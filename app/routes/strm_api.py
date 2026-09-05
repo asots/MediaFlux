@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from typing import Annotated
 
 from fastapi import APIRouter, Body, Request
 
@@ -274,3 +275,45 @@ def runs(request: Request):
             "error": row["error"] or "",
         })
     return api_response(result)
+
+
+def _metadata_owner(request: Request) -> str:
+    from app.web import csrf_token
+
+    # Web 确认绑定当前已登录浏览器会话；凭证本身由服务端密钥签名。
+    return "strm-web:" + csrf_token(request)
+
+
+@router.get("/metadata/status")
+def metadata_status(request: Request):
+    require_api_login(request)
+    from app.modules.strm_metadata_management import metadata_status as get_status
+
+    return api_response(get_status())
+
+
+@router.post("/metadata/cancel-pending/preview")
+def metadata_cancel_preview(request: Request, data: Annotated[dict, Body()]):
+    require_api_login(request)
+    if data:
+        return api_error("该操作不接受额外参数", 400)
+    from app.modules.strm_metadata_management import prepare_backlog_cancel
+
+    try:
+        preview, token = prepare_backlog_cancel(_metadata_owner(request))
+        return api_response({"preview": preview, "confirmation_token": token})
+    except ValueError as exc:
+        return api_error(str(exc), 409)
+
+
+@router.post("/metadata/cancel-pending")
+def metadata_cancel_pending(request: Request, data: Annotated[dict, Body()]):
+    require_api_login(request)
+    if set(data) != {"confirmation_token", "confirm"} or data.get("confirm") is not True:
+        return api_error("需要确认及预览凭证", 400)
+    from app.modules.strm_metadata_management import cancel_backlog_confirmed
+
+    try:
+        return api_response(cancel_backlog_confirmed(data["confirmation_token"], _metadata_owner(request)))
+    except ValueError as exc:
+        return api_error(str(exc), 409)

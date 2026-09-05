@@ -17,6 +17,9 @@
     const refreshStrmBaseUrlBtn=document.getElementById('refreshStrmBaseUrlBtn');
     const saveStrmBtn=document.getElementById('saveStrmBtn');
     const runStrmFullBtn=document.getElementById('runStrmFullBtn');
+    const cancelMetadataBtn=document.getElementById('cancelStrmMetadataBacklogBtn');
+    let metadataCancelBusy=false;
+    let metadataCancellable=0;
     const diagnosticResult=document.getElementById('strmIndexDiagnosticResult');
     const diagnosticState=document.getElementById('strmIndexDiagnosticState');
     const diagnosticRefreshBtn=document.getElementById('refreshStrmIndexDiagnosticBtn');
@@ -370,8 +373,14 @@
         const metadataPending=Math.max(0,Number(metadataQueue.pending||0));
         const metadataFailed=Math.max(0,Number(metadataQueue.failed||0));
         const metadataPaused=!s.running&&metadataPending>0&&metadataQueue.enabled===false;
-        const metadataActive=!s.running&&metadataPending>0&&!metadataPaused;
-        setTag(s.running?'同步中':metadataActive?'元数据处理中':metadataPaused?'元数据已暂停':metadataFailed>0?'元数据有失败':s.config_error?'配置不完整':s.enabled?'定时已启用':'定时已停用',s.running||metadataActive?'var(--info)':metadataPaused||metadataFailed>0||s.config_error?'var(--warning)':s.enabled?'var(--success)':'var(--text-muted)');
+        const metadataRunning=Math.max(0,Number(metadataQueue.running||0));
+        const metadataActive=!s.running&&metadataRunning>0;
+        const metadataWaiting=!s.running&&metadataPending>0&&!metadataPaused&&!metadataActive;
+        metadataCancellable=Math.max(0,Number(metadataQueue.queued||0))+Math.max(0,Number(metadataQueue.retry_wait||0));
+        const queueSummary=document.getElementById('strmMetadataQueueSummary');
+        if(queueSummary)queueSummary.textContent=`伴随待办 ${metadataCancellable.toLocaleString()} 项 · 处理中 ${metadataRunning.toLocaleString()} 项`;
+        if(cancelMetadataBtn)cancelMetadataBtn.disabled=metadataCancelBusy||metadataCancellable===0;
+        setTag(s.running?'同步中':metadataActive?'元数据处理中':metadataWaiting?'元数据等待处理':metadataPaused?'元数据已暂停':metadataFailed>0?'元数据有失败':s.config_error?'配置不完整':s.enabled?'定时已启用':'定时已停用',s.running||metadataActive?'var(--info)':metadataPaused||metadataFailed>0||s.config_error?'var(--warning)':s.enabled?'var(--success)':'var(--text-muted)');
         document.getElementById('strmNextRun').textContent=s.next_run||(s.config_error||'无定时计划');
         const last=s.last_run||{};
         document.getElementById('strmLastRun').textContent=last.started_at?`${last.started_at}`:'暂无运行记录';
@@ -386,10 +395,10 @@
         const total=Math.max(0,Number(progress.total||0));
         const percent=Math.max(0,Math.min(100,Number(progress.percent||0)));
         const progressStage=document.getElementById('strmProgressStage');
-        progressStage.textContent=metadataActive?'STRM 已完成 · 元数据后台处理中':metadataPaused?'伴随元数据同步已关闭 · 队列暂停':String(progress.detail||progress.stage||(s.running?'正在同步':'等待任务'));
+        progressStage.textContent=metadataActive?(metadataQueue.enabled===false?'伴随同步已关闭 · 当前任务收尾中':'STRM 已完成 · 元数据后台处理中'):metadataPaused?'伴随元数据同步已关闭 · 队列暂停':metadataWaiting?(Number(metadataQueue.breaker_seconds||0)>0?'元数据队列等待重试（临时退避）':metadataQueue.consumer_active===false?'元数据队列等待消费者':'元数据队列等待后台领取'):String(progress.detail||progress.stage||(s.running?'正在同步':'等待任务'));
         lastStatusProgressText=progressStage.textContent;
-        document.getElementById('strmProgressCount').textContent=metadataActive||metadataPaused?`队列 ${metadataPending} 项${Number(metadataQueue.retry_wait||0)>0?` · ${Number(metadataQueue.retry_wait)} 项等待重试`:''}`:`${completed} / ${total} · ${percent}%`;
-        document.getElementById('strmProgressBar').style.transform=`scaleX(${metadataActive||metadataPaused?1:percent/100})`;
+        document.getElementById('strmProgressCount').textContent=metadataActive||metadataPaused||metadataWaiting?`队列 ${metadataPending} 项${Number(metadataQueue.retry_wait||0)>0?` · ${Number(metadataQueue.retry_wait)} 项等待重试`:''}`:`${completed} / ${total} · ${percent}%`;
+        document.getElementById('strmProgressBar').style.transform=`scaleX(${metadataActive||metadataPaused||metadataWaiting?1:percent/100})`;
         const dot=document.getElementById('strmStatusDot');
         if(dot)dot.className='status-dot'+(s.running||metadataActive?' active':'');
         const runtime=Array.isArray(s.source_runtime)?s.source_runtime:[];
@@ -399,8 +408,35 @@
         syncBaseUrlRefreshFromStatus(s);
         window.renderLucideIcons?.(runStrmFullBtn.parentElement);
         statusShouldPoll=!!s.running||(metadataPending>0&&metadataQueue.enabled!==false);
+        statusShouldPoll=statusShouldPoll||metadataRunning>0;
         if(!statusShouldPoll)clearStatusPoll();
     }
+    async function cancelMetadataBacklog(event){
+        if(metadataCancelBusy||metadataCancellable===0)return;
+        metadataCancelBusy=true;
+        cancelMetadataBtn.disabled=true;
+        cancelMetadataBtn.setAttribute('aria-busy','true');
+        try{
+            const previewResponse=await fetch('/api/strm/metadata/cancel-pending/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+            const prepared=await previewResponse.json();
+            if(!previewResponse.ok||prepared.ok===false)throw new Error(prepared.error||'队列预览失败');
+            const count=Number(prepared.preview?.count||0);
+            const confirmed=await appConfirm({trigger:event.currentTarget,title:'取消伴随元数据待办',message:`将取消本次预览中的 ${count.toLocaleString()} 项排队／等待重试任务，保留取消记录。不启动同步、不改变同步开关、不删除任何已落盘文件。正在处理和之后新增的任务不受影响。`,confirmText:'确认清除待办',danger:true});
+            if(!confirmed)return;
+            const response=await fetch('/api/strm/metadata/cancel-pending',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmation_token:prepared.confirmation_token,confirm:true})});
+            const data=await response.json();
+            if(!response.ok||data.ok===false)throw new Error(data.error||'取消队列失败');
+            window.showToast?.(data.summary||`已取消 ${Number(data.cancelled||0)} 项待办`,'success');
+        }catch(error){
+            window.showToast?.(error.message||'取消队列失败','error');
+        }finally{
+            await loadStatus({background:true});
+            metadataCancelBusy=false;
+            cancelMetadataBtn.disabled=metadataCancellable===0;
+            cancelMetadataBtn.setAttribute('aria-busy','false');
+        }
+    }
+    cancelMetadataBtn?.addEventListener('click',cancelMetadataBacklog);
     function clearStatusPoll(){
         if(pollTimer!==null)window.clearTimeout(pollTimer);
         pollTimer=null;

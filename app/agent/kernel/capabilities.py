@@ -49,6 +49,7 @@ class KernelToolSpec:
     execute_confirmed: ToolCallable | None = None
     verify: ToolCallable | None = None
     availability: Availability | None = None
+    runtime_status: Callable[[], Mapping[str, str]] | None = None
     authorize: Authorizer | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     model_name: str = ""

@@ -267,6 +267,35 @@ class TMDBClient:
             result[key] = [item for item in items if isinstance(item, dict)]
         return result
 
+    def media_credits(
+        self,
+        tmdb_id: str,
+        media_type: str,
+        *,
+        season_number: int | None = None,
+        deadline_at: float | None = None,
+        retries: int | None = None,
+    ) -> dict[str, list[Any]]:
+        """读取电影或剧集（可选单季）演职员；剧集使用完整季集聚合端点。"""
+        if media_type not in {"movie", "tv"}:
+            raise ValueError("media_type 仅支持 movie 或 tv")
+        path = f"/{media_type}/{self._numeric_id(tmdb_id)}"
+        if season_number is not None:
+            if (
+                media_type != "tv"
+                or isinstance(season_number, bool)
+                or not isinstance(season_number, int)
+                or not 0 <= season_number <= 100
+            ):
+                raise ValueError("season_number 仅适用于剧集，必须在 0 到 100 之间")
+            path += f"/season/{season_number}"
+        path += "/aggregate_credits" if media_type == "tv" else "/credits"
+        payload = self.get(path, deadline_at=deadline_at, retries=retries)
+        # 缺字段不能静默变为空列表，否则 Agent 会误称 TMDB 尚未录入。
+        if any(not isinstance(payload.get(key), list) for key in ("cast", "crew")):
+            raise ProviderInvalidResponse("TMDB 演职员响应缺少有效 cast/crew 列表")
+        return {key: payload[key] for key in ("cast", "crew")}
+
     @staticmethod
     def _numeric_id(value: object) -> str:
         normalized = str(value or "").strip()

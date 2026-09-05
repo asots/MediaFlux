@@ -170,7 +170,7 @@
                         <div class="strm-metadata-panel-head">
                             <div class="strm-toggle-subhead">
                                 <strong>同步伴随元数据</strong>
-                                <span>后台队列异步拉取 NFO、字幕与海报，不阻塞 STRM</span>
+                                <span>后台队列异步拉取 NFO、字幕与海报，不阻塞 STRM；关闭后当前任务可完成，已运行的扫描可能继续入队</span>
                             </div>
                             <label class="toggle">
                                 <input type="checkbox" data-key="STRM_METADATA_ENABLED" id="strmMetadataEnabled">
@@ -291,6 +291,15 @@
                         </div>
                         <div class="strm-last-run-metrics" id="strmLastRunMetrics">
                             最近扫描指标将在任务完成后显示
+                        </div>
+                        <div class="strm-metadata-queue-actions">
+                            <div class="strm-metadata-queue-copy">
+                                <strong id="strmMetadataQueueSummary" aria-live="polite">伴随元数据队列待查询</strong>
+                                <span>取消历史待办，不删除 NFO、字幕或海报；关闭同步后仍可清除。</span>
+                            </div>
+                            <button type="button" class="jump-btn" id="cancelStrmMetadataBacklogBtn" disabled aria-busy="false">
+                                <i data-lucide="list-x" aria-hidden="true"></i><span>清除待办</span>
+                            </button>
                         </div>
                     </div>
 

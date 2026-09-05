@@ -24,6 +24,7 @@ from .local_media import register_specs as register_local_media_specs
 from .playback import register_specs as register_playback_specs
 from .resource import register_specs as register_resource_specs
 from .strm import register_specs as register_strm_specs
+from .strm_metadata import register_specs as register_strm_metadata_specs
 from .subscription import register_specs as register_subscription_specs
 from .system import register_specs as register_system_specs
 from .workspace import register_specs as register_workspace_specs
@@ -53,6 +54,7 @@ _REGISTRARS = (
     register_subscription_specs,
     register_playback_specs,
     register_strm_specs,
+    register_strm_metadata_specs,
     register_cloud_specs,
     register_cloud_sdk_specs,
     register_discovery_specs,

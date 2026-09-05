@@ -87,6 +87,7 @@ class ToolContext:
     session_id: str = ""
     request_id: str = ""
     confirmation_bootstrap: bool = False
+    capability_search: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
 ContextualToolHandler = Callable[[dict[str, Any], ToolContext], ToolResult]
@@ -115,6 +116,7 @@ class ToolSpec:
     context_confirmation_preparer: ContextualConfirmationPreparer | None = None
     context_confirmed_handler: ContextualConfirmedToolHandler | None = None
     post_write_verifier: PostWriteVerifier | None = None
+    runtime_status: Callable[[], dict[str, str]] | None = None
     model_name: str = ""
     related_tools: tuple[str, ...] = ()
     domains: tuple[str, ...] = ()

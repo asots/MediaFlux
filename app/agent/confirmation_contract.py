@@ -350,6 +350,18 @@ _CONFIRMATION_COPY: dict[str, dict[str, str]] = {
         "impact": "会扫描来源并按现有规则创建或更新 STRM 内容。",
         "reversibility": "可停止后续运行；本次已写入的结果不会自动回滚。",
     },
+    "strm.metadata.set_enabled": {
+        "action": "调整伴随元数据同步开关",
+        "object": "云盘NFO、字幕、海报等伴随文件同步，不是Jellyfin自身刮削",
+        "impact": "关闭后不再领取后续任务，后续启动的同步不再新增；已运行扫描可能继续入队、当前任务可能完成。开启后可继续处理积压。",
+        "reversibility": "保留队列和所有落盘文件，可再次确认切换开关；已完成同步不会自动回滚。",
+    },
+    "strm.metadata.cancel_pending": {
+        "action": "取消伴随元数据历史积压",
+        "object": "本次预览冻结的排队及等待重试任务",
+        "impact": "确认后仅标记这些待办为取消；不删除NFO、字幕、海报、STRM或媒体，不影响正在运行任务、预览后新增任务或Jellyfin已有信息。",
+        "reversibility": "不会开启同步或更改开关；取消记录保留。以后重新开启并扫描可能再次产生待办，本次不自动恢复队列。",
+    },
     "strm.set_schedule_policy": {
         "action": "更新 STRM 定时同步策略",
         "object": "定时同步的启用状态、计划表达式或任务通知",

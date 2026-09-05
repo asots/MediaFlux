@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.agent.capability_discovery_actions import web_capability_status
 from app.agent.discovery_actions import (
     bangumi_calendar,
     recommend_discovery,
@@ -41,6 +42,7 @@ from app.agent.library_recommendation_actions import (
     get_library_recommendations,
     library_recommendation_arguments,
 )
+from app.agent.media_credits_actions import get_media_credits, media_credits_arguments
 from app.agent.media_rating_actions import (
     lookup_media_rating,
     media_rating_arguments,
@@ -99,6 +101,7 @@ def register_specs(
             },
             handler=search_web,
             validator=web_search_arguments,
+            runtime_status=web_capability_status,
             related_tools=("web.read",),
             examples=(
                 "搜索网上的最新消息",
@@ -145,6 +148,7 @@ def register_specs(
             },
             handler=read_web,
             validator=web_read_arguments,
+            runtime_status=web_capability_status,
             related_tools=("web.search",),
             examples=(
                 "看看这个网页说了什么",
@@ -158,7 +162,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="discovery.search",
-            description="在已启用的 TMDB、豆瓣与 Bangumi 外部数据源中搜索影视元数据，不返回海报原始地址或配置值。",
+            description="搜索 TMDB、豆瓣与 Bangumi 的影视身份和概况，不含演职员表。问主演、配音或导演应先区分真人/动画/同名作品，再用 discovery.credits 读取演员角色；搜索卡未带演员不代表源站未录入。",
             risk=RiskLevel.READ,
             domains=("discovery", "media_identity"),
             source_kind="metadata_catalog",
@@ -221,6 +225,7 @@ def register_specs(
             },
             handler=search_discovery,
             validator=discovery_search_arguments,
+            related_tools=("discovery.detail", "discovery.credits", "web.search"),
             examples=(
                 "从 TMDB 或豆瓣搜索影视资料",
                 "查一部电影的外部元数据",
@@ -296,7 +301,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="discovery.detail",
-            description="读取一个精确影视来源条目的安全详情和映射确认状态；不会写入映射、收藏、订阅或下载任务。",
+            description="读取精确条目的标题、年份、播出时间、简介和映射状态，不包含演职员表。字段缺失不表示官方未公布；演员、角色或导演请继续用 discovery.credits，必要时联网核实。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -313,7 +318,39 @@ def register_specs(
             },
             context_handler=get_discovery_detail,
             validator=discovery_detail_arguments,
+            related_tools=("discovery.credits", "discovery.mapping_candidates", "web.search"),
             examples=("查看刚才第 2 个影视详情",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="discovery.credits",
+            description=(
+                "只读查询已确认 TMDB 作品的演员、角色/配音及导演等主创。电影使用 credits，"
+                "剧集使用全剧或指定季的聚合演职员表。先通过 discovery.search/detail 核实"
+                "真人、动画和同名条目的身份，不能猜 TMDB ID；区分未查询、请求失败和返回空表，"
+                "以上任何情况均不能推断官方未公布或尚未播出。需要时用 web.search 核实官方资料。"
+            ),
+            risk=RiskLevel.READ,
+            domains=("discovery", "media_identity", "research"),
+            source_kind="metadata_catalog",
+            freshness="live",
+            parameters={
+                "type": "object",
+                "required": ["tmdb_id", "media_type"],
+                "properties": {
+                    "tmdb_id": {"type": "string", "pattern": "^[0-9]{1,10}$"},
+                    "media_type": {"type": "string", "enum": ["movie", "tv"]},
+                    "season_number": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "cast_limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+                    "crew_limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
+                },
+                "additionalProperties": False,
+            },
+            handler=get_media_credits,
+            validator=media_credits_arguments,
+            related_tools=("discovery.search", "discovery.detail", "web.search", "web.read"),
+            examples=("这部剧主演都是谁", "真人版演员表和角色", "谁演的男主角", "动画主要配音是谁", "第二季演员和导演"),
         )
     )
     registry.register(

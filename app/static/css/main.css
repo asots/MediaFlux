@@ -7194,3 +7194,15 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
     font-weight: 700;
 }
 .rss-entry-skip-reason svg { width: 12px; height: 12px; }
+
+/* 队列动作固定占位；关闭伴随同步不隐藏待办管理入口。 */
+.strm-metadata-queue-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border-soft); padding-top: 14px; margin-top: 14px; }
+.strm-metadata-queue-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; line-height: 1.6; }
+.strm-metadata-queue-copy strong { font-size: 13px; font-variant-numeric: tabular-nums; }
+.strm-metadata-queue-copy span { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+#cancelStrmMetadataBacklogBtn { flex: 0 0 auto; width: auto; min-width: 116px; min-height: 40px; white-space: nowrap; }
+#cancelStrmMetadataBacklogBtn[aria-busy="true"] { opacity: .65; }
+@media (max-width: 600px) {
+    .strm-metadata-queue-actions { align-items: stretch; flex-direction: column; }
+    #cancelStrmMetadataBacklogBtn { align-self: flex-end; min-height: 44px; }
+}

@@ -134,6 +134,8 @@ def get_discovery_detail(
             "rating": rating,
             "rating_source": _safe(card.rating_source, 30),
             "overview": _safe(card.overview, 500),
+            "credits_state": "not_queried",
+            "credits_note": "本详情只含作品概况，未查询演职员；未返回演员字段不表示源站为空或官方未公布。",
             "mapping_confirmed": bool(
                 card.provider == "tmdb"
                 or (
@@ -149,7 +151,7 @@ def get_discovery_detail(
         evidence=[
             Evidence(
                 "discovery_detail",
-                "只读取来源详情与映射确认状态；未保存映射、收藏、订阅或下载任务。",
+                "只读取来源概况与映射确认状态，未查询演员表；未保存映射、收藏、订阅或下载任务。",
                 _now(),
             )
         ],

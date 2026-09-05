@@ -11,6 +11,11 @@ from collections.abc import Iterable
 from typing import Any
 
 from app.agent.confirmation_contract import build_confirmation_contract
+from app.agent.domain_tool_metadata import (
+    DOMAIN_ALIASES,
+    PREFIX_RETRIEVAL_TERMS,
+    TOOL_RETRIEVAL_TERMS,
+)
 from app.agent.feature_gate import (
     AgentRuntimeDisabled,
     agent_runtime_admission,
@@ -25,224 +30,6 @@ from ..effects import PreparedEffect
 from ..pipeline import ToolCallContext, ToolPipelineError
 
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
-
-_DOMAIN_ALIASES = {
-    "guangya": "cloud",
-    "downloads": "download",
-    "local_media": "local_media",
-    "media_proxy": "playback",
-    "strm": "automation",
-}
-
-# 这些是工具自身的检索语义，不是对用户消息做业务分流。
-# 检索语义与领域 ToolSpec 一起声明，避免维护第二份意图路由。
-_PREFIX_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
-    "guangya": ("光鸭", "光鸭云盘", "云盘", "云端文件", "目录", "文件夹"),
-    "provider": ("Jellyfin", "Emby", "qBittorrent", "qB", "媒体服务器", "实时"),
-    "downloads": ("下载", "下载器", "qBittorrent", "qB", "任务", "进度"),
-    "library": ("媒体库", "影片", "剧集", "集数", "入库"),
-    "rss": ("RSS", "订阅源", "刷新周期", "排除关键字"),
-    "media": ("媒体订阅", "追更", "订阅"),
-    "indexer": ("资源", "资源搜索", "索引站", "种子", "磁力"),
-    "discovery": ("推荐", "新剧", "电影", "剧集", "动漫", "国漫"),
-    "web": ("联网", "网页", "链接", "公告", "文档", "最新", "定档", "公开信息"),
-}
-
-_TOOL_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
-    "agent.capabilities": (
-        "你是谁",
-        "能做什么",
-        "助手能力",
-        "项目能力",
-        "支持哪些功能",
-    ),
-    "guangya.fs.query": (
-        "根目录",
-        "列出目录",
-        "目录内容",
-        "查看目录",
-        "浏览目录",
-        "搜索文件",
-        "查看文件夹",
-        "子目录",
-        "子目录名称",
-        "文件夹名称",
-        "目录下有哪些",
-        "递归目录",
-    ),
-    "guangya.fs.change.preview": (
-        "创建目录",
-        "新建目录",
-        "重命名",
-        "改名",
-        "移动",
-        "复制",
-        "拷贝",
-        "备份到云盘目录",
-        "回收站",
-        "规整文件",
-    ),
-    "guangya.account.status": (
-        "光鸭账号",
-        "云盘容量",
-        "剩余空间",
-        "可用空间",
-        "存储用量",
-    ),
-    "guangya.recycle.list": (
-        "光鸭回收站",
-        "回收站列表",
-        "已删除文件",
-        "垃圾箱内容",
-    ),
-    "guangya.recycle.restore": (
-        "恢复回收站",
-        "还原删除文件",
-        "找回光鸭文件",
-    ),
-    "guangya.recycle.clear": (
-        "清空回收站",
-        "永久删除回收站",
-        "彻底清理光鸭垃圾箱",
-    ),
-    "guangya.operation.status": (
-        "光鸭任务状态",
-        "恢复任务进度",
-        "清空回收站进度",
-    ),
-    "guangya.share.list": (
-        "光鸭分享列表",
-        "我的分享",
-        "已创建分享",
-    ),
-    "guangya.share.create": (
-        "创建光鸭分享",
-        "分享云盘文件",
-        "生成分享链接",
-        "提取码",
-    ),
-    "guangya.share.revoke": (
-        "撤销光鸭分享",
-        "取消分享链接",
-        "删除分享",
-    ),
-    "provider.query": (
-        "媒体总数",
-        "媒体库统计",
-        "媒体资源总量",
-        "媒体库有多少资源",
-        "媒体库有多少媒体",
-        "电影剧集总数",
-        "按媒体库统计",
-        "指定媒体库数量",
-        "动漫库有多少",
-        "这个媒体库有多少部",
-        "实时下载任务",
-        "下载速度",
-        "下载进度",
-        "当前任务",
-    ),
-    "media.recommend_from_library": (
-        "从媒体库推荐",
-        "本地片单推荐",
-        "今晚看什么",
-        "今天心情很丧",
-        "不用脑子",
-        "爆笑",
-        "无厘头",
-        "日番",
-        "推荐没看过的",
-        "排除已看作品",
-        "结合观看历史推荐",
-        "Jellyfin 里值得看",
-    ),
-    "media.recently_played": (
-        "最近播放",
-        "播放历史",
-        "观看历史",
-        "最近看过",
-        "我最近看了什么",
-        "根据观看记录推荐",
-        "根据最近播放推荐",
-    ),
-    "media.recently_added": (
-        "最近入库",
-        "最新入库",
-        "最近添加",
-        "媒体库最近新增",
-    ),
-    "media.continue_watching": (
-        "继续观看",
-        "没看完",
-        "接着看",
-        "Resume",
-    ),
-    "library.count_series_episodes": ("一共有多少集", "本地多少集", "季度分布"),
-    "library.batch_presence": (
-        "批量核对媒体库",
-        "哪些在库",
-        "缺哪几部",
-        "缺少哪些电影",
-        "片单收录情况",
-        "导演作品在库情况",
-    ),
-    "indexer.search_resources": (
-        "有没有资源",
-        "搜索资源",
-        "查找资源",
-        "最近新出的步兵资源",
-        "新出步兵",
-        "无码资源",
-        "uncensored",
-        "Sukebei 最新",
-        "成人资源索引",
-    ),
-    "rss.subscription_summaries": (
-        "配置了哪些RSS",
-        "RSS订阅列表",
-        "RSS订阅源",
-        "我订阅了哪些RSS",
-        "我订阅了那些RSS",
-        "有哪些RSS",
-        "RSS规则",
-    ),
-    "media.subscription_summaries": ("配置了哪些媒体订阅", "媒体追更列表"),
-    "rss.create_subscription": ("添加RSS", "创建RSS订阅", "新增RSS订阅"),
-    "discovery.recommend": (
-        "最近推荐",
-        "新剧推荐",
-        "国漫推荐",
-        "片单推荐",
-        "根据观看记录推荐",
-        "根据最近播放推荐",
-    ),
-    "discovery.person_filmography": (
-        "导演的所有电影",
-        "导演全部作品",
-        "人物电影作品表",
-        "演员参演电影",
-        "编剧作品",
-        "按上映年份排列",
-        "诺兰电影",
-    ),
-    "web.search": (
-        "2026新剧",
-        "最新定档",
-        "近期公开资讯",
-        "近期步兵资源",
-        "最近新出资源",
-        "成人作品近期发行信息",
-    ),
-    "web.read": (
-        "打开网页",
-        "读取链接",
-        "网页正文",
-        "总结网页",
-        "官方公告",
-        "查看文档",
-        "fetch url",
-    ),
-}
 
 
 def _production_owner_kind(owner: object) -> str:
@@ -285,6 +72,7 @@ def _kernel_context(context: ToolCallContext) -> ToolContext:
         session_id=context.session_id,
         request_id=context.request_id,
         confirmation_bootstrap=False,
+        capability_search=context.capability_search,
     )
 
 
@@ -322,7 +110,7 @@ def _assert_success(result: ToolResult, *, code: str) -> ToolResult:
 
 def _domain(spec: ToolSpec) -> str:
     prefix = spec.name.partition(".")[0].casefold()
-    candidate = spec.domains[0] if spec.domains else _DOMAIN_ALIASES.get(prefix, prefix)
+    candidate = spec.domains[0] if spec.domains else DOMAIN_ALIASES.get(prefix, prefix)
     candidate = re.sub(r"[^a-z0-9_.-]+", "_", str(candidate).casefold()).strip("_.-")
     return candidate or "system"
 
@@ -340,8 +128,8 @@ def _retrieval_terms(spec: ToolSpec) -> tuple[str, ...]:
     values = (
         *spec.domains,
         spec.source_kind,
-        *_PREFIX_RETRIEVAL_TERMS.get(prefix, ()),
-        *_TOOL_RETRIEVAL_TERMS.get(spec.name, ()),
+        *PREFIX_RETRIEVAL_TERMS.get(prefix, ()),
+        *TOOL_RETRIEVAL_TERMS.get(spec.name, ()),
     )
     return tuple(
         dict.fromkeys(str(item).strip() for item in values if str(item).strip())
@@ -391,6 +179,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
             effect=effect,
             validator=spec.validator,
             read=read,
+            runtime_status=spec.runtime_status,
             cost=1.0 if spec.freshness != "live" else 1.25,
             metadata={
                 "source_kind": spec.source_kind,
@@ -509,6 +298,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         input_schema=spec.parameters,
         effect=effect,
         validator=spec.validator,
+        runtime_status=spec.runtime_status,
         prepare=prepare,
         execute_confirmed=execute_confirmed,
         verify=verify if spec.post_write_verifier is not None else None,

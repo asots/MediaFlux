@@ -13,6 +13,11 @@ from app.agent.automation_actions import (
     automation_pipeline_arguments,
     diagnose_automation_pipeline,
 )
+from app.agent.capability_discovery_actions import (
+    CAPABILITY_PARAMETERS,
+    capability_arguments,
+    discover_capabilities,
+)
 from app.agent.config_actions import (
     media_server_arguments,
     test_media_server,
@@ -710,6 +715,14 @@ def register_specs(
             ],
         )
 
+    def capabilities_with_context(arguments, context):
+        if arguments:
+            return discover_capabilities(arguments, context)
+        result = capabilities({})
+        if context.capability_search is not None:
+            result.data["discovery"] = context.capability_search({})
+        return result
+
     registry.register(
         ToolSpec(
             name="agent.action_history",
@@ -741,16 +754,14 @@ def register_specs(
             name="agent.capabilities",
             description=(
                 "回答 MediaFlux Media Agent 是谁、能做什么，并列出当前可以读取或经确认执行的项目能力；"
-                "这是全局能力说明，不是仅限光鸭、下载或某个单一领域的能力列表。"
+                "传query可从全项目发现需要的原子工具，或传tool_names核实可用状态，"
+                "并在下一次模型调用加载Schema。当前工具不足时先查询，不可直接声称未挂载。"
             ),
             risk=RiskLevel.READ,
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
+            parameters=CAPABILITY_PARAMETERS,
             handler=capabilities,
-            validator=_no_arguments,
+            context_handler=capabilities_with_context,
+            validator=capability_arguments,
             domains=("agent", "system"),
             source_kind="agent_capability_catalog",
             freshness="derived",

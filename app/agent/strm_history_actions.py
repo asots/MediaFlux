@@ -17,14 +17,6 @@ _SAFE_RUN_STATUSES = _ALLOWED_STATUSES - {"all"}
 _SAFE_TRIGGER_TYPES = {"manual", "cron", "organize", "telegram", "config-retirement"}
 _SAFE_MODES = {"full", "fast", "incremental", "fast_noop"}
 _SAFE_CHANGE_QUEUE_STATES = ("queued", "running", "dirty", "completed", "failed")
-_SAFE_METADATA_QUEUE_STATUSES = (
-    "queued",
-    "running",
-    "retry_wait",
-    "completed",
-    "failed",
-    "cancelled",
-)
 _SAFE_STAT_KEYS = (
     "total",
     "generated",
@@ -114,20 +106,14 @@ def _queue_summary() -> dict[str, Any]:
         change_rows = conn.execute(
             "SELECT state,COUNT(*) AS count FROM strm_change_queue GROUP BY state"
         ).fetchall()
-        metadata_rows = conn.execute(
-            "SELECT status,COUNT(*) AS count FROM strm_metadata_queue GROUP BY status"
-        ).fetchall()
     change_counts = {state: 0 for state in _SAFE_CHANGE_QUEUE_STATES}
     for row in change_rows:
         state = str(row["state"] or "").strip().casefold()
         if state in change_counts:
             change_counts[state] = _count(row["count"])
-    metadata_counts = {status: 0 for status in _SAFE_METADATA_QUEUE_STATUSES}
-    for row in metadata_rows:
-        status = str(row["status"] or "").strip().casefold()
-        if status in metadata_counts:
-            metadata_counts[status] = _count(row["count"])
-    return {"change_queue": change_counts, "metadata_queue": metadata_counts}
+    from app.modules.strm_metadata_management import metadata_status
+
+    return {"change_queue": change_counts, "metadata_queue": metadata_status()}
 
 
 def get_strm_run_history(arguments: dict[str, Any]) -> ToolResult:

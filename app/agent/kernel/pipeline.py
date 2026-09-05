@@ -51,6 +51,7 @@ class ToolCallContext:
     lease: PublicationLease
     cancellation: CancellationToken
     report_progress: ProgressSink
+    capability_search: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     def policy_context(self) -> dict[str, Any]:
         return {

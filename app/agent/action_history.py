@@ -77,6 +77,8 @@ _TOOL_LABELS = {
     "strm.retry_failures": "STRM 失败项重试",
     "strm.run_once": "STRM 手动同步",
     "strm.set_schedule_policy": "STRM 调度策略修改",
+    "strm.metadata.set_enabled": "伴随同步开关调整",
+    "strm.metadata.cancel_pending": "伴随元数据积压取消",
     "guangya.organize.set_schedule_policy": "光鸭定时整理策略修改",
     "guangya.fs.change.execute": "光鸭文件变更执行",
     "guangya.recycle.restore": "光鸭回收站恢复",
@@ -331,6 +333,8 @@ _SAFE_FIELDS = {
     },
     "strm.run_once": {"accepted", "trigger"},
     "strm.set_schedule_policy": {"runtime_refreshed"},
+    "strm.metadata.set_enabled": {"enabled", "verified"},
+    "strm.metadata.cancel_pending": {"cancelled", "enabled", "files_deleted"},
     "guangya.organize.set_schedule_policy": {"runtime_refreshed"},
     "guangya.fs.change.execute": {
         "queued",

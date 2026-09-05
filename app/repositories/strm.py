@@ -1230,3 +1230,69 @@ def list_strm_change_queue(
             "ORDER BY updated_at DESC, id DESC LIMIT ?",
             (provider, max(1, int(limit or 1))),
         ).fetchall()
+
+
+def _metadata_backlog_snapshot(conn: sqlite3.Connection, cutoff_id: int) -> dict[str, Any]:
+    """冻结有界队列集合；逐行散列，不把数万任务 ID 放进确认票据。"""
+    import hashlib
+
+    digest = hashlib.sha256()
+    counts = {"queued": 0, "retry_wait": 0}
+    cursor = conn.execute(
+        "SELECT id,revision,status,lease_generation,attempts,next_attempt_at "
+        "FROM strm_metadata_queue WHERE provider='guangya' AND id<=? "
+        "AND status IN ('queued','retry_wait') ORDER BY id",
+        (cutoff_id,),
+    )
+    for row in cursor:
+        values = tuple(row)
+        counts[str(row["status"])] += 1
+        digest.update(json.dumps(values, ensure_ascii=True, separators=(",", ":")).encode())
+        digest.update(b"\n")
+    return {
+        "version": 1,
+        "cutoff_id": cutoff_id,
+        "count": sum(counts.values()),
+        "counts": counts,
+        "digest": digest.hexdigest(),
+    }
+
+
+def capture_strm_metadata_backlog() -> dict[str, Any]:
+    """只冻结当前待办；running、已完成和失败历史不属于清除范围。"""
+    with _database().get_conn() as conn:
+        conn.execute("BEGIN")
+        cutoff = int(conn.execute(
+            "SELECT COALESCE(MAX(id),0) FROM strm_metadata_queue WHERE provider='guangya'"
+        ).fetchone()[0])
+        return _metadata_backlog_snapshot(conn, cutoff)
+
+
+def cancel_strm_metadata_backlog(expected: dict[str, Any]) -> int:
+    """事务内验证冻结集合并取消；后来新增任务与正在运行任务永不被扩大纳入。"""
+    if (
+        not isinstance(expected, dict)
+        or expected.get("version") != 1
+        or type(expected.get("cutoff_id")) is not int
+        or expected["cutoff_id"] < 0
+        or type(expected.get("count")) is not int
+        or expected["count"] <= 0
+    ):
+        raise ValueError("元数据队列预览无效，请重新预览")
+    database = _database()
+    with database.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _metadata_backlog_snapshot(conn, expected["cutoff_id"])
+        if current != expected:
+            raise ValueError("元数据队列已变化，请重新预览；未取消任何任务")
+        stamp = database.now()
+        changed = conn.execute(
+            "UPDATE strm_metadata_queue SET status='cancelled',dirty=0,revision=revision+1,"
+            "lease_owner='',lease_until=0,completed_at=?,updated_at=?,"
+            "last_error_type='user_cancelled',last_error='用户确认取消历史伴随元数据待办' "
+            "WHERE provider='guangya' AND id<=? AND status IN ('queued','retry_wait')",
+            (stamp, stamp, current["cutoff_id"]),
+        ).rowcount
+        if changed != current["count"]:
+            raise ValueError("元数据队列已变化，请重新预览；未取消任何任务")
+        return changed

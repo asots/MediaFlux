@@ -358,8 +358,10 @@ def strm_runtime_status(_arguments: dict[str, Any]) -> ToolResult:
     """读取 STRM 调度器和可选择来源名称的脱敏运行快照。"""
     from app.modules.scheduler import get_scheduler
     from app.modules.strm import configured_strm_source_plans
+    from app.modules.strm_metadata_management import metadata_status
 
     raw = get_scheduler().status()
+    metadata_queue = metadata_status()
     configured_sources, source_error = configured_strm_source_plans()
     available_source_names = (
         list(
@@ -445,6 +447,7 @@ def strm_runtime_status(_arguments: dict[str, Any]) -> ToolResult:
             "enabled": bool(raw.get("enabled")),
             "configured": configured,
             "cron_valid": bool(raw.get("cron_valid")),
+            "metadata_queue": metadata_queue,
             "running": running,
             "current_trigger": _safe_choice(
                 raw.get("current_trigger"), {"manual", "cron", "telegram"}

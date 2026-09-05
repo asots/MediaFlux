@@ -15,6 +15,7 @@ from app.concurrency import CrossLoopAsyncLock
 from app.sensitive_data import contains_sensitive_credential
 
 from .capabilities import CapabilityRetriever, ToolCatalog, ToolEffect
+from .discovery import DISCOVERY_TOOL, CapabilityDiscovery
 from .events import AgentEvent, AgentEventType, EventFactory
 from .model import (
     ModelAdapter,
@@ -60,7 +61,7 @@ DEFAULT_SYSTEM_PROMPT = """你是 MediaFlux Media Agent，一名可操作当前 
 - 云盘、媒体库、下载、订阅、资源、TMDB 与项目状态等事实必须来自本轮工具结果；不得凭记忆编造当前状态。
 - 在本轮候选原子工具中自主执行 MODEL -> TOOL -> MODEL 循环。工具失败时先阅读安全错误，能修正参数或改用候选能力就自行重试。
 - 一次请求可以连续组合多个 READ 工具；最终直接回答，不调用第二个模型做 presentation。
-- 短追问必须继承最近会话中的媒体对象、工具事实与用户约束；只要本轮候选中存在相关能力，就先调用验证，不能未经尝试便声称“未挂载”或“接口未开放”。
+- 短追问继承当前任务的媒体对象、工具事实与约束，明确换话题时不继续沿用旧工具。当前工具不足或需要核实是否支持时，先调用始终提供的 agent.capabilities（query 描述所需能力或 tool_names 指定已知工具）；它会在下一次模型调用加载相关工具Schema。初选窗口不代表项目的全部能力，未经发现与实际核验不得声称“未挂载”“未开放”。
 
 副作用规则：
 - READ 工具可直接调用。
@@ -87,6 +88,8 @@ DEFAULT_SYSTEM_PROMPT = """你是 MediaFlux Media Agent，一名可操作当前 
 - 先给结论，再给必要明细；明确区分实时结果、缓存结果、部分完成和未执行。
 - 不重复同一错误，不输出内部链路、凭据、完整路径或无意义的“请稍后重试”。
 - 若确实缺少必要对象，说明已检查什么以及只缺哪一个信息。
+- 搜索摘要不等于完整详情。未查询、字段未返回、确实返回空表、请求失败是不同情况；没有演职员字段不能说官方未公布/TMDB未录入。先读取相应详情，仍不足时用已接入的web.search/web.read核实。配置关闭/缺Key/超时应按工具真实错误说明，不能统称无能力。
+- 队列计数是瞬时快照；running=0不代表消费者未运行或不会自动执行。只有运行状态明确暂停/关闭时才能如此说明，未读取的状态明确未知。
 - 媒体条目含 `open_url` 时使用 `[打开媒体库](原样 open_url)`；没有该字段时不要猜测链接。"""
 
 
@@ -375,20 +378,31 @@ class AgentSession:
                     **self._capability_retrieval_context(state),
                 },
             )
+            discovery = CapabilityDiscovery(
+                self.catalog,
+                context={
+                    "owner": agent_input.owner, "session_id": agent_input.session_id,
+                    "request_id": agent_input.request_id, "channel": agent_input.channel,
+                    "generation": lease.generation, "turn_id": lease.turn_id,
+                    "reference_kinds": tuple(state.ref_kinds),
+                },
+                maximum=getattr(self.retriever, "maximum", 10),
+            )
+            selected_tools = discovery.window(selection.tools)
             await publish(
                 AgentEventType.CAPABILITIES_SELECTED,
                 {
-                    "tools": list(selection.names),
-                    "count": len(selection.tools),
+                    "tools": [tool.name for tool in selected_tools],
+                    "count": len(selected_tools),
                 },
             )
             messages = self._restore_messages(state)
             current_user_index = len(messages)
             messages.append(ModelMessage(role="user", content=contextual_message))
-            selected_names = set(selection.names)
-            selected_model_names = set(selection.model_names)
+            selected_names = {tool.name for tool in selected_tools}
+            selected_model_names = {tool.model_name for tool in selected_tools}
             tool_definitions = tuple(
-                tool.model_definition() for tool in selection.tools
+                tool.model_definition() for tool in selected_tools
             )
             total_tool_calls = 0
             total_usage: dict[str, int] = {}
@@ -404,6 +418,7 @@ class AgentSession:
                 lease=lease,
                 cancellation=token,
                 report_progress=progress,
+                capability_search=discovery.search,
             )
             # 新的自然语言回合会明确取代尚未确认的旧计划。若只提升
             # generation 而不撤销票据，历史卡片会永久显示“待确认”，
@@ -531,6 +546,12 @@ class AgentSession:
                                 "effect": tool.effect.value,
                             },
                         )
+                        discovery_checkpoint = discovery.checkpoint()
+                        if tool.name == DISCOVERY_TOOL:
+                            current_state = await self.state_store.load(
+                                owner=agent_input.owner, session_id=agent_input.session_id,
+                            )
+                            discovery.context["reference_kinds"] = tuple(current_state.ref_kinds)
                         try:
                             result = await self.pipeline.execute(
                                 canonical_call.name,
@@ -538,6 +559,9 @@ class AgentSession:
                                 context=tool_context,
                             )
                         except ToolPipelineError as exc:
+                            if tool.name == DISCOVERY_TOOL:
+                                # 仅撤销本次失败的发现，不能丢掉同批之前成功的结果。
+                                discovery.restore(discovery_checkpoint)
                             await publish(
                                 AgentEventType.TOOL_FAILED,
                                 {
@@ -550,6 +574,8 @@ class AgentSession:
                             )
                             messages.append(self._tool_error_message(call, exc))
                             continue
+                        if tool.name == DISCOVERY_TOOL and result.outcome.public_content.get("ok") is False:
+                            discovery.restore(discovery_checkpoint)
                         if result.effect_plan is not None:
                             plan = result.effect_plan
                             await publish(
@@ -633,6 +659,18 @@ class AgentSession:
                                 tool_name=call.name,
                             )
                         )
+                    additions = discovery.consume()
+                    if additions:
+                        # 只在完整工具批次之后更新Schema；同一模型批次不能猜新工具名绕过初选。
+                        token.raise_if_cancelled()
+                        selected_tools = discovery.window(selected_tools, additions)
+                        selected_names = {tool.name for tool in selected_tools}
+                        selected_model_names = {tool.model_name for tool in selected_tools}
+                        tool_definitions = tuple(tool.model_definition() for tool in selected_tools)
+                        await publish(AgentEventType.CAPABILITIES_SELECTED, {
+                            "tools": [tool.name for tool in selected_tools],
+                            "count": len(selected_tools), "reason": "discovery", "round": round_index + 2,
+                        })
                     continue
 
                 final_text = assistant_text
