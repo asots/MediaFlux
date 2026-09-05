@@ -62,6 +62,7 @@ HTML = """
         <section class="agent-console is-empty" aria-label="Agent 对话工作区">
           <div class="agent-transcript" id="agentTranscript" role="log"></div>
           <div class="agent-empty-intro" id="agentEmptyIntro"><p>直接描述你想处理的任务</p></div>
+          <button type="button" class="agent-new-replies" id="agentNewReplies" hidden>有新回复</button>
           <form class="agent-composer" id="agentComposer">
             <div class="agent-composer-input-wrap">
               <textarea id="agentPrompt" rows="1" maxlength="1000" data-empty-placeholder="询问 MediaFlux" data-active-placeholder="继续描述或调整任务"></textarea>
@@ -81,21 +82,22 @@ HTML = """
               </div>
             </div>
           </form>
+          <section class="agent-start-panel"><div class="agent-start-resume" id="agentStartResume"></div><p class="agent-start-status" id="agentStartActionsStatus" role="status">正在读取本地待办…</p><div class="agent-start-actions" id="agentStartActions" aria-busy="true"></div></section>
         </section>
         <dialog class="agent-rail agent-history-drawer" id="agentHistoryRail">
           <section class="agent-rail-section agent-session-panel">
             <div class="agent-session-heading">
-              <div><span class="agent-kicker">HISTORY</span><h3>最近会话</h3></div>
+              <div class="agent-session-title"><h3 id="agent-session-heading" tabindex="-1">历史会话</h3><span class="agent-session-count" id="agentSessionCount">0 条</span></div>
               <div class="agent-session-heading-actions">
-                <span class="agent-session-count" id="agentSessionCount">0</span>
                 <button type="button" class="agent-history-close" data-agent-history-close>关闭</button>
               </div>
             </div>
+            <label class="agent-session-search"><input id="agentSessionSearch" type="search" maxlength="80" placeholder="筛选会话标题"></label>
             <div class="agent-session-list" id="agentSessionList" aria-busy="true"></div>
-            <p id="agentSessionStatus" role="status"></p>
+            <p class="agent-history-feedback" id="agentSessionStatus" role="status"></p>
           </section>
         </dialog>
-        <p id="agentResponseStatus" role="status"></p>
+        <p class="sr-only" id="agentResponseStatus" role="status"></p>
       </div>
     </section>
   </div></main></div>
@@ -149,7 +151,19 @@ MOCK_FETCH = r"""
     const parsed = new URL(String(url), location.href);
     const path = parsed.pathname;
     window.__kernelCalls.push({url: path, method: options.method || 'GET', body: String(options.body || '')});
+    if (path === '/api/agent/next-actions') {
+      if (window.__kernelConfig.nextActionsDelayMs) await new Promise(resolve => setTimeout(resolve, window.__kernelConfig.nextActionsDelayMs));
+      return jsonResponse(window.__kernelConfig.nextActions || {actions: [], snapshot_status: 'idle'}, window.__kernelConfig.nextActionsStatus || 200);
+    }
     if (path === '/api/agent/sessions') return jsonResponse(window.__kernelConfig.sessions || {sessions: []});
+    if (path.startsWith('/api/agent/sessions/') && options.method === 'PATCH') {
+      const id = decodeURIComponent(path.split('/').pop());
+      const item = (window.__kernelConfig.sessions?.sessions || []).find(item => item.session_id === id);
+      if (!item) return jsonResponse({error: '会话不存在'}, 404);
+      if (window.__kernelConfig.patchStatus) return jsonResponse({error: '会话更新失败'}, window.__kernelConfig.patchStatus);
+      Object.assign(item, JSON.parse(options.body));
+      return jsonResponse({session: item});
+    }
     if (path.startsWith('/api/agent/sessions/') && (options.method || 'GET') === 'GET') {
       const id = decodeURIComponent(path.split('/').pop());
       return jsonResponse((window.__kernelConfig.sessionDetails || {})[id] || {error: '会话不存在'},

@@ -31,6 +31,7 @@ from .state import (
     AgentInput,
     CancellationToken,
     PublicationLease,
+    SelectionInvalidError,
     SessionBusyError,
     SessionState,
     SessionStateStore,
@@ -38,6 +39,7 @@ from .state import (
     StateUpdate,
     TurnCoordinator,
 )
+from .ux_selection import validate_selection
 
 logger = logging.getLogger(__name__)
 
@@ -311,6 +313,22 @@ class AgentSession:
         token: CancellationToken | None = None
         factory: EventFactory | None = None
         try:
+            validated_selection = None
+            selection_tool = None
+            if "selection" in agent_input.metadata:
+                current_state = await self.state_store.load(
+                    owner=agent_input.owner, session_id=agent_input.session_id,
+                )
+                validated_selection = await validate_selection(
+                    agent_input.metadata["selection"], state=current_state,
+                    store=self.pipeline.reference_store,
+                )
+                try:
+                    selection_tool = self.catalog.get("ingest.submit")
+                    if selection_tool.effect is ToolEffect.READ:
+                        raise KeyError("selection must require confirmation")
+                except KeyError as exc:
+                    raise ToolPipelineError("候选预览能力暂不可用", code="selection_unavailable") from exc
             admission_token = await self.turn_admission.begin(agent_input)
             async with self._start_lock:
                 if await self.coordinator.has_protected_turn(
@@ -318,10 +336,14 @@ class AgentSession:
                     session_id=agent_input.session_id,
                 ):
                     raise SessionBusyError("confirmed effect is executing")
+                begin_options = {}
+                if validated_selection is not None:
+                    begin_options["selection_guard"] = validated_selection.guard
                 lease, state = await self.state_store.begin_turn(
                     owner=agent_input.owner,
                     session_id=agent_input.session_id,
                     request_id=agent_input.request_id,
+                    **begin_options,
                 )
                 token = await self.coordinator.begin(lease)
             factory = EventFactory(
@@ -389,6 +411,13 @@ class AgentSession:
                 maximum=getattr(self.retriever, "maximum", 10),
             )
             selected_tools = discovery.window(selection.tools)
+            if validated_selection is not None:
+                # 结构化选择仍走 MODEL -> 原 ToolPipeline -> EffectPlan，不另建执行面。
+                selected_tools = (selection_tool,)
+                contextual_message += (
+                    "\n\n已验证的卡片选择（仅请求预检，必须等待用户单独确认）：\n"
+                    + json.dumps(dict(validated_selection.arguments), ensure_ascii=False, separators=(",", ":"))
+                )
             await publish(
                 AgentEventType.CAPABILITIES_SELECTED,
                 {
@@ -419,6 +448,7 @@ class AgentSession:
                 cancellation=token,
                 report_progress=progress,
                 capability_search=discovery.search,
+                selection_arguments=validated_selection.arguments if validated_selection else None,
             )
             # 新的自然语言回合会明确取代尚未确认的旧计划。若只提升
             # generation 而不撤销票据，历史卡片会永久显示“待确认”，
@@ -714,6 +744,16 @@ class AgentSession:
                 if self.journal is not None:
                     await self.journal.append(event, owner=agent_input.owner)
                 await queue.put(event)
+        except SelectionInvalidError as exc:
+            failure_factory = EventFactory(
+                session_id=agent_input.session_id,
+                turn_id=secrets.token_urlsafe(12), request_id=agent_input.request_id,
+            )
+            # 拒绝发生在 begin_turn 前；不记会话事件，不污染现有确认/历史。
+            await queue.put(failure_factory.create(
+                AgentEventType.TURN_FAILED,
+                {"code": "selection_invalid", "message": str(exc)},
+            ))
         except SessionBusyError:
             busy_factory = factory or EventFactory(
                 session_id=agent_input.session_id,

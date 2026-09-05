@@ -21,7 +21,14 @@ from app.modules.web_secret import get_web_secret
 
 from .events import AgentEvent
 from .references import OpaqueReference, ReferenceError
-from .state import PublicationLease, SessionState, StalePublicationError, StateUpdate
+from .state import (
+    CandidateSelectionGuard,
+    PublicationLease,
+    SessionState,
+    StalePublicationError,
+    StateUpdate,
+)
+from .ux_display import session_display_patch, session_summary
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_kernel_sessions (
@@ -96,13 +103,15 @@ class SQLiteKernelStore:
         self._events_since_global_prune = 0
 
     async def begin_turn(
-        self, *, owner: str, session_id: str, request_id: str
+        self, *, owner: str, session_id: str, request_id: str,
+        selection_guard: CandidateSelectionGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
         return await asyncio.to_thread(
             self._begin_turn_sync,
             owner,
             session_id,
             request_id,
+            selection_guard,
         )
 
     async def is_current(self, lease: PublicationLease) -> bool:
@@ -183,6 +192,12 @@ class SQLiteKernelStore:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_sessions_sync, owner, limit)
+
+    async def patch_session_display(
+        self, *, owner: str, session_id: str, patch: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        validated = session_display_patch(dict(patch))
+        return await asyncio.to_thread(self._patch_session_display_sync, owner, session_id, validated)
 
     async def reset_session(self, *, owner: str, session_id: str) -> SessionState:
         return await asyncio.to_thread(self._reset_session_sync, owner, session_id)
@@ -452,12 +467,15 @@ class SQLiteKernelStore:
         return max(0, int(row["generation"])) if row is not None else 0
 
     def _begin_turn_sync(
-        self, owner: str, session_id: str, request_id: str
+        self, owner: str, session_id: str, request_id: str,
+        selection_guard: CandidateSelectionGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
         with db.get_conn() as conn:
             self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, owner, session_id)
+            if selection_guard is not None:
+                selection_guard.check(state)
             owner_digest, session_digest = self._scope(owner, session_id)
             state.generation = max(
                 state.generation,
@@ -512,55 +530,90 @@ class SQLiteKernelStore:
             self._ensure_schema(conn)
             return self._load_row(conn, owner, session_id)
 
+    def _patch_session_display_sync(
+        self, owner: str, session_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        owner_digest, session_digest = self._scope(owner, session_id)
+        with db.get_conn() as conn:
+            self._ensure_schema(conn)
+            # 跨进程事务内读最新签名状态；禁止 load -> commit 覆盖新回合。
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT generation,state_json,state_hmac,updated_at FROM agent_kernel_sessions "
+                "WHERE owner_digest=? AND session_digest=?",
+                (owner_digest, session_digest),
+            ).fetchone()
+            if row is None:
+                return None
+            generation = int(row["generation"])
+            domain = f"state:v1:{owner_digest}:{session_digest}:{generation}".encode()
+            payload = self._decode(
+                row["state_json"], row["state_hmac"], domain=domain, expected_type=dict,
+            )
+            metadata = payload.get("metadata", {})
+            if not isinstance(metadata, dict) or payload.get("session_id") != session_id:
+                raise ValueError("会话显示元数据无效")
+            # 不经过 State DTO 的截断/归一化往返，保留所有非显示字段的原始 JSON 值。
+            payload["metadata"] = {**metadata, **deepcopy(patch)}
+            encoded, signature = self._encode(
+                payload, domain=domain, maximum=self.max_state_bytes,
+            )
+            # 显示更新不更改 generation/epoch/updated_at，也不碰确认与对话。
+            conn.execute(
+                "UPDATE agent_kernel_sessions SET state_json=?,state_hmac=? "
+                "WHERE owner_digest=? AND session_digest=?",
+                (encoded, signature, owner_digest, session_digest),
+            )
+            state = self._state_from_payload(
+                owner=owner, session_id=session_id, generation=generation, payload=payload,
+            )
+            return session_summary(state, updated_at=float(row["updated_at"]))
+
     def _list_sessions_sync(self, owner: str, limit: int) -> list[dict[str, Any]]:
         owner_digest = self._digest(owner, domain=b"owner:v1")
         maximum = max(1, min(int(limit), 100))
         result: list[dict[str, Any]] = []
         with db.get_conn() as conn:
             self._ensure_schema(conn)
-            rows = conn.execute(
-                "SELECT session_digest,generation,state_json,state_hmac,updated_at "
+            # 排序与按键读取共用一个读快照，避免并发 PATCH/新回合混入旧排序。
+            conn.execute("BEGIN")
+            # 全历史只排序小键；不让完整 state_json 进入临时 B-tree。
+            keys = conn.execute(
+                "SELECT session_digest "
                 "FROM agent_kernel_sessions WHERE owner_digest=? "
-                "ORDER BY updated_at DESC LIMIT ?",
-                (owner_digest, maximum),
-            ).fetchall()
-        for row in rows:
-            generation = int(row["generation"])
-            session_digest = str(row["session_digest"])
-            try:
-                payload = self._decode(
-                    row["state_json"],
-                    row["state_hmac"],
-                    domain=f"state:v1:{owner_digest}:{session_digest}:{generation}".encode(),
-                    expected_type=dict,
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            session_id = str(payload.get("session_id") or "").strip()
-            if not session_id:
-                continue
-            conversation = payload.get("conversation")
-            title = "新对话"
-            message_count = 0
-            if isinstance(conversation, list):
-                message_count = len(conversation)
-                for item in conversation:
-                    if not isinstance(item, dict) or item.get("role") != "user":
-                        continue
-                    candidate = str(item.get("content") or "").strip()
-                    if candidate:
-                        title = candidate[:80]
-                        break
-            result.append(
-                {
-                    "session_id": session_id,
-                    "generation": generation,
-                    "title": title,
-                    "message_count": message_count,
-                    "pending_approval": bool(payload.get("pending_effect_plan_id")),
-                    "updated_at": float(row["updated_at"]),
-                }
+                "ORDER BY CASE WHEN json_valid(state_json) THEN "
+                "CASE WHEN json_type(state_json,'$.metadata.pinned')='true' "
+                "THEN 1 ELSE 0 END ELSE 0 END DESC, updated_at DESC, session_digest",
+                (owner_digest,),
             )
+            for key in keys:
+                session_digest = str(key["session_digest"])
+                row = conn.execute(
+                    "SELECT generation,state_json,state_hmac,updated_at "
+                    "FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?",
+                    (owner_digest, session_digest),
+                ).fetchone()
+                if row is None:
+                    continue
+                generation = int(row["generation"])
+                try:
+                    payload = self._decode(
+                        row["state_json"], row["state_hmac"],
+                        domain=f"state:v1:{owner_digest}:{session_digest}:{generation}".encode(),
+                        expected_type=dict,
+                    )
+                    session_id = str(payload.get("session_id") or "").strip()
+                    if not session_id or self._scope(owner, session_id)[1] != session_digest:
+                        continue
+                    state = self._state_from_payload(
+                        owner=owner, session_id=session_id, generation=generation, payload=payload,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                result.append(session_summary(state, updated_at=float(row["updated_at"])))
+                # 未通过 HMAC 的记录不能占用有限列表的名额。
+                if len(result) >= maximum:
+                    break
         return result
 
     def _reset_session_sync(self, owner: str, session_id: str) -> SessionState:

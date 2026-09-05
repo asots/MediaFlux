@@ -98,7 +98,9 @@ class AgentKernelArchitectureTests(unittest.TestCase):
         self.assertTrue(forbidden_names.isdisjoint(source.split()))
         line_count = sum(text.count("\n") + 1 for text in sources)
         self.assertGreaterEqual(line_count, 4_000)
-        self.assertLessEqual(line_count, 7_000)
+        # UX 白名单投影、签名元数据 PATCH 与候选选择凭证增加约 450 行；
+        # 保留整个 Kernel 的总量预算，不能把新模块排除以掩盖控制面增长。
+        self.assertLessEqual(line_count, 7_500)
 
     def test_web_adapter_only_uses_kernel_event_endpoints(self) -> None:
         source = (ROOT / "app" / "static" / "js" / "agent.js").read_text(

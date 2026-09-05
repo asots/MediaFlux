@@ -1018,6 +1018,10 @@ class AgentVisualViewportLifecycleTests(unittest.TestCase):
             f"""
             const assert = require('node:assert/strict');
             const styleValues = {{}};
+            const composerStyles = {{}};
+            let composerHeight = 58;
+            let composer = {{getBoundingClientRect: () => ({{height: composerHeight}})}};
+            const consoleNode = {{style: {{setProperty: (name, value) => {{composerStyles[name] = value;}}}}}};
             const window = {{visualViewport: {{height: 700}}, innerHeight: 800}};
             const document = {{
               documentElement: {{style: {{setProperty: (name, value) => {{styleValues[name] = value;}}}}}},
@@ -1025,9 +1029,17 @@ class AgentVisualViewportLifecycleTests(unittest.TestCase):
             {viewport_block}
             syncViewportHeight();
             assert.equal(styleValues['--agent-viewport-height'], '700px');
+            assert.equal(composerStyles['--agent-composer-height'], '58px');
             window.visualViewport.height = 643.6;
+            composerHeight = 137.6;
             syncViewportHeight();
             assert.equal(styleValues['--agent-viewport-height'], '644px');
+            assert.equal(composerStyles['--agent-composer-height'], '138px');
+            window.visualViewport = null;
+            composer = null;
+            syncViewportHeight();
+            assert.equal(styleValues['--agent-viewport-height'], '800px');
+            assert.equal(composerStyles['--agent-composer-height'], '100px');
             """
         )
         _run_node(script)

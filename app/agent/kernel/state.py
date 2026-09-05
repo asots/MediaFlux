@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -23,6 +24,31 @@ class StalePublicationError(KernelStateError):
 
 class SessionBusyError(KernelStateError):
     """已确认的副作用正在执行；新回合不能抢占。"""
+
+
+class SelectionInvalidError(KernelStateError):
+    """候选输入在取得新回合前失效，不得改变原会话。"""
+
+    def __init__(self) -> None:
+        super().__init__("候选已失效或不属于当前会话，请重新搜索后选择。")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateSelectionGuard:
+    generation: int
+    ref: str
+    expires_at: float
+
+    def check(self, state: SessionState) -> None:
+        view = state.metadata.get("ux_candidate_view")
+        if (
+            state.generation != self.generation
+            or self.expires_at <= time.time()
+            or not isinstance(view, dict)
+            or view.get("ref") != self.ref
+            or view.get("generation") != self.generation
+        ):
+            raise SelectionInvalidError()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +162,8 @@ class SessionState:
 
 class SessionStateStore(Protocol):
     async def begin_turn(
-        self, *, owner: str, session_id: str, request_id: str
+        self, *, owner: str, session_id: str, request_id: str,
+        selection_guard: CandidateSelectionGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]: ...
 
     async def is_current(self, lease: PublicationLease) -> bool: ...
@@ -160,7 +187,8 @@ class InMemorySessionStateStore:
         self._states: dict[tuple[str, str], SessionState] = {}
 
     async def begin_turn(
-        self, *, owner: str, session_id: str, request_id: str
+        self, *, owner: str, session_id: str, request_id: str,
+        selection_guard: CandidateSelectionGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
         key = (owner, session_id)
         async with self._lock:
@@ -171,6 +199,8 @@ class InMemorySessionStateStore:
                 if current
                 else SessionState(owner=owner, session_id=session_id)
             )
+            if selection_guard is not None:
+                selection_guard.check(state)
             state.generation = generation
             self._states[key] = state
             lease = PublicationLease(

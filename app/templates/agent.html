@@ -20,10 +20,12 @@
                 <p>直接描述你想处理的任务</p>
             </div>
 
+            <button type="button" class="agent-new-replies" id="agentNewReplies" hidden><i data-lucide="arrow-down"></i><span>有新回复</span></button>
+            <p class="sr-only" id="agentDraftHelp">未发送草稿仅保存在当前浏览器标签页，六小时后过期；疑似凭据不持久保存。等待回复时可继续编辑，但不会自动发送。</p>
             <form class="agent-composer" id="agentComposer">
                 <div class="agent-composer-input-wrap">
                     <label class="sr-only" for="agentPrompt">输入要交给 Agent 的任务</label>
-                    <textarea id="agentPrompt" rows="1" maxlength="1000" placeholder="询问 MediaFlux" data-empty-placeholder="询问 MediaFlux" data-active-placeholder="继续描述或调整任务" autocomplete="off"></textarea>
+                    <textarea id="agentPrompt" aria-describedby="agentDraftHelp" rows="1" maxlength="1000" placeholder="询问 MediaFlux" data-empty-placeholder="询问 MediaFlux" data-active-placeholder="继续描述或调整任务" autocomplete="off"></textarea>
                 </div>
                 <div class="agent-composer-header">
                     <div class="agent-composer-actions">
@@ -40,19 +42,24 @@
                     </div>
                 </div>
             </form>
+            <section class="agent-start-panel" aria-label="可以从这里开始">
+                <div class="agent-start-resume" id="agentStartResume"></div>
+                <p class="agent-start-status" id="agentStartActionsStatus" role="status">正在读取本地待办…</p>
+                <div class="agent-start-actions" id="agentStartActions" aria-busy="true"></div>
+            </section>
         </section>
 
         <dialog class="agent-rail agent-history-drawer" id="agentHistoryRail" aria-labelledby="agent-session-heading">
             <section class="agent-rail-section agent-session-panel">
                 <div class="agent-session-heading">
-                    <div><span class="agent-kicker">HISTORY</span><h3 id="agent-session-heading">最近会话</h3></div>
+                    <div class="agent-session-title"><h3 id="agent-session-heading" tabindex="-1">历史会话</h3><span class="agent-session-count" id="agentSessionCount">0 条</span></div>
                     <div class="agent-session-heading-actions">
-                        <span class="agent-session-count" id="agentSessionCount">0</span>
                         <button type="button" class="agent-history-close" data-agent-history-close aria-label="关闭历史会话" title="关闭历史会话"><i data-lucide="x"></i></button>
                     </div>
                 </div>
+                <label class="agent-session-search"><i data-lucide="search"></i><span class="sr-only">筛选最近会话标题</span><input id="agentSessionSearch" type="search" maxlength="80" placeholder="筛选会话标题" autocomplete="off"></label>
                 <div class="agent-session-list" id="agentSessionList" aria-live="polite" aria-busy="true"><div class="agent-session-empty"><i data-lucide="message-circle-dashed"></i><span>尚无已保存的查询摘要</span></div></div>
-                <p class="sr-only" id="agentSessionStatus" role="status" aria-live="polite"></p>
+                <p class="agent-history-feedback" id="agentSessionStatus" role="status" aria-live="polite"></p>
             </section>
         </dialog>
         <p class="sr-only" id="agentResponseStatus" role="status" aria-live="polite" aria-atomic="true"></p>

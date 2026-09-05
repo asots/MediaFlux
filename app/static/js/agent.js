@@ -19,6 +19,15 @@
     const sessionCount = document.getElementById('agentSessionCount');
     const sessionStatus = document.getElementById('agentSessionStatus');
     const responseStatus = document.getElementById('agentResponseStatus');
+    const nextActions = document.getElementById('agentStartActions');
+    const resumeSlot = document.getElementById('agentStartResume');
+    const composerActions = composer?.querySelector('.agent-composer-actions');
+    const nextActionsStatus = document.getElementById('agentStartActionsStatus');
+    const newRepliesButton = document.getElementById('agentNewReplies');
+    const sessionSearch = document.getElementById('agentSessionSearch');
+    const DRAFT_PREFIX = 'mediaflux.agent.drafts.v1.';
+    const DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
+    const MAX_DRAFTS = 20;
 
     const SESSION_KEY = 'mediaflux.agent.kernel.session.v1';
     const SESSION_RE = /^[A-Za-z0-9_-]{16,64}$/;
@@ -44,7 +53,13 @@
         config: '检查项目配置',
     };
 
+    let draftScope = '';
     let sessionId = storedSessionId() || createId('session');
+    let sessionItems = [];
+    let followOutput = true;
+    let candidateExpiryTimer = null;
+    const memoryDrafts = new Map();
+    const sessionEdits = new Set();
     let latestSessionId = '';
     let activeRequest = null;
     let historyController = null;
@@ -67,16 +82,108 @@
 
     function storedSessionId() {
         try {
-            const value = localStorage.getItem(SESSION_KEY) || '';
+            const key = draftScope ? `${SESSION_KEY}.${draftScope}` : SESSION_KEY;
+            const value = localStorage.getItem(key) || '';
             return SESSION_RE.test(value) ? value : '';
-        } catch (_) {
-            return '';
-        }
+        } catch (_) { return ''; }
     }
 
     function rememberSession(value) {
         sessionId = value;
-        try { localStorage.setItem(SESSION_KEY, value); } catch (_) { /* private mode */ }
+        try {
+            localStorage.setItem(SESSION_KEY, value);
+            if (draftScope) localStorage.setItem(`${SESSION_KEY}.${draftScope}`, value);
+        } catch (_) { /* private mode */ }
+    }
+
+    function clipText(value, limit) {
+        const text = String(value || '').slice(0, limit);
+        // DOM maxlength 按 UTF-16 计数；截断时不要把 emoji 的代理对切成非法 JSON 文本。
+        return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;
+    }
+
+    function readDrafts() {
+        if (!draftScope) return {};
+        try {
+            const value = JSON.parse(sessionStorage.getItem(DRAFT_PREFIX + draftScope) || '{}');
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+            return Object.fromEntries(Object.entries(value).filter(([id, draft]) =>
+                SESSION_RE.test(id) && typeof draft?.text === 'string' && draft.text.length <= 1000 &&
+                Number.isFinite(draft.updated_at) && draft.updated_at <= Date.now() &&
+                Date.now() - draft.updated_at < DRAFT_TTL_MS
+            ).sort((a, b) => b[1].updated_at - a[1].updated_at).slice(0, MAX_DRAFTS));
+        } catch (_) { return {}; }
+    }
+
+    function saveDraft() {
+        const text = clipText(promptInput?.value, 1000);
+        memoryDrafts.set(sessionId, text);
+        if (memoryDrafts.size > MAX_DRAFTS) memoryDrafts.delete(memoryDrafts.keys().next().value);
+        if (!draftScope) return;
+        const drafts = readDrafts();
+        const looksSensitive = /(?:password|passwd|api[_-]?key|secret|token|cookie|authorization|密码|密钥|令牌)\s*[:=]/i.test(text) || /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text);
+        if (text && !looksSensitive) drafts[sessionId] = {text, updated_at: Date.now()};
+        else delete drafts[sessionId];
+        const bounded = Object.fromEntries(Object.entries(drafts)
+            .sort((a, b) => b[1].updated_at - a[1].updated_at).slice(0, MAX_DRAFTS));
+        try { sessionStorage.setItem(DRAFT_PREFIX + draftScope, JSON.stringify(bounded)); } catch (_) { /* storage optional */ }
+        rememberSession(sessionId);
+    }
+
+    function removeDraft(id) {
+        memoryDrafts.delete(id);
+        if (!draftScope) return;
+        const drafts = readDrafts();
+        delete drafts[id];
+        try { sessionStorage.setItem(DRAFT_PREFIX + draftScope, JSON.stringify(drafts)); } catch (_) { /* storage optional */ }
+    }
+
+    function restoreDraft() {
+        if (!promptInput) return;
+        promptInput.value = memoryDrafts.has(sessionId)
+            ? memoryDrafts.get(sessionId) : (readDrafts()[sessionId]?.text || '');
+        resizePrompt();
+    }
+
+    function configureDraftScope(value) {
+        if (typeof value !== 'string' || !/^[a-f0-9]{32,64}$/.test(value) || draftScope === value) return;
+        // 首次鉴权响应前输入的内容属于当前页面，不被迟到的持久草稿覆盖。
+        let typed = String(promptInput?.value || '');
+        const accountChanged = Boolean(draftScope);
+        if (accountChanged) {
+            // 同一页面的登录主体改变时，不把旧主体的内存/输入传给新主体。
+            ++sessionLoadGeneration;
+            activeRequest?.controller.abort();
+            expireCandidateCards();
+            memoryDrafts.clear();
+            typed = '';
+            if (promptInput) promptInput.value = '';
+            transcript?.replaceChildren();
+            followOutput = true;
+            if (newRepliesButton) newRepliesButton.hidden = true;
+            setConsoleEmpty(true);
+        }
+        draftScope = value;
+        if (accountChanged) sessionId = storedSessionId() || createId('session');
+        const scopedSession = storedSessionId();
+        if (!busy && !typed && scopedSession) sessionId = scopedSession;
+        if (!typed && !busy) restoreDraft();
+        saveDraft();
+    }
+
+    function fillDraft(text) {
+        const value = clipText(String(text || '').trim(), 1000);
+        if (!promptInput || !value) return;
+        if (promptInput.value.trim() && promptInput.value.trim() !== value) {
+            announce(responseStatus, '输入框已有草稿，请先发送或清空后再选择。');
+            window.showToast?.('已保留输入框中的草稿，请先发送或清空后再选择', 'warning');
+            promptInput.focus();
+            return;
+        }
+        promptInput.value = value;
+        saveDraft();
+        resizePrompt();
+        promptInput.focus();
     }
 
     function element(tag, className, text) {
@@ -103,6 +210,12 @@
 
     function setConsoleEmpty(empty) {
         consoleNode?.classList.toggle('is-empty', Boolean(empty));
+        const resumeParent = empty && resumeSlot ? resumeSlot : composerActions;
+        if (resumeButton && resumeParent && resumeButton.parentElement !== resumeParent) {
+            const wasFocused = document.activeElement === resumeButton;
+            resumeParent.append(resumeButton);
+            if (wasFocused && !resumeButton.disabled) resumeButton.focus({preventScroll: true});
+        }
         if (promptInput) {
             promptInput.placeholder = empty
                 ? (promptInput.dataset.emptyPlaceholder || '询问 MediaFlux')
@@ -115,9 +228,15 @@
     }
 
     function scrollToBottom(force = false) {
-        if (!transcript || (!force && !transcriptNearBottom())) return;
+        if (!transcript) return;
+        if (!force && !followOutput) {
+            if (newRepliesButton) newRepliesButton.hidden = false;
+            return;
+        }
+        if (force) followOutput = true;
+        if (newRepliesButton) newRepliesButton.hidden = true;
         requestAnimationFrame(() => {
-            transcript.scrollTop = transcript.scrollHeight;
+            if (followOutput) transcript.scrollTop = transcript.scrollHeight;
         });
     }
 
@@ -683,8 +802,15 @@
     }
 
     function finalizeAnswer(turn, text) {
+        turn.failed = false;
         cancelTurnMarkdownRender(turn);
         const answer = String(text || '').trim();
+        if (!answer && turn.candidateGroup) {
+            turn.head?.remove();
+            turn.text?.remove();
+            scrollToBottom();
+            return;
+        }
         if (!answer) {
             turn.item?.remove();
             setConsoleEmpty(!transcript?.childElementCount);
@@ -697,10 +823,12 @@
         replaceRichText(turn.text, answer);
         const trace = buildToolTrace(turn);
         if (trace) turn.card.append(trace);
-        scrollToBottom(true);
+        scrollToBottom();
     }
 
     function finalizeError(turn, message, {cancelled = false} = {}) {
+        turn.failed = true;
+        turn.cancelled = cancelled;
         cancelTurnMarkdownRender(turn);
         turn.card.classList.remove('agent-streaming');
         turn.card.classList.add(cancelled ? 'agent-cancelled' : 'is-interrupted');
@@ -708,7 +836,15 @@
         turn.text.textContent = message || (cancelled ? '本次任务已停止。' : 'Agent 暂时无法完成该请求。');
         const trace = buildToolTrace(turn);
         if (trace) turn.card.append(trace);
-        scrollToBottom(true);
+        if (turn.requestMessage && !turn.boundSelection && !turn.card.querySelector('.agent-retry-draft')) {
+            const actions = element('div', 'agent-retry-actions');
+            const retry = element('button', 'agent-retry-draft', '放回输入框修改');
+            retry.type = 'button';
+            retry.dataset.agentDraft = turn.requestMessage;
+            actions.append(retry);
+            turn.card.append(actions);
+        }
+        scrollToBottom();
     }
 
     function approvalTargetLabel(value) {
@@ -911,6 +1047,7 @@
         const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
         switch (event?.type) {
         case 'turn.started':
+            if (turn.boundSelection) expireVisibleApprovals();
             setTurnStatus(turn, payload.kind === 'confirmation' ? '正在执行已确认计划' : '正在理解任务');
             break;
         case 'capabilities.selected':
@@ -941,11 +1078,14 @@
             setTurnStatus(turn, toolLabel(payload.tool, payload.label));
             break;
         case 'tool.progress': {
+            if (Object.prototype.hasOwnProperty.call(payload, 'candidate_view') && payload.candidate_view === null) expireCandidateCards();
             const summary = publicSummary(payload);
             if (summary) setTurnStatus(turn, summary.slice(0, 100));
             break;
         }
         case 'tool.completed':
+            if (payload.result?.candidate_view) renderCandidateView(turn, payload.result.candidate_view);
+            else if (Object.prototype.hasOwnProperty.call(payload.result || {}, 'candidate_view')) expireCandidateCards();
             updateStep(turn, `call:${payload.call_id || event.sequence}`, `${toolLabel(payload.tool, payload.label)}完成`);
             break;
         case 'tool.failed':
@@ -1042,7 +1182,7 @@
 
     function setBusy(value, {stoppable = false} = {}) {
         busy = Boolean(value);
-        if (promptInput) promptInput.disabled = busy;
+        if (promptInput) promptInput.disabled = false;
         if (sendButton) {
             sendButton.hidden = busy && stoppable;
             sendButton.disabled = busy || !promptInput?.value.trim();
@@ -1052,6 +1192,7 @@
             stopButton.hidden = !(busy && stoppable);
             stopButton.disabled = !(busy && stoppable);
         }
+        syncCandidateButtons();
         newSessionButton && (newSessionButton.disabled = busy);
         resumeButton && (resumeButton.disabled = busy || !latestSessionId);
     }
@@ -1065,15 +1206,22 @@
         promptInput.style.height = 'auto';
         promptInput.style.height = `${Math.min(160, Math.max(44, promptInput.scrollHeight))}px`;
         syncSend();
+        syncViewportHeight();
     }
 
-    async function sendQuery(text) {
+    async function sendQuery(text, {selection = null, preserveDraft = false} = {}) {
         if (busy || !text.trim()) return;
         const message = text.trim();
-        expireVisibleApprovals();
+        ++sessionLoadGeneration;
+        expireCandidateCards();
+        if (!selection) expireVisibleApprovals();
         appendUser(message);
         const turn = createAssistantTurn();
-        promptInput.value = '';
+        turn.requestMessage = message;
+        turn.boundSelection = Boolean(selection);
+        if (!preserveDraft) promptInput.value = '';
+        saveDraft();
+        scrollToBottom(true);
         resizePrompt();
         rememberSession(sessionId);
         const controller = new AbortController();
@@ -1090,6 +1238,7 @@
                     session_id: sessionId,
                     request_id: requestId,
                     stream: true,
+                    ...(selection ? {selection} : {}),
                 }),
                 signal: controller.signal,
             });
@@ -1097,7 +1246,7 @@
                 if (activeRequest?.requestId !== requestId) return;
                 applyEvent(turn, event);
             });
-            announce(responseStatus, 'Media Agent 已完成');
+            announce(responseStatus, turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : 'Media Agent 已完成');
         } catch (error) {
             if (error?.name === 'AbortError') finalizeError(turn, '本次任务已停止。', {cancelled: true});
             else finalizeError(turn, error?.message || 'Agent 暂时不可用。');
@@ -1233,34 +1382,169 @@
     }
 
     function renderSessionList(items) {
-        sessionList?.replaceChildren();
-        const sessions = Array.isArray(items) ? items.filter((item) => SESSION_RE.test(String(item?.session_id || ''))) : [];
-        if (sessionCount) sessionCount.textContent = String(sessions.length);
-        latestSessionId = sessions[0]?.session_id || '';
+        sessionItems = (Array.isArray(items) ? items : []).filter((item) => SESSION_RE.test(String(item?.session_id || ''))).slice(0, 100)
+            .map((item) => ({...item, pinned: item.pinned === true}));
+        if (!sessionList) return;
+        const newest = [...sessionItems].sort((a, b) => (Number(b.updated_at) || 0) - (Number(a.updated_at) || 0));
+        latestSessionId = newest[0]?.session_id || '';
         if (resumeButton) resumeButton.disabled = busy || !latestSessionId;
-        if (!sessions.length) {
-            const empty = element('div', 'agent-session-empty');
-            empty.append(icon('message-circle-dashed'), element('span', '', '尚无已保存的对话'));
-            sessionList?.append(empty);
-            renderIcons(empty);
-            return;
+        const query = String(sessionSearch?.value || '').trim().normalize('NFKC').toLocaleLowerCase();
+        const sorted = [...sessionItems].sort((a, b) => Number(b.pinned) - Number(a.pinned) ||
+            (Number(b.updated_at) || 0) - (Number(a.updated_at) || 0));
+        const existing = new Map([...sessionList.querySelectorAll('.agent-session-item')].map(row => [row.dataset.sessionId, row]));
+        const ids = new Set(sorted.map(item => item.session_id));
+        const scrollTop = sessionList.scrollTop;
+        const focused = sessionList.contains(document.activeElement) ? document.activeElement : null;
+        let shown = 0;
+        for (const [id, row] of existing) if (!ids.has(id)) row.remove();
+        for (const item of sorted) {
+            let row = existing.get(item.session_id);
+            if (!row) {
+                row = element('div', 'agent-session-item');
+                row.dataset.sessionId = item.session_id;
+                const open = element('button', 'agent-session-open');
+                open.type = 'button';
+                open.dataset.sessionOpen = item.session_id;
+                open.append(element('strong', ''), element('small', ''));
+                const controls = element('div', 'agent-session-controls');
+                for (const [name, mark, label] of [['pin', 'pin', '置顶'], ['rename', 'pencil', '重命名'], ['delete', 'trash-2', '删除']]) {
+                    const button = element('button', `agent-session-${name}`);
+                    button.type = 'button';
+                    button.dataset[`session${name[0].toUpperCase()}${name.slice(1)}`] = item.session_id;
+                    button.title = label;
+                    button.append(icon(mark));
+                    controls.append(button);
+                }
+                row.append(open, controls);
+                renderIcons(row);
+            }
+            const title = String(item.title || '新对话');
+            const open = row.querySelector('.agent-session-open');
+            open.querySelector('strong').textContent = title;
+            open.querySelector('small').textContent = `${item.pinned ? '置顶 · ' : ''}${item.message_count || 0} 条消息${sessionTime(item.updated_at) ? ` · ${sessionTime(item.updated_at)}` : ''}`;
+            open.title = title;
+            row.classList.toggle('is-active', item.session_id === sessionId);
+            const pin = row.querySelector('[data-session-pin]');
+            pin.setAttribute('aria-pressed', String(item.pinned));
+            pin.setAttribute('aria-label', `${item.pinned ? '取消置顶' : '置顶'}会话 ${title}`);
+            pin.title = item.pinned ? '取消置顶' : '置顶';
+            row.querySelector('[data-session-rename]').setAttribute('aria-label', `重命名会话 ${title}`);
+            row.querySelector('[data-session-delete]').setAttribute('aria-label', `删除会话 ${title}`);
+            row.hidden = Boolean(query && !title.normalize('NFKC').toLocaleLowerCase().includes(query));
+            if (!row.hidden) shown += 1;
+            sessionList.append(row);
         }
-        for (const item of sessions) {
-            const row = element('div', `agent-session-item${item.session_id === sessionId ? ' is-active' : ''}`);
-            row.dataset.sessionId = item.session_id;
-            const open = element('button', 'agent-session-open');
-            open.type = 'button';
-            open.dataset.sessionOpen = item.session_id;
-            open.append(element('strong', '', item.title || '新对话'), element('small', '', `${item.message_count || 0} 条消息${sessionTime(item.updated_at) ? ` · ${sessionTime(item.updated_at)}` : ''}`));
-            const remove = element('button', 'agent-session-delete');
-            remove.type = 'button';
-            remove.dataset.sessionDelete = item.session_id;
-            remove.setAttribute('aria-label', `删除会话 ${item.title || ''}`);
-            remove.append(icon('trash-2'));
-            row.append(open, remove);
-            sessionList?.append(row);
+        let empty = sessionList.querySelector('.agent-session-empty');
+        if (!shown) {
+            if (!empty) {
+                empty = element('div', 'agent-session-empty');
+                empty.append(icon('message-circle-dashed'), element('span', ''));
+                sessionList.append(empty);
+                renderIcons(empty);
+            }
+            empty.querySelector('span').textContent = query ? '没有匹配的会话，试试其他标题' : '尚无已保存的对话';
+        } else empty?.remove();
+        if (sessionCount) sessionCount.textContent = `${shown} 条`;
+        sessionList.scrollTop = scrollTop;
+        if (focused?.isConnected && !focused.closest('[hidden]') && document.activeElement !== focused) focused.focus({preventScroll: true});
+    }
+
+    function editSessionTitle(id) {
+        if (sessionEdits.has(id)) return;
+        const item = sessionItems.find(item => item.session_id === id);
+        const row = [...sessionList.querySelectorAll('.agent-session-item')].find(row => row.dataset.sessionId === id);
+        if (!item || !row || row.querySelector('form')) return;
+        const form = element('form', 'agent-session-editor');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.maxLength = 80;
+        input.value = String(item.title || '');
+        input.setAttribute('aria-label', '会话名称');
+        const save = element('button', '', '保存');
+        save.type = 'submit';
+        const cancel = element('button', '', '取消');
+        cancel.type = 'button';
+        const close = () => {
+            const restoreFocus = form.contains(document.activeElement) || document.activeElement === document.body;
+            form.remove();
+            row.classList.remove('is-editing');
+            if (restoreFocus && historyRail?.open) row.querySelector('[data-session-rename]')?.focus({preventScroll: true});
+        };
+        cancel.addEventListener('click', close);
+        input.addEventListener('keydown', event => {
+            if (event.key === 'Escape') { event.stopPropagation(); event.preventDefault(); close(); }
+        });
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            const title = input.value.trim();
+            if (!title) { announce(sessionStatus, '会话名称不能为空'); input.focus(); return; }
+            if (await patchSession(id, {title})) close();
+        });
+        form.append(input, save, cancel);
+        row.classList.add('is-editing');
+        row.append(form);
+        input.focus();
+        input.select();
+    }
+
+    async function patchSession(id, values) {
+        if (sessionEdits.has(id)) return false;
+        sessionEdits.add(id);
+        const row = [...sessionList.querySelectorAll('.agent-session-item')].find(row => row.dataset.sessionId === id);
+        const controls = [...(row?.querySelectorAll('button,input') || [])];
+        const focused = controls.includes(document.activeElement) ? document.activeElement : null;
+        const selection = focused && typeof focused.selectionStart === 'number'
+            ? [focused.selectionStart, focused.selectionEnd] : null;
+        controls.forEach(control => { control.disabled = true; });
+        try {
+            const payload = await fetchJSON(`/api/agent/sessions/${encodeURIComponent(id)}`, {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(values),
+            });
+            const updated = payload.session;
+            if (!updated || updated.session_id !== id) throw new Error('会话更新结果无效，请刷新列表核验');
+            sessionItems = sessionItems.map(item => item.session_id === id ? {...item, ...updated} : item);
+            renderSessionList(sessionItems);
+            announce(sessionStatus, '会话已更新');
+            return true;
+        } catch (error) {
+            announce(sessionStatus, error?.message || '会话更新失败，请稍后重试');
+            return false;
+        } finally {
+            sessionEdits.delete(id);
+            controls.forEach(control => { control.disabled = false; });
+            // disabled 会使键盘焦点落到 body；失败后恢复，但不抢走用户主动移到别处的焦点。
+            if (focused?.isConnected && historyRail?.open &&
+                (document.activeElement === document.body || document.activeElement === focused)) {
+                focused.focus({preventScroll: true});
+                if (selection && typeof focused.setSelectionRange === 'function') focused.setSelectionRange(...selection);
+            }
         }
-        renderIcons(sessionList);
+    }
+
+    async function refreshNextActions() {
+        if (!nextActions) return;
+        nextActions.setAttribute('aria-busy', 'true');
+        try {
+            const payload = await fetchJSON('/api/agent/next-actions');
+            const actions = (Array.isArray(payload.actions) ? payload.actions : []).filter(item =>
+                typeof item?.title === 'string' && typeof item.prompt === 'string' && item.prompt.trim()).slice(0, 3);
+            const nodes = [];
+            for (const action of actions) {
+                const button = element('button', 'agent-start-action');
+                button.type = 'button';
+                button.dataset.agentDraft = clipText(action.prompt, 1000);
+                button.title = String(action.description || action.title).slice(0, 300);
+                button.append(element('span', '', action.title.slice(0, 80)), icon('arrow-up-right'));
+                nodes.push(button);
+            }
+            nextActions.replaceChildren(...nodes);
+            if (nextActionsStatus) nextActionsStatus.textContent = actions.length
+                ? '可以从这里开始 · 仅查看，不自动处理'
+                : (payload.snapshot_status === 'unavailable' ? '待办暂时不可用，仍可直接提问' : '暂时没有待处理事项，也可以直接提问');
+            renderIcons(nextActions);
+        } catch (_) {
+            if (nextActionsStatus) nextActionsStatus.textContent = '待办暂时不可用，仍可直接提问';
+        } finally { nextActions.setAttribute('aria-busy', 'false'); }
     }
 
     async function refreshSessions({quiet = false} = {}) {
@@ -1271,6 +1555,7 @@
         try {
             const payload = await fetchJSON('/api/agent/sessions', {signal: controller.signal});
             if (historyController !== controller) return;
+            configureDraftScope(payload.draft_scope);
             renderSessionList(payload.sessions || []);
             announce(sessionStatus, '会话列表已更新');
         } catch (error) {
@@ -1295,7 +1580,10 @@
         try {
             const payload = await fetchJSON(`/api/agent/sessions/${encodeURIComponent(targetId)}`);
             if (generation !== sessionLoadGeneration) return;
+            saveDraft();
             rememberSession(targetId);
+            restoreDraft();
+            expireCandidateCards();
             transcript?.replaceChildren();
             for (const message of payload.messages || []) {
                 if (message.role === 'user') appendUser(String(message.content || ''), {recovered: true});
@@ -1305,7 +1593,13 @@
                     finalizeAnswer(turn, String(message.content || ''));
                 }
             }
+            if (payload.candidate_view) {
+                const view = appendMessage('assistant', {recovered: true});
+                renderCandidateView({card: view.body}, payload.candidate_view);
+            }
             renderRecoveredApproval(payload.pending_approval);
+            followOutput = true;
+            scrollToBottom(true);
             setConsoleEmpty(!transcript?.childElementCount);
             if (closeHistory) closeHistoryRail();
             refreshSessions({quiet: true});
@@ -1318,7 +1612,11 @@
         if (busy || !SESSION_RE.test(targetId)) return;
         try {
             await fetchJSON(`/api/agent/sessions/${encodeURIComponent(targetId)}`, {method: 'DELETE'});
-            if (targetId === sessionId) startNewSession();
+            removeDraft(targetId);
+            if (targetId === sessionId) {
+                promptInput.value = '';
+                startNewSession();
+            }
             await refreshSessions();
         } catch (error) {
             announce(sessionStatus, error?.message || '会话删除失败');
@@ -1328,7 +1626,12 @@
     function startNewSession() {
         if (busy) return;
         ++sessionLoadGeneration;
+        saveDraft();
+        expireCandidateCards();
         rememberSession(createId('session'));
+        restoreDraft();
+        followOutput = true;
+        if (newRepliesButton) newRepliesButton.hidden = true;
         transcript?.replaceChildren();
         setConsoleEmpty(true);
         promptInput?.focus();
@@ -1344,6 +1647,7 @@
             historyRail.setAttribute('open', '');
         }
         historyButton?.setAttribute('aria-expanded', 'true');
+        document.getElementById('agent-session-heading')?.focus({preventScroll: true});
         refreshSessions();
     }
 
@@ -1354,16 +1658,123 @@
         historyButton?.setAttribute('aria-expanded', 'false');
     }
 
+    function expireCandidateCards() {
+        if (candidateExpiryTimer !== null) clearTimeout(candidateExpiryTimer);
+        candidateExpiryTimer = null;
+        transcript?.querySelectorAll('[data-candidate-select]').forEach((button) => {
+            button.disabled = true;
+            button.dataset.expired = 'true';
+            button.title = '候选已更新，请基于新的搜索结果选择';
+        });
+        transcript?.querySelectorAll('.agent-candidates-note').forEach(note => {
+            note.textContent = '此批候选仅供回看，请基于新的搜索结果选择。';
+        });
+    }
+
+    function syncCandidateButtons() {
+        transcript?.querySelectorAll('[data-candidate-select]').forEach(button => {
+            const expired = button.dataset.expired === 'true' || Number(button.dataset.expiresAt) * 1000 <= Date.now();
+            button.disabled = busy || expired;
+            if (expired) {
+                button.title = '候选已过期或更新，请重新搜索';
+                const note = button.closest('.agent-candidates')?.querySelector('.agent-candidates-note');
+                if (note) note.textContent = '此批候选仅供回看，请基于新的搜索结果选择。';
+            }
+        });
+    }
+
+    function renderCandidateView(turn, view) {
+        if (!view || !Array.isArray(view.items) || typeof view.ref !== 'string' || !Number.isFinite(view.expires_at)) return;
+        if (turn.candidateGroup?.dataset.candidateView === view.ref) return;
+        const items = view.items.filter(item => typeof item?.title === 'string' && Number.isInteger(item.position) &&
+            item.position > 0 && item.position <= 12 && typeof item.selection?.ref === 'string' &&
+            /^ref_[A-Za-z0-9_-]{16,160}$/.test(item.selection.ref) && item.selection.position === item.position).slice(0, 12);
+        if (!items.length) return;
+        expireCandidateCards();
+        const group = element('section', 'agent-candidates');
+        group.dataset.candidateView = view.ref;
+        group.setAttribute('aria-label', '比较资源候选');
+        const heading = element('div', 'agent-candidates-heading');
+        heading.append(element('strong', '', '资源候选'), element('span', '', `${items.length} 项可供核对`));
+        const note = element('p', 'agent-candidates-note', '选择后先生成预览，确认后才提交下载。');
+        const grid = element('div', 'agent-candidate-grid');
+        const extra = document.createElement('details');
+        extra.className = 'agent-candidates-more';
+        const summary = document.createElement('summary');
+        summary.textContent = `查看另外 ${Math.max(0, items.length - 4)} 项候选`;
+        const moreGrid = element('div', 'agent-candidate-grid');
+        extra.append(summary, moreGrid);
+        const tagNames = {resolution: '画质', media: '版本', video_codec: '编码', effect: '画面', audio: '音轨'};
+        for (const [index, item] of items.entries()) {
+            const card = element('article', 'agent-candidate-card');
+            const meta = element('p', 'agent-candidate-meta', `#${item.position}${item.site_name ? ` · ${String(item.site_name).slice(0, 80)}` : ''}${item.size_text ? ` · ${String(item.size_text).slice(0, 32)}` : ''}`);
+            const title = element('h4', '', item.title.slice(0, 300));
+            title.title = item.title.slice(0, 300);
+            const tags = element('div', 'agent-candidate-tags');
+            for (const [key, label] of Object.entries(tagNames)) {
+                const value = item.tags?.[key];
+                if (typeof value === 'string' && value.trim()) tags.append(element('span', '', `${label} · ${value.slice(0, 64)}`));
+            }
+            const reasons = element('ul', 'agent-candidate-reasons');
+            for (const reason of (Array.isArray(item.reasons) ? item.reasons : []).filter(value => typeof value === 'string').slice(0, 3)) {
+                reasons.append(element('li', '', reason.slice(0, 120)));
+            }
+            const warnings = element('ul', 'agent-candidate-warnings');
+            for (const warning of (Array.isArray(item.warnings) ? item.warnings : []).filter(value => typeof value === 'string').slice(0, 4)) {
+                warnings.append(element('li', '', warning.slice(0, 120)));
+            }
+            const button = element('button', 'agent-candidate-select', '选择并预览');
+            button.type = 'button';
+            button.dataset.candidateSelect = item.selection.ref;
+            button.dataset.candidatePosition = String(item.selection.position);
+            button.dataset.candidateTitle = clipText(item.title, 160);
+            button.dataset.expiresAt = String(view.expires_at);
+            button.setAttribute('aria-label', `选择候选 ${item.position} 并预览`);
+            card.append(meta, title);
+            if (tags.childElementCount) card.append(tags);
+            if (reasons.childElementCount) card.append(reasons);
+            if (warnings.childElementCount) card.append(warnings);
+            card.append(button);
+            (index < 4 ? grid : moreGrid).append(card);
+        }
+        group.append(heading, note, grid);
+        if (items.length > 4) group.append(extra);
+        turn.candidateGroup = group;
+        turn.card.append(group);
+        syncCandidateButtons();
+        candidateExpiryTimer = setTimeout(syncCandidateButtons, Math.max(0, Math.min(2147483647, view.expires_at * 1000 - Date.now() + 25)));
+        scrollToBottom();
+    }
+
+    function selectCandidate(button) {
+        if (busy || button.disabled) return;
+        if (button.dataset.expired === 'true' || Number(button.dataset.expiresAt) * 1000 <= Date.now()) {
+            syncCandidateButtons();
+            announce(responseStatus, '候选已过期，请重新搜索后选择');
+            window.showToast?.('候选已过期，请重新搜索后选择', 'warning');
+            return;
+        }
+        const selection = {ref: button.dataset.candidateSelect, position: Number(button.dataset.candidatePosition)};
+        sendQuery(`选择候选 #${selection.position}「${button.dataset.candidateTitle || ''}」并生成下载预览。`, {selection, preserveDraft: true});
+    }
+
     function syncViewportHeight() {
         const height = window.visualViewport?.height || window.innerHeight;
         document.documentElement.style.setProperty('--agent-viewport-height', `${Math.round(height)}px`);
+        consoleNode?.style.setProperty('--agent-composer-height', `${Math.round(composer?.getBoundingClientRect().height || 100)}px`);
     }
 
     composer?.addEventListener('submit', (event) => {
         event.preventDefault();
         sendQuery(promptInput?.value || '');
     });
-    promptInput?.addEventListener('input', resizePrompt);
+    promptInput?.addEventListener('input', () => { resizePrompt(); saveDraft(); });
+    transcript?.addEventListener('scroll', () => {
+        followOutput = transcriptNearBottom();
+        if (followOutput && newRepliesButton) newRepliesButton.hidden = true;
+    }, {passive: true});
+    newRepliesButton?.addEventListener('click', () => scrollToBottom(true));
+    window.addEventListener('pagehide', saveDraft);
     promptInput?.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
             event.preventDefault();
@@ -1381,13 +1792,23 @@
     historyRail?.addEventListener('click', (event) => {
         if (event.target === historyRail || event.target.closest('[data-agent-history-close]')) closeHistoryRail();
     });
+    sessionSearch?.addEventListener('input', () => renderSessionList(sessionItems));
     sessionList?.addEventListener('click', (event) => {
         const open = event.target.closest('[data-session-open]');
         const remove = event.target.closest('[data-session-delete]');
+        const rename = event.target.closest('[data-session-rename]');
+        const pin = event.target.closest('[data-session-pin]');
+        if (rename) editSessionTitle(rename.dataset.sessionRename);
+        if (pin) {
+            const item = sessionItems.find(item => item.session_id === pin.dataset.sessionPin);
+            if (item) patchSession(item.session_id, {pinned: !item.pinned});
+        }
         if (open) loadSession(open.dataset.sessionOpen || '');
         if (remove) deleteSession(remove.dataset.sessionDelete || '');
     });
     transcript?.addEventListener('click', (event) => {
+        const candidate = event.target.closest('[data-candidate-select]');
+        if (candidate) selectCandidate(candidate);
         const confirm = event.target.closest('[data-effect-confirm]');
         const cancel = event.target.closest('[data-effect-cancel]');
         if (confirm) confirmEffect(confirm);
@@ -1395,10 +1816,7 @@
     });
     page.addEventListener('click', (event) => {
         const draft = event.target.closest('[data-agent-draft]');
-        if (!draft || busy) return;
-        promptInput.value = draft.dataset.agentDraft || '';
-        resizePrompt();
-        promptInput.focus();
+        if (draft) fillDraft(draft.dataset.agentDraft);
     });
     window.visualViewport?.addEventListener('resize', syncViewportHeight, {passive: true});
     window.addEventListener('resize', syncViewportHeight, {passive: true});
@@ -1406,6 +1824,7 @@
     syncViewportHeight();
     resizePrompt();
     setConsoleEmpty(true);
+    refreshNextActions();
     renderIcons(page);
     refreshSessions({quiet: true}).then(() => {
         if (storedSessionId()) loadSession(sessionId, {closeHistory: false});

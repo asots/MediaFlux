@@ -11,9 +11,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from app.concurrency import CrossLoopAsyncLock
-
 from app.agent.public_safety import sanitize_public_text
+from app.concurrency import CrossLoopAsyncLock
 
 from .capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from .effects import (
@@ -30,6 +29,13 @@ from .state import (
     SessionStateStore,
     StalePublicationError,
     StateUpdate,
+)
+from .ux_selection import (
+    CANDIDATE_VIEW_KEY,
+    RESOURCE_KIND,
+    candidate_result,
+    issue_candidate_view,
+    resource_model_content,
 )
 
 
@@ -52,6 +58,7 @@ class ToolCallContext:
     cancellation: CancellationToken
     report_progress: ProgressSink
     capability_search: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    selection_arguments: Mapping[str, Any] | None = None
 
     def policy_context(self) -> dict[str, Any]:
         return {
@@ -401,6 +408,19 @@ class ToolPipeline:
         except KeyError as exc:
             raise ToolPipelineError("未知工具", code="tool_not_found") from exc
         raw_arguments = dict(arguments or {})
+        if context.selection_arguments is not None:
+            expected = dict(context.selection_arguments)
+            # 卡片选择限定为既有提交工具的预检；模型不能换资源、扩选或另选目标。
+            actual = {**raw_arguments, "target": raw_arguments.get("target", "preferred")}
+            positions = raw_arguments.get("positions")
+            if (
+                tool.name != "ingest.submit"
+                or tool.effect is ToolEffect.READ
+                or actual != expected
+                or not isinstance(positions, list)
+                or any(type(position) is not int for position in positions)
+            ):
+                raise ToolPipelineError("只能预览本次已验证的候选选择", code="selection_mismatch")
         _validate_json_schema(raw_arguments, tool.input_schema)
         try:
             normalized = tool.validator(raw_arguments)
@@ -437,10 +457,24 @@ class ToolPipeline:
         if tool.effect is ToolEffect.READ:
             if tool.read is None:  # pragma: no cover - ToolSpec 已校验
                 raise ToolPipelineError("工具不可执行", code="tool_not_executable")
+            resource_search = tool.metadata.get("source_kind") == "resource_index"
+            if resource_search:
+                # 同一模型回合内重搜也使旧卡失效，包括空结果和读取失败。
+                await self._commit_updates(context.lease, (
+                    StateUpdate(f"metadata.{CANDIDATE_VIEW_KEY}", None),
+                ))
+                await context.report_progress({"tool": tool.name, "candidate_view": None})
             value = await _invoke(tool.read, resolved, context)
-            outcome = await self._materialize_refs(
-                self.projector.project(value), context=context
-            )
+            projected = self.projector.project(value)
+            if resource_search and not any(item.kind == RESOURCE_KIND for item in projected.refs):
+                public = candidate_result(projected.public_content, None)
+                projected = replace(
+                    projected, public_content=public,
+                    model_content=resource_model_content(
+                        projected.model_content, maximum=getattr(self.projector, "max_model_chars", 24_000),
+                    ),
+                )
+            outcome = await self._materialize_refs(projected, context=context)
             await self._commit_updates(context.lease, outcome.state_updates)
             return PipelineResult(
                 tool=tool,
@@ -685,6 +719,8 @@ class ToolPipeline:
         reference_arguments: dict[str, str] = {}
         kinds: list[str] = []
         ids: list[str] = []
+        candidate_view = None
+        has_candidates = False
         for item in outcome.refs:
             if not isinstance(item, ReferenceValue):
                 raise ToolPipelineError(
@@ -697,6 +733,13 @@ class ToolPipeline:
                 value=item.value,
                 ttl_seconds=item.ttl_seconds,
             )
+            if reference.kind == RESOURCE_KIND:
+                has_candidates = True
+                candidate_view = await issue_candidate_view(
+                    store=self.reference_store, owner=context.owner, session_id=context.session_id,
+                    generation=context.lease.generation, ref=reference.ref, value=item.value,
+                    ttl_seconds=item.ttl_seconds, public=outcome.public_content,
+                )
             exposed.append({"ref": reference.ref, "kind": reference.kind})
             argument_name = (
                 re.sub(r"[^a-z0-9_]+", "_", reference.kind.casefold()).strip("_")
@@ -706,12 +749,16 @@ class ToolPipeline:
                 reference_arguments[argument_name] = reference.ref
             ids.append(reference.ref)
             kinds.append(reference.kind)
-        public = dict(outcome.public_content)
+        public = (
+            candidate_result(outcome.public_content, candidate_view)
+            if has_candidates else dict(outcome.public_content)
+        )
         public["refs"] = exposed
         if reference_arguments:
             public["reference_arguments"] = reference_arguments
         model_content = (
-            outcome.model_content.rstrip()
+            (resource_model_content(outcome.model_content, maximum=getattr(self.projector, "max_model_chars", 24_000))
+             if has_candidates else outcome.model_content.rstrip())
             + "\nopaque_refs="
             + json.dumps(exposed, ensure_ascii=False, separators=(",", ":"))
             + "\nreference_arguments="
@@ -725,6 +772,8 @@ class ToolPipeline:
             StateUpdate("recent_refs", ids, mode="append"),
             StateUpdate("ref_kinds", kinds, mode="append"),
         )
+        if has_candidates:
+            updates += (StateUpdate(f"metadata.{CANDIDATE_VIEW_KEY}", candidate_view),)
         return replace(
             outcome,
             public_content=public,

@@ -14,7 +14,8 @@ from typing import Any
 from .adapters import EventObserver, TurnView, consume_events, iter_ndjson
 from .metrics import KernelMetrics
 from .session import AgentSession
-from .state import AgentInput
+from .state import AgentInput, SelectionInvalidError
+from .ux_selection import normalize_selection
 
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
 _PLAN_RE = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
@@ -33,6 +34,7 @@ class QueryEnvelope:
     channel: str = "api"
     reply_context: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    selection: Mapping[str, Any] | None = None
 
     def to_agent_input(self) -> AgentInput:
         owner = _owner(self.owner)
@@ -42,6 +44,9 @@ class QueryEnvelope:
         if channel not in {"web", "telegram", "api", "test"}:
             raise TransportInputError("channel 无效")
         try:
+            metadata = dict(self.metadata)
+            if self.selection is not None:
+                metadata["selection"] = normalize_selection(self.selection)
             return AgentInput(
                 owner=owner,
                 session_id=session_id,
@@ -49,9 +54,9 @@ class QueryEnvelope:
                 request_id=request_id,
                 channel=channel,
                 reply_context=dict(self.reply_context),
-                metadata=dict(self.metadata),
+                metadata=metadata,
             )
-        except ValueError as exc:
+        except (ValueError, SelectionInvalidError) as exc:
             raise TransportInputError(str(exc)) from exc
 
 
@@ -163,6 +168,7 @@ class TelegramKernelTransport:
             channel="telegram",
             reply_context=request.reply_context,
             metadata=request.metadata,
+            selection=request.selection,
         )
         events = self.metrics.track(
             self.session.run(normalized.to_agent_input()),

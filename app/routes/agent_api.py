@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import hmac
 import logging
 import re
 from typing import Annotated, Any
@@ -14,14 +16,18 @@ from app import config
 from app.agent.feature_gate import is_agent_enabled
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
 from app.agent.kernel.public_view import public_conversation_messages
-from app.agent.kernel.state import SessionBusyError
+from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import (
     EffectEnvelope,
     QueryEnvelope,
     TransportInputError,
 )
+from app.agent.kernel.ux_display import next_actions_view, session_display_patch
+from app.agent.kernel.ux_selection import current_candidate_view, normalize_selection
 from app.agent.owner_routes import web_kernel_owner
 from app.agent.rate_limit import agent_rate_limiter
+from app.agent.workspace_next_actions import summarize_workspace_next_actions
+from app.modules.web_secret import get_web_secret
 from app.web import api_error, api_response, require_api_login
 
 logger = logging.getLogger(__name__)
@@ -82,7 +88,7 @@ def _check_rate_limit(
 def _error(exc: Exception):
     if isinstance(exc, AgentRateLimitError):
         return api_error(str(exc), 429)
-    if isinstance(exc, TransportInputError):
+    if isinstance(exc, (TransportInputError, SelectionInvalidError)):
         return api_error(str(exc), 400)
     if isinstance(exc, SessionBusyError):
         return api_response(
@@ -120,6 +126,25 @@ async def capabilities(request: Request):
         return _error(exc)
 
 
+@router.get("/next-actions")
+async def next_actions(request: Request):
+    require_api_login(request)
+    try:
+        _require_enabled()
+        _check_rate_limit(request, "next-actions", limit=30)
+        try:
+            result = await asyncio.to_thread(summarize_workspace_next_actions, {})
+            payload = next_actions_view(result)
+        except Exception as exc:  # noqa: BLE001 - 本地快照不可用时不影响首页
+            logger.warning("Agent 下一步快照不可用 type=%s", type(exc).__name__)
+            payload = {"actions": [], "snapshot_status": "unavailable"}
+        response = api_response(payload)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
+        return _error(exc)
+
+
 @router.get("/metrics")
 async def metrics(request: Request):
     require_api_login(request)
@@ -138,6 +163,7 @@ async def query(request: Request, data: Annotated[Any, Body()] = None):
             "session_id",
             "stream",
             "request_id",
+            "selection",
         }
     ):
         return api_error("请求字段无效", 400)
@@ -153,7 +179,9 @@ async def query(request: Request, data: Annotated[Any, Body()] = None):
             message=message,
             request_id=_request_id(data.get("request_id")),
             channel="web",
+            selection=normalize_selection(data["selection"]) if "selection" in data else None,
         )
+        envelope.to_agent_input()
         transport = get_agent_kernel_runtime().web
         if data.get("stream", True) is not False:
             return StreamingResponse(
@@ -273,10 +301,43 @@ async def reset_session(request: Request, data: Annotated[Any, Body()] = None):
 async def list_sessions(request: Request):
     require_api_login(request)
     try:
-        sessions = await get_agent_kernel_runtime().store.list_sessions(
-            owner=_owner(request)
+        owner = _owner(request)
+        sessions = await get_agent_kernel_runtime().store.list_sessions(owner=owner)
+        secret = str(get_web_secret() or "")
+        if not secret:
+            raise RuntimeError("draft scope secret unavailable")
+        draft_scope = hmac.new(
+            secret.encode(), b"mediaflux-agent-draft:v1\0" + owner.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        response = api_response({
+            "sessions": sessions, "draft_scope": draft_scope,
+            "scope": "recent_sessions",
+        })
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
+        return _error(exc)
+
+
+@router.patch("/sessions/{session_id}")
+async def patch_session(request: Request, session_id: str, data: Annotated[Any, Body()] = None):
+    require_api_login(request)
+    # 写入口沿用主应用 SecurityMiddleware 的登录与 X-CSRF-Token 校验。
+    try:
+        _require_enabled()
+        _check_rate_limit(request, "session-display", limit=30)
+        normalized = _session_id(session_id)
+        try:
+            patch = session_display_patch(data)
+        except ValueError as exc:
+            raise TransportInputError(str(exc)) from exc
+        summary = await get_agent_kernel_runtime().store.patch_session_display(
+            owner=_owner(request), session_id=normalized, patch=patch,
         )
-        return api_response({"sessions": sessions})
+        if summary is None:
+            return api_error("会话不存在", 404)
+        return api_response({"session": summary})
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
         return _error(exc)
 
@@ -334,6 +395,9 @@ async def get_session(request: Request, session_id: str):
                 "generation": state.generation,
                 "messages": messages,
                 "pending_approval": pending_approval,
+                "candidate_view": await current_candidate_view(
+                    state=state, store=get_agent_kernel_runtime().store,
+                ),
             }
         )
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
