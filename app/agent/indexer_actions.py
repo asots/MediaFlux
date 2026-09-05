@@ -768,6 +768,52 @@ def prepare_submit_resource_batch(
     return _preview_submit_resource_batch(arguments, state), str(state["fingerprint"])
 
 
+def _converge_batch_duplicates(items: list[dict[str, Any]]) -> int:
+    """仅关联同批、同请求、同目标的唯一实际提交结果，不查询全局任务。
+
+    duplicate/ok/created 仍描述本候选未再次提交；batch_result 描述关联的
+    提交结果（submitted 并非下载完成），existing_status 不再保留瞬时快照。
+    不从结果推断新的重试授权；有多个实际提交结果时不猜测其先后顺序。
+    """
+    outcomes = {
+        "submitted": "已受理（不代表下载完成）",
+        "partial": "部分下载目标成功，其余失败",
+        "manual_review": "提交结果待核对，勿直接重复提交",
+        "failed": "提交失败",
+    }
+    completed: dict[tuple[int, str], list[dict[str, Any]]] = {}
+    for item in items:
+        request_id = item.get("request_id")
+        if (
+            isinstance(request_id, int)
+            and not isinstance(request_id, bool)
+            and request_id > 0
+            and item.get("target") in _TARGETS
+            and not item.get("duplicate")
+            and item.get("status") in outcomes
+        ):
+            completed.setdefault((request_id, item["target"]), []).append(item)
+
+    merged = 0
+    for item in items:
+        if not item.get("duplicate"):
+            continue
+        matches = completed.get((item.get("request_id"), item.get("target")), [])
+        if len(matches) != 1:
+            continue
+        final = matches[0]
+        item["batch_result"] = {
+            key: final.get(key)
+            for key in ("result_id", "status", "succeeded", "failed", "error")
+        }
+        item["existing_status"] = final["status"]
+        item["can_resubmit"] = False
+        item["resubmit_target"] = ""
+        item["error"] = f"已合并到同批下载请求，未新增任务；{outcomes[final['status']]}"
+        merged += 1
+    return merged
+
+
 def _submit_resource_batch(
     arguments: dict[str, Any], *, service: Any | None = None
 ) -> ToolResult:
@@ -813,23 +859,26 @@ def _submit_resource_batch(
             "批量下载处理失败",
             error="下载处理失败，请稍后重试。",
         )
+    merged = _converge_batch_duplicates(items)
     counts = {
         status: sum(item.get("status") == status for item in items)
         for status in ("submitted", "partial", "manual_review", "failed", "duplicate")
     }
     accepted = counts["submitted"] + counts["partial"]
     review_required = counts["manual_review"]
+    unaccepted = len(items) - merged - accepted
     if (
         accepted
         and not counts["failed"]
-        and not counts["duplicate"]
+        and counts["duplicate"] == merged
+        and not counts["partial"]
         and not review_required
     ):
         status, summary = "accepted", f"{accepted} 个下载任务已提交"
     elif accepted:
         status, summary = (
             "partial",
-            f"批量提交完成：{accepted} 个已受理，{len(items) - accepted} 个未受理",
+            f"批量提交完成：{accepted} 个已受理，{unaccepted} 个未受理",
         )
     elif review_required:
         status, summary = (
@@ -840,6 +889,10 @@ def _submit_resource_batch(
         status, summary = "conflict", "所选资源均已提交或正在处理中"
     else:
         status, summary = "unavailable", "批量资源提交未成功"
+    if counts["partial"]:
+        summary += f"；{counts['partial']} 个任务仅部分下载目标成功"
+    if merged:
+        summary += f"；{merged} 个同批重复候选已合并（未新增任务）"
     return ToolResult(
         bool(accepted),
         status,
@@ -851,6 +904,7 @@ def _submit_resource_batch(
             "review_required": review_required,
             "failed": counts["failed"],
             "duplicate": counts["duplicate"],
+            "merged": merged,
             "items": items,
         },
         evidence=[
@@ -864,8 +918,10 @@ def _submit_resource_batch(
         error=(
             "部分下载任务提交结果待核对，请先核对下载器，勿直接重复提交。"
             if review_required
+            else "部分下载目标提交失败。"
+            if counts["partial"]
             else "部分或全部资源未被下载后端接受。"
-            if accepted < len(items)
+            if unaccepted
             else ""
         ),
     )

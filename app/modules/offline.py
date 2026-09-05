@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urlparse
 
+import httpx
+
 from app.clients.guangya import GuangYaClient, close_guangya_client
 from app.config import get, get_bool, get_int
 from app.logger import get_logger, redact_sensitive_text
@@ -88,6 +90,57 @@ class OfflineManifestResolution:
     diagnostic: str
 
 
+class OfflineManifestError(RuntimeError):
+    """解析请求/响应失败，不等同于请求成功但文件清单尚不可用。
+
+    只保留错误类型、状态码与外层解析次数，不携带上游响应、URL 或凭据。
+    """
+
+    def __init__(self, exc: Exception, *, attempts: int = 1):
+        current: BaseException = exc
+        visited: set[int] = set()
+        while id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, (httpx.HTTPError, TimeoutError, ValueError)):
+                break
+            cause = current.__cause__ or current.__context__
+            if cause is None:
+                break
+            current = cause
+        self.attempts = attempts
+        self.retry_manifest = isinstance(current, RuntimeError)
+        self.error_type = type(current).__name__
+        self.http_status = (
+            current.response.status_code if isinstance(current, httpx.HTTPStatusError) else 0
+        )
+        if self.http_status:
+            message = f"光鸭资源解析请求失败（HTTP {self.http_status}）"
+        elif isinstance(current, (httpx.TimeoutException, TimeoutError)):
+            message = "光鸭资源解析请求超时"
+        elif isinstance(current, httpx.TransportError):
+            message = "光鸭资源解析网络异常"
+        elif isinstance(current, ValueError):
+            message = "光鸭资源解析响应无效"
+        else:
+            message = "光鸭资源解析失败"
+        super().__init__(message)
+
+    def as_result(self) -> dict:
+        return {
+            "ok": False,
+            "error": f"{self}，未创建下载任务",
+            "resolve_attempts": self.attempts,
+            "resolve_error_type": self.error_type,
+            "resolve_http_status": self.http_status,
+            "resolve_diagnostic": f"解析异常={self.error_type}；HTTP={self.http_status or '-'}",
+        }
+
+
+def _manifest_failure(exc: Exception) -> dict:
+    failure = exc if isinstance(exc, OfflineManifestError) else OfflineManifestError(exc)
+    return failure.as_result()
+
+
 def _manifest_diagnostic(response: object) -> str:
     if not isinstance(response, dict):
         return f"响应类型 {type(response).__name__}"
@@ -122,7 +175,6 @@ def _resolve_offline_manifest(
     delay = max(0.0, min(float(get("OFFLINE_MAGNET_RESOLVE_DELAY_SECONDS", "0.5") or 0.5), 5.0))
     last_response: dict = {}
     last_files: list[dict] = []
-    last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
             response = (
@@ -130,34 +182,30 @@ def _resolve_offline_manifest(
                 if from_torrent and torrent_data is not None
                 else client.resolve_url(url)
             )
-            last_error = None
+            last_response = response if isinstance(response, dict) else {"raw_type": type(response).__name__}
+            last_files = GuangYaClient.normalize_offline_files(last_response)
         except Exception as exc:
-            last_error = exc
-            last_response = {"error_type": type(exc).__name__}
-            if protocol != "magnet" or attempt >= attempts:
-                break
+            # HTTP/网络的有界重试由 GuangYaClient._call_read 统一负责。
+            # 保留 SDK 业务 RuntimeError 的磁力轮询，但最终异常不得报为空清单。
+            failure = OfflineManifestError(exc, attempts=attempt)
             logger.warning(
-                "光鸭%s解析暂时失败，准备重试 attempt=%s/%s error=%s",
-                source_label, attempt, attempts, type(exc).__name__,
+                "光鸭%s解析失败 attempts=%s type=%s http_status=%s",
+                source_label, attempt, failure.error_type, failure.http_status or "-",
             )
-            if delay > 0:
-                time.sleep(delay * attempt)
-            continue
-        last_response = response if isinstance(response, dict) else {"raw_type": type(response).__name__}
-        last_files = GuangYaClient.normalize_offline_files(last_response)
+            if failure.retry_manifest and attempt < attempts:
+                if delay > 0:
+                    time.sleep(delay * attempt)
+                continue
+            raise failure from exc
         resolver_excluded_only = _resolver_excluded_only(last_files)
         if protocol != "magnet" or (last_files and not resolver_excluded_only):
             return OfflineManifestResolution(last_response, last_files, attempt, _manifest_diagnostic(last_response))
         if attempt < attempts and delay > 0:
             time.sleep(delay * attempt)
     diagnostic = (
-        f"解析异常={type(last_error).__name__}"
-        if last_error is not None
-        else (
-            f"解析器仅返回排除项；{_manifest_diagnostic(last_response)}"
-            if _resolver_excluded_only(last_files)
-            else _manifest_diagnostic(last_response)
-        )
+        f"解析器仅返回排除项；{_manifest_diagnostic(last_response)}"
+        if _resolver_excluded_only(last_files)
+        else _manifest_diagnostic(last_response)
     )
     logger.warning(
         "光鸭%s解析未返回可用文件清单 attempts=%s diagnostic=%s",
@@ -453,8 +501,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
             choices = build_offline_file_choices(files, rules)
         except Exception as exc:
             return {
-                "ok": False, "decision": decision.as_dict(),
-                "error": f"光鸭资源解析失败，未创建整单任务: {exc}",
+                "decision": decision.as_dict(), **_manifest_failure(exc),
             }
 
         manifest_unverifiable = not choices or _resolver_excluded_only(files)
@@ -689,7 +736,7 @@ def preview_offline_selection(url: str, title: str = "", client: GuangYaClient |
             resolution = _resolve_offline_manifest(client, url, decision.protocol)
             choices = build_offline_file_choices(resolution.files, rules)
         except Exception as exc:
-            result["error"] = f"光鸭资源解析失败: {exc}"
+            result.update(_manifest_failure(exc))
             return result
         if decision.protocol == "magnet" and not choices:
             result["resolve_attempts"] = resolution.attempts
@@ -734,7 +781,7 @@ def submit_offline_selection(url: str, selected_indexes: list[int] | None,
             resolution = _resolve_offline_manifest(client, url, decision.protocol)
             files = resolution.files
         except Exception as exc:
-            return {**base, "error": f"光鸭资源解析失败: {exc}"}
+            return {**base, **_manifest_failure(exc)}
 
         try:
             requested = _normalize_selected_indexes(selected_indexes or [])

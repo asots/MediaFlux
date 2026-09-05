@@ -403,7 +403,13 @@ def _public_dispatch_targets(value: Any) -> list[str]:
 
 def _public_guangya_failure(error: str) -> str:
     """把内部光鸭错误归类为固定公开文案，禁止透传上游响应或资源地址。"""
+    http_failure = re.search(r"光鸭资源解析请求失败（HTTP ([45][0-9]{2})）", error)
+    if http_failure:
+        return f"光鸭资源解析请求失败（HTTP {http_failure.group(1)}）"
     rules = (
+        ("光鸭资源解析请求超时", "光鸭资源解析请求超时"),
+        ("光鸭资源解析网络异常", "光鸭资源解析网络异常"),
+        ("光鸭资源解析响应无效", "光鸭资源解析响应无效"),
         ("光鸭未登录", "光鸭未登录"),
         ("资源中没有符合下载规则的文件", "光鸭未找到符合下载规则的文件"),
         ("种子文件未解析到可验证文件列表", "光鸭种子未解析到有效文件列表"),

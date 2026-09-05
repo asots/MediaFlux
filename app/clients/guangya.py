@@ -1094,6 +1094,17 @@ class GuangYaClient:
         if not callable(original_request):
             return
 
+        # SDK 把 JSON Content-Type 设为客户端默认值，files= 上传时仍会继承，
+        # 导致 multipart 请求体与声明不符。绑定策略时只移除这一默认值，
+        # 让 httpx 按 json=/files= 自动编码；显式请求头（如 OSS 上传）不变。
+        # 不在每次请求前后切换共享 headers，避免并发 JSON/BT 请求互相污染。
+        transport_headers = getattr(getattr(raw, "_client", None), "headers", None)
+        if isinstance(transport_headers, httpx.Headers) and (
+            transport_headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            == "application/json"
+        ):
+            del transport_headers["content-type"]
+
         def request_with_policy(url, method="GET", **request_kwargs):
             # SDK 会在 401 后根据 refresh token 自动重放原请求。因为业务
             # 读写都可能是 POST，直接走 SDK 持有的 httpx.Client 发出一次
