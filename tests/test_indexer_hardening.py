@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import socket
-import time
+import threading
 import unittest
 
 import httpx
@@ -73,8 +73,21 @@ class TrackingAdapter(IndexerAdapter):
 
 class IndexerHardeningTests(unittest.IsolatedAsyncioTestCase):
     async def test_dns_validation_does_not_block_event_loop_timeout(self):
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        started = asyncio.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        resolver_threads = []
+
         def slow_resolver(host, port):
-            time.sleep(0.2)
+            resolver_threads.append(threading.get_ident())
+            loop.call_soon_threadsafe(started.set)
+            # 错误地内联执行时不要卡住事件循环；下面的线程断言会明确失败。
+            if threading.get_ident() != loop_thread:
+                if not release.wait(10):
+                    raise RuntimeError("test resolver cleanup timed out")
+            finished.set()
             return PUBLIC_RESOLVER(host, port)
 
         transport = httpx.MockTransport(lambda request: httpx.Response(
@@ -83,12 +96,18 @@ class IndexerHardeningTests(unittest.IsolatedAsyncioTestCase):
         client = FixedHostHttpClient(
             allowed_hosts={"nyaa.si"}, resolver=slow_resolver, transport=transport
         )
-        started = time.monotonic()
+        request = asyncio.create_task(client.get("https://nyaa.si/"))
         try:
+            # 先确认DNS已进入后台线程，再检查超时；不比较两个短sleep的墙钟先后。
+            await asyncio.wait_for(started.wait(), timeout=5)
+            self.assertNotEqual(resolver_threads[0], loop_thread)
             with self.assertRaises(asyncio.TimeoutError):
-                await asyncio.wait_for(client.get("https://nyaa.si/"), timeout=0.05)
-            self.assertLess(time.monotonic() - started, 0.15)
+                await asyncio.wait_for(request, timeout=0.05)
+            self.assertFalse(finished.is_set(), "DNS仍被测试闸门阻塞时事件循环必须已经超时")
         finally:
+            release.set()
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
             await client.aclose()
 
     async def test_concurrency_limit_is_shared_across_search_calls(self):
