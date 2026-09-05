@@ -114,6 +114,7 @@ function loadOrganize(page=organizePage) {
             const tmdbTag = r.tmdb_id ? `<span class="tag-mini" style="margin-left:6px;">${_esc(r.tmdb_id)}</span>` : '';
             const legacyTag = r.legacy_incomplete ? '<span class="tag-mini is-warning" style="margin-left:6px;">旧记录只读</span>' : '';
             const confirmationTag = r.confirmation_actor==='agent' ? '<span class="tag-mini is-agent-confirm" style="margin-left:6px;">Agent 确认</span>' : '';
+            const cleanTitleTag = r.provider==='clean_title' ? '<span class="tag-mini is-warning" style="margin-left:6px;" title="仅清洗归档，未匹配完整元数据">清洗入库 · 无完整元数据</span>' : '';
             const originalDisplay = r.origin==='local' ? r.original_path : [r.original_path,r.original_name].filter(Boolean).join('/');
             const reason = r.error || r.warning || '';
             const skipReason = r.status==='skipped'&&r.error
@@ -125,7 +126,7 @@ function loadOrganize(page=organizePage) {
             return `<tr data-origin="${_esc(r.origin)}">
                 <td>${selectable}</td>
                 <td><span class="logs-origin-badge is-${_esc(r.origin)}">${_esc(r.origin_label)}</span><small class="logs-origin-source" title="${_attr(r.source_label)}">${_esc(r.source_label)}</small></td>
-                <td class="path-cell-long" title="${_attr(originalDisplay)}"><span>${_esc(originalDisplay||'-')}${tmdbTag}${legacyTag}${confirmationTag}</span>${reasonMarkup}</td>
+                <td class="path-cell-long" title="${_attr(originalDisplay)}"><span>${_esc(originalDisplay||'-')}${tmdbTag}${legacyTag}${confirmationTag}${cleanTitleTag}</span>${reasonMarkup}</td>
                 <td class="path-cell-long" title="${_attr(r.new_path)}">${_esc(r.new_path||'-')}</td>
                 <td><span class="status-pill ${st[1]}" title="${_attr(r.raw_status||'')}">${_esc(st[0])}</span></td>
                 <td class="text-muted">${_esc(r.updated_at||r.created_at||'-')}</td>
@@ -268,7 +269,7 @@ function _renderOrganizeDetail(data){
     organizeDetail=data;selectedOrganizeCandidate=null;
     document.getElementById('organizeDetailTitle').textContent=`整理日志 #${data.id}`;
     const [statusLabel, statusClass] = orgStatusMap[data.status] || [data.status, 'running'];
-    const identityLabel=data.provider==='metatube'&&data.external_id?`MetaTube · ${data.external_id}`:(data.tmdb_id?`TMDB-${data.tmdb_id}`:'');
+    const identityLabel=data.provider==='clean_title'?['清洗入库 · 无完整元数据',data.external_id].filter(Boolean).join(' · '):data.provider==='metatube'&&data.external_id?`MetaTube · ${data.external_id}`:(data.tmdb_id?`TMDB-${data.tmdb_id}`:'');
     const subtitleParts = [
         data.confirmation_actor==='agent' ? 'Agent 确认' : '',
         data.title,

@@ -360,6 +360,18 @@
                                         </label>
                                     </div>
 
+                                    <div class="metadata-option metadata-nsfw-clean-review">
+                                        <span>
+                                            <strong>允许光鸭 NSFW 清洗入库</strong>
+                                            <small id="nsfwCleanReviewDescription">仅光鸭 NSFW 无完整元数据时，授权 Agent 主动复核 clean_title 并自动执行清洗入库；不确定则保留人工确认，不影响本地媒体或 MetaTube 识别流程。</small>
+                                            <small id="nsfwCleanReviewDependency">需先启用「Agent 主动复核」。关闭任一开关会阻止后续文件开写，已开写文件按原流程收尾。</small>
+                                        </span>
+                                        <label class="toggle">
+                                            <input type="checkbox" data-key="AGENT_NSFW_CLEAN_REVIEW_ENABLED" data-bool="1" aria-label="允许光鸭 NSFW 清洗入库" aria-describedby="nsfwCleanReviewDescription nsfwCleanReviewDependency" disabled>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+
                                     <label class="metadata-field metadata-field-wide">
                                         <span class="field-label">
                                             <span class="name">AI 线索可信门槛</span>

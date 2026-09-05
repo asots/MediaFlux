@@ -34,6 +34,10 @@ from app.agent.kernel.provider_model import (
 )
 from app.agent.kernel.session import SessionLimits
 from app.logger import get_logger
+from app.modules.nsfw_clean_review import (
+    inspect_nsfw_clean_candidate,
+    nsfw_clean_review_enabled,
+)
 from app.modules.scraper import TMDBScraper
 from app.sensitive_data import contains_sensitive_credential
 
@@ -48,10 +52,10 @@ _SYSTEM_PROMPT = """
 
 必须遵守：
 1. 先调用 recognition.inspect_case；不得凭文件名印象直接决定。
-2. 对可能选择的候选调用 recognition.inspect_candidate。
+2. 对可能选择的候选调用 recognition.inspect_candidate。TMDB候选核对真实详情；clean_title仅核对服务器清洗证据，不代表外部元数据匹配。
 3. 剧集必须再按案例中出现的每个季调用 recognition.inspect_season，并核对每个集号真实存在。
 4. 只能从冻结候选中选择；不得新建候选、修改季集号、猜测缺失集号或绕过规则。
-5. 只有标题/别名、年份、媒体类型和全部季集边界形成一致证据时才 approve；否则 abstain。
+5. TMDB必须有标题/别名、年份、类型及季集的一致证据；clean_title必须有已授权的光鸭成人来源、同一明确番号、无歧义分段以及保留身份的清洗变换才approve。不得把score=1当成外部查证，不能补造演员/剧情/年份；否则abstain。
 6. 最后必须且只能调用一次 recognition.propose_review_decision。该工具只记录建议，不执行写操作。
 7. 不输出思维过程；工具接受决定后只用一句短句结束。
 """.strip()
@@ -68,6 +72,7 @@ class RecognitionReviewDecision:
     tool_calls: int = 0
     duration_ms: int = 0
     failure_code: str = ""
+    entry_mode: str = ""
 
     @property
     def approved(self) -> bool:
@@ -79,6 +84,8 @@ class RecognitionReviewDecision:
         # 模型自由文本只在本次短生命周期内使用；审计只保存结构化结果，
         # 避免把解释、文件名或潜在思维过程带入长期数据库。
         payload.pop("summary", None)
+        if not self.entry_mode:
+            payload.pop("entry_mode", None)
         return payload
 
 
@@ -256,8 +263,21 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
             summary="识别材料疑似包含凭据，已保留人工确认",
         )
 
+    if all(_candidate_provider(item) == "clean_title" for item in candidates):
+        if not nsfw_clean_review_enabled():
+            return RecognitionReviewDecision(
+                status="abstained", reason_code="nsfw_clean_not_authorized",
+                summary="未授权光鸭 NSFW 清洗入库，已保留人工确认",
+            )
+        if not any(inspect_nsfw_clean_candidate(payload, item)["ok"] for item in candidates):
+            return RecognitionReviewDecision(
+                status="abstained", reason_code="clean_evidence_invalid",
+                summary="清洗候选证据不足，已保留人工确认",
+            )
     settings = ProviderSettings.from_config()
-    scraper = TMDBScraper()
+    scraper = TMDBScraper() if any(
+        _candidate_provider(item) == "tmdb" for item in candidates
+    ) else None
     proposed: dict[str, Any] = {}
     case_inspected = False
     inspected_candidates: dict[int, bool] = {}
@@ -282,7 +302,7 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
                 episode = None if episode in (None, "") else int(episode)
             except (TypeError, ValueError, OverflowError):
                 episode = None
-            if season is None or episode is None:
+            if scraper is not None and (season is None or episode is None):
                 try:
                     parsed_season, parsed_episode = scraper.parse_source_position(
                         name, parent
@@ -342,12 +362,20 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
         provider = _candidate_provider(candidate)
         media_type = str(candidate.get("media_type") or "").strip().lower()
         tmdb_id = str(candidate.get("tmdb_id") or "").strip()
+        if provider == "clean_title":
+            if not nsfw_clean_review_enabled():
+                inspected_candidates[index] = False
+                return {"ok": False, "status": "not_authorized",
+                        "summary": "未授权光鸭 NSFW 清洗入库，保留人工确认"}
+            evidence = inspect_nsfw_clean_candidate(payload, candidate)
+            inspected_candidates[index] = bool(evidence["ok"])
+            return evidence
         if provider != "tmdb" or media_type not in {"movie", "tv"} or not tmdb_id:
             inspected_candidates[index] = False
             return {
                 "ok": False,
                 "status": "unsupported_candidate",
-                "summary": "当前主动复核只自动确认可由 TMDB 再验证的候选",
+                "summary": "该候选不属于已支持的 TMDB 核验或光鸭清洗范围",
                 "data": {"candidate_index": index, "provider": provider},
             }
         detail = scraper.get_detail(tmdb_id, media_type)
@@ -466,7 +494,7 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
         KernelToolSpec(
             name="recognition.inspect_candidate",
             domain="recognition",
-            description="从 TMDB 实时读取一个冻结候选的标题、年份、类型和基本详情。",
+            description="核验冻结候选：TMDB读取实时详情；已授权的光鸭clean_title读取服务器重算的番号/清洗前后/分段证据，不获取或编造完整元数据。",
             input_schema=index_schema,
             effect=ToolEffect.READ,
             examples=("核对候选 0", "读取候选详情"),
@@ -539,7 +567,8 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
 
         await asyncio.wait_for(consume(), timeout=timeout)
     finally:
-        scraper.close()
+        if scraper is not None:
+            scraper.close()
 
     elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
     model_name = str(settings.model or "")[:200]
@@ -573,6 +602,15 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
         guard_failure = "case_not_inspected"
     elif confidence < _MIN_APPROVAL_CONFIDENCE:
         guard_failure = "confidence_below_gate"
+    elif _candidate_provider(candidate) == "clean_title":
+        if not nsfw_clean_review_enabled():
+            guard_failure = "nsfw_clean_not_authorized"
+        elif not inspected_candidates.get(index, False):
+            guard_failure = "candidate_not_revalidated"
+        else:
+            evidence = inspect_nsfw_clean_candidate(payload, candidate)
+            if not evidence["ok"]:
+                guard_failure = evidence["reason_code"]
     elif _candidate_provider(candidate) != "tmdb":
         guard_failure = "provider_not_revalidated"
     elif not inspected_candidates.get(index, False):
@@ -618,6 +656,7 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
         )
     return RecognitionReviewDecision(
         status="approved",
+        entry_mode="clean_title" if _candidate_provider(candidate) == "clean_title" else "",
         candidate_index=index,
         confidence=confidence,
         reason_code=str(proposed["reason_code"]),

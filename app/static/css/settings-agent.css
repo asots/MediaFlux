@@ -680,6 +680,10 @@ html[data-settings-config="pending"] .settings-page #settingsForm {
 .metadata-option > span:first-child { min-width: 0; display: grid; gap: 4px; }
 .metadata-option strong { color: var(--text-primary); font-size: 13px; }
 .metadata-option small { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.metadata-nsfw-clean-review .toggle { width: 44px; height: 44px; }
+.metadata-nsfw-clean-review .toggle-slider { inset: 11px 2px; }
+.metadata-nsfw-clean-review input:disabled + .toggle-slider { opacity: .55; cursor: not-allowed; }
+.metadata-nsfw-clean-review input:focus-visible + .toggle-slider { outline: 2px solid var(--accent); outline-offset: 3px; }
 .metadata-card-body > :last-child { border-bottom: 0; }
 .metadata-compact-section {
     padding: 16px 0 2px;

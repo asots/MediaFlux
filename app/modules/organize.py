@@ -267,7 +267,9 @@ class Organizer:
     def __init__(
         self, client: GuangYaClient = None, scraper: TMDBScraper = None, *,
         traversal_limits: tuple[int, int, int] | None = None,
+        before_plan_write: Callable[..., None] | None = None,
     ):
+        self._before_plan_write = before_plan_write
         self._owns_client = client is None
         self._owns_scraper = scraper is None
         self.client = client if client is not None else GuangYaClient()

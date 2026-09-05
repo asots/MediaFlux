@@ -90,6 +90,7 @@ _AGENT_LIBRARY_PATROL_KEYS = {
     "AGENT_LIBRARY_PATROL_MAX_SERIES",
     "AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED",
     "AGENT_RECOGNITION_REVIEW_ENABLED",
+    "AGENT_NSFW_CLEAN_REVIEW_ENABLED",
 }
 
 _MEDIA_SERVER_REFRESH_KEYS = {
@@ -118,6 +119,7 @@ _AGENT_SETTINGS_DEFAULTS = {
     "AGENT_LIBRARY_PATROL_NOTIFY_ENABLED": "0",
     "AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED": "1",
     "AGENT_RECOGNITION_REVIEW_ENABLED": "0",
+    "AGENT_NSFW_CLEAN_REVIEW_ENABLED": "0",
     "AGENT_LIBRARY_PATROL_INTERVAL_HOURS": "24",
     "AGENT_LIBRARY_PATROL_MAX_SERIES": "50",
 }
@@ -970,6 +972,11 @@ def get_config(request: Request):
         if config.has_external_override(key)
     )
     managed_field_set = set(managed_fields)
+    # 新授权独立默认关闭，不能继承旧的主动复核权限。
+    items.setdefault(
+        "AGENT_NSFW_CLEAN_REVIEW_ENABLED",
+        _AGENT_SETTINGS_DEFAULTS["AGENT_NSFW_CLEAN_REVIEW_ENABLED"],
+    )
     # 运行目录只作为缺省值展示；用户保存的 STRM_ROOT（包括显式空值）仍优先。
     items.setdefault("STRM_ROOT", config.get("STRM_ROOT", ""))
     retention_key = "DOWNLOAD_TORRENT_RETENTION_DAYS"
@@ -1135,6 +1142,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
         "AGENT_LIBRARY_PATROL_ENABLED",
         "AGENT_LIBRARY_PATROL_NOTIFY_ENABLED",
         "AGENT_RECOGNITION_REVIEW_ENABLED",
+        "AGENT_NSFW_CLEAN_REVIEW_ENABLED",
     ):
         if key not in data:
             continue
@@ -1668,7 +1676,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
             )
         finally:
             patrol_reload_ms = max(1, round((time.perf_counter() - patrol_reload_started) * 1000))
-    if "AGENT_RECOGNITION_REVIEW_ENABLED" in changed_keys:
+    if {"AGENT_RECOGNITION_REVIEW_ENABLED", "AGENT_NSFW_CLEAN_REVIEW_ENABLED"} & changed_keys:
         try:
             from app.modules.organize_confirmations import (
                 wake_recognition_review_dispatcher,

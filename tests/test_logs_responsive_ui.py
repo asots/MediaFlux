@@ -64,6 +64,10 @@ def test_logs_template_markup_contract():
     assert "confirmation_actor==='agent'" in content
     assert "data.confirmation_actor==='agent' ? 'Agent 确认'" in content
     assert "Agent 确认" in content
+    assert "r.provider==='clean_title'" in content
+    assert "data.provider==='clean_title'" in content
+    assert "清洗入库 · 无完整元数据" in content
+    assert "${confirmationTag}${cleanTitleTag}" in content
 
 
 def test_logs_responsive_css_contract():

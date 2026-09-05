@@ -11,7 +11,7 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 
 from app import database as db
@@ -21,12 +21,15 @@ from app.logger import get_logger
 from app.modules.directory_scrape import FixedMatchScraper, ScopedGuangYaClient
 from app.modules.directory_scrape_errors import DirectoryScrapeConflictError
 from app.modules.nsfw import (
-    MetaTubeError, NsfwRecognizer, build_clean_title_candidate,
-    extract_nsfw_identifier, normalize_code,
+    MetaTubeError,
+    NsfwRecognizer,
+    build_clean_title_candidate,
+    extract_nsfw_identifier,
+    normalize_code,
 )
 from app.modules.organize import (
-    OrganizeRules,
     Organizer,
+    OrganizeRules,
     enforce_fixed_organize_rules,
     organize_rules_snapshot,
     organize_rules_snapshot_matches,
@@ -232,6 +235,63 @@ def _recognition_review_is_enabled() -> bool:
         return False
 
 
+def _clean_review_candidate(candidate: dict) -> bool:
+    return str(candidate.get("provider") or "").strip().lower() == "clean_title"
+
+
+def _validate_agent_clean_authorization(payload: dict, candidate: dict) -> None:
+    from app.modules.nsfw_clean_review import (
+        inspect_nsfw_clean_candidate,
+        nsfw_clean_review_enabled,
+    )
+
+    if not _recognition_review_is_enabled() or not nsfw_clean_review_enabled():
+        raise DirectoryScrapeConflictError("未授权或已关闭光鸭 NSFW 自动清洗，保留人工确认")
+    evidence = inspect_nsfw_clean_candidate(payload, candidate)
+    if not evidence["ok"]:
+        raise DirectoryScrapeConflictError(evidence["summary"])
+
+
+def _clean_confirmation_retry_is_current(payload: dict, client) -> bool:
+    """只给仍有效的冻结材料签发人工按钮，避免过期快照形成确认死循环。"""
+    try:
+        rules = OrganizeRules.from_config().for_source(str(payload.get("source_dir_id") or ""))
+        if not organize_rules_snapshot_matches(payload.get("rules"), rules):
+            return False
+        if client is not None:
+            for item in (*payload.get("files", []), *payload.get("companions", [])):
+                _validate_snapshot(client, item, role="待确认文件")
+        return True
+    except Exception:  # noqa: BLE001 - 无法证明快照有效时只允许重新扫描。
+        return False
+
+
+class _AgentCleanWriteBoundary:
+    """只缩小既有执行器的授权；当前文件已开写后交由原事务补偿完成。"""
+    def __init__(self, payload: dict, candidate: dict):
+        self.payload, self.candidate = payload, candidate
+        self.media_write_attempted = False
+
+    def __call__(self, plan, stage: str, *, target_files=()) -> None:
+        _validate_agent_clean_authorization(self.payload, self.candidate)
+        source = str(self.payload.get("source_dir_id") or "")
+        rules = OrganizeRules.from_config().for_source(source)
+        if not organize_rules_snapshot_matches(self.payload.get("rules"), rules):
+            raise DirectoryScrapeConflictError("来源或整理规则已变化，保留人工确认")
+        if plan.action != "move" or plan.conflict_decision not in {"new", "coexist"}:
+            raise DirectoryScrapeConflictError("目标存在冲突或需要替换，自动清洗不授权覆盖或回收")
+        # 目标中已有本组之外的文件（含孤立字幕/NFO）也交人工，避免移动伴随
+        # 文件时触发 provider 隐式同名覆盖；同组已移动数字分段仍允许继续。
+        allowed_ids = {
+            str(item.get("file_id") or "")
+            for item in (*self.payload.get("files", []), *self.payload.get("companions", []))
+        }
+        if any(str(item.file_id) not in allowed_ids for item in target_files):
+            raise DirectoryScrapeConflictError("目标目录已有其他文件，自动清洗转人工核对")
+        if stage == "commit":
+            self.media_write_attempted = True
+
+
 def _persist_confirmation_actions(
     payload: dict,
     *,
@@ -334,7 +394,8 @@ def publish_confirmation_event(
     """把候选卡及其终态写入同一个可靠 Telegram 消息线程。"""
     from app.modules.telegram_notification_center import publish_notification_thread
     from app.modules.telegram_notification_policy import (
-        NotificationImportance, NotificationTopic,
+        NotificationImportance,
+        NotificationTopic,
     )
 
     resolved_token = str(token or confirmation_token_from_event(event)).strip()
@@ -1567,6 +1628,8 @@ def start_confirmation(
             raise ValueError("该重试确认已绑定其他候选")
     candidate = dict(candidates[selected_index])
     status = str(preview["status"] or "pending")
+    if normalized_actor == "agent" and _clean_review_candidate(candidate) and status == "pending":
+        _validate_agent_clean_authorization(payload, candidate)
 
     if status in {"queued", "running", "completed"}:
         if (
@@ -1879,6 +1942,7 @@ def _confirmation_result_event(
         f"⚠️ {actor_label}整理部分完成" if partial else f"✅ {actor_label}整理完成",
         fields=(
             ("目标媒体", _candidate_display_name(candidate)),
+            *(( ("入库方式", "清洗入库 · 无完整元数据"), ) if _clean_review_candidate(candidate) else ()),
             ("源文件目录", payload.get("directory") or payload.get("source_name") or "/"),
             NOTIFICATION_SECTION_BREAK,
             ("执行结果", result_label),
@@ -2203,7 +2267,13 @@ def _execute_guangya_confirmation(
     write_started = False
     operation_token = f"recognition-confirm:{token}"
     delivery_enabled = _confirmation_delivery_enabled(payload)
+    clean_boundary = (
+        _AgentCleanWriteBoundary(payload, candidate)
+        if actor == "agent" and _clean_review_candidate(candidate) else None
+    )
     try:
+        if clean_boundary is not None:
+            _validate_agent_clean_authorization(payload, candidate)
         source_dir_id = str(payload.get("source_dir_id") or "").strip()
         current_rules = OrganizeRules.from_config().for_source(source_dir_id)
         if not organize_rules_snapshot_matches(payload.get("rules"), current_rules):
@@ -2235,8 +2305,11 @@ def _execute_guangya_confirmation(
             if str(item.get("file_id") or "")
         }
         scoped = ScopedGuangYaClient(client, parent_id, allowed_ids)
+        # 自动清洗不授权清理源空目录或旧版本，规则快照验证仍针对原配置。
+        execution_rules = replace(current_rules, clean_empty=False) if clean_boundary else current_rules
         organizer = Organizer(
             client=scoped,
+            **({"before_plan_write": clean_boundary} if clean_boundary is not None else {}),
             scraper=FixedMatchScraper(
                 scraper,
                 match,
@@ -2251,7 +2324,7 @@ def _execute_guangya_confirmation(
         scoped.begin_source_scan()
         plans, _preview_stats = organizer.organize(
             parent_id,
-            current_rules,
+            execution_rules,
             dry_run=True,
             post_actions=False,
             source_name=str(payload.get("directory") or payload.get("source_name") or ""),
@@ -2270,13 +2343,16 @@ def _execute_guangya_confirmation(
             # 关闭；否则会出现“已完成 / 已移动 0”且父汇总吞掉文件的假成功。
             raise DirectoryScrapeConflictError(unresolved_error)
 
+        if clean_boundary is not None:
+            for plan in plans:
+                clean_boundary(plan, "prepare")
         scoped.begin_source_scan()
         # 从这里开始 Organizer 可以调用真实 provider 写接口。即使异常看似
         # 瞬时，也不能再自动签发重试票据，必须先核对实际落盘结果。
         write_started = True
         _plans, stats = organizer.organize(
             parent_id,
-            current_rules,
+            execution_rules,
             dry_run=False,
             post_actions=False,
             source_name=str(payload.get("directory") or payload.get("source_name") or ""),
@@ -2286,6 +2362,8 @@ def _execute_guangya_confirmation(
             operation_token=operation_token,
         )
         db.mark_organize_logs_confirmation_actor(operation_token, actor)
+        if clean_boundary is not None and not clean_boundary.media_write_attempted:
+            raise DirectoryScrapeConflictError("执行前检查未通过，未移动媒体，保留人工确认")
         if provider == "tmdb" and actor == "human":
             learning_warnings = _record_confirmation_learning(
                 scraper, payload, candidate, match
@@ -2406,14 +2484,22 @@ def _execute_guangya_confirmation(
             layout="relaxed",
         )
         actions: tuple[NotificationAction, ...] = ()
-        if retryable and delivery_enabled:
+        clean_handoff = clean_boundary is not None and not clean_boundary.media_write_attempted
+        clean_retry = clean_handoff and _clean_confirmation_retry_is_current(payload, client)
+        if clean_retry or (clean_boundary is None and retryable and delivery_enabled):
             try:
                 _retry_token, retry_action = _persist_confirmation_retry(
                     payload,
                     selected_index=selected_index,
                     chat_id=chat_id,
                 )
-                actions = (retry_action,)
+                if clean_handoff:
+                    actions = (
+                        NotificationAction(f"人工确认 · {_safe_label(candidate, selected_index)}", retry_action.callback_data),
+                        NotificationAction("跳过此组", f"orgc:{_retry_token}:skip"),
+                    )
+                else:
+                    actions = (retry_action,)
             except Exception as retry_exc:  # noqa: BLE001 - 新票据失败必须 fail closed。
                 logger.warning(
                     "Telegram 确认整理新重试票据创建失败 token=%s type=%s",
@@ -2422,7 +2508,7 @@ def _execute_guangya_confirmation(
                 )
 
         failure_event = NotificationEvent(
-            terminal_failure_event.title,
+            "⚠️ Agent 清洗复核转人工" if clean_handoff else terminal_failure_event.title,
             fields=terminal_failure_event.fields,
             footer=(
                 "旧确认已失效；请点击下方新按钮重新确认。"

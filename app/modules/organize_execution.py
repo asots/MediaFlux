@@ -433,6 +433,9 @@ def execute_organize_plans(
             *(item.file for item in planned_subtitles),
         ]
         try:
+            write_guard = getattr(organizer, "_before_plan_write", None)
+            if write_guard is not None:
+                write_guard(p, "prepare")
             organizer._verify_remote_snapshot(
                 GuangYaFile(
                     p.file_id, p.original_name, False, p.size, p.etag,
@@ -485,6 +488,9 @@ def execute_organize_plans(
             p.conflict_decision = conflict_decision
             p.conflict_note = conflict_note
             existing_original_name = existing.name if existing else ""
+            # 可选的授权范围在真实库存仲裁后再校验，且必须早于旧文件备份、移动或回收。
+            if write_guard is not None:
+                write_guard(p, "conflict", target_files=target_files)
             if existing:
                 if conflict_decision == "replace":
                     organizer._verify_remote_snapshot(existing, role="待替换旧文件")
@@ -516,6 +522,8 @@ def execute_organize_plans(
                     ),
                     role="待整理视频",
                 )
+                if write_guard is not None:
+                    write_guard(p, "commit")
                 video_move_attempted = True
                 organizer.client.move([p.file_id], target_id)
                 video_moved_to_target = True
