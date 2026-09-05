@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from app import database as db
-from app.clients.base import close_media_server_client
 from app.clients.guangya import GuangYaFile
 from app.modules.directory_media import (
     DirectoryInspection,
@@ -65,7 +64,6 @@ from app.modules.organize_postprocess import media_role
 from app.modules.media_probe import ProbeBudget, probe_local_media_profile
 from app.modules.media_server_path_mapping import (
     MediaServerPathMapping,
-    configured_media_server_refresh_options,
 )
 from app.modules.scraper import MatchResult, TMDBScraper
 from app.logger import get_logger
@@ -1545,7 +1543,7 @@ class LocalMediaService:
 
     @staticmethod
     def _refresh_plans(plans: list[LocalMovePlan]) -> list[str]:
-        """校验媒体库绑定后，按目标路径执行库内精准刷新。"""
+        """持久提交映射后的变化路径，绑定由刷新消费者延迟校验。"""
         warnings: list[str] = []
         bound_paths: dict[tuple[str, str, str], set[str]] = {}
         unbound_paths: set[str] = set()
@@ -1581,96 +1579,18 @@ class LocalMediaService:
         if not bound_paths:
             return warnings
 
-        from app.modules.media_server_profiles import list_configured_profiles
-        profiles = {
-            item.server_type: item for item in list_configured_profiles()
-            if item.enabled and item.configured
-        }
-        clients: dict[str, Any] = {}
-        folders_by_provider: dict[str, list[dict[str, Any]]] = {}
+        from app.modules.media_refresh_coordinator import enqueue_media_refresh_paths
+
+        # 文件已落盘：先保存绑定和映射后的路径，再由统一消费者查询/校验媒体库。
+        # 此处不做网络 I/O，媒体服务器临时不可用也不会丢掉刷新意图。
         for (provider, library_id, library_name), paths in sorted(bound_paths.items()):
-            profile = profiles.get(provider)
-            label = library_name or library_id
-            if profile is None:
-                warnings.append(f"{provider} 未启用或未配置，未刷新媒体库 {label}")
-                continue
-            try:
-                client = clients.get(provider)
-                if client is None:
-                    if provider == "jellyfin":
-                        from app.clients.jellyfin import JellyfinClient
-                        client = JellyfinClient(
-                            profile.url,
-                            profile.credential,
-                            **configured_media_server_refresh_options("jellyfin"),
-                        )
-                    elif provider == "emby":
-                        from app.clients.emby import EmbyClient
-                        client = EmbyClient(
-                            profile.url,
-                            profile.credential,
-                            **configured_media_server_refresh_options("emby"),
-                        )
-                    else:
-                        warnings.append(f"不支持的媒体服务器: {provider}")
-                        continue
-                    clients[provider] = client
-
-                folders = folders_by_provider.get(provider)
-                if folders is None:
-                    folders = client.list_virtual_folders()
-                    folders_by_provider[provider] = folders
-
-                if library_id:
-                    matches = [
-                        item for item in folders
-                        if str(item.get("id") or "").strip() == library_id
-                    ]
-                    if len(matches) != 1:
-                        warnings.append(
-                            f"{profile.label} 媒体库绑定已失效，请重新绑定: {label}"
-                        )
-                        continue
-                    selected = matches[0]
-                    actual_name = str(selected.get("name") or "").strip()
-                    if (
-                        library_name
-                        and actual_name.casefold() != library_name.casefold()
-                    ):
-                        warnings.append(
-                            f"{profile.label} 媒体库名称与绑定 ID 不一致，请重新绑定: "
-                            f"{library_name}"
-                        )
-                        continue
-                else:
-                    matches = [
-                        item for item in folders
-                        if str(item.get("name") or "").strip().casefold()
-                        == library_name.casefold()
-                    ]
-                    if len(matches) != 1:
-                        reason = "不存在" if not matches else "存在同名媒体库"
-                        warnings.append(f"{profile.label} {reason}，请重新绑定: {library_name}")
-                        continue
-                    selected = matches[0]
-
-                resolved_id = str(selected.get("id") or "").strip()
-                from app.modules.media_refresh_coordinator import (
-                    enqueue_media_refresh_paths,
-                )
-
-                queued = enqueue_media_refresh_paths(
-                    sorted(paths),
-                    providers=(provider,),
-                    allowed_library_ids=(resolved_id,),
-                )
-                queue_label = "Jellyfin" if provider == "jellyfin" else "Emby"
-                if queued.get(queue_label) != "queued":
-                    warnings.append(f"{profile.label} 刷新入队失败 {label}")
-            except Exception as exc:
-                warnings.append(f"{profile.label} 刷新失败 {label}: {exc}")
-        for client in clients.values():
-            close_media_server_client(client)
+            queued = enqueue_media_refresh_paths(
+                sorted(paths), providers=(provider,),
+                library_binding={"id": library_id, "name": library_name},
+            )
+            label = {"jellyfin": "Jellyfin", "emby": "Emby"}.get(provider, provider)
+            if queued.get(label) != "queued":
+                warnings.append(f"{label} 刷新入队失败 {library_name or library_id}")
         return warnings
 
     @staticmethod

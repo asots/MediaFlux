@@ -1411,6 +1411,23 @@ def _migrate_agent_capability_closure_v24(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_durable_handoffs_v25(conn: sqlite3.Connection) -> None:
+    """保留旧队列，增加不可复用的刷新事件令牌及规格补全的持久交接。"""
+    for table, column, definition in (
+        ("strm_refresh_outbox", "event_token", "TEXT NOT NULL DEFAULT ''"),
+        ("organize_probe_queue", "pending_strm_changes_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ):
+        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        if columns and column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        if table == "strm_refresh_outbox" and columns:
+            # 使用随机事件令牌而非秒时间戳或重置为 1 的版本，避免同秒与删后重建 ABA。
+            conn.execute(
+                "UPDATE strm_refresh_outbox SET event_token=lower(hex(randomblob(16))) "
+                "WHERE event_token=''"
+            )
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1436,4 +1453,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     21: _migrate_agent_recognition_review_v22,
     22: _migrate_agent_kernel_session_epochs_v23,
     23: _migrate_agent_capability_closure_v24,
+    24: _migrate_durable_handoffs_v25,
 }

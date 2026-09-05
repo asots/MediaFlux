@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 from app.clients.emby import EmbyClient
 from app.clients.jellyfin import JellyfinClient
 from app.modules.local_media_service import LocalMediaService
+from app.modules.media_refresh_coordinator import MediaRefreshCoordinator
 
 
 class LocalMediaRefreshTests(TestCase):
@@ -92,11 +93,11 @@ class LocalMediaRefreshTests(TestCase):
         ) as enqueue:
             warnings = LocalMediaService._refresh_plans(plans)
         self.assertEqual(warnings, [])
-        client.list_virtual_folders.assert_called_once_with()
+        client.list_virtual_folders.assert_not_called()
         enqueue.assert_called_once_with(
             ["/media/Movies/Film"],
             providers=("jellyfin",),
-            allowed_library_ids=("movies",),
+            library_binding={"id": "movies", "name": "电影"},
         )
         client.refresh_for_paths.assert_not_called()
         client.refresh_library.assert_not_called()
@@ -132,52 +133,29 @@ class LocalMediaRefreshTests(TestCase):
         enqueue.assert_called_once_with(
             ["//NAS/Video/Anime/作品/Season 1"],
             providers=("jellyfin",),
-            allowed_library_ids=("anime",),
+            library_binding={"id": "anime", "name": "动漫"},
         )
         client.refresh_for_paths.assert_not_called()
 
     def test_bound_target_with_mismatched_library_name_is_safely_skipped(self):
-        profile = SimpleNamespace(
-            server_type="jellyfin", label="Jellyfin", url="http://jellyfin",
-            credential="token", enabled=True, configured=True,
-        )
         client = Mock()
-        client.list_virtual_folders.return_value = [
-            {"id": "movies", "name": "电影", "locations": ["/media/Movies"]},
-        ]
-        plans = [SimpleNamespace(
-            provider="jellyfin", library_id="movies", library_name="剧集",
-            target=Path("/media/TV/Show/E01.mkv"),
-        )]
-        with patch(
-            "app.modules.media_server_profiles.list_configured_profiles",
-            return_value=[profile],
-        ), patch("app.clients.jellyfin.JellyfinClient", return_value=client):
-            warnings = LocalMediaService._refresh_plans(plans)
-
-        self.assertTrue(any("名称与绑定 ID 不一致" in item for item in warnings))
+        client.list_virtual_folders.return_value = [{"id": "movies", "name": "电影"}]
+        with self.assertRaisesRegex(ValueError, "名称与绑定 ID 不一致"):
+            MediaRefreshCoordinator._resolve_library_binding(
+                client, {"library_binding": {"id": "movies", "name": "剧集"}},
+            )
         client.refresh_for_paths.assert_not_called()
         client.refresh_library.assert_not_called()
 
     def test_legacy_name_binding_requires_unique_library(self):
-        profile = SimpleNamespace(
-            server_type="jellyfin", label="Jellyfin", url="http://jellyfin",
-            credential="token", enabled=True, configured=True,
-        )
         client = Mock()
         client.list_virtual_folders.return_value = [
-            {"id": "movies-a", "name": "电影", "locations": [], "collection_type": "movies"},
-            {"id": "movies-b", "name": "电影", "locations": [], "collection_type": "movies"},
+            {"id": "movies-a", "name": "电影"}, {"id": "movies-b", "name": "电影"},
         ]
-        plans = [SimpleNamespace(
-            provider="jellyfin", library_id="", library_name="电影",
-            target=Path("/media/Movies/Film/Film.mkv"),
-        )]
-        with patch(
-            "app.modules.media_server_profiles.list_configured_profiles", return_value=[profile]
-        ), patch("app.clients.jellyfin.JellyfinClient", return_value=client):
-            warnings = LocalMediaService._refresh_plans(plans)
-        self.assertIn("存在同名媒体库", warnings[0])
+        with self.assertRaisesRegex(ValueError, "存在同名媒体库"):
+            MediaRefreshCoordinator._resolve_library_binding(
+                client, {"library_binding": {"id": "", "name": "电影"}},
+            )
         client.refresh_for_paths.assert_not_called()
         client.refresh_library.assert_not_called()
 

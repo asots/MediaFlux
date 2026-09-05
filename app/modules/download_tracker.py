@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import json
+import logging
 import threading
 import time
 from datetime import datetime, timedelta
 
 from app import database as db
-from app.clients.guangya import GuangYaClient, close_guangya_client
+from app.clients.guangya import (
+    GuangYaClient,
+    close_guangya_client,
+    guangya_offline_task_state,
+)
 from app.clients.qbittorrent import (
     QBittorrentClient,
     TorrentTask,
@@ -25,11 +29,10 @@ from app.logger import get_logger, log_throttled
 from app.modules.naming import sanitize_name
 from app.modules.organize import OrganizeRules
 from app.modules.organize_tasks import get_organize_manager
+from app.repositories.download_requests import apply_download_tracker_update
 
 logger = get_logger(__name__)
 
-_COMPLETE_STATES = {"completed", "complete", "success", "succeeded", "finished", "done", 1, 2, 3}
-_FAILED_STATES = {"failed", "error", "cancelled", "canceled", "invalid", -1}
 _QB_FAILED_STATES = {"error", "missingfiles"}
 _TRACKER_CURSOR_KEY = "download_tracker.active_cursor_id"
 _DEFAULT_MISSING_GRACE_SECONDS = 900
@@ -235,6 +238,7 @@ class DownloadTracker:
     ) -> None:
         request_id = int(row["id"])
         updates = {}
+        backend_logs: list[tuple[str, str, float, str]] = []
         qb_status = str(row["qb_status"] or "")
         gy_status = str(row["gy_status"] or "")
 
@@ -260,9 +264,7 @@ class DownloadTracker:
                             if is_qb_torrent_complete(state, progress)
                             else "downloading"
                         )
-                    self._update_backend_log(
-                        request_id, "qb", updates["qb_status"], progress, task.hash
-                    )
+                    backend_logs.append(("qb", updates["qb_status"], progress, task.hash))
             elif (
                 not tracking_completed_qb
                 and qb_available
@@ -323,9 +325,9 @@ class DownloadTracker:
                 else:
                     updates["gy_status"] = "downloading"
                     updates["gy_task_missing_since"] = None
-                self._update_backend_log(
-                    request_id, "guangya", updates.get("gy_status", gy_status), progress, task_ids[0],
-                )
+                backend_logs.append((
+                    "guangya", updates.get("gy_status", gy_status), progress, task_ids[0],
+                ))
             elif not task_ids and gy_available:
                 task = self._match_gy(row, gy_tasks)
                 if task:
@@ -338,10 +340,10 @@ class DownloadTracker:
                         if int(self._row_value(row, "gy_isolated", 0) or 0):
                             updates["gy_task_ids"] = json.dumps([matched_task_id], ensure_ascii=False)
                             updates["gy_batch_count"] = 1
-                    self._update_backend_log(
-                        request_id, "guangya", updates["gy_status"], progress,
+                    backend_logs.append((
+                        "guangya", updates["gy_status"], progress,
                         str(task.get("id") or self._row_value(row, "gy_task_id", "") or ""),
-                    )
+                    ))
                 elif gy_status == "outcome_unknown":
                     updates["gy_status"] = "manual_review"
                     updates["error"] = (
@@ -411,8 +413,15 @@ class DownloadTracker:
                     separators=(",", ":"),
                 ),
             })
-        if updates:
-            db.update_download_request_and_sync_media_admission(request_id, **updates)
+        persisted = apply_download_tracker_update(row, **updates)
+        if persisted is None:
+            return
+        # 日志、整理与通知只能消费本轮成功持久化的状态，不能消费旧快照。
+        row = persisted
+        effective_qb = str(row["qb_status"] or "")
+        effective_gy = str(row["gy_status"] or "")
+        for source, status, progress, task_id in backend_logs:
+            self._update_backend_log(request_id, source, status, progress, task_id)
 
         if effective_qb == "completed" and matched_qb_task is not None:
             self._start_local_import(row, matched_qb_task)
@@ -423,7 +432,7 @@ class DownloadTracker:
         ):
             if self._staging_ready_for_organize(row):
                 self._start_organize(row)
-        self._notify_completion(row, effective_qb, effective_gy, updates)
+        self._notify_completion(row, effective_qb, effective_gy, {})
 
 
     @classmethod
@@ -1170,14 +1179,7 @@ class DownloadTracker:
 
     @staticmethod
     def _gy_task_state(task: dict) -> str:
-        progress = max(0.0, min(float(task.get("progress") or 0), 1.0))
-        state = task.get("status")
-        normalized = str(state).strip().lower()
-        if progress >= 1 or state in _COMPLETE_STATES or normalized in _COMPLETE_STATES:
-            return "completed"
-        if state in _FAILED_STATES or normalized in _FAILED_STATES:
-            return "failed"
-        return "downloading"
+        return guangya_offline_task_state(task.get("status"), task.get("progress"))
 
     @classmethod
     def _qb_submission_has_no_stable_identity(cls, row) -> bool:

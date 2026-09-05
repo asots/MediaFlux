@@ -43,7 +43,7 @@ _lock = threading.RLock()
 _wal_setup_lock = threading.Lock()
 _wal_mode_cache: dict[str, tuple[int, int, int]] = {}
 _configured_test_mode = False
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX = "上次进程在本地媒体写操作期间中断"
 _LOCAL_MEDIA_INTERRUPTED_PREWRITE_ERROR = (
@@ -276,6 +276,7 @@ from app.database_migrations import (  # noqa: E402,F401
     _migrate_agent_recognition_review_v22,
     _migrate_agent_kernel_session_epochs_v23,
     _migrate_agent_capability_closure_v24,
+    _migrate_durable_handoffs_v25,
 )
 
 
@@ -614,6 +615,7 @@ def init_db() -> None:
                 _migrate_retire_telegram_write_confirmations_v16(connection)
                 _migrate_strm_refresh_outbox_v19(connection)
                 _migrate_unify_rss_download_requests_v20(connection)
+                _migrate_durable_handoffs_v25(connection)
 
             _run_schema_savepoint(conn, operation=prepare_schema_baseline)
             _run_schema_savepoint(

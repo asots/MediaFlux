@@ -321,6 +321,7 @@ def stop_background_services() -> bool:
     rss_workers_stopped = True
     bot_workers_stopped = True
     download_tracker_stopped = True
+    agent_runtime_stopped = True
     agent_jobs_stopped = True
     agent_patrol_stopped = True
     agent_verification_stopped = True
@@ -339,9 +340,11 @@ def stop_background_services() -> bool:
     try:
         from app.modules.agent_runtime import shutdown_agent_runtime
 
-        if not shutdown_agent_runtime():
+        agent_runtime_stopped = bool(shutdown_agent_runtime())
+        if not agent_runtime_stopped:
             logger.warning("Agent 运行时协调线程未在关机窗口内退出")
     except Exception as exc:
+        agent_runtime_stopped = False
         logger.warning("停止 Agent 运行时协调线程失败 type=%s", type(exc).__name__)
 
     # 再关闭会产生新任务的入口和轮询器。
@@ -475,6 +478,7 @@ def stop_background_services() -> bool:
         download_tracker_stopped,
         rss_workers_stopped,
         subscription_workers_stopped,
+        agent_runtime_stopped,
         agent_jobs_stopped,
         agent_patrol_stopped,
         agent_verification_stopped,

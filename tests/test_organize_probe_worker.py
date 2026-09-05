@@ -163,7 +163,8 @@ class OrganizeProbeWorkerTests(IsolatedDatabaseTestCase):
         )
 
         with patch("app.modules.media_probe.probe_media_profile", return_value=profile), patch(
-            "app.modules.organize.Organizer._post_organize_link"
+            "app.modules.organize.Organizer._post_organize_link",
+            side_effect=lambda stats, *_args, **_kwargs: stats.update(strm={"ok": True, "queued": True}),
         ) as linked:
             self.assertTrue(worker._process_one())
 

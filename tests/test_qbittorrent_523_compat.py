@@ -262,7 +262,7 @@ class QBittorrent523CompletionTests(unittest.TestCase):
                 ) as start_import, patch.object(
                     tracker, "_notify_completion"
                 ), patch(
-                    "app.modules.download_tracker.db.update_download_request_and_sync_media_admission"
+                    "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
                 ) as update:
                     tracker._update_request(
                         self._row(), [task], [], qb_available=True, gy_available=False,
@@ -285,14 +285,14 @@ class QBittorrent523CompletionTests(unittest.TestCase):
         ) as start_import, patch.object(
             tracker, "_notify_completion"
         ), patch(
-            "app.modules.download_tracker.db.update_download_request_and_sync_media_admission"
+            "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
         ) as update:
             tracker._update_request(
                 self._row(), [task], [], qb_available=True, gy_available=False,
             )
 
         self.assertEqual(update.call_args.kwargs["qb_status"], "completed")
-        start_import.assert_called_once_with(self._row(), task)
+        start_import.assert_called_once_with({**self._row(), **update.call_args.kwargs}, task)
 
     def test_completed_request_reacquires_qb_task_until_local_import_finishes(self):
         tracker = DownloadTracker()
@@ -313,13 +313,13 @@ class QBittorrent523CompletionTests(unittest.TestCase):
         ) as start_import, patch.object(
             tracker, "_notify_completion"
         ), patch(
-            "app.modules.download_tracker.db.update_download_request_and_sync_media_admission"
+            "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
         ) as update:
             tracker._update_request(
                 row, [task], [], qb_available=True, gy_available=False,
             )
 
-        start_import.assert_called_once_with(row, task)
+        start_import.assert_called_once_with({**row, **update.call_args.kwargs}, task)
         if update.called:
             self.assertNotIn("qb_status", update.call_args.kwargs)
 
@@ -336,15 +336,16 @@ class QBittorrent523CompletionTests(unittest.TestCase):
         ) as start_import, patch.object(
             tracker, "_notify_completion"
         ), patch(
-            "app.modules.download_tracker.db.update_download_request_and_sync_media_admission"
-        ):
+            "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
+        ) as persist:
             tracker._update_request(
                 row, [], [], qb_available=False, gy_available=False,
             )
 
         start_import.assert_called_once()
         imported_row, task = start_import.call_args.args
-        self.assertIs(imported_row, row)
+        self.assertEqual(imported_row, {**row, **persist.call_args.kwargs})
+        self.assertIsNot(imported_row, row)
         self.assertEqual(task.content_path, "/downloads/Demo/Demo.mkv")
         self.assertEqual(task.progress, 1.0)
 

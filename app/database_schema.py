@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS organize_probe_queue (
     source_id TEXT NOT NULL DEFAULT '',
     rel_dir TEXT NOT NULL DEFAULT '',
     rules_json TEXT NOT NULL DEFAULT '{}',
+    pending_strm_changes_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'queued'
         CHECK(status IN ('queued','running','retry_wait','completed','failed','cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
@@ -955,6 +956,7 @@ CREATE INDEX IF NOT EXISTS idx_strm_metadata_queue_diagnostics
 -- outbox。allow_emby 保存本轮明确的 provider 边界，重试不会扩大刷新范围。
 CREATE TABLE IF NOT EXISTS strm_refresh_outbox (
     path TEXT NOT NULL,
+    event_token TEXT NOT NULL DEFAULT '',
     allow_emby INTEGER NOT NULL DEFAULT 1 CHECK(allow_emby IN (0,1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,

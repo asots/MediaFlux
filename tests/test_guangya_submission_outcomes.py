@@ -176,7 +176,7 @@ class GuangYaSubmissionOutcomeTests(unittest.TestCase):
         }
         task = {"id": "gy-accepted", "status": "completed", "progress": 1.0}
         with patch(
-            "app.database.update_download_request_and_sync_media_admission"
+            "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
         ) as update, patch.object(tracker, "_update_backend_log"), patch.object(
             tracker, "_notify_completion"
         ):
@@ -198,7 +198,7 @@ class GuangYaSubmissionOutcomeTests(unittest.TestCase):
         }
         task = {"id": "gy-accepted", "status": "downloading", "progress": 0.5}
         with patch(
-            "app.database.update_download_request_and_sync_media_admission"
+            "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
         ) as update, patch.object(tracker, "_update_backend_log"), patch.object(
             tracker, "_notify_completion"
         ):

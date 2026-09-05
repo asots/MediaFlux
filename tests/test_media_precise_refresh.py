@@ -946,9 +946,7 @@ class SchedulerRefreshWiringTests(unittest.TestCase):
         self.enqueue_outbox.assert_called_once_with(
             [f"{ROOT}/剧集/作品 A/Season 01"], allow_emby=True
         )
-        self.ack_outbox.assert_called_once_with(
-            [f"{ROOT}/剧集/作品 A/Season 01"], allow_emby=True
-        )
+        self.ack_outbox.assert_called_once_with(self.enqueue_outbox.return_value)
         enqueue.assert_called_once_with(
             [f"{ROOT}/剧集/作品 A/Season 01"],
             immediate=False,
@@ -995,9 +993,7 @@ class SchedulerRefreshWiringTests(unittest.TestCase):
         self.enqueue_outbox.assert_called_once_with(
             [f"{ROOT}/剧集/作品 A"], allow_emby=False
         )
-        self.ack_outbox.assert_called_once_with(
-            [f"{ROOT}/剧集/作品 A"], allow_emby=False
-        )
+        self.ack_outbox.assert_called_once_with(self.enqueue_outbox.return_value)
         self.assertFalse(enqueue.call_args.kwargs["allow_emby"])
 
     def test_unified_refresh_override_disables_queueing(self):

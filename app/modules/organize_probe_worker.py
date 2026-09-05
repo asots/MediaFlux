@@ -28,6 +28,10 @@ class _ProbeCompletionUnavailable(RuntimeError):
     """本次仍未取得媒体规格，可按有限退避重试。"""
 
 
+class _ProbeHandoffUnavailable(RuntimeError):
+    """改名已提交但交接未确认；保留载荷重试，不消耗探测次数。"""
+
+
 class OrganizeProbeWorker:
     def __init__(self) -> None:
         self._stop_event = threading.Event()
@@ -207,6 +211,7 @@ class OrganizeProbeWorker:
         items: list[dict],
         video: dict,
         desired_name: str,
+        link_strm: bool = False,
     ) -> list[dict]:
         client = self._runtime_client()
         if not self._acquire_write_lock():
@@ -284,8 +289,14 @@ class OrganizeProbeWorker:
             if not db.commit_organize_probe_rename(
                 int(log["id"]), current_name=desired_name, new_path=new_path,
                 item_updates=item_updates,
+                job_id=int(job["id"]), owner=self._owner,
+                changes=changes if link_strm else [],
             ):
-                raise _ProbeCompletionCancelled("整理日志状态已变化")
+                raise _ProbeCompletionCancelled("整理日志或任务 lease 状态已变化")
+            # 后续异常必须按提交后交接处理，不能消耗探测次数或重复改名。
+            job["pending_strm_changes_json"] = json.dumps(
+                changes if link_strm else [], ensure_ascii=False,
+            )
             return changes
         except Exception:
             rollback_errors: list[str] = []
@@ -303,7 +314,35 @@ class OrganizeProbeWorker:
         finally:
             self._organize_write_lock.release()
 
-    def _execute_job(self, job: dict) -> None:
+    def _handoff_pending(self, job: dict) -> bool:
+        """重启也只依赖持久载荷；缺配置或下游拒绝时绝不能确认丢弃。"""
+        try:
+            changes = json.loads(job.get("pending_strm_changes_json", "[]"))
+            if not isinstance(changes, list) or any(not isinstance(item, dict) for item in changes):
+                raise ValueError("规格补全交接载荷格式无效")
+            if not changes:
+                return False
+            from app.modules.organize import Organizer
+
+            stats = {"moved": 1, "failed": 0, "strm_changes": changes}
+            Organizer._post_organize_link(
+                stats, self._rules_from_job(job), force_incremental=True,
+            )
+            outcome = stats.get("strm")
+            if not isinstance(outcome, dict) or outcome.get("ok") is not True:
+                raise _ProbeHandoffUnavailable("STRM 尚未持久接管规格补全变化，保留待交接任务")
+            return True
+        except _ProbeHandoffUnavailable:
+            raise
+        except Exception as exc:
+            raise _ProbeHandoffUnavailable(
+                f"规格补全交接暂不可用（{type(exc).__name__}），保留待交接任务"
+            ) from exc
+
+    def _execute_job(self, job: dict) -> bool:
+        # 优先补交接：不能依赖探测可用性、云端访问或名称是否仍需变化。
+        if self._handoff_pending(job):
+            return True
         log = self._row_dict(db.get_organize_log(int(job["organize_log_id"])))
         if not log or str(log.get("status") or "") != "success":
             raise _ProbeCompletionCancelled("整理日志状态已变化")
@@ -333,22 +372,17 @@ class OrganizeProbeWorker:
         _organizer, rules, plan = self._desired_plan(job, log, video, remote, profile)
         desired_name = str(plan.new_name or remote.name)
         if desired_name == str(video.get("current_name") or ""):
-            return
-        changes = self._apply_remote_rename(
+            return False
+        self._apply_remote_rename(
             job=job, log=log, items=items, video=video, desired_name=desired_name,
+            link_strm=bool(rules.link_strm),
         )
-        if rules.link_strm and changes:
-            from app.modules.organize import Organizer
-
-            Organizer._post_organize_link(
-                {"moved": 1, "failed": 0, "strm_changes": changes},
-                rules,
-                force_incremental=True,
-            )
+        handoff_completed = self._handoff_pending(job)
         logger.debug(
             "媒体规格后台补全完成 log=%s file=%s renamed=%s",
             log.get("id"), video.get("file_id"), desired_name,
         )
+        return handoff_completed
 
     def _process_one(self) -> bool:
         jobs = db.claim_due_organize_probe_jobs(
@@ -361,8 +395,15 @@ class OrganizeProbeWorker:
         with self._state_lock:
             self._current_job_id = job_id
         try:
-            self._execute_job(job)
-            db.complete_organize_probe_job(job_id, owner=self._owner)
+            handoff_completed = self._execute_job(job)
+            if not db.complete_organize_probe_job(
+                job_id, owner=self._owner, handoff_completed=handoff_completed,
+            ):
+                raise _ProbeHandoffUnavailable("任务 lease 已变化，未确认规格补全完成")
+        except _ProbeHandoffUnavailable as exc:
+            db.release_organize_probe_job(
+                job_id, owner=self._owner, delay_seconds=30, reason=exc,
+            )
         except _ProbeCompletionCancelled as exc:
             db.cancel_organize_probe_job(job_id, owner=self._owner, reason=exc)
             logger.debug("媒体规格补全任务已取消 job=%s reason=%s", job_id, exc)
@@ -382,6 +423,14 @@ class OrganizeProbeWorker:
                 status,
             )
         except Exception as exc:
+            if job.get("pending_strm_changes_json", "[]") != "[]":
+                # 包含下游已接管但本地完成状态写入失败：允许幂等重投，
+                # 不能让 max_attempts 将已提交的交接永久终结。
+                db.release_organize_probe_job(
+                    job_id, owner=self._owner, delay_seconds=30,
+                    reason=f"交接完成状态暂不可用（{type(exc).__name__}）",
+                )
+                return True
             status = db.fail_or_retry_organize_probe_job(
                 job_id, owner=self._owner, error_type=type(exc).__name__, error=exc,
                 base_backoff_seconds=600,

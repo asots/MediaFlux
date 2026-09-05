@@ -94,15 +94,22 @@ def claim_due_organize_probe_jobs(
         return claimed
 
 
-def complete_organize_probe_job(job_id: int, *, owner: str) -> bool:
+def complete_organize_probe_job(
+    job_id: int, *, owner: str, handoff_completed: bool = False,
+) -> bool:
+    """只有有效执行者确认下游接管后，才清空待交接载荷并完成任务。"""
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
+        # 先获得 writer 再取 lease 校验时间，不能使用等待写锁前的过期快照。
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "UPDATE organize_probe_queue SET status='completed',lease_owner='',lease_until=0,"
-            "last_error_type='',last_error='',completed_at=?,updated_at=? "
-            "WHERE id=? AND status='running' AND lease_owner=?",
-            (stamp, stamp, int(job_id), str(owner or "")),
+            "last_error_type='',last_error='',completed_at=?,updated_at=?,"
+            "pending_strm_changes_json='[]' "
+            "WHERE id=? AND status='running' AND lease_owner=? AND lease_until>? "
+            "AND (pending_strm_changes_json='[]' OR ?)",
+            (stamp, stamp, int(job_id), str(owner or ""), time.time(), bool(handoff_completed)),
         )
         return cur.rowcount == 1
 
@@ -212,12 +219,24 @@ def commit_organize_probe_rename(
     current_name: str,
     new_path: str,
     item_updates: list[dict],
+    job_id: int,
+    owner: str,
+    changes: list[dict],
 ) -> bool:
-    """在单一事务中提交后台补全后的日志与成员快照。"""
+    """同事务提交审计和待交接变化；队列调用必须持有未过期 lease。"""
+    pending = json.dumps(changes, ensure_ascii=False)
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        job = conn.execute(
+            "SELECT id FROM organize_probe_queue WHERE id=? AND organize_log_id=? "
+            "AND status='running' AND lease_owner=? AND lease_until>? "
+            "AND pending_strm_changes_json='[]'",
+            (int(job_id), int(organize_log_id), str(owner or ""), time.time()),
+        ).fetchone()
+        if not owner or job is None:
+            return False
         row = conn.execute(
             "SELECT status,legacy_incomplete FROM organize_log WHERE id=?",
             (int(organize_log_id),),
@@ -247,4 +266,13 @@ def commit_organize_probe_rename(
         )
         if cur.rowcount != 1:
             raise RuntimeError("整理日志快照已变化，拒绝提交媒体规格补全")
+        cur = conn.execute(
+            "UPDATE organize_probe_queue SET pending_strm_changes_json=?,updated_at=? "
+            "WHERE id=? AND organize_log_id=? AND status='running' "
+            "AND lease_owner=? AND lease_until>? AND pending_strm_changes_json='[]'",
+            (pending, stamp, int(job_id), int(organize_log_id), str(owner), time.time()),
+        )
+        if cur.rowcount != 1:
+            # 此处不能 return False：必须让审计更新一并回滚。
+            raise RuntimeError("规格补全任务 lease 已变化，拒绝提交交接")
         return True

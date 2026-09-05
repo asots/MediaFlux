@@ -6125,7 +6125,7 @@ class SecurityTests(InitializedWebTestCase):
         )
         with (
             patch(
-                "app.database.update_download_request_and_sync_media_admission"
+                "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
             ) as update,
             patch("app.database.update_download_request"),
             patch.object(tracker, "_update_backend_log") as update_log,
@@ -6169,7 +6169,7 @@ class SecurityTests(InitializedWebTestCase):
         manager.start.return_value = {"ok": True, "task_id": "organize-1", "run_id": 17}
         with (
             patch(
-                "app.database.update_download_request_and_sync_media_admission"
+                "app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}
             ) as update,
             patch("app.database.update_download_request"),
             patch.object(tracker, "_update_backend_log"),

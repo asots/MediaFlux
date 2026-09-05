@@ -1741,7 +1741,19 @@ class STRMScheduler:
                     active_ids_complete=not scoped_sources,
                 )
 
+            has_changes = any(int(aggregate.get(key, 0) or 0) > 0 for key in (
+                "generated", "metadata_generated", "cleaned", "metadata_cleaned",
+            ))
             if stopped or self._stop_event.is_set():
+                media_refresh = {}
+                if has_changes:
+                    media_refresh = self._refresh_media_servers(
+                        emby_enabled=options.get("emby_refresh_override"),
+                        media_server_refresh_enabled=options.get("media_server_refresh_override"),
+                        changed_paths=list(aggregate.get("changed_strm_paths") or []),
+                        changed_dirs=list(aggregate.get("changed_dirs") or []),
+                        persist_only=True,
+                    )
                 with self._state_lock:
                     for row in self._source_runtime:
                         if row.get("status") == "pending":
@@ -1755,7 +1767,7 @@ class STRMScheduler:
                 elapsed = round((datetime.now() - started).total_seconds(), 1)
                 result = {
                     "stats": aggregate, "sources": source_results,
-                    "media_refresh": {}, "elapsed_seconds": elapsed,
+                    "media_refresh": media_refresh, "elapsed_seconds": elapsed,
                     "source_runtime": [dict(row) for row in self._source_runtime],
                     "mode": mode,
                     "fallback_used": fallback_used,
@@ -1773,7 +1785,7 @@ class STRMScheduler:
                 _publish_linked_notification_threads(
                     options,
                     strm_status="已停止",
-                    media_refresh="未触发",
+                    media_refresh="已保留，重启后重试" if media_refresh else "未触发",
                     partial=True,
                     error="服务停止，STRM 同步已安全中止；变化目标已保留，重启后可继续处理",
                 )
@@ -1791,10 +1803,6 @@ class STRMScheduler:
             ):
                 aggregate[key] = round(float(aggregate.get(key, 0.0) or 0.0), 3)
             stats = aggregate
-            has_changes = any(int(stats.get(key, 0) or 0) > 0 for key in (
-                "generated", "metadata_generated", "cleaned",
-                "metadata_cleaned"
-            ))
             self._set_progress("refresh", 0, 1, "提交媒体库刷新")
             refresh_started = monotonic()
             media_refresh = self._refresh_media_servers(
@@ -2018,8 +2026,9 @@ class STRMScheduler:
         changed_dirs: list[str] | None = None,
         media_server_refresh_enabled: bool | None = None,
         immediate: bool = False,
+        persist_only: bool = False,
     ) -> dict[str, str]:
-        """把本轮 STRM 变化持久加入统一刷新队列。"""
+        """统一规划并保存刷新意图；关停时仅落盘，不唤醒消费者。"""
         if not has_changes:
             logger.debug("STRM 本轮无增量变化，跳过媒体库刷新")
             return {}
@@ -2051,7 +2060,9 @@ class STRMScheduler:
         allow_emby = True if emby_enabled is None else bool(emby_enabled)
         # STRM 已经落盘，媒体库刷新必须独立交接。先写 durable outbox，再尝试
         # 投递统一刷新队列；投递失败只重试刷新，绝不重新生成 STRM。
-        db.enqueue_strm_refresh_paths(targets, allow_emby=allow_emby)
+        entries = db.enqueue_strm_refresh_paths(targets, allow_emby=allow_emby)
+        if persist_only:
+            return {"媒体库": "pending"}
         try:
             results = enqueue_media_refresh_paths(
                 targets,
@@ -2068,9 +2079,7 @@ class STRMScheduler:
         refresh_failed = any(value == "failed" for value in results.values())
         if not refresh_failed:
             try:
-                db.acknowledge_strm_refresh_paths(
-                    targets, allow_emby=allow_emby
-                )
+                db.acknowledge_strm_refresh_paths(entries)
             except Exception:
                 # 统一刷新队列已经持久接管；保留 outbox 只会触发幂等补投，
                 # 不能反向把本轮 STRM 标记为失败。

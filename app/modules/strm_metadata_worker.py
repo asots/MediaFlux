@@ -323,19 +323,9 @@ class STRMMetadataWorker:
         entries = db.list_strm_refresh_entries(limit=20000)
         if not entries:
             return
-        grouped_paths = {
-            False: list(dict.fromkeys(
-                str(entry.get("path") or "").strip()
-                for entry in entries
-                if not bool(entry.get("allow_emby"))
-                and str(entry.get("path") or "").strip()
-            )),
-            True: list(dict.fromkeys(
-                str(entry.get("path") or "").strip()
-                for entry in entries
-                if bool(entry.get("allow_emby"))
-                and str(entry.get("path") or "").strip()
-            )),
+        grouped_entries = {
+            allow_emby: [entry for entry in entries if bool(entry["allow_emby"]) == allow_emby]
+            for allow_emby in (False, True)
         }
         batch_size = max(
             50, min(get_int("STRM_METADATA_REFRESH_BATCH_SIZE", 500), 5000)
@@ -359,7 +349,8 @@ class STRMMetadataWorker:
         )
 
         retry_pending = False
-        for allow_emby, paths in grouped_paths.items():
+        for allow_emby, batch in grouped_entries.items():
+            paths = [str(entry["path"]) for entry in batch]
             if not paths:
                 continue
             try:
@@ -383,9 +374,7 @@ class STRMMetadataWorker:
             # 统一刷新队列已持久接管这些路径；后续媒体服务器失败只重试刷新，
             # 不再让 STRM 或元数据 worker 重复提交同一文件变化。
             try:
-                db.acknowledge_strm_refresh_paths(
-                    paths, allow_emby=allow_emby
-                )
+                db.acknowledge_strm_refresh_paths(batch)
             except Exception:
                 retry_pending = True
                 logger.exception(

@@ -23,6 +23,12 @@ def _job(**updates) -> dict:
     return payload
 
 
+def _refresh_paths_and_scopes():
+    entries = db.list_strm_refresh_entries()
+    assert all(len(str(entry["event_token"])) == 32 for entry in entries)
+    return [{"path": entry["path"], "allow_emby": entry["allow_emby"]} for entry in entries]
+
+
 class StrmMetadataQueueTests(IsolatedDatabaseTestCase):
     def setUp(self) -> None:
         with db.get_conn() as conn:
@@ -168,25 +174,25 @@ class StrmMetadataQueueTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(state, "completed")
         self.assertEqual(
-            db.list_strm_refresh_entries(),
+            _refresh_paths_and_scopes(),
             [{"path": refresh_path, "allow_emby": True}],
         )
         self.assertEqual(db.count_strm_refresh_paths(), 1)
-        self.assertEqual(db.acknowledge_strm_refresh_paths([refresh_path]), 1)
+        self.assertEqual(db.acknowledge_strm_refresh_paths(db.list_strm_refresh_entries()), 1)
         self.assertEqual(db.list_strm_refresh_entries(), [])
 
     def test_refresh_outbox_preserves_provider_scope_for_same_path(self):
         refresh_path = "/strm/剧集/Example/Season 01"
 
         self.assertEqual(
-            db.enqueue_strm_refresh_paths([refresh_path], allow_emby=False), 1
+            len(db.enqueue_strm_refresh_paths([refresh_path], allow_emby=False)), 1
         )
         self.assertEqual(
-            db.enqueue_strm_refresh_paths([refresh_path], allow_emby=True), 1
+            len(db.enqueue_strm_refresh_paths([refresh_path], allow_emby=True)), 1
         )
 
         self.assertEqual(
-            db.list_strm_refresh_entries(),
+            _refresh_paths_and_scopes(),
             [
                 {"path": refresh_path, "allow_emby": False},
                 {"path": refresh_path, "allow_emby": True},
@@ -195,17 +201,17 @@ class StrmMetadataQueueTests(IsolatedDatabaseTestCase):
         self.assertEqual(db.count_strm_refresh_paths(), 2)
         self.assertEqual(
             db.acknowledge_strm_refresh_paths(
-                [refresh_path], allow_emby=False
+                [entry for entry in db.list_strm_refresh_entries() if not entry["allow_emby"]]
             ),
             1,
         )
         self.assertEqual(
-            db.list_strm_refresh_entries(),
+            _refresh_paths_and_scopes(),
             [{"path": refresh_path, "allow_emby": True}],
         )
         self.assertEqual(
             db.acknowledge_strm_refresh_paths(
-                [refresh_path], allow_emby=True
+                db.list_strm_refresh_entries()
             ),
             1,
         )
@@ -455,7 +461,7 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
         ) as refresh:
             worker._flush_media_refresh(force=True)
             self.assertEqual(
-                db.list_strm_refresh_entries(),
+                _refresh_paths_and_scopes(),
                 [{"path": path, "allow_emby": True}],
             )
             self.assertTrue(worker._refresh_retry_pending)
@@ -526,7 +532,7 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
             self.assertEqual(refresh.call_args_list[1].args[0], [path])
             self.assertTrue(refresh.call_args_list[1].kwargs["allow_emby"])
             self.assertEqual(
-                db.list_strm_refresh_entries(),
+                _refresh_paths_and_scopes(),
                 [{"path": path, "allow_emby": True}],
             )
             self.assertTrue(worker._refresh_retry_pending)

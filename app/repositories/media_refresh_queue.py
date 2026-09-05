@@ -84,9 +84,23 @@ def _normalized_paths(values: object) -> list[str]:
     ))
 
 
-def _group_key(provider: str, allowed_library_ids: tuple[str, ...]) -> str:
+def _normalized_binding(value: dict[str, str] | None) -> dict[str, str]:
+    if not value:
+        return {}
+    binding = {key: str(value.get(key) or "").strip() for key in ("id", "name")}
+    if not any(binding.values()):
+        raise ValueError("媒体库绑定不能为空")
+    return binding
+
+
+def _group_key(
+    provider: str, allowed_library_ids: tuple[str, ...], binding: dict[str, str],
+) -> str:
+    parts: list[Any] = [provider, list(allowed_library_ids)]
+    if binding:
+        parts.append(binding)
     payload = json.dumps(
-        [provider, list(allowed_library_ids)],
+        parts,
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -160,18 +174,20 @@ def enqueue_media_refresh(
     paths: object,
     *,
     allowed_library_ids: object = (),
+    library_binding: dict[str, str] | None = None,
     debounce_seconds: float = 20.0,
     now_epoch: float | None = None,
 ) -> dict[str, Any]:
     """合并一组变化路径；运行中到达的新路径只进入 pending，不覆盖 inflight。"""
     normalized_provider = _normalized_provider(provider)
     normalized_ids = _normalized_library_ids(allowed_library_ids)
+    binding = _normalized_binding(library_binding)
     normalized_paths = _normalized_paths(paths)
     if not normalized_paths:
         return {"queued": 0, "group_key": "", "path_count": 0}
     now_value = float(time.time() if now_epoch is None else now_epoch)
     due_at = now_value + max(0.0, float(debounce_seconds or 0.0))
-    key = _group_key(normalized_provider, normalized_ids)
+    key = _group_key(normalized_provider, normalized_ids, binding)
     database = _database()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -184,6 +200,7 @@ def enqueue_media_refresh(
             group = {
                 "provider": normalized_provider,
                 "allowed_library_ids": list(normalized_ids),
+                "library_binding": binding,
                 "pending_paths": [],
                 "inflight_paths": [],
                 "status": "queued",
@@ -200,6 +217,7 @@ def enqueue_media_refresh(
         elif (
             str(group.get("provider") or "") != normalized_provider
             or _normalized_library_ids(group.get("allowed_library_ids")) != normalized_ids
+            or _normalized_binding(group.get("library_binding")) != binding
         ):
             raise RuntimeError("媒体库刷新队列分组冲突")
         before = len(_normalized_paths(group.get("pending_paths")))
@@ -272,6 +290,7 @@ def claim_due_media_refreshes(
                 "group_key": key,
                 "provider": str(group.get("provider") or ""),
                 "allowed_library_ids": list(group.get("allowed_library_ids") or []),
+                "library_binding": dict(group.get("library_binding") or {}),
                 "paths": pending,
                 "attempts": max(0, int(group.get("attempts") or 0)),
                 "lease_generation": generation,

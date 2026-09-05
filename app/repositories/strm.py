@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -420,23 +421,25 @@ def _enqueue_strm_refresh_paths(
     *,
     stamp: str,
     allow_emby: bool,
-) -> int:
-    normalized = _normalize_refresh_paths(paths)
-    for path in normalized:
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for path in _normalize_refresh_paths(paths):
+        token = uuid.uuid4().hex
         conn.execute(
             "INSERT INTO strm_refresh_outbox("
-            "path,allow_emby,created_at,updated_at) VALUES(?,?,?,?) "
+            "path,allow_emby,event_token,created_at,updated_at) VALUES(?,?,?,?,?) "
             "ON CONFLICT(path,allow_emby) DO UPDATE SET "
-            "updated_at=excluded.updated_at",
-            (path, 1 if allow_emby else 0, stamp, stamp),
+            "event_token=excluded.event_token,updated_at=excluded.updated_at",
+            (path, 1 if allow_emby else 0, token, stamp, stamp),
         )
-    return len(normalized)
+        entries.append({"path": path, "allow_emby": allow_emby, "event_token": token})
+    return entries
 
 
 def enqueue_strm_refresh_paths(
     paths: object, *, allow_emby: bool = True
-) -> int:
-    """持久登记尚未由统一媒体库刷新队列接管的 STRM 变化路径。"""
+) -> list[dict[str, object]]:
+    """持久登记变化，返回本次写入的事件快照；交接只允许确认该快照。"""
     database = _database()
     with database.get_conn() as conn:
         return _enqueue_strm_refresh_paths(
@@ -445,22 +448,15 @@ def enqueue_strm_refresh_paths(
 
 
 def list_strm_refresh_entries(*, limit: int = 5000) -> list[dict[str, object]]:
-    """读取尚未由统一媒体库刷新队列接管的 STRM 变化及 provider 边界。"""
+    """读取未被统一队列接管的事件快照，保留 provider 边界和条件 ACK 令牌。"""
     safe_limit = max(1, min(int(limit or 5000), 20000))
     with _database().get_conn() as conn:
         rows = conn.execute(
-            "SELECT path,allow_emby FROM strm_refresh_outbox "
+            "SELECT path,allow_emby,event_token FROM strm_refresh_outbox "
             "ORDER BY updated_at,path,allow_emby LIMIT ?",
             (safe_limit,),
         ).fetchall()
-    return [
-        {
-            "path": str(row["path"] or ""),
-            "allow_emby": bool(row["allow_emby"]),
-        }
-        for row in rows
-        if str(row["path"] or "")
-    ]
+    return [dict(row, allow_emby=bool(row["allow_emby"])) for row in rows]
 
 
 def count_strm_refresh_paths() -> int:
@@ -470,25 +466,25 @@ def count_strm_refresh_paths() -> int:
         ).fetchone()[0] or 0)
 
 
-def acknowledge_strm_refresh_paths(
-    paths: object, *, allow_emby: bool = True
-) -> int:
-    """统一刷新队列接管成功后确认 outbox；入队失败时保留并安全重试。"""
-    normalized = _normalize_refresh_paths(paths)
-    if not normalized:
+def acknowledge_strm_refresh_paths(entries: list[dict[str, object]]) -> int:
+    """只确认已交接的事件版本；迟到 ACK 不得删除同路径的新变化。"""
+    params = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("STRM 刷新确认必须携带事件快照")
+        path = str(entry.get("path") or "").strip()
+        token = str(entry.get("event_token") or "").strip()
+        if not path or not token or "allow_emby" not in entry:
+            raise ValueError("STRM 刷新确认缺少路径、provider 边界或事件令牌")
+        params.append((path, int(bool(entry["allow_emby"])), token))
+    if not params:
         return 0
-    deleted = 0
     with _database().get_conn() as conn:
-        for offset in range(0, len(normalized), 500):
-            batch = normalized[offset:offset + 500]
-            placeholders = ",".join("?" for _ in batch)
-            cur = conn.execute(
-                f"DELETE FROM strm_refresh_outbox WHERE allow_emby=? "
-                f"AND path IN ({placeholders})",
-                [1 if allow_emby else 0, *batch],
-            )
-            deleted += int(cur.rowcount or 0)
-    return deleted
+        cur = conn.executemany(
+            "DELETE FROM strm_refresh_outbox WHERE path=? AND allow_emby=? AND event_token=?",
+            params,
+        )
+        return int(cur.rowcount or 0)
 
 
 def strm_metadata_job_is_current(

@@ -36,6 +36,22 @@ from app.private_files import protect_private_file
 logger = get_logger(__name__)
 
 
+def guangya_offline_task_state(status: object, progress: object = 0) -> str:
+    """客户端展示与下载跟踪共用的离线任务分类；明确失败优先于进度。"""
+    normalized = str(status).strip().lower()
+    if normalized in {"4", "-1", "failed", "error", "cancelled", "canceled", "invalid"}:
+        return "failed"
+    if normalized in {
+        "1", "2", "3", "completed", "complete", "success", "succeeded", "finished", "done",
+    }:
+        return "completed"
+    try:
+        completed = float(progress or 0) >= 1
+    except (TypeError, ValueError):
+        completed = False
+    return "completed" if completed else "downloading"
+
+
 def close_guangya_client(client: object | None) -> bool:
     """尽力释放短生命周期光鸭 Client，不让清理异常覆盖业务结果。"""
     if client is None:
@@ -2201,12 +2217,6 @@ class GuangYaClient:
                 or raw.get("title") or raw.get("url") or "未命名任务")
         status = raw.get("status") if raw.get("status") is not None else raw.get("state")
         normalized_status = str(status).strip().lower()
-        completed = status in {1, 2, 3} or normalized_status in {
-            "1", "2", "3", "completed", "complete", "success", "succeeded", "finished", "done",
-        }
-        failed = status in {4, -1} or normalized_status in {
-            "4", "-1", "failed", "error", "cancelled", "canceled", "invalid",
-        }
         progress = raw.get("progress")
         if progress is None:
             progress = raw.get("process") if raw.get("process") is not None else raw.get("percent", 0)
@@ -2216,6 +2226,9 @@ class GuangYaClient:
                 progress /= 100
         except (TypeError, ValueError):
             progress = 0.0
+        task_state = guangya_offline_task_state(status, progress)
+        completed = task_state == "completed"
+        failed = task_state == "failed"
         size = raw.get("size") or raw.get("totalSize") or raw.get("fileSize") or 0
         downloaded = raw.get("downloaded") or raw.get("completedSize") or raw.get("doneSize") or 0
         speed = raw.get("speed") or raw.get("downloadSpeed") or raw.get("dlspeed") or 0

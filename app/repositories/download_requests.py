@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -1031,6 +1032,42 @@ def update_download_request_and_sync_media_admission(request_id: int, **fields) 
         )
 
 
+def apply_download_tracker_update(
+    snapshot: sqlite3.Row | Mapping[str, object],
+    **fields,
+) -> sqlite3.Row | None:
+    """在写事务内校验完整快照，返回已落盘状态；冲突/取消时拒绝本轮观察。
+
+    Tracker 在读取快照后会访问下载器，期间用户可能重提、取消或后处理完成。
+    不能只比较秒级 updated_at，也不能把事务外的重新读取当作并发保护。
+    完整行比较无需 schema 版本列，并同时保护后端身份、通知及整理状态。
+    冲突时不写请求/准入、不产生副作用，由下一轮使用新快照继续处理。
+    """
+    request_id = int(snapshot["id"])
+    timestamp = now()
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT * FROM download_requests WHERE id=?", (request_id,)
+        ).fetchone()
+        if current is None or str(current["status"] or "") == "cancelled":
+            return None
+        if dict(current) != dict(snapshot):
+            return None
+        if str(current["status"] or "") == "resubmitted":
+            # 未被接管的后端仍可推进，但历史根状态不可复活。
+            fields["status"] = "resubmitted"
+        if _update_download_request_conn(conn, request_id, fields, timestamp):
+            from app.repositories.media_subscriptions import (
+                _sync_media_download_admission_for_request_conn,
+            )
+
+            _sync_media_download_admission_for_request_conn(conn, request_id, timestamp)
+        return conn.execute(
+            "SELECT * FROM download_requests WHERE id=?", (request_id,)
+        ).fetchone()
+
+
 def finalize_download_request_submission(
     request_id: int,
     claimed_targets: Iterable[str],
@@ -1272,7 +1309,7 @@ def list_active_download_requests(
         )
     normalized_limit = max(1, int(limit))
     normalized_after = max(0, int(after_id or 0))
-    predicate = f"({' OR '.join(clauses)})"
+    predicate = f"(status!='cancelled' AND ({' OR '.join(clauses)}))"
     with get_conn() as conn:
         rows = conn.execute(
             f"SELECT * FROM download_requests WHERE {predicate} AND id>? "

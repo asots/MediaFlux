@@ -76,6 +76,7 @@ def enqueue_media_refresh_paths(
     *,
     providers: tuple[str, ...] | list[str] | None = None,
     allowed_library_ids: tuple[str, ...] = (),
+    library_binding: dict[str, str] | None = None,
     immediate: bool = False,
     allow_emby: bool = True,
 ) -> dict[str, str]:
@@ -99,6 +100,7 @@ def enqueue_media_refresh_paths(
                 provider,
                 paths,
                 allowed_library_ids=allowed_library_ids,
+                library_binding=library_binding,
                 debounce_seconds=delay,
             )
         except Exception as exc:
@@ -253,6 +255,41 @@ class MediaRefreshCoordinator:
             )
         return None
 
+    @staticmethod
+    def _resolve_library_binding(client, group: dict[str, Any]) -> tuple[str, ...]:
+        """消费持久意图时校验绑定；超时/失配均保留重试，绝不全库兜底。"""
+        allowed_ids = tuple(group.get("allowed_library_ids") or ())
+        binding = group.get("library_binding") or {}
+        if not binding:
+            return allowed_ids
+        library_id = str(binding.get("id") or "").strip()
+        library_name = str(binding.get("name") or "").strip()
+        if not library_id and not library_name:
+            raise ValueError("媒体库绑定为空，请重新绑定")
+        folders = client.list_virtual_folders()
+        if library_id:
+            matches = [
+                item for item in folders
+                if str(item.get("id") or "").strip() == library_id
+            ]
+            if len(matches) != 1:
+                raise ValueError("媒体库绑定已失效，请重新绑定")
+            actual_name = str(matches[0].get("name") or "").strip()
+            if library_name and actual_name.casefold() != library_name.casefold():
+                raise ValueError("媒体库名称与绑定 ID 不一致，请重新绑定")
+        else:
+            matches = [
+                item for item in folders
+                if str(item.get("name") or "").strip().casefold() == library_name.casefold()
+            ]
+            if len(matches) != 1:
+                reason = "不存在" if not matches else "存在同名媒体库"
+                raise ValueError(f"{reason}，请重新绑定: {library_name}")
+        resolved_id = str(matches[0].get("id") or "").strip()
+        if not resolved_id or (allowed_ids and resolved_id not in allowed_ids):
+            raise ValueError("媒体库绑定与允许范围不一致，请重新绑定")
+        return (resolved_id,)
+
     def _process_group(self, group: dict[str, Any]) -> None:
         provider = str(group.get("provider") or "").strip().lower()
         group_key = str(group.get("group_key") or "")
@@ -278,10 +315,11 @@ class MediaRefreshCoordinator:
                     self._failed_session += 1
                     self._last_error_type = "MediaServerUnavailable"
                 return
+            allowed_ids = self._resolve_library_binding(client, group)
             recent_ids = recent_media_refresh_target_ids(provider)
             outcome = client.refresh_for_paths(
                 list(group.get("paths") or []),
-                allowed_library_ids=tuple(group.get("allowed_library_ids") or ()),
+                allowed_library_ids=allowed_ids,
                 allow_global_fallback=False,
                 skip_item_ids=recent_ids,
             )

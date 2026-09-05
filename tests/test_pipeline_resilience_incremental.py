@@ -448,11 +448,11 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             "gy_task_id": "", "source_value": "magnet:?xt=urn:btih:hash",
             "organize_started": 0,
         }
-        with patch("app.database.update_download_request_and_sync_media_admission") as update, patch(
+        with patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}) as update, patch(
             "app.modules.download_tracker.DownloadTracker._publish_lifecycle",
         ):
             tracker._update_request(row, [], [], qb_available=False)
-        update.assert_not_called()
+        update.assert_called_once_with(row)
 
     def test_gy_submitted_without_task_id_ages_into_manual_review(self):
         """提交时未拿到任务 ID 且云端匹配不到时，不得永远停在 submitted。"""
@@ -463,7 +463,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             "gy_task_id": "", "gy_task_ids": "[]", "gy_batch_count": 0,
             "source_value": "magnet:?xt=urn:btih:gyhash", "organize_started": 0,
         }
-        with patch("app.database.update_download_request_and_sync_media_admission") as update, patch(
+        with patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}) as update, patch(
             "app.modules.download_tracker.DownloadTracker._publish_lifecycle",
         ):
             tracker._update_request(dict(base_row), [], [], gy_available=True)
@@ -472,7 +472,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         stale = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         aged_row = {**base_row, "gy_task_missing_since": stale}
-        with patch("app.database.update_download_request_and_sync_media_admission") as update, patch(
+        with patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}) as update, patch(
             "app.modules.download_tracker.DownloadTracker._publish_lifecycle",
         ):
             tracker._update_request(aged_row, [], [], gy_available=True)
@@ -487,7 +487,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             "gy_task_id": "", "source_value": "magnet:?xt=urn:btih:hash",
             "organize_started": 0,
         }
-        with patch("app.database.update_download_request_and_sync_media_admission") as update, patch(
+        with patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}) as update, patch(
             "app.modules.download_tracker.DownloadTracker._publish_lifecycle",
         ):
             tracker._update_request(row, [], [], qb_available=True)

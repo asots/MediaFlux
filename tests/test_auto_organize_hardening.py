@@ -228,7 +228,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         ]
         with patch.object(tracker, "_start_organize") as start, patch.object(
             tracker, "_update_backend_log"
-        ), patch.object(db, "update_download_request_and_sync_media_admission") as update, patch(
+        ), patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}) as update, patch(
             "app.modules.download_tracker.DownloadTracker._publish_lifecycle"
         ):
             tracker._update_request(row, [], one_done)
@@ -236,7 +236,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             start.assert_not_called()
             tracker._update_request(row, [], all_done)
             self.assertEqual(update.call_args.kwargs["gy_status"], "completed")
-            start.assert_called_once_with(row)
+            start.assert_called_once_with({**row, **update.call_args.kwargs})
 
     def test_tracker_waits_for_expected_staging_files_before_organize(self):
         tracker = DownloadTracker()
@@ -267,7 +267,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             tracker, "_start_organize"
         ) as start, patch.object(tracker, "_update_backend_log"), patch.object(
             db, "update_download_request"
-        ) as update, patch("app.modules.download_tracker.DownloadTracker._publish_lifecycle"):
+        ) as update, patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}), patch("app.modules.download_tracker.DownloadTracker._publish_lifecycle"):
             tracker._update_request(row, [], done)
 
         start.assert_not_called()
@@ -308,10 +308,10 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             tracker, "_start_organize"
         ) as start, patch.object(tracker, "_update_backend_log"), patch.object(
             db, "update_download_request"
-        ), patch("app.modules.download_tracker.DownloadTracker._publish_lifecycle"):
+        ), patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}) as persist, patch("app.modules.download_tracker.DownloadTracker._publish_lifecycle"):
             tracker._update_request(row, [], done)
 
-        start.assert_called_once_with(row)
+        start.assert_called_once_with({**row, **persist.call_args.kwargs})
 
     def test_tracker_does_not_start_when_expected_count_is_visible_but_snapshot_is_new(self):
         tracker = DownloadTracker()
@@ -342,7 +342,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             tracker, "_start_organize"
         ) as start, patch.object(tracker, "_update_backend_log"), patch.object(
             db, "update_download_request"
-        ) as update, patch("app.modules.download_tracker.DownloadTracker._publish_lifecycle"):
+        ) as update, patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}), patch("app.modules.download_tracker.DownloadTracker._publish_lifecycle"):
             tracker._update_request(row, [], done)
 
         start.assert_not_called()
@@ -558,7 +558,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         }
         with patch.object(tracker, "_start_organize") as start, patch.object(
             tracker, "_update_backend_log"
-        ), patch.object(db, "update_download_request_and_sync_media_admission"), patch(
+        ), patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}), patch(
             "app.modules.download_tracker.DownloadTracker._publish_lifecycle"
         ):
             tracker._update_request(row, [], [])
@@ -593,7 +593,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         }
         with patch.object(tracker, "_update_backend_log"), patch.object(
             tracker, "_notify_completion"
-        ), patch.object(db, "update_download_request_and_sync_media_admission") as update:
+        ), patch("app.modules.download_tracker.apply_download_tracker_update", side_effect=lambda snapshot, **fields: {**snapshot, **fields}) as update:
             tracker._update_request(row, [], [], qb_available=True, gy_available=False)
 
         self.assertEqual(update.call_args.kwargs["qb_status"], "manual_review")
