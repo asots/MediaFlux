@@ -123,3 +123,100 @@ def read_organize_result(payload: object) -> dict[str, Any]:
     except (TypeError, ValueError):
         normalized["schema_version"] = ORGANIZE_RESULT_SCHEMA_VERSION
     return normalized
+
+
+def _format_scan_summary(stats: dict) -> str:
+    """把扫描统计压成一行可读摘要。
+
+    完整统计已经作为结构化结果返回给 Web/TG，日志只保留人能一眼看懂的
+    关键项：为零的计数不打印，异常项始终打印。
+    """
+    stats = stats if isinstance(stats, dict) else {}
+
+    def count(key: str) -> int:
+        try:
+            return int(stats.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    groups = [item for item in (stats.get("source_groups") or []) if isinstance(item, dict)]
+    scope = ""
+    if len(groups) == 1:
+        scope = str(groups[0].get("name") or groups[0].get("path") or "")
+    elif groups:
+        scope = f"{len(groups)} 个媒体目录"
+
+    parts = [f"共 {count('total')} 个视频"]
+    for label, key in (
+        ("已识别", "matched"), ("待确认", "need_confirm"), ("跳过", "skipped"),
+        ("冲突", "conflict"), ("失败", "failed"), ("已移动", "moved"),
+        ("伴随文件", "metadata_moved"), ("特别篇", "specials_auto_mapped"),
+    ):
+        value = count(key)
+        if value:
+            parts.append(f"{label} {value}")
+    if count("stopped"):
+        parts.append("已停止")
+    if not stats.get("scan_complete", True) or count("scan_limited"):
+        parts.append(f"扫描不完整({stats.get('scan_limit_kind') or '未知原因'})")
+    errors = stats.get("scan_errors") or []
+    if errors:
+        parts.append(f"扫描错误 {len(errors)}")
+
+    timing = " ".join(
+        f"{label}={float(stats.get(key) or 0.0):.2f}s"
+        for label, key in (
+            ("扫描", "scan_elapsed_seconds"),
+            ("识别", "recognition_elapsed_seconds"),
+            ("探测", "media_probe_elapsed_seconds"),
+            ("冲突", "conflict_check_elapsed_seconds"),
+        )
+        if float(stats.get(key) or 0.0) > 0
+    )
+    summary = f"[{scope}] " if scope else ""
+    summary += " · ".join(parts)
+    return f"{summary} | {timing}" if timing else summary
+
+
+def _format_phase_timing(stats: dict) -> str:
+    """输出阶段耗时与外部请求量；为零的诊断项不打印。"""
+    stats = stats if isinstance(stats, dict) else {}
+    chunks = []
+    for label, key in (
+        ("scan", "scan_elapsed_seconds"),
+        ("recognition", "recognition_elapsed_seconds"),
+        ("probe", "media_probe_elapsed_seconds"),
+        ("conflict", "conflict_check_elapsed_seconds"),
+        ("execute", "execute_elapsed_seconds"),
+        ("cleanup", "cleanup_elapsed_seconds"),
+        ("plan_wall", "parallel_planning_elapsed_seconds"),
+        ("writer_wait", "writer_wait_elapsed_seconds"),
+        ("target_version", "target_revision_check_elapsed_seconds"),
+        ("target_list", "target_inventory_refresh_elapsed_seconds"),
+    ):
+        value = float(stats.get(key) or 0.0)
+        if value > 0:
+            chunks.append(f"{label}={value:.2f}s")
+    chunks.append(f"total={float(stats.get('total_elapsed_seconds') or 0.0):.2f}s")
+
+    for label, key in (
+        ("tmdb", "tmdb_search_requests"),
+        ("tmdb_cache", "tmdb_search_cache_hits"),
+        ("ai", "ai_requests"),
+        ("list_dir", "scan_list_dir_calls"),
+        ("probe_cache", "media_probe_cache_hits"),
+        ("probe_online", "media_probe_online_profiles"),
+        ("probe_timeouts", "media_probe_timeouts"),
+        ("target_refresh", "target_dir_refreshes"),
+        ("target_cache", "target_inventory_cache_hits"),
+        ("target_version_miss", "target_revision_mismatches"),
+        ("recognition_task_cache", "task_recognition_cache_hits"),
+        ("recognition_task_bind", "task_recognition_cache_bindings"),
+    ):
+        try:
+            value = int(stats.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            chunks.append(f"{label}={value}")
+    return " ".join(chunks)

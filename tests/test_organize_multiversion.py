@@ -277,7 +277,7 @@ class MultiVersionPriorityTests(unittest.TestCase):
             "GY_ORGANIZE_KEEP_REMUX_VARIANT": True,
         }
 
-        with patch("app.modules.organize.get_bool", side_effect=lambda key, default=False: values.get(key, default)):
+        with patch("app.modules.organize_rules.get_bool", side_effect=lambda key, default=False: values.get(key, default)):
             rules = OrganizeRules.from_config()
 
         self.assertTrue(rules.keep_multi_versions)

@@ -1,4 +1,8 @@
-"""网盘整理模块。
+"""网盘整理协调器。
+
+数据模型位于 organize_models，配置/确认规则位于 organize_rules，纯标题
+证据提取位于 organize_identity，结果及诊断格式位于 organize_results。
+本模块继续持有客户端、共享运行态与规划/执行协调，所有入口复用同一实现。
 
 流程：扫描源目录 → 刮削识别 → 分类归档 → 命名标准化 → 冲突覆盖 → 移动 → 日志。
 默认 dry_run=True 只输出整理计划不实际移动（安全验证）。
@@ -19,7 +23,6 @@ import logging
 import re
 import threading
 import time
-import unicodedata
 from concurrent.futures import (
     CancelledError,
     Executor,
@@ -28,7 +31,7 @@ from concurrent.futures import (
     wait,
 )
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import replace
 from difflib import SequenceMatcher
 from typing import Callable
 
@@ -59,10 +62,6 @@ from app.modules.directory_scrape_errors import (
     safe_organize_failure,
 )
 from app.modules.naming import (
-    MOVIE_DEFAULT,
-    MOVIE_DIR_DEFAULT,
-    SHOW_DIR_DEFAULT,
-    TV_DEFAULT,
     append_variant_tags,
     build_context,
     render_template,
@@ -93,7 +92,6 @@ from app.modules.special_media import (
     is_special_media_name,
     is_special_path,
     special_media_position,
-    strip_special_media_markers,
     title_hint_from_path,
 )
 from app.modules.organize_scan import (
@@ -137,6 +135,44 @@ from app.modules.organize_delete_audit import (
     execute_recycle_bin_delete,
 )
 
+
+# 各阶段只保留一份实现；此处直接导出，维持现行 Python 调用入口。
+from app.modules.organize_models import (  # noqa: F401
+    OrganizeScanUnsafeError,
+    _OrganizeAuditWriteError,
+    OrganizePlan,
+    OrganizeContext,
+    OrganizePlanningResult,
+    _PreparedOrganizeGroup,
+)
+from app.modules.organize_rules import (  # noqa: F401
+    DEFAULT_ORGANIZE_VIDEO_EXTS,
+    DEFAULT_ORGANIZE_METADATA_EXTS,
+    automatic_match_requires_confirmation,
+    OrganizeRules,
+    enforce_fixed_organize_rules,
+    _ORGANIZE_RULE_SERVER_ONLY_FIELDS,
+    organize_rules_snapshot,
+    restore_organize_rules_snapshot,
+    organize_rules_snapshot_matches,
+)
+from app.modules.organize_identity import (  # noqa: F401
+    _MEDIA_IDENTITY_SEPARATORS_RE,
+    _DIRECTORY_TITLE_SEGMENT_RE,
+    _MEDIA_IDENTITY_TOKEN_RE,
+    _normalize_media_identity,
+    _GENERIC_FILENAME_IDENTITY_HINTS,
+    _SPECIAL_FILENAME_IDENTITY_MARKER_RE,
+    _usable_filename_identity_hint,
+    _special_filename_identity_hint,
+    _recognition_identity_year,
+    _directory_episode_identity_hint,
+)
+from app.modules.organize_results import (  # noqa: F401
+    _format_scan_summary,
+    _format_phase_timing,
+)
+
 logger = get_logger(__name__)
 
 # TMDB genre id
@@ -151,14 +187,6 @@ GENRE_MUSIC = 10402
 CONCERT_RE = re.compile(r"(?i)(演唱会|音乐会|巡回演出|concert|live\s+(?:at|in|from)|world\s+tour)")
 KIDS_RE = re.compile(r"(?i)(儿童|少儿|幼儿|kids?|children)")
 
-DEFAULT_ORGANIZE_VIDEO_EXTS = (
-    "mkv", "mp4", "ts", "m2ts", "mts", "avi", "mov", "m4v", "webm",
-    "mpeg", "mpg", "wmv", "flv", "vob", "tp", "f4v", "rm", "rmvb",
-)
-DEFAULT_ORGANIZE_METADATA_EXTS = (
-    "nfo", "srt", "ass", "ssa", "sup", "vtt", "sub", "idx",
-    "jpg", "jpeg", "png", "webp",
-)
 VIDEO_EXTS = set(DEFAULT_ORGANIZE_VIDEO_EXTS)
 METADATA_EXTS = set(DEFAULT_ORGANIZE_METADATA_EXTS)
 
@@ -172,165 +200,6 @@ REGION_MAP = {
 }
 
 SAFE_RE = re.compile(r'[\\/:*?"<>|]')
-_MEDIA_IDENTITY_SEPARATORS_RE = re.compile(
-    r"[^a-z0-9\u3040-\u30ff\u3400-\u9fff"
-    r"\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7a3\ud7b0-\ud7ff]+"
-)
-_DIRECTORY_TITLE_SEGMENT_RE = re.compile(
-    r"[\[【(（]([^\]】)）]{1,160})[\]】)）]"
-)
-_MEDIA_IDENTITY_TOKEN_RE = re.compile(
-    r"[a-z0-9]+|[\u3040-\u30ff]+|[\u3400-\u9fff]+|"
-    r"[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7a3\ud7b0-\ud7ff]+",
-    re.IGNORECASE,
-)
-
-
-def _normalize_media_identity(value: object) -> str:
-    """生成跨目录缓存与剧集证据共用的稳定媒体标题身份。"""
-    normalized = unicodedata.normalize("NFC", str(value or ""))
-    return _MEDIA_IDENTITY_SEPARATORS_RE.sub("", normalized.casefold())
-
-
-_GENERIC_FILENAME_IDENTITY_HINTS = {
-    "anime", "episode", "episodes", "ep", "file", "movie", "season",
-    "show", "tv", "unknown", "video",
-}
-_SPECIAL_FILENAME_IDENTITY_MARKER_RE = re.compile(
-    r"(?ix)(?<![a-z0-9])(?:"
-    r"s\d{1,3}[ ._-]*e(?:p)?[ ._-]*0{1,3}|"
-    r"s0{1,3}[ ._-]*e(?:p)?[ ._-]*\d{1,3}|"
-    r"nc(?:op|ed)(?:[ ._-]*\d{1,3})?|"
-    r"(?:pv|cm|promo|trailer)(?:[ ._-]*\d{1,3})?|"
-    r"mini[ ._-]*(?:animations?|anime)(?:[ ._-]*\d{1,3})?|"
-    r"(?:ova|oav|oad|specials?|sps?|omnibus)(?:[ ._-]*\d{1,3})?|"
-    r"(?:op|ed)(?:[ ._-]*\d{1,3})?"
-    r")(?![a-z0-9])"
-)
-
-
-def _usable_filename_identity_hint(filename: str) -> str:
-    """提取可支撑目录级连续剧集包识别的文件名标题。
-
-    目录名常混入发布组、编码组或打包者标签。只有目录已经形成连续剧集
-    证据时才会调用本函数，并且极短、纯数字和通用占位标题都会失败关闭，
-    回退到原有路径标题逻辑。
-    """
-    context = extract_recognition_context(str(filename or ""), "")
-    title = str(context.filename_title or context.normalized_title or "").strip()
-    identity = _normalize_media_identity(title)
-    if (
-        not title
-        or len(identity) < 4
-        or identity.isdigit()
-        or identity in _GENERIC_FILENAME_IDENTITY_HINTS
-    ):
-        return ""
-    return title
-
-
-def _special_filename_identity_hint(filename: str) -> str:
-    """提取特殊集文件自身携带的作品标题，失败时由调用方回退父目录。
-
-    ``S00E01``、``OVA``、``NCOP`` 等词只描述特殊集位置，不属于作品名。
-    仅当文件名本身明确带有特殊集标记时调用本函数；去掉标记后若只剩
-    空值或通用词则失败关闭，避免把裸 ``NCOP.mkv`` 当作作品标题搜索。
-    """
-    if not is_special_media_name(filename):
-        return ""
-    stem = str(filename or "").rsplit("/", 1)[-1]
-    if "." in stem:
-        stem = stem.rsplit(".", 1)[0]
-    cleaned = strip_special_media_markers(stem)
-    cleaned = _SPECIAL_FILENAME_IDENTITY_MARKER_RE.sub(" ", cleaned)
-    cleaned = re.sub(r"[ ._\-]+", " ", cleaned).strip(" []()【】._-")
-    if not cleaned:
-        return ""
-    return _usable_filename_identity_hint(f"{cleaned}.mkv")
-
-
-def _recognition_identity_year(filename: str, parent_context: str) -> str:
-    """返回来源文件/目录中经解析器确认的可靠年份。
-
-    目录级剧集包会把多个文件折叠成同一个身份识别请求；该请求必须保留
-    ``2008`` 之类的作品/季年份，否则精确官方别名可能重新落入多候选歧义。
-    这里只接受解析器产出的 19xx/20xx 四位年份，不直接扫描原始数字，避免
-    把 1080、2160、集号或版本号带入识别标题。
-    """
-    context = extract_recognition_context(filename, parent_context)
-    for value in (context.filename_year, context.folder_year):
-        year = str(value or "").strip()
-        if re.fullmatch(r"(?:19|20)\d{2}", year):
-            return year
-    return ""
-
-
-def _directory_episode_identity_hint(filename: str, parent_context: str) -> str:
-    """为连续剧集包选择与短文件标题兼容的更完整目录标题。
-
-    例如文件只有 ``Boruto - 001``，而目录包含
-    ``(Boruto: Naruto Next Generations)``。只有目录候选是文件标题的严格、
-    有信息量扩展时才采用；否则保持文件名标题，避免无关父目录污染识别。
-    """
-    file_title = _usable_filename_identity_hint(filename)
-    if not file_title:
-        return ""
-    file_identity = _normalize_media_identity(file_title)
-    file_tokens = _MEDIA_IDENTITY_TOKEN_RE.findall(
-        unicodedata.normalize("NFKC", file_title).casefold()
-    )
-
-    context = extract_recognition_context(filename, parent_context)
-    raw_candidates = [str(context.folder_title or "").strip()]
-    raw_candidates.extend(
-        match.group(1).strip()
-        for match in _DIRECTORY_TITLE_SEGMENT_RE.finditer(str(parent_context or ""))
-    )
-
-    compatible: list[tuple[int, str]] = []
-    seen: set[str] = set()
-    for raw_candidate in raw_candidates:
-        if not raw_candidate:
-            continue
-        parsed = extract_recognition_context(
-            f"{raw_candidate}.S01E01.mkv", ""
-        )
-        candidate = str(
-            parsed.filename_title or parsed.normalized_title or raw_candidate
-        ).strip()
-        candidate_identity = _normalize_media_identity(candidate)
-        if (
-            not candidate
-            or candidate_identity in seen
-            or candidate_identity == file_identity
-            or not candidate_identity.startswith(file_identity)
-        ):
-            continue
-        seen.add(candidate_identity)
-        extra_identity = candidate_identity[len(file_identity):]
-        if len(extra_identity) < 6:
-            continue
-
-        candidate_tokens = _MEDIA_IDENTITY_TOKEN_RE.findall(
-            unicodedata.normalize("NFKC", candidate).casefold()
-        )
-        token_extension = bool(
-            file_tokens
-            and candidate_tokens[:len(file_tokens)] == file_tokens
-            and len(candidate_tokens) >= len(file_tokens) + 2
-        )
-        cjk_extension = bool(
-            re.search(r"[\u3040-\u30ff\u3400-\u9fff]", file_title)
-            and len(extra_identity) >= 6
-        )
-        if token_extension or cjk_extension:
-            compatible.append((len(candidate_identity), candidate))
-
-    if not compatible:
-        return file_title
-    compatible.sort(key=lambda item: (item[0], item[1].casefold()))
-    return compatible[0][1]
-
 
 
 _DIRECTORY_PACKAGE_IDENTITY_PROOF_KEY = "verified_directory_package_identity_proof"
@@ -347,172 +216,6 @@ _DIRECTORY_PACKAGE_IDENTITY_MIN_EPISODES = 12
 _DIRECTORY_PACKAGE_IDENTITY_MIN_BREAKDOWN_SCORE = 0.80
 _DIRECTORY_PACKAGE_IDENTITY_MIN_FILE_ANCHOR_SCORE = 0.82
 _DIRECTORY_PACKAGE_IDENTITY_MIN_FOLDER_ANCHOR_SCORE = 0.64
-
-
-def automatic_match_requires_confirmation(
-    match: MatchResult | None, *, threshold: float = 0.9,
-) -> bool:
-    """统一判定无人工选择的自动整理结果是否足够安全。
-
-    默认均衡档保持原有 90% 严格门槛。积极档只放宽“唯一 TMDB 候选因
-    分数略低于 strict 阈值”这一种情况；类型/年份/季集冲突、近似并列、
-    AI 未复核结果以及缺少结构化评分证据时仍失败关闭。
-    """
-    if match is None:
-        return True
-    try:
-        required = float(threshold)
-        confidence = float(getattr(match, "confidence", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return True
-    if not 0.0 < required <= 1.0 or confidence < required:
-        return True
-
-    status = str(getattr(match, "status", "") or "").strip().lower()
-    need_confirm = bool(getattr(match, "need_confirm", False))
-    if (not status or status == "matched") and not need_confirm:
-        return False
-
-    # 90% 及以上档位绝不覆盖识别器的显式人工确认结论。
-    if required >= 0.9:
-        return True
-    if status not in {"low_confidence", "matched"}:
-        return True
-    if str(getattr(match, "provider", "") or "").strip().lower() != "tmdb":
-        return True
-    matched_by = str(getattr(match, "matched_by", "") or "").strip().lower()
-    if matched_by and matched_by not in {"search", "title_search"}:
-        return True
-    if dict(getattr(match, "ai_diagnostic", None) or {}):
-        return True
-    if list(getattr(match, "rejected_constraints", None) or []):
-        return True
-
-    decision = dict(getattr(match, "threshold_decision", None) or {})
-    if str(decision.get("reason") or "") != "below_threshold":
-        return True
-    try:
-        if abs(float(decision.get("score")) - confidence) > 0.001:
-            return True
-    except (TypeError, ValueError):
-        return True
-
-    candidates = list(getattr(match, "candidates", None) or [])
-    if not candidates:
-        return True
-    selected = getattr(candidates[0], "score_breakdown", None)
-    if selected is None or list(getattr(selected, "rejected_constraints", None) or []):
-        return True
-    strong_title_score = max(
-        float(getattr(selected, "title_score", 0.0) or 0.0),
-        float(getattr(selected, "original_title_score", 0.0) or 0.0),
-        float(getattr(selected, "alias_score", 0.0) or 0.0),
-    )
-    if strong_title_score < required:
-        return True
-    if len(candidates) > 1:
-        second_score = float(getattr(candidates[1], "score", 0.0) or 0.0)
-        if confidence - second_score < 0.08:
-            return True
-    return False
-
-
-
-def _format_scan_summary(stats: dict) -> str:
-    """把扫描统计压成一行可读摘要。
-
-    完整统计已经作为结构化结果返回给 Web/TG，日志只保留人能一眼看懂的
-    关键项：为零的计数不打印，异常项始终打印。
-    """
-    stats = stats if isinstance(stats, dict) else {}
-
-    def count(key: str) -> int:
-        try:
-            return int(stats.get(key) or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    groups = [item for item in (stats.get("source_groups") or []) if isinstance(item, dict)]
-    scope = ""
-    if len(groups) == 1:
-        scope = str(groups[0].get("name") or groups[0].get("path") or "")
-    elif groups:
-        scope = f"{len(groups)} 个媒体目录"
-
-    parts = [f"共 {count('total')} 个视频"]
-    for label, key in (
-        ("已识别", "matched"), ("待确认", "need_confirm"), ("跳过", "skipped"),
-        ("冲突", "conflict"), ("失败", "failed"), ("已移动", "moved"),
-        ("伴随文件", "metadata_moved"), ("特别篇", "specials_auto_mapped"),
-    ):
-        value = count(key)
-        if value:
-            parts.append(f"{label} {value}")
-    if count("stopped"):
-        parts.append("已停止")
-    if not stats.get("scan_complete", True) or count("scan_limited"):
-        parts.append(f"扫描不完整({stats.get('scan_limit_kind') or '未知原因'})")
-    errors = stats.get("scan_errors") or []
-    if errors:
-        parts.append(f"扫描错误 {len(errors)}")
-
-    timing = " ".join(
-        f"{label}={float(stats.get(key) or 0.0):.2f}s"
-        for label, key in (
-            ("扫描", "scan_elapsed_seconds"),
-            ("识别", "recognition_elapsed_seconds"),
-            ("探测", "media_probe_elapsed_seconds"),
-            ("冲突", "conflict_check_elapsed_seconds"),
-        )
-        if float(stats.get(key) or 0.0) > 0
-    )
-    summary = f"[{scope}] " if scope else ""
-    summary += " · ".join(parts)
-    return f"{summary} | {timing}" if timing else summary
-
-
-def _format_phase_timing(stats: dict) -> str:
-    """输出阶段耗时与外部请求量；为零的诊断项不打印。"""
-    stats = stats if isinstance(stats, dict) else {}
-    chunks = []
-    for label, key in (
-        ("scan", "scan_elapsed_seconds"),
-        ("recognition", "recognition_elapsed_seconds"),
-        ("probe", "media_probe_elapsed_seconds"),
-        ("conflict", "conflict_check_elapsed_seconds"),
-        ("execute", "execute_elapsed_seconds"),
-        ("cleanup", "cleanup_elapsed_seconds"),
-        ("plan_wall", "parallel_planning_elapsed_seconds"),
-        ("writer_wait", "writer_wait_elapsed_seconds"),
-        ("target_version", "target_revision_check_elapsed_seconds"),
-        ("target_list", "target_inventory_refresh_elapsed_seconds"),
-    ):
-        value = float(stats.get(key) or 0.0)
-        if value > 0:
-            chunks.append(f"{label}={value:.2f}s")
-    chunks.append(f"total={float(stats.get('total_elapsed_seconds') or 0.0):.2f}s")
-
-    for label, key in (
-        ("tmdb", "tmdb_search_requests"),
-        ("tmdb_cache", "tmdb_search_cache_hits"),
-        ("ai", "ai_requests"),
-        ("list_dir", "scan_list_dir_calls"),
-        ("probe_cache", "media_probe_cache_hits"),
-        ("probe_online", "media_probe_online_profiles"),
-        ("probe_timeouts", "media_probe_timeouts"),
-        ("target_refresh", "target_dir_refreshes"),
-        ("target_cache", "target_inventory_cache_hits"),
-        ("target_version_miss", "target_revision_mismatches"),
-        ("recognition_task_cache", "task_recognition_cache_hits"),
-        ("recognition_task_bind", "task_recognition_cache_bindings"),
-    ):
-        try:
-            value = int(stats.get(key) or 0)
-        except (TypeError, ValueError):
-            value = 0
-        if value:
-            chunks.append(f"{label}={value}")
-    return " ".join(chunks)
 
 
 # 媒体组流水线的来源级探测墙钟上限：每组各有独立预算，防止病态来源
@@ -559,311 +262,6 @@ def _optional_execution_lock(lock: object | None):
     finally:
         release()
 
-
-class OrganizeScanUnsafeError(RuntimeError):
-    """扫描快照不可信，整个来源必须失败关闭。
-
-    这类错误与单个媒体组的运行期失败不同：部分快照会让后续清理和冲突
-    仲裁失去依据，因此禁止被组级失败隔离吞掉。
-    """
-
-
-class _OrganizeAuditWriteError(RuntimeError):
-    def __init__(self, log_id: int, cause: Exception):
-        super().__init__(str(cause))
-        self.log_id = int(log_id)
-        self.__cause__ = cause
-
-
-@dataclass
-class OrganizePlan:
-    file_id: str
-    original_name: str
-    original_path: str
-    original_parent_id: str = "0"
-    size: int = 0
-    etag: str = ""
-    match: MatchResult = None
-    main_category: str = ""
-    region: str = ""
-    year: str = ""
-    season: int | None = None
-    episode: int | None = None
-    source_season: int | None = None
-    source_episode: int | None = None
-    episode_mapping: EpisodeMappingPlan | None = None
-    base_name: str = ""
-    new_name: str = ""
-    variant: MediaVariant = field(default_factory=MediaVariant)
-    variant_label: str = ""
-    variant_suffix: str = ""
-    conflict_decision: str = "new"
-    conflict_note: str = ""
-    target_path: str = ""
-    media_root_path: str = ""
-    identity_guard_required: bool = False
-    backdrop_path: str = ""
-    poster_path: str = ""
-    season_total: int = 0
-    action: str = "move"  # move / skip / conflict
-    note: str = ""
-    # 追加在末尾以保持历史位置参数构造的语义兼容。
-    source_group_id: str = ""
-    source_group_path: str = ""
-    media_profile: object | None = field(default=None, repr=False, compare=False)
-    media_probe_complete: bool = False
-    media_probe_pending: bool = False
-    conflict_existing_id: str = ""
-    conflict_existing_name: str = ""
-    multipart_index: int | None = None
-    multipart_token: str = ""
-    multipart_ambiguous: bool = False
-
-
-@dataclass(frozen=True)
-class OrganizeContext:
-    """一次整理运行的上下文。
-
-    业务规则由 :class:`OrganizeRules` 承载；这里仅保存运行时控制项，
-    避免内部阶段继续传递一长串容易错位的参数。
-    """
-
-    source_dir_id: str
-    dry_run: bool = True
-    max_files: int = 0
-    cancel_event: threading.Event | None = None
-    post_actions: bool = True
-    source_name: str = ""
-    require_complete_scan: bool = False
-    media_probe_cache_only: bool | None = None
-    protected_source_ids: frozenset[str] = frozenset()
-    automatic: bool = False
-    # 组级流水线的实时进度回调；只用于观测，异常不得影响整理结果。
-    group_progress: Callable[[dict], None] | None = None
-    # 回退开关：为 False 时继续使用整源扫描/规划/执行的旧路径。
-    group_pipeline: bool = True
-    # 单次调用的审计归属键；用于精确回读本轮日志，避免并发任务污染。
-    operation_token: str = ""
-    # 来源适配器可提供显式媒体类型提示；普通光鸭整理保持空值，继续依赖
-    # 文件名与目录上下文自动判断。本地来源配置和手动刮削可复用同一规划
-    # 流水线，而不需要在规划器外再实现一套 match/parse 分支。
-    media_type_hint: str = ""
-    # 当前来源可见的只读规划 Worker 总预算。多来源调度传入共享执行池后，
-    # 该值描述全局池大小，而不是为来源预先切分的固定份额。
-    planning_workers: int | None = None
-    # 当前来源可见的 ffprobe 总预算；真正并发量由 media_probe 的进程级
-    # 槽位统一限制，因此多来源之间可以动态复用空闲预算。
-    media_probe_workers: int | None = None
-    # 多来源并行时共享的只读规划池。各来源只负责枚举并提交媒体单元，
-    # Worker 完成短目录后可继续领取其他来源的大目录任务。
-    planning_executor: Executor | None = field(default=None, repr=False, compare=False)
-    # 多来源并行时共享的单写门。扫描、识别和探测不持有该锁；最终冲突
-    # 仲裁、云盘写入、审计与清理必须在锁内完成。
-    execution_lock: object | None = field(default=None, repr=False, compare=False)
-    # 同一次后台整理跨来源/媒体组共享的短生命周期运行态。仅缓存已严格
-    # 验证的作品身份与单写入器维护的目标库存，绝不跨任务持久化。
-    task_runtime: OrganizeTaskRuntime | None = field(
-        default=None, repr=False, compare=False,
-    )
-
-    @property
-    def probe_cache_only(self) -> bool:
-        if self.media_probe_cache_only is None:
-            return self.dry_run
-        return bool(self.media_probe_cache_only)
-
-    def cancelled(self) -> bool:
-        return bool(self.cancel_event and self.cancel_event.is_set())
-
-
-@dataclass
-class OrganizePlanningResult:
-    plans: list[OrganizePlan]
-    subtitle_plans_by_video: dict[str, list]
-
-
-@dataclass
-class _PreparedOrganizeGroup:
-    """媒体组只读规划结果；由 coordinator 按稳定顺序提交给单 Writer。"""
-
-    task: OrganizeGroupTask
-    stats: dict
-    scan_result: OrganizeScanResult | None = None
-    planning_result: OrganizePlanningResult | None = None
-    planning_elapsed_seconds: float = 0.0
-    error: Exception | None = field(default=None, repr=False)
-
-
-@dataclass
-class OrganizeRules:
-    target_dir_id: str = "0"
-    add_kids: bool = False
-    add_concert: bool = False
-    region_split: bool = True
-    year_split: bool = True
-    small_file_mb: int = 10
-    clean_empty: bool = True
-    conflict_strategy: int = 1  # 1=不覆盖仅同名 2=覆盖大文件优先 3=覆盖小文件优先
-    remux_first: bool = True
-    resolution_first: bool = True
-    dolby_first: bool = True
-    keep_multi_versions: bool = False
-    keep_remux_variant: bool = False
-    recycle_replaced_enabled: bool = False
-    link_strm: bool = True
-    video_exts: str = ""
-    metadata_exts: str = ""
-    rename_enabled: bool = True
-    media_info_enabled: bool = True
-    media_probe_enabled: bool = True
-    media_probe_timeout: int = 30
-    movie_dir_template: str = MOVIE_DIR_DEFAULT
-    movie_template: str = MOVIE_DEFAULT
-    tv_template: str = TV_DEFAULT
-    show_dir_template: str = SHOW_DIR_DEFAULT
-    naming_scope: str = "both"
-    notify_enabled: bool = True
-    library_notify: bool = True
-    strm_detail_notify: bool = True
-    emby_refresh: bool = True
-    nsfw_enabled: bool = False
-    nsfw_source_ids: str = ""
-    nsfw_exclusive: bool = False
-    nsfw_metatube_endpoint: str = ""
-    nsfw_metatube_token: str = ""
-    nsfw_category_name: str = "成人内容"
-    nsfw_strip_domains: str = ""
-    nsfw_timeout_seconds: int = 8
-    automatic_match_preset: str = "balanced"
-
-    @classmethod
-    def from_config(cls, target_dir_id: str = "") -> "OrganizeRules":
-        """读取 Web/TG/自动入库共用的正式整理配置。"""
-        return cls(
-            target_dir_id=str(target_dir_id or get("GY_ORGANIZE_TARGET_DIR", "0") or "0"),
-            add_kids=get_bool("GY_ORGANIZE_ADD_KIDS", False),
-            add_concert=get_bool("GY_ORGANIZE_ADD_CONCERT", False),
-            region_split=get_bool("GY_ORGANIZE_REGION_SPLIT", True),
-            year_split=get_bool("GY_ORGANIZE_YEAR_SPLIT", True),
-            small_file_mb=max(0, get_int("GY_ORGANIZE_SMALL_FILE_MB", 10)),
-            clean_empty=get_bool("GY_ORGANIZE_CLEAN_EMPTY", True),
-            conflict_strategy=max(1, min(get_int("GY_ORGANIZE_CONFLICT_STRATEGY", 1), 3)),
-            remux_first=get_bool("GY_ORGANIZE_REMUX_FIRST", True),
-            resolution_first=get_bool("GY_ORGANIZE_RESOLUTION_FIRST", True),
-            dolby_first=get_bool("GY_ORGANIZE_DOLBY_FIRST", True),
-            keep_multi_versions=get_bool("GY_ORGANIZE_KEEP_MULTI_VERSIONS", False),
-            keep_remux_variant=get_bool("GY_ORGANIZE_KEEP_REMUX_VARIANT", False),
-            recycle_replaced_enabled=get_bool("GY_ORGANIZE_RECYCLE_REPLACED_ENABLED", False),
-            link_strm=get_bool("GY_ORGANIZE_LINK_STRM", True),
-            video_exts=get("GY_ORGANIZE_VIDEO_EXTS", ""),
-            metadata_exts=get("GY_ORGANIZE_METADATA_EXTS", ""),
-            # 命名与媒体规格探测已统一为产品固定契约。旧环境变量继续允许
-            # 留在 user.env 中，但不再影响任何新任务或历史快照恢复。
-            rename_enabled=True,
-            media_info_enabled=True,
-            media_probe_enabled=True,
-            media_probe_timeout=30,
-            movie_dir_template=MOVIE_DIR_DEFAULT,
-            movie_template=MOVIE_DEFAULT,
-            tv_template=TV_DEFAULT,
-            show_dir_template=SHOW_DIR_DEFAULT,
-            naming_scope="both",
-            notify_enabled=get_bool("GY_ORGANIZE_NOTIFY_ENABLED", True),
-            library_notify=get_bool("GY_ORGANIZE_LIBRARY_NOTIFY", True),
-            strm_detail_notify=get_bool("GY_ORGANIZE_STRM_DETAIL_NOTIFY", True),
-            emby_refresh=get_bool("GY_ORGANIZE_EMBY_REFRESH", True),
-            nsfw_enabled=get_bool("GY_ORGANIZE_NSFW_ENABLED", False),
-            nsfw_source_ids=get("GY_ORGANIZE_NSFW_SOURCE_IDS", ""),
-            nsfw_exclusive=False,
-            nsfw_metatube_endpoint=get("GY_ORGANIZE_NSFW_METATUBE_ENDPOINT", ""),
-            nsfw_metatube_token=get("GY_ORGANIZE_NSFW_METATUBE_TOKEN", ""),
-            nsfw_category_name=get("GY_ORGANIZE_NSFW_CATEGORY_NAME", "成人内容") or "成人内容",
-            nsfw_strip_domains=get("GY_ORGANIZE_NSFW_STRIP_DOMAINS", ""),
-            nsfw_timeout_seconds=max(2, min(get_int("GY_ORGANIZE_NSFW_TIMEOUT_SECONDS", 8), 30)),
-            automatic_match_preset=normalize_automatic_match_preset(
-                get("GY_ORGANIZE_AUTOMATIC_MATCH_PRESET", "balanced")
-            ),
-        )
-
-    def selected_nsfw_source_ids(self) -> frozenset[str]:
-        """返回已配置的成人专用光鸭来源；异常配置按空集失败关闭。"""
-        from app.modules.organize_sources import normalize_organize_source_ids
-
-        source_ids, error = normalize_organize_source_ids(self.nsfw_source_ids)
-        if error:
-            return frozenset()
-        return frozenset(source_ids)
-
-    def for_source(self, source_id: str) -> "OrganizeRules":
-        """把全局规则收敛为单个光鸭来源的实际识别边界。
-
-        成人识别只有在来源被显式列入专用范围时才启用；选中的来源只走
-        MetaTube 精确番号链，未选来源完全禁用成人识别并保持普通 TMDB 链。
-        """
-        selected = str(source_id or "").strip() in self.selected_nsfw_source_ids()
-        active = bool(self.nsfw_enabled and selected)
-        return replace(self, nsfw_enabled=active, nsfw_exclusive=active)
-
-    def for_local_source(self, media_type: str) -> "OrganizeRules":
-        """把全局规则收敛为一个本地来源的实际识别边界。"""
-        selected = str(media_type or "").strip().lower() == "nsfw"
-        active = bool(self.nsfw_enabled and selected)
-        return replace(self, nsfw_enabled=active, nsfw_exclusive=active)
-
-
-def enforce_fixed_organize_rules(rules: OrganizeRules) -> OrganizeRules:
-    """覆盖已废弃的命名/探测配置，保证所有入口执行同一整理契约。"""
-    return replace(
-        rules,
-        rename_enabled=True,
-        media_info_enabled=True,
-        media_probe_enabled=True,
-        media_probe_timeout=30,
-        movie_dir_template=MOVIE_DIR_DEFAULT,
-        movie_template=MOVIE_DEFAULT,
-        tv_template=TV_DEFAULT,
-        show_dir_template=SHOW_DIR_DEFAULT,
-        naming_scope="both",
-    )
-
-
-_ORGANIZE_RULE_SERVER_ONLY_FIELDS = frozenset({"nsfw_metatube_token"})
-
-
-def organize_rules_snapshot(rules: OrganizeRules) -> dict[str, object]:
-    """生成可持久化/返回前端的规则快照，不包含服务端密钥。"""
-    payload = asdict(enforce_fixed_organize_rules(rules))
-    for field_name in _ORGANIZE_RULE_SERVER_ONLY_FIELDS:
-        payload.pop(field_name, None)
-    return payload
-
-
-def restore_organize_rules_snapshot(
-    snapshot: object, *, trusted_rules: OrganizeRules | None = None,
-) -> OrganizeRules:
-    """从非敏感快照恢复规则；服务端字段始终取当前可信配置。"""
-    if not isinstance(snapshot, dict):
-        raise ValueError("整理规则快照无效")
-    trusted = enforce_fixed_organize_rules(
-        trusted_rules if trusted_rules is not None else OrganizeRules.from_config()
-    )
-    values = asdict(trusted)
-    allowed_fields = set(OrganizeRules.__dataclass_fields__) - _ORGANIZE_RULE_SERVER_ONLY_FIELDS
-    for key in allowed_fields:
-        if key in snapshot:
-            values[key] = snapshot[key]
-    return enforce_fixed_organize_rules(OrganizeRules(**values))
-
-
-def organize_rules_snapshot_matches(snapshot: object, current_rules: OrganizeRules) -> bool:
-    """比较可执行规则；密钥轮换不复用历史值，而是使用当前服务端配置。"""
-    if not isinstance(snapshot, dict):
-        return False
-    normalized = {
-        key: value for key, value in snapshot.items()
-        if key not in _ORGANIZE_RULE_SERVER_ONLY_FIELDS
-    }
-    return normalized == organize_rules_snapshot(current_rules)
 
 class Organizer:
     def __init__(
