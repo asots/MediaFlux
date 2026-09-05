@@ -1428,6 +1428,12 @@ def _migrate_durable_handoffs_v25(conn: sqlite3.Connection) -> None:
             )
 
 
+def _migrate_strm_path_cleanup_v26(conn: sqlite3.Connection) -> None:
+    """仅增加迁移清理凭据，不改写现有 STRM 索引或媒体文件。"""
+    conn.execute('CREATE TABLE IF NOT EXISTS strm_path_cleanup (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    source TEXT NOT NULL,\n    file_id TEXT NOT NULL,\n    strm_path TEXT NOT NULL,\n    content_fingerprint TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    UNIQUE(source, file_id, strm_path, content_fingerprint)\n)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_strm_path_cleanup_source\n    ON strm_path_cleanup(source, id)')
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1454,4 +1460,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     22: _migrate_agent_kernel_session_epochs_v23,
     23: _migrate_agent_capability_closure_v24,
     24: _migrate_durable_handoffs_v25,
+    25: _migrate_strm_path_cleanup_v26,
 }

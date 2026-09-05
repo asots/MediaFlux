@@ -40,6 +40,7 @@ from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.logger import get_logger, redact_sensitive_text
 from app.modules.process_lock import CrossProcessLock
 from app.modules.strm_notifications import append_change, relative_change
+from app.modules.strm_recovery import reconcile_historical_strm, recover_pending_paths
 
 logger = get_logger(__name__)
 
@@ -1038,6 +1039,20 @@ def _install_video_candidate(
         and str(current.get("strm_path") or "") == str(expected)
     )
     repair_fingerprint = ""
+    if (
+        current and previous_path and previous_path != expected
+        and expected.is_file() and not target_owners
+        and not db.list_strm_path_owners(str(expected))
+        and _fingerprint_matches(previous_path, current["content_fingerprint"])
+    ):
+        expected_url = build_play_url(base_url, file.file_id, file.etag, file.size, file.name)
+        matches, fingerprint = (
+            _read_strm_state(expected, expected_url)
+            if expected.stat().st_size == len(expected_url.encode("utf-8"))
+            else (False, "")
+        )
+        if matches and fingerprint == current["content_fingerprint"]:
+            target_owners = [current]
     if expected.is_file() and indexed_target:
         # 同 file_id、同目标路径的索引足以证明这是 MediaFlux 管理的 STRM。
         # 指纹不一致表示文件被误改，应在完整/增量同步中自动修复；但仍记录
@@ -1856,6 +1871,15 @@ def _sync_strm_incremental_impl(
             completed += 1
             progress.emit("generate", completed, total_work, "精准更新 STRM")
 
+    if not stats["fallback_required"] and not stats["stopped"] and not stats["failed"]:
+        for kind, namespace in (("video", video_key), ("metadata", metadata_key)):
+            scoped = {str(change["file_id"]) for change in normalized.values() if change["kind"] == kind}
+            if scoped:
+                active_ids = {str(change["file_id"]) for change in upserts if change["kind"] == kind}
+                recover_pending_paths(
+                    namespace, strm_root, stats, valid_ids=active_ids, only_file_ids=scoped,
+                    should_stop=should_stop, on_refresh_paths=on_refresh_paths,
+                )
     stats["generate_elapsed_seconds"] = round(
         time.monotonic() - generate_started, 3
     )
@@ -2620,6 +2644,11 @@ def _sync_strm_impl(
                 stats["clean_skipped"] = bool(stats["clean_skipped"]) or bool(
                     cleanup.get("skipped")
                 )
+                for blocked_path in cleanup.get("blocked_paths", [])[:3]:
+                    _append_error_sample(
+                        stats, "清理旧 STRM", blocked_path,
+                        RuntimeError("文件归属校验或删除失败，已保留文件和索引；请核对内容及目录写入权限"),
+                    )
                 stats["cleaned"] += cleanup["cleaned"]
                 stats["empty_dirs_cleaned"] += cleanup["empty_dirs_cleaned"]
                 for removed_path in cleanup.get("removed_paths", []):
@@ -2648,12 +2677,33 @@ def _sync_strm_impl(
                         bool(stats["clean_skipped"])
                         or bool(metadata_cleanup.get("skipped"))
                     )
+                    for blocked_path in metadata_cleanup.get("blocked_paths", [])[:3]:
+                        _append_error_sample(
+                            stats, "清理旧元数据", blocked_path,
+                            RuntimeError("文件归属校验或删除失败，已保留文件和索引；请核对内容及目录写入权限"),
+                        )
                     stats["metadata_cleaned"] += metadata_cleanup["cleaned"]
                     stats["empty_dirs_cleaned"] += metadata_cleanup["empty_dirs_cleaned"]
                     for removed_path in metadata_cleanup.get("removed_paths", []):
                         _track_change(stats, "removed", removed_path, strm_root, on_refresh_paths=on_refresh_paths)
                     removed_dir_paths.update(metadata_cleanup.get("removed_dir_paths", []))
-                if clean_empty_dirs and not (should_stop and should_stop()):
+                if not stats["clean_skipped"]:
+                    recover_pending_paths(
+                        source_key, strm_root, stats, valid_ids=seen_ids,
+                        should_stop=should_stop, on_refresh_paths=on_refresh_paths,
+                    )
+                    if metadata and metadata_queue_cleanup_ready and not stats["clean_skipped"]:
+                        recover_pending_paths(
+                            metadata_source_key, strm_root, stats, valid_ids=metadata_seen_ids,
+                            should_stop=should_stop, on_refresh_paths=on_refresh_paths,
+                        )
+                if deferred_cleanup_actions is None:
+                    reconcile_historical_strm(
+                        strm_root, base_url,
+                        [{"id": source_dir_id, "rel_prefix": rel_prefix}], stats,
+                        should_stop=should_stop, on_refresh_paths=on_refresh_paths,
+                    )
+                if clean_empty_dirs and not stats["clean_skipped"] and not (should_stop and should_stop()):
                     empty_cleanup = clean_empty_strm_dirs(
                         strm_root, should_stop=should_stop
                     )
@@ -3510,6 +3560,7 @@ def clean_invalid_strm(
             blocked_paths.append(path_text)
             logger.debug("STRM 所有权校验阻止清理 type=%s", type(exc).__name__)
         except OSError as exc:
+            blocked_paths.append(path_text)
             logger.debug("清理无效 STRM 失败 type=%s", type(exc).__name__)
     db.delete_strm_index_ids(source_key, removed_ids)
 

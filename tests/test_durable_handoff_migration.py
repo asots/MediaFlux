@@ -20,7 +20,7 @@ class DurableHandoffMigrationTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(tokens), 2)
         self.assertTrue(all(len(token) == 32 for token in tokens))
         with db.get_conn() as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 25)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
             self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
             columns = {row[1]: row for row in conn.execute("PRAGMA table_info(organize_probe_queue)")}

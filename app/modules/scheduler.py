@@ -27,6 +27,7 @@ from app.modules.strm import (
     finalize_changed_paths, safe_path_component, sync_strm, sync_strm_incremental,
 )
 from app.modules.media_refresh import plan_refresh_targets
+from app.modules.strm_recovery import reconcile_historical_strm
 from app.modules.strm_notifications import append_change, build_strm_detail_messages, relative_change
 from app.notifier import NotificationEvent
 
@@ -1090,7 +1091,7 @@ class STRMScheduler:
             "error_samples": [], "changes": [], "omitted_count": 0,
             "changed_strm_paths": [], "changed_dirs": [], "changed_overflow_dirs": [],
             "changed_paths_omitted": 0,
-            "retired_sources": 0, "retired_blocked": 0,
+            "retired_sources": 0, "retired_blocked": 0, "recovery_pending": 0,
         }
 
     @staticmethod
@@ -1534,6 +1535,16 @@ class STRMScheduler:
             aggregate["changed_strm_paths"].append(str(path))
         for path in retirement.get("removed_dir_paths", []):
             append_change(aggregate, relative_change("removed_dir", path, strm_root or "/"))
+
+        if round_cleanup_safe:
+            reconcile_historical_strm(
+                strm_root, base_url, sources, aggregate, all_sources=active_ids_complete,
+                should_stop=self._stop_event.is_set, on_refresh_paths=refresh_path_sink,
+            )
+            if aggregate.get("clean_skipped"):
+                round_cleanup_safe = False
+            if aggregate.get("stopped"):
+                stopped = True
 
         cleanup_roots: list[Path] = []
         if round_cleanup_safe and strm_root:

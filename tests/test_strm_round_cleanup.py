@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from app.modules.scheduler import STRMScheduler
 
 
 class TestStrmRoundCleanup:
+    @pytest.fixture(autouse=True)
+    def isolate_historical_reconciliation(self):
+        # 本文件只测调度顺序，真实数据库/文件校准由 test_strm_move_recovery 覆盖。
+        with patch("app.modules.scheduler.reconcile_historical_strm") as reconcile:
+            self.reconcile = reconcile
+            yield
+
     def test_full_round_runs_shared_empty_directory_sweep_once(self):
         scheduler = STRMScheduler()
         sources = [

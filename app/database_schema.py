@@ -885,6 +885,20 @@ CREATE TABLE IF NOT EXISTS strm_index (
 
 CREATE INDEX IF NOT EXISTS idx_strm_index_path ON strm_index(strm_path);
 
+-- 索引迁移的旧路径凭据与新索引同事务提交，进程中断后仍可安全补删。
+CREATE TABLE IF NOT EXISTS strm_path_cleanup (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    strm_path TEXT NOT NULL,
+    content_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(source, file_id, strm_path, content_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_strm_path_cleanup_source
+    ON strm_path_cleanup(source, id);
+
+
 -- STRM 变化目标队列：整理产生的目标目录变化必须跨进程重启存活。
 -- pending 与 inflight 分离，保证 running 期间到达的新变化不会被本轮消费覆盖。
 CREATE TABLE IF NOT EXISTS strm_change_queue (

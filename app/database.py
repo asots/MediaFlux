@@ -43,7 +43,7 @@ _lock = threading.RLock()
 _wal_setup_lock = threading.Lock()
 _wal_mode_cache: dict[str, tuple[int, int, int]] = {}
 _configured_test_mode = False
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX = "上次进程在本地媒体写操作期间中断"
 _LOCAL_MEDIA_INTERRUPTED_PREWRITE_ERROR = (
@@ -277,6 +277,7 @@ from app.database_migrations import (  # noqa: E402,F401
     _migrate_agent_kernel_session_epochs_v23,
     _migrate_agent_capability_closure_v24,
     _migrate_durable_handoffs_v25,
+    _migrate_strm_path_cleanup_v26,
 )
 
 
@@ -2557,6 +2558,7 @@ from app.repositories.strm import (  # noqa: E402,F401
     count_strm_metadata_jobs,
     count_strm_refresh_paths,
     delete_strm_index_ids,
+    delete_strm_path_cleanup,
     enqueue_strm_change_targets,
     enqueue_strm_metadata_jobs,
     enqueue_strm_refresh_paths,
@@ -2568,6 +2570,8 @@ from app.repositories.strm import (  # noqa: E402,F401
     list_strm_index_by_prefix,
     list_strm_indexes_by_file_id,
     list_strm_installation_rows,
+    list_strm_path_cleanup,
+    list_strm_path_owners,
     list_strm_metadata_queue,
     list_strm_refresh_entries,
     merge_strm_changes,

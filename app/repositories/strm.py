@@ -19,6 +19,40 @@ def _database() -> "ModuleType":
     return database
 
 
+# 单条、批量与冲突替换使用相同 SQL，所有丢失旧索引的分支都保留凭据。
+_RECORD_PATHS = (
+    "INSERT OR IGNORE INTO strm_path_cleanup("
+    "source,file_id,strm_path,content_fingerprint,created_at) "
+    "SELECT source,file_id,strm_path,content_fingerprint,? FROM strm_index "
+    "WHERE source=? AND COALESCE(strm_path,'')<>'' AND content_fingerprint<>'' "
+)
+_RECORD_DISPLACED_PATH = _RECORD_PATHS + "AND file_id=? AND strm_path<>?"
+_UPSERT_STRM_INDEX = (
+    "INSERT INTO strm_index(source,file_id,etag,size,filename,strm_path,"
+    "content_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?) "
+    "ON CONFLICT(source,file_id) DO UPDATE SET "
+    "etag=excluded.etag,size=excluded.size,filename=excluded.filename,"
+    "strm_path=excluded.strm_path,content_fingerprint=excluded.content_fingerprint,"
+    "created_at=excluded.created_at"
+)
+
+
+def _delete_conflicting_indexes(
+    conn: sqlite3.Connection, source: str, conflicts: list[str], timestamp: str,
+) -> None:
+    values = list(dict.fromkeys(conflicts))
+    for start in range(0, len(values), 500):
+        chunk = values[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        conn.execute(
+            _RECORD_PATHS + f"AND file_id IN ({placeholders})", [timestamp, source, *chunk],
+        )
+        conn.execute(
+            f"DELETE FROM strm_index WHERE source=? AND file_id IN ({placeholders})",
+            [source, *chunk],
+        )
+
+
 def upsert_strm_index(
     source: str,
     file_id: str,
@@ -45,12 +79,10 @@ def upsert_strm_index(
             (source, file_id),
         ).fetchone()
         conn.execute(
-            "INSERT INTO strm_index(source,file_id,etag,size,filename,strm_path,"
-            "content_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(source,file_id) DO UPDATE SET "
-            "etag=excluded.etag,size=excluded.size,filename=excluded.filename,"
-            "strm_path=excluded.strm_path,content_fingerprint=excluded.content_fingerprint,"
-            "created_at=excluded.created_at",
+            _RECORD_DISPLACED_PATH, (database.now(), source, file_id, strm_path)
+        )
+        conn.execute(
+            _UPSERT_STRM_INDEX,
             (
                 source,
                 file_id,
@@ -62,12 +94,7 @@ def upsert_strm_index(
                 database.now(),
             ),
         )
-        if conflicts:
-            placeholders = ",".join("?" for _ in conflicts)
-            conn.execute(
-                f"DELETE FROM strm_index WHERE source=? AND file_id IN ({placeholders})",
-                [source, *conflicts],
-            )
+        _delete_conflicting_indexes(conn, source, conflicts, database.now())
         return str(previous["strm_path"] or "") if previous else ""
 
 
@@ -112,25 +139,19 @@ def upsert_strm_index_batch(
             all_conflicts.extend(conflicts)
 
     with database.get_conn() as conn:
-        conn.executemany(
-            "INSERT INTO strm_index(source,file_id,etag,size,filename,strm_path,"
-            "content_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(source,file_id) DO UPDATE SET "
-            "etag=excluded.etag,size=excluded.size,filename=excluded.filename,"
-            "strm_path=excluded.strm_path,content_fingerprint=excluded.content_fingerprint,"
-            "created_at=excluded.created_at",
-            records,
-        )
-        if all_conflicts:
-            unique_conflicts = list(dict.fromkeys(all_conflicts))
-            chunk_size = 500
-            for i in range(0, len(unique_conflicts), chunk_size):
-                chunk = unique_conflicts[i:i + chunk_size]
-                placeholders = ",".join("?" for _ in chunk)
-                conn.execute(
-                    f"DELETE FROM strm_index WHERE source=? AND file_id IN ({placeholders})",
-                    [source, *chunk],
-                )
+        if len({record[1] for record in records}) == len(records):
+            # 常见的唯一 ID 批次保持 executemany；不同 ID 之间没有读写依赖。
+            conn.executemany(
+                _RECORD_DISPLACED_PATH,
+                [(now_str, record[0], record[1], record[5]) for record in records],
+            )
+            conn.executemany(_UPSERT_STRM_INDEX, records)
+        else:
+            # 同 ID 连续改路径必须按顺序记旧值，不能丢失批次中的中间副本。
+            for record in records:
+                conn.execute(_RECORD_DISPLACED_PATH, (now_str, record[0], record[1], record[5]))
+                conn.execute(_UPSERT_STRM_INDEX, record)
+        _delete_conflicting_indexes(conn, source, all_conflicts, now_str)
 
 
 def list_strm_index(source: str = "guangya") -> list[sqlite3.Row]:
@@ -154,6 +175,37 @@ def list_strm_installation_rows(
             "UNION SELECT * FROM strm_index WHERE strm_path=? AND source=?",
             (str(source), str(file_id), str(strm_path), str(source)),
         ).fetchall()
+
+
+def list_strm_path_owners(strm_path: str) -> list[sqlite3.Row]:
+    """跨来源查询目标路径所有者，防止清理复用路径或其他来源的文件。"""
+    with _database().get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM strm_index WHERE strm_path=?", (str(strm_path),)
+        ).fetchall()
+
+
+def list_strm_path_cleanup(
+    source: str, *, after_id: int = 0, limit: int = 500,
+) -> list[sqlite3.Row]:
+    """按不可变 ID 分页；保留被所有权校验阻止的凭据而不阻塞后面的任务。"""
+    with _database().get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM strm_path_cleanup WHERE source=? AND id>? "
+            "ORDER BY id LIMIT ?", (str(source), int(after_id), max(1, min(int(limit), 1000))),
+        ).fetchall()
+
+
+def delete_strm_path_cleanup(ids: list[int]) -> None:
+    values = list(dict.fromkeys(int(value) for value in ids))
+    if not values:
+        return
+    with _database().get_conn() as conn:
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            conn.execute(
+                f"DELETE FROM strm_path_cleanup WHERE id IN ({','.join('?' for _ in batch)})", batch,
+            )
 
 
 def list_strm_indexes_by_file_id(file_id: str) -> list[sqlite3.Row]:
