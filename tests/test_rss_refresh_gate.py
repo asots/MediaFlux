@@ -4,10 +4,10 @@ import re
 import socket
 import threading
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
-from fastapi.testclient import TestClient
 import httpx
+from fastapi.testclient import TestClient
 
 from app import database as db
 from app.bot import handlers
@@ -128,7 +128,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
     def test_auto_download_consumes_all_pending_entries_in_bounded_batches(self):
         engine = RSSEngine()
         engine.refresh = Mock(return_value={"total": 25, "new": 25, "skipped": 0})
-        engine.download_many = Mock(side_effect=lambda ids: {
+        engine.download_many = Mock(side_effect=lambda ids, **kwargs: {
             "total": len(ids),
             "succeeded": [{"id": item} for item in ids],
             "existing": [],
@@ -147,7 +147,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             "app.modules.rss.db.list_rss_entries", return_value=rows,
         ), patch(
             "app.modules.rss.db.get_rss_subscription",
-            return_value={"exclude_keywords": ""},
+            return_value={"id": 7, "enabled": 1, "action": "download", "exclude_keywords": ""},
         ), patch(
             "app.modules.rss.db.skip_pending_rss_entries", return_value=0,
         ):
@@ -163,7 +163,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
     def test_auto_download_defers_backlog_beyond_one_round_budget(self):
         engine = RSSEngine()
         engine.refresh = Mock(return_value={"total": 105, "new": 105, "skipped": 0})
-        engine.download_many = Mock(side_effect=lambda ids: {
+        engine.download_many = Mock(side_effect=lambda ids, **kwargs: {
             "total": len(ids), "succeeded": list(ids), "existing": [],
             "unverified": [], "failed": [], "success_count": len(ids),
             "existing_count": 0, "unverified_count": 0, "failure_count": 0,
@@ -175,7 +175,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             "app.modules.rss.db.list_rss_entries", return_value=rows,
         ), patch(
             "app.modules.rss.db.get_rss_subscription",
-            return_value={"exclude_keywords": ""},
+            return_value={"id": 7, "enabled": 1, "action": "download", "exclude_keywords": ""},
         ), patch(
             "app.modules.rss.db.skip_pending_rss_entries", return_value=0,
         ):
@@ -423,6 +423,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
 
     def test_auto_download_preserves_unknown_outcome_summary(self):
         sid = self._subscription("auto-unknown")
+        db.update_rss_subscription(sid, {"action": "download"})
         engine = RSSEngine()
         with patch.object(
             engine, "refresh", return_value={"total": 1, "new": 1, "skipped": 0}
@@ -448,7 +449,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
 
     def test_auto_download_applies_current_exclude_keywords_to_existing_pending_rows(self):
         sid = self._subscription("historical-filter")
-        db.update_rss_subscription(sid, {"exclude_keywords": "合集"})
+        db.update_rss_subscription(sid, {"exclude_keywords": "合集", "action": "download"})
         # 历史普通条目可能没有 rss_entry_media；过滤时也必须补写可解释原因。
         excluded_id = db.add_rss_entry(
             sid,
@@ -478,7 +479,8 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             result = engine.auto_download(sid)
 
         self.assertEqual(result["filtered"], 1)
-        download_many.assert_called_once_with([accepted_id])
+        download_many.assert_called_once_with([accepted_id], auto_guard=ANY)
+        self.assertTrue(download_many.call_args.kwargs["auto_guard"]())
         excluded = db.get_rss_entry(int(excluded_id))
         self.assertEqual(excluded["status"], "skipped")
         self.assertTrue(excluded["processed"])

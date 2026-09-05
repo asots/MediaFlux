@@ -43,6 +43,36 @@ _TORRENT_DATA_CLEANUP_BATCH_SIZE = 500
 _STALE_SUBMISSION_MINUTES = 15
 
 
+class _QBTaskIndex:
+    """一轮快照只建一次索引；重复键保持原先线性匹配的首项语义。"""
+
+    def __init__(self, tasks: list):
+        self.by_hash: dict[str, TorrentTask] = {}
+        self.by_title: dict[str, TorrentTask] = {}
+        for task in tasks:
+            self.by_hash.setdefault(str(getattr(task, "hash", "") or "").lower(), task)
+            self.by_title.setdefault(str(getattr(task, "name", "") or "").strip().lower(), task)
+
+
+class _GYTaskIndex:
+    def __init__(self, tasks: list[dict]):
+        self.by_id: dict[str, dict] = {}
+        self.last_by_id: dict[str, dict] = {}
+        self.by_source: dict[str, dict] = {}
+        self.by_title: dict[str, dict] = {}
+        self.unique_target: dict[str, dict | None] = {}
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            self.by_id.setdefault(task_id, task)
+            # 旧批量任务归并使用字典推导，重复 ID 取最后项；单项匹配取首项。
+            self.last_by_id[task_id] = task
+            raw = task.get("raw") if isinstance(task.get("raw"), dict) else {}
+            self.by_source.setdefault(str(raw.get("url") or raw.get("sourceUrl") or ""), task)
+            self.by_title.setdefault(str(task.get("name") or "").strip().lower(), task)
+            target = str(task.get("target_dir") or "")
+            self.unique_target[target] = None if target in self.unique_target else task
+
+
 class DownloadTracker:
     def __init__(self) -> None:
         self._stop_event = threading.Event()
@@ -153,9 +183,11 @@ class DownloadTracker:
         )
         qb_available, qb_tasks = self._qb_tasks() if qb_needed else (False, [])
         gy_available, gy_tasks = self._gy_tasks() if gy_needed else (False, [])
+        qb_index = _QBTaskIndex(qb_tasks)
+        gy_index = _GYTaskIndex(gy_tasks)
         for row in rows:
             self._update_request(
-                row, qb_tasks, gy_tasks,
+                row, qb_index, gy_index,
                 qb_available=qb_available, gy_available=gy_available,
             )
         db.kv_set(_TRACKER_CURSOR_KEY, str(int(rows[-1]["id"])))
@@ -233,9 +265,11 @@ class DownloadTracker:
         return datetime.now() - started >= timedelta(seconds=cls._missing_grace_seconds())
 
     def _update_request(
-        self, row, qb_tasks: list, gy_tasks: list[dict], *,
+        self, row, qb_tasks: list | _QBTaskIndex, gy_tasks: list[dict] | _GYTaskIndex, *,
         qb_available: bool = True, gy_available: bool = True,
     ) -> None:
+        qb_tasks = qb_tasks if isinstance(qb_tasks, _QBTaskIndex) else _QBTaskIndex(qb_tasks)
+        gy_tasks = gy_tasks if isinstance(gy_tasks, _GYTaskIndex) else _GYTaskIndex(gy_tasks)
         request_id = int(row["id"])
         updates = {}
         backend_logs: list[tuple[str, str, float, str]] = []
@@ -293,7 +327,7 @@ class DownloadTracker:
         if gy_status in {"submitted", "downloading", "outcome_unknown"}:
             task_ids = self._parse_gy_task_ids(row)
             if task_ids and gy_available:
-                task_by_id = {str(task.get("id") or ""): task for task in gy_tasks}
+                task_by_id = gy_tasks.last_by_id
                 matched = [task_by_id[task_id] for task_id in task_ids if task_id in task_by_id]
                 expected_batches = max(len(task_ids), int(self._row_value(row, "gy_batch_count", 0) or 0))
                 states = [self._gy_task_state(task) for task in matched]
@@ -1188,61 +1222,35 @@ class DownloadTracker:
         return kind in {"http", "ed2k"} and not identity
 
     @classmethod
-    def _match_qb(cls, row, tasks):
+    def _match_qb(cls, row, tasks: list | _QBTaskIndex):
+        index = tasks if isinstance(tasks, _QBTaskIndex) else _QBTaskIndex(tasks)
         identity = str(cls._row_value(row, "qb_task_id", "") or "").lower()
         title = str(cls._row_value(row, "title", "") or "").strip().lower()
         if identity:
-            return next(
-                (task for task in tasks if task.hash.lower() == identity),
-                None,
-            )
-        # qB 4.x 对 HTTP/ED2K 成功响应可能没有 hash。标题并非稳定身份，
-        # 同名任务会串单，因此这两类请求必须转人工核对。
+            return index.by_hash.get(identity)
+        # HTTP/ED2K 的标题不是稳定身份，不允许因此认领另一个同名任务。
         if cls._qb_submission_has_no_stable_identity(row):
             return None
-        return next(
-            (task for task in tasks if title and task.name.strip().lower() == title),
-            None,
-        )
+        return index.by_title.get(title) if title else None
 
     @staticmethod
-    def _match_gy(row, tasks: list[dict]):
+    def _match_gy(row, tasks: list[dict] | _GYTaskIndex):
+        index = tasks if isinstance(tasks, _GYTaskIndex) else _GYTaskIndex(tasks)
         task_id = str(DownloadTracker._row_value(row, "gy_task_id", "") or "")
         title = str(DownloadTracker._row_value(row, "title", "") or "").strip().lower()
         source_value = str(DownloadTracker._row_value(row, "source_value", "") or "")
         target_dir = str(DownloadTracker._row_value(row, "gy_target_dir", "") or "")
         isolated = bool(int(DownloadTracker._row_value(row, "gy_isolated", 0) or 0))
         if task_id:
-            return next(
-                (task for task in tasks if str(task.get("id") or "") == task_id),
-                None,
-            )
-        # 自动下载每个请求使用唯一隔离目录；无 task ID 时只允许用该稳定身份认领，
-        # 不再回退 URL/标题，避免同磁力或同名任务串单。
+            return index.by_id.get(task_id)
+        # 隔离目录只能唯一匹配，不回退 URL/标题；无 ID 非隔离任务保留原优先级。
         if isolated:
-            if not target_dir:
-                return None
-            target_matches = [
-                task for task in tasks
-                if str(task.get("target_dir") or "") == target_dir
-            ]
-            return target_matches[0] if len(target_matches) == 1 else None
-        for task in tasks:
-            raw = task.get("raw") if isinstance(task.get("raw"), dict) else {}
-            raw_url = str(raw.get("url") or raw.get("sourceUrl") or "")
-            if source_value and raw_url == source_value:
-                return task
-        if target_dir:
-            target_matches = [
-                task for task in tasks
-                if str(task.get("target_dir") or "") == target_dir
-            ]
-            if len(target_matches) == 1:
-                return target_matches[0]
-        return next(
-            (task for task in tasks if title and str(task.get("name") or "").strip().lower() == title),
-            None,
-        )
+            return index.unique_target.get(target_dir) if target_dir else None
+        if source_value and source_value in index.by_source:
+            return index.by_source[source_value]
+        if target_dir and index.unique_target.get(target_dir) is not None:
+            return index.unique_target[target_dir]
+        return index.by_title.get(title) if title else None
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():

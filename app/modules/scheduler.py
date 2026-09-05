@@ -1215,6 +1215,21 @@ class STRMScheduler:
             if not result.get("ok"):
                 logger.warning(result.get("error", "STRM 定时任务触发失败"))
 
+    def _refresh_overflow_sink(self):
+        """固定本轮策略；生成阶段只持久化精确溢出目录，不唤醒消费者。"""
+        with self._state_lock:
+            options = dict(self._run_options)
+
+        def persist(paths: list[str]) -> None:
+            self._refresh_media_servers(
+                emby_enabled=options.get("emby_refresh_override"),
+                media_server_refresh_enabled=options.get("media_server_refresh_override"),
+                changed_dirs=paths,
+                persist_only=True,
+            )
+
+        return persist
+
     def _run_incremental_sources(
         self,
         sources: list[dict[str, str]],
@@ -1257,6 +1272,7 @@ class STRMScheduler:
         grouped: dict[str, list[dict]] = {}
         for item in changes:
             grouped.setdefault(str(item.get("source_id") or ""), []).append(dict(item))
+        refresh_path_sink = self._refresh_overflow_sink()
         aggregate = self._empty_stats()
         source_results: list[dict] = []
         stopped = False
@@ -1288,6 +1304,7 @@ class STRMScheduler:
                 source_name=source["name"],
                 on_progress=source_progress,
                 should_stop=self._stop_event.is_set,
+                on_refresh_paths=refresh_path_sink,
             )
             completed_count = sum(int(current.get(key, 0) or 0) for key in (
                 "generated", "skipped", "failed", "metadata_generated",
@@ -1337,6 +1354,7 @@ class STRMScheduler:
         active_ids_complete: bool = True,
     ) -> tuple[dict, list[dict], bool]:
         """执行全量来源扫描；局部来源模式禁止把未选来源判为退役。"""
+        refresh_path_sink = self._refresh_overflow_sink()
         aggregate = self._empty_stats()
         source_results: list[dict] = []
         _configured, source_error = configured_strm_source_plans()
@@ -1370,6 +1388,7 @@ class STRMScheduler:
                 source_name=source["name"],
                 on_progress=source_progress,
                 should_stop=self._stop_event.is_set,
+                on_refresh_paths=refresh_path_sink,
             )
             completed_count = sum(int(current.get(key, 0) or 0) for key in (
                 "generated", "skipped", "failed", "metadata_generated",
@@ -1435,14 +1454,23 @@ class STRMScheduler:
                     logger.exception(
                         "STRM 整轮清理提交失败 source=%s", result["id"]
                     )
+                if current.get("stopped"):
+                    stopped = True
                 if current.get("clean_skipped"):
                     round_cleanup_safe = False
                     with self._state_lock:
-                        self._source_runtime[result["_source_index"]]["status"] = "partial"
+                        self._source_runtime[result["_source_index"]]["status"] = (
+                            "stopped" if current.get("stopped") else "partial"
+                        )
                 self._set_progress(
                     "cleanup", cleanup_index, len(source_results),
                     f"已清理 {cleanup_index}/{len(source_results)} 个来源",
                 )
+                if stopped:
+                    # 延后清理也可能遇到 outbox 持久化失败；必须进入停止
+                    # 收尾的 persist-only 重试，不能走正常即时消费路径。
+                    round_cleanup_safe = False
+                    break
 
         if round_cleanup_safe and active_ids_complete:
             self._set_progress("retirement", 0, 1, "清理已移除的 STRM 来源")

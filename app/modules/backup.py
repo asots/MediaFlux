@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO, Iterator
 
 from app.runtime_paths import RuntimePaths, protected_runtime_output_target
 from app.version import BuildInfo
@@ -72,41 +72,57 @@ def _safe_read_regular(path: Path) -> bytes | None:
         os.close(descriptor)
 
 
-def _sqlite_backup_bytes(path: Path, source_connection: sqlite3.Connection | None = None) -> bytes | None:
+def _sqlite_backup_file(
+    path: Path,
+    target_path: Path,
+    source_connection: sqlite3.Connection | None = None,
+) -> bool:
+    """在线一致性快照留在私有临时目录，避免把整个库装入内存。"""
     if source_connection is None and not path.exists():
-        return None
-    with tempfile.TemporaryDirectory(prefix="mediaflux-sqlite-backup-") as temporary:
-        target_path = Path(temporary) / "mediaflux.db"
-        owns_source = source_connection is None
-        source = source_connection or sqlite3.connect(str(path), timeout=10)
+        return False
+    owns_source = source_connection is None
+    source = source_connection or sqlite3.connect(str(path), timeout=10)
+    target: sqlite3.Connection | None = None
+    try:
         target = sqlite3.connect(str(target_path))
-        try:
-            source.backup(target)
-            target.commit()
-        except sqlite3.Error as exc:
-            raise BackupError(f"SQLite 在线备份失败：{exc}") from exc
-        finally:
+        source.backup(target)
+        target.commit()
+    except sqlite3.Error as exc:
+        raise BackupError(f"SQLite 在线备份失败：{exc}") from exc
+    finally:
+        if target is not None:
             target.close()
-            if owns_source:
-                source.close()
-        return target_path.read_bytes()
+        if owns_source:
+            source.close()
+    return True
 
 
-def _database_schema_version(payload: bytes | None) -> int:
-    if payload is None:
+def _database_schema_version(path: Path | None) -> int:
+    if path is None:
         return 0
-    with tempfile.TemporaryDirectory(prefix="mediaflux-schema-") as temporary:
-        path = Path(temporary) / "database.db"
-        path.write_bytes(payload)
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            return int(connection.execute("PRAGMA user_version").fetchone()[0])
-        finally:
-            connection.close()
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        connection.close()
 
 
-def _entry(name: str, payload: bytes) -> dict[str, Any]:
-    return {"name": name, "size": len(payload), "sha256": _sha256_bytes(payload)}
+def _entry(name: str, path: Path) -> dict[str, Any]:
+    fingerprint = _regular_file_fingerprint(path)
+    if fingerprint is None:
+        raise BackupError(f"备份快照不存在：{name}")
+    return {"name": name, **fingerprint}
+
+
+def _copy_stream(source: BinaryIO, target: BinaryIO) -> dict[str, Any]:
+    """复制与哈希共享同一批有界字节，供校验暂存和事务恢复使用。"""
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(1024 * 1024):
+        target.write(chunk)
+        size += len(chunk)
+        digest.update(chunk)
+    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _default_backup_path(paths: RuntimePaths, reason: str) -> Path:
@@ -131,65 +147,67 @@ def _create_backup_unlocked(
         raise BackupError(f"备份输出不能覆盖 MediaFlux 运行文件：{protected.name}")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    payloads: dict[str, bytes] = {}
-    database_payload = _sqlite_backup_bytes(paths.database_path, source_connection)
-    if database_payload is not None:
-        payloads["database/mediaflux.db"] = database_payload
-    if include_settings:
-        env_payload = _safe_read_regular(paths.env_file)
-        if env_payload is not None:
-            payloads["config/user.env"] = env_payload
-        token_payload = _safe_read_regular(paths.token_file)
-        if token_payload is not None:
-            payloads["data/guangya_token.json"] = token_payload
-    if not payloads:
-        raise BackupError("没有可备份的 MediaFlux 数据")
+    with tempfile.TemporaryDirectory(prefix="mediaflux-sqlite-backup-") as temporary:
+        payloads: dict[str, Path] = {}
+        database_snapshot = Path(temporary) / "mediaflux.db"
+        if _sqlite_backup_file(paths.database_path, database_snapshot, source_connection):
+            payloads["database/mediaflux.db"] = database_snapshot
+        if include_settings:
+            for name, source in (("config/user.env", paths.env_file),
+                                 ("data/guangya_token.json", paths.token_file)):
+                payload = _safe_read_regular(source)
+                if payload is not None:
+                    staged = Path(temporary) / Path(name).name
+                    staged.write_bytes(payload)
+                    payloads[name] = staged
+        if not payloads:
+            raise BackupError("没有可备份的 MediaFlux 数据")
 
-    build = BuildInfo.current()
-    manifest = {
-        "format_version": BACKUP_FORMAT_VERSION,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "reason": str(reason or "manual")[:100],
-        "build": build.as_dict(),
-        "database_schema_version": _database_schema_version(database_payload),
-        "entries": [_entry(name, payloads[name]) for name in sorted(payloads)],
-    }
-    manifest_payload = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        build = BuildInfo.current()
+        manifest = {
+            "format_version": BACKUP_FORMAT_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "reason": str(reason or "manual")[:100],
+            "build": build.as_dict(),
+            "database_schema_version": _database_schema_version(payloads.get("database/mediaflux.db")),
+            "entries": [_entry(name, payloads[name]) for name in sorted(payloads)],
+        }
+        manifest_payload = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
-    temporary_name = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent, delete=False
-        ) as handle:
-            temporary_name = handle.name
-        temporary_path = Path(temporary_name)
+        temporary_name = ""
         try:
-            os.chmod(temporary_path, 0o600)
-        except OSError:
-            pass
-        with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("manifest.json", manifest_payload)
-            for name in sorted(payloads):
-                archive.writestr(name, payloads[name])
-        descriptor = os.open(
-            temporary_path,
-            os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary_path, destination)
-        try:
-            os.chmod(destination, 0o600)
-        except OSError:
-            pass
-        _fsync_directory(destination.parent)
-    except (OSError, zipfile.BadZipFile) as exc:
-        if temporary_name:
-            Path(temporary_name).unlink(missing_ok=True)
-        raise BackupError(str(exc)) from exc
-    return destination
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent, delete=False
+            ) as handle:
+                temporary_name = handle.name
+            temporary_path = Path(temporary_name)
+            try:
+                os.chmod(temporary_path, 0o600)
+            except OSError:
+                pass
+            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("manifest.json", manifest_payload)
+                for name in sorted(payloads):
+                    archive.write(payloads[name], name)
+            descriptor = os.open(
+                temporary_path,
+                os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0),
+            )
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary_path, destination)
+            try:
+                os.chmod(destination, 0o600)
+            except OSError:
+                pass
+            _fsync_directory(destination.parent)
+        except (OSError, zipfile.BadZipFile) as exc:
+            if temporary_name:
+                Path(temporary_name).unlink(missing_ok=True)
+            raise BackupError(str(exc)) from exc
+        return destination
 
 
 def create_backup(
@@ -224,88 +242,90 @@ def _safe_archive_name(name: str) -> str:
     return normalized
 
 
-def _verify_sqlite(payload: bytes) -> None:
-    with tempfile.TemporaryDirectory(prefix="mediaflux-backup-verify-") as temporary:
-        path = Path(temporary) / "mediaflux.db"
-        path.write_bytes(payload)
-        connection: sqlite3.Connection | None = None
-        try:
-            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-            foreign = connection.execute("PRAGMA foreign_key_check").fetchall()
-        except sqlite3.Error as exc:
-            raise BackupError(f"备份数据库无法读取：{exc}") from exc
-        finally:
-            if connection is not None:
-                connection.close()
-        if integrity != "ok" or foreign:
-            raise BackupError("备份数据库完整性校验失败")
-
-
-def _read_verified_backup(archive_path: Path) -> tuple[BackupManifest, dict[str, bytes]]:
-    """在单次归档打开期间完成验证并返回同一批已验证字节。"""
-    path = Path(archive_path).expanduser().resolve()
-    payloads: dict[str, bytes] = {}
+def _verify_sqlite(path: Path) -> int:
+    connection: sqlite3.Connection | None = None
     try:
-        with zipfile.ZipFile(path) as archive:
-            raw_names = archive.namelist()
-            if len(raw_names) != len(set(raw_names)):
-                raise BackupError("备份包含重复条目")
-            names = {_safe_archive_name(name) for name in raw_names}
-            if "manifest.json" not in names:
-                raise BackupError("备份缺少 manifest.json")
-            try:
-                manifest = json.loads(archive.read("manifest.json"))
-            except (ValueError, UnicodeError, KeyError) as exc:
-                raise BackupError("备份 manifest 无效") from exc
-            if not isinstance(manifest, dict) or manifest.get("format_version") != BACKUP_FORMAT_VERSION:
-                raise BackupError("不支持的备份格式版本")
-            entries = manifest.get("entries")
-            if not isinstance(entries, list) or not entries:
-                raise BackupError("备份 manifest 没有有效条目")
-            expected_names: set[str] = set()
-            database_payload: bytes | None = None
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    raise BackupError("备份 manifest 条目无效")
-                name = _safe_archive_name(str(entry.get("name") or ""))
-                if name == "manifest.json" or name in expected_names:
-                    raise BackupError("备份 manifest 条目重复")
-                expected_names.add(name)
-                payload = archive.read(name)
-                if len(payload) != int(entry.get("size", -1)):
-                    raise BackupError(f"备份条目大小不匹配：{name}")
-                if _sha256_bytes(payload) != str(entry.get("sha256") or ""):
-                    raise BackupError(f"备份条目哈希不匹配：{name}")
-                payloads[name] = payload
-                if name == "database/mediaflux.db":
-                    database_payload = payload
-            if names != expected_names | {"manifest.json"}:
-                raise BackupError("备份内容与 manifest 不一致")
-            if database_payload is not None:
-                _verify_sqlite(database_payload)
-                actual_schema_version = _database_schema_version(database_payload)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        foreign = connection.execute("PRAGMA foreign_key_check").fetchall()
+        schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    except sqlite3.Error as exc:
+        raise BackupError(f"备份数据库无法读取：{exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+    if integrity != "ok" or foreign:
+        raise BackupError("备份数据库完整性校验失败")
+    return schema_version
+
+
+@contextmanager
+def _verified_backup(archive_path: Path) -> Iterator[tuple[BackupManifest, dict[str, Path]]]:
+    """只打开归档一次，流式验证并暂存；恢复消费同一批已验证文件。"""
+    path = Path(archive_path).expanduser().resolve()
+    with tempfile.TemporaryDirectory(prefix="mediaflux-backup-verify-") as temporary:
+        payloads: dict[str, Path] = {}
+        try:
+            with zipfile.ZipFile(path) as archive:
+                raw_names = archive.namelist()
+                if len(raw_names) != len(set(raw_names)):
+                    raise BackupError("备份包含重复条目")
+                names = {_safe_archive_name(name) for name in raw_names}
+                if "manifest.json" not in names:
+                    raise BackupError("备份缺少 manifest.json")
                 try:
-                    manifest_schema_version = int(
-                        manifest.get("database_schema_version", -1)
-                    )
-                except (TypeError, ValueError) as exc:
-                    raise BackupError("备份数据库版本字段无效") from exc
-                if manifest_schema_version != actual_schema_version:
-                    raise BackupError("备份数据库版本与 manifest 不一致")
-    except FileNotFoundError as exc:
-        raise BackupError(f"备份文件不存在：{path}") from exc
-    except zipfile.BadZipFile as exc:
-        raise BackupError("备份不是有效 ZIP 文件") from exc
-    except (KeyError, TypeError, ValueError) as exc:
-        raise BackupError("备份 manifest 与归档内容不一致") from exc
-    return BackupManifest(manifest), payloads
+                    manifest = json.loads(archive.read("manifest.json"))
+                except (ValueError, UnicodeError, KeyError) as exc:
+                    raise BackupError("备份 manifest 无效") from exc
+                if not isinstance(manifest, dict) or manifest.get("format_version") != BACKUP_FORMAT_VERSION:
+                    raise BackupError("不支持的备份格式版本")
+                entries = manifest.get("entries")
+                if not isinstance(entries, list) or not entries:
+                    raise BackupError("备份 manifest 没有有效条目")
+                expected_names: set[str] = set()
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        raise BackupError("备份 manifest 条目无效")
+                    name = _safe_archive_name(str(entry.get("name") or ""))
+                    if name == "manifest.json" or name in expected_names:
+                        raise BackupError("备份 manifest 条目重复")
+                    expected_names.add(name)
+                    expected_size = int(entry.get("size", -1))
+                    if archive.getinfo(name).file_size != expected_size:
+                        raise BackupError(f"备份条目大小不匹配：{name}")
+                    staged = Path(temporary) / name
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(name) as source, staged.open("xb") as target:
+                        fingerprint = _copy_stream(source, target)
+                    if fingerprint["size"] != expected_size:
+                        raise BackupError(f"备份条目大小不匹配：{name}")
+                    if fingerprint["sha256"] != str(entry.get("sha256") or ""):
+                        raise BackupError(f"备份条目哈希不匹配：{name}")
+                    payloads[name] = staged
+                if names != expected_names | {"manifest.json"}:
+                    raise BackupError("备份内容与 manifest 不一致")
+                database_payload = payloads.get("database/mediaflux.db")
+                if database_payload is not None:
+                    actual_schema_version = _verify_sqlite(database_payload)
+                    try:
+                        manifest_schema_version = int(manifest.get("database_schema_version", -1))
+                    except (TypeError, ValueError) as exc:
+                        raise BackupError("备份数据库版本字段无效") from exc
+                    if manifest_schema_version != actual_schema_version:
+                        raise BackupError("备份数据库版本与 manifest 不一致")
+        except FileNotFoundError as exc:
+            raise BackupError(f"备份文件不存在：{path}") from exc
+        except zipfile.BadZipFile as exc:
+            raise BackupError("备份不是有效 ZIP 文件") from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BackupError("备份 manifest 与归档内容不一致") from exc
+        yield BackupManifest(manifest), payloads
 
 
 def verify_backup(archive_path: Path) -> BackupManifest:
     """验证条目白名单、哈希和 SQLite 完整性，不触碰运行数据。"""
-    manifest, _payloads = _read_verified_backup(archive_path)
-    return manifest
+    with _verified_backup(archive_path) as (manifest, _payloads):
+        return manifest
 
 
 _RESTORE_JOURNAL_VERSION = 1
@@ -393,9 +413,14 @@ def _same_fingerprint(actual: dict[str, Any] | None, expected: dict[str, Any] | 
     return actual is not None and expected is not None and actual == expected
 
 
-def _write_private_file(path: Path, payload: bytes) -> None:
+def _write_private_file(path: Path, payload: bytes | Path) -> dict[str, Any]:
     with path.open("xb") as handle:
-        handle.write(payload)
+        if isinstance(payload, Path):
+            with payload.open("rb") as source:
+                fingerprint = _copy_stream(source, handle)
+        else:
+            handle.write(payload)
+            fingerprint = _fingerprint(payload)
         handle.flush()
         os.fsync(handle.fileno())
     try:
@@ -403,6 +428,7 @@ def _write_private_file(path: Path, payload: bytes) -> None:
     except OSError:
         pass
     _fsync_directory(path.parent)
+    return fingerprint
 
 
 def _validate_transaction_id(value: Any) -> str:
@@ -715,7 +741,7 @@ def recover_pending_restore(
 
 def _transactional_restore_files(
     paths: RuntimePaths,
-    files: dict[str, tuple[Path, bytes]],
+    files: dict[str, tuple[Path, Path]],
 ) -> None:
     transaction_id = uuid.uuid4().hex
     entries: list[dict[str, Any]] = []
@@ -728,13 +754,13 @@ def _transactional_restore_files(
             temporary, backup = _restore_artifacts(target, transaction_id)
             if _regular_file_fingerprint(temporary) is not None or _regular_file_fingerprint(backup) is not None:
                 raise BackupError(f"恢复事务临时文件已存在：{target}")
-            _write_private_file(temporary, payload)
             staged.append(temporary)
+            new_fingerprint = _write_private_file(temporary, payload)
             entries.append({
                 "name": name,
                 "had_target": old is not None,
                 "old": old,
-                "new": _fingerprint(payload),
+                "new": new_fingerprint,
             })
         journal = {
             "version": _RESTORE_JOURNAL_VERSION,
@@ -783,28 +809,28 @@ def restore_backup(paths: RuntimePaths, archive_path: Path) -> BackupManifest:
     """完整验证后事务替换数据库、配置与 token。调用方必须先停止服务。"""
     with _offline_restore_guard(paths):
         _recover_pending_restore_unlocked(paths)
-        manifest, verified_payloads = _read_verified_backup(archive_path)
-        database_payload = verified_payloads.get("database/mediaflux.db")
-        if database_payload is None:
-            raise BackupError("完整恢复要求备份包含数据库")
-        # 不能只信任 manifest；必须以已经完成哈希与完整性校验的数据库
-        # payload 为准，避免降级版本恢复成功后把服务留在无法启动的状态。
-        from app.database import SCHEMA_VERSION
+        with _verified_backup(archive_path) as (manifest, verified_payloads):
+            database_payload = verified_payloads.get("database/mediaflux.db")
+            if database_payload is None:
+                raise BackupError("完整恢复要求备份包含数据库")
+            # 不能只信任 manifest；必须以已经完成哈希与完整性校验的数据库
+            # payload 为准，避免降级版本恢复成功后把服务留在无法启动的状态。
+            from app.database import SCHEMA_VERSION
 
-        backup_schema_version = _database_schema_version(database_payload)
-        if backup_schema_version > SCHEMA_VERSION:
-            raise BackupError(
-                "备份数据库版本 "
-                f"{backup_schema_version} 高于当前程序支持的 {SCHEMA_VERSION}，"
-                "已拒绝降级恢复"
-            )
-        mapping = _restore_mapping(paths)
-        files = {
-            str(entry["name"]): (
-                mapping[str(entry["name"])],
-                verified_payloads[str(entry["name"])],
-            )
-            for entry in manifest.entries
-        }
-        _transactional_restore_files(paths, files)
-        return manifest
+            backup_schema_version = _database_schema_version(database_payload)
+            if backup_schema_version > SCHEMA_VERSION:
+                raise BackupError(
+                    "备份数据库版本 "
+                    f"{backup_schema_version} 高于当前程序支持的 {SCHEMA_VERSION}，"
+                    "已拒绝降级恢复"
+                )
+            mapping = _restore_mapping(paths)
+            files = {
+                str(entry["name"]): (
+                    mapping[str(entry["name"])],
+                    verified_payloads[str(entry["name"])],
+                )
+                for entry in manifest.entries
+            }
+            _transactional_restore_files(paths, files)
+            return manifest

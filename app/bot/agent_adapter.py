@@ -344,10 +344,9 @@ def _preview_lines(
 
 
 def _effect_result_text(view: TurnView) -> str:
-    return format_public_result(
-        view.effect_result,
-        fallback="操作已完成并通过写后校验。",
-    )
+    if not view.effect_result:
+        return "执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。"
+    return format_public_result(view.effect_result, fallback="操作已结束。")
 
 
 def _turn_text(view: TurnView) -> str:
@@ -362,6 +361,12 @@ def _turn_text(view: TurnView) -> str:
     if view.status == "cancelled":
         return "已停止本次任务。"
     if view.status == "failed":
+        if view.effect_result:
+            return format_public_result(
+                {**view.effect_result, "ok": False,
+                 "error": view.effect_result.get("error") or view.error_message},
+                fallback=view.error_message or "确认执行未能完成。",
+            )
         return _safe_text(view.error_message or "Agent 暂时无法完成该请求。")
     if view.status == "approval_required":
         return "等待确认。"

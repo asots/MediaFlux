@@ -317,7 +317,7 @@ class BackupTests(unittest.TestCase):
             database_write_started = threading.Event()
             config_finished = threading.Event()
             archive_paths: list[Path] = []
-            original_snapshot = backup_module._sqlite_backup_bytes
+            original_snapshot = backup_module._sqlite_backup_file
 
             def slow_snapshot(*args, **kwargs):
                 snapshot_started.set()
@@ -349,7 +349,7 @@ class BackupTests(unittest.TestCase):
                 ), patch.object(
                     app_config, "_STARTUP_ENV_OVERRIDES", frozenset()
                 ), patch.object(
-                    backup_module, "_sqlite_backup_bytes", side_effect=slow_snapshot
+                    backup_module, "_sqlite_backup_file", side_effect=slow_snapshot
                 ):
                     backup_thread = threading.Thread(target=run_backup)
                     backup_thread.start()

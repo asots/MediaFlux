@@ -771,9 +771,15 @@
         return scope.childElementCount ? scope : null;
     }
 
+    const unconfirmedEffectMessage = '执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。';
+
+    function hasEffectResult(result) {
+        return result && typeof result === 'object' && !Array.isArray(result) && Object.keys(result).length > 0;
+    }
+
     function formatEffectResult(result) {
-        const summary = publicSummary(result) || '操作已完成并通过写后校验。';
-        if (!result || typeof result !== 'object') return `✅ ${summary}`;
+        if (!hasEffectResult(result)) return `⚠️ ${unconfirmedEffectMessage}`;
+        const summary = publicSummary(result) || '操作已结束。';
         const status = String(result.status || '').toLowerCase();
         const iconPrefix = result.ok === false || ['failed', 'error'].includes(status)
             ? '❌'
@@ -971,7 +977,9 @@
             turn.effectResult = payload.result || {};
             break;
         case 'effect.failed':
-            turn.effectError = payload.message || '确认执行失败。';
+            turn.effectError = hasEffectResult(payload.result)
+                ? formatEffectResult({...payload.result, ok: false, error: payload.result.error || payload.message})
+                : payload.message || '确认执行失败。';
             break;
         case 'turn.completed':
             if (payload.status === 'success') finalizeAnswer(turn, payload.answer || '');
@@ -980,7 +988,7 @@
             }
             break;
         case 'turn.failed':
-            finalizeError(turn, payload.message || turn.effectError || 'Agent 暂时无法完成该请求。');
+            finalizeError(turn, turn.effectError || payload.message || 'Agent 暂时无法完成该请求。');
             break;
         case 'turn.cancelled':
             finalizeError(turn, '本次任务已停止。', {cancelled: true});
@@ -1138,6 +1146,10 @@
         setBusy(true);
         const controller = new AbortController();
         const requestId = createId('confirm');
+        let result = null;
+        let effectTerminal = '';
+        let failure = '';
+        let transportError = '';
         try {
             const response = await fetch('/api/agent/actions/confirm', {
                 method: 'POST',
@@ -1150,18 +1162,40 @@
                 }),
                 signal: controller.signal,
             });
-            let result = {};
-            let error = '';
             await readEventStream(response, (event) => {
-                if (event.type === 'effect.completed') result = event.payload?.result || {};
-                if (event.type === 'effect.failed' || event.type === 'turn.failed') {
-                    error = event.payload?.message || error;
+                const payload = event.payload || {};
+                if (event.type === 'effect.completed') {
+                    effectTerminal = 'completed';
+                    result = payload.result;
+                    failure = '';
+                } else if (event.type === 'effect.failed') {
+                    effectTerminal = 'failed';
+                    result = payload.result;
+                    failure = payload.message || '确认执行未能完成。';
+                } else if (event.type === 'turn.failed' && effectTerminal !== 'failed') {
+                    failure = payload.message || '确认执行未能完成。';
+                } else if (event.type === 'turn.cancelled' && !effectTerminal) {
+                    failure = payload.reason || unconfirmedEffectMessage;
                 }
             });
-            replaceApprovalWithResult(card, error || formatEffectResult(result), {error: Boolean(error)});
         } catch (error) {
-            replaceApprovalWithResult(card, error?.message || '确认执行失败，请重新查询状态。', {error: true});
+            transportError = error?.message || '事件流中断';
         } finally {
+            // 只有可信的 effect 终态可确认写入；EOF/缺失 DTO 不能补成成功。
+            // 已收到的业务终态优先于后续传输错误，失败 DTO 优先于笼统 turn.failed。
+            const completed = effectTerminal === 'completed' && hasEffectResult(result);
+            const failed = effectTerminal === 'failed' || Boolean(failure);
+            let text = unconfirmedEffectMessage;
+            if (effectTerminal === 'failed' && hasEffectResult(result)) {
+                text = formatEffectResult({...result, ok: false, error: result.error || failure});
+            } else if (failed) {
+                text = failure;
+            } else if (completed) {
+                text = formatEffectResult(result);
+            } else if (transportError) {
+                text += `\n${transportError}`;
+            }
+            replaceApprovalWithResult(card, text, {error: failed || !completed || result?.ok === false});
             setBusy(false);
             refreshSessions({quiet: true});
         }

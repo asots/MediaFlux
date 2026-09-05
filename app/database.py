@@ -2567,6 +2567,7 @@ from app.repositories.strm import (  # noqa: E402,F401
     list_strm_index,
     list_strm_index_by_prefix,
     list_strm_indexes_by_file_id,
+    list_strm_installation_rows,
     list_strm_metadata_queue,
     list_strm_refresh_entries,
     merge_strm_changes,

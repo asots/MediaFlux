@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 import unicodedata
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -213,6 +214,10 @@ def rss_subscription_refresh_revision(subscription) -> str:
         "parser": str(value("parser", "") or ""),
         "exclude_keywords": str(value("exclude_keywords", "") or ""),
         "action": str(value("action", "") or ""),
+        "download_method": str(value("download_method", "") or ""),
+        "qb_save_path": str(value("qb_save_path", "") or ""),
+        "gy_target_dir": str(value("gy_target_dir", "") or ""),
+        "gy_target_dir_name": str(value("gy_target_dir_name", "") or ""),
         "media_tmdb_id": str(value("media_tmdb_id", "") or ""),
         "media_default_season": int(value("media_default_season", 1)),
         "skip_existing_episodes": int(value("skip_existing_episodes", 0) or 0),
@@ -805,10 +810,13 @@ class RSSEngine:
         *,
         entry_already_claimed: bool = False,
         qb_runtime_config: dict | None = None,
+        auto_guard: Callable[[], bool] | None = None,
     ) -> dict:
         """将单条 RSS 下载统一接入 download_request / DownloadTracker。"""
         if not entry:
             return {"error": "条目不存在", "ok": False}
+        if auto_guard is not None and not auto_guard():
+            return {"ok": False, "cancelled": True, "error": RSS_REFRESH_CONFLICT_ERROR}
 
         entry_id = int(entry["id"])
         method = self._entry_method(entry)
@@ -839,6 +847,10 @@ class RSSEngine:
                 "infohash": infohash,
                 "already_processed": True,
             }
+        # 自动任务在真正领取前重新读取配置；手动入口不传 guard，保留暂停后
+        # 显式下载能力。已经开始的外部写入不能因后续暂停而释放防重状态。
+        if auto_guard is not None and not auto_guard():
+            return {"ok": False, "cancelled": True, "error": RSS_REFRESH_CONFLICT_ERROR}
         if not entry_already_claimed and not db.claim_rss_entry(entry_id):
             return {"error": "条目正在提交或已被处理", "ok": False, "method": method}
 
@@ -994,13 +1006,14 @@ class RSSEngine:
         """下载单条条目并建立可持续跟踪的统一下载请求。"""
         return self._download_entry(db.get_rss_entry(entry_id))
 
-    def download_many(self, entry_ids: list[int]) -> dict:
+    def download_many(self, entry_ids: list[int], *, auto_guard: Callable[[], bool] | None = None) -> dict:
         ids = list(dict.fromkeys(int(item) for item in entry_ids))[:_RSS_DOWNLOAD_BATCH_SIZE]
         entries = [db.get_rss_entry(entry_id) for entry_id in ids]
         succeeded: list[dict] = []
         existing: list[dict] = []
         unverified: list[dict] = []
         failed: list[dict] = []
+        cancelled: list[dict] = []
         jobs = list(enumerate(zip(ids, entries, strict=True)))
         groups: dict[str, list[tuple[int, tuple[int, object]]]] = {}
         for position, job in jobs:
@@ -1025,7 +1038,7 @@ class RSSEngine:
             # 相同资源保持顺序；不同资源最多四路提交。统一 request_key 在 DB
             # 内提供跨订阅、跨入口幂等，不再维护 RSS 专属下载后端 claim。
             return [
-                (position, entry_id, self._download_entry(entry))
+                (position, entry_id, self._download_entry(entry, auto_guard=auto_guard))
                 for position, (entry_id, entry) in group
             ]
 
@@ -1051,7 +1064,9 @@ class RSSEngine:
                 "infohash": result.get("infohash") or "",
                 "request_id": int(result.get("request_id") or 0),
             }
-            if result.get("existing"):
+            if result.get("cancelled"):
+                cancelled.append(item)
+            elif result.get("existing"):
                 existing.append(item)
             elif result.get("unverified") and result.get("ok"):
                 unverified.append(item)
@@ -1070,6 +1085,7 @@ class RSSEngine:
         )
         return {
             "total": len(ids),
+            **({"cancelled_count": len(cancelled)} if cancelled else {}),
             "succeeded": succeeded,
             "existing": existing,
             "unverified": unverified,
@@ -1166,9 +1182,32 @@ class RSSEngine:
 
     def auto_download(self, sub_id: int, *, expected_revision: str = "") -> dict:
         """刷新后自动下载所有 pending 条目。"""
-        refreshed = self.refresh(sub_id, expected_revision=expected_revision)
+        subscription = db.get_rss_subscription(sub_id)
+        if subscription is None:
+            return {"error": "订阅项不存在", "cancelled": True}
+        revision = expected_revision or rss_subscription_refresh_revision(subscription)
+        # refresh 自己写 last_refreshed_at 会带动 updated_at。确认入口仍检查完整
+        # revision；持续提交栅栏比较配置内容，排除本轮统计写入造成的伪冲突。
+        auto_revision = rss_subscription_refresh_revision({**dict(subscription), "updated_at": ""})
+
+        def auto_guard():
+            current = db.get_rss_subscription(sub_id)
+            return bool(
+                current is not None
+                and int(current["enabled"] or 0)
+                and str(current["action"] or "") == "download"
+                and secrets.compare_digest(
+                    rss_subscription_refresh_revision({**dict(current), "updated_at": ""}), auto_revision,
+                )
+            )
+
+        if not auto_guard():
+            return {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True}
+        refreshed = self.refresh(sub_id, expected_revision=revision)
         if refreshed.get("error"):
             return refreshed
+        if not auto_guard():
+            return {"refresh": refreshed, "error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True}
         rows = db.list_rss_entries(
             sub_id=sub_id, status="pending", order="received_desc"
         )
@@ -1209,10 +1248,14 @@ class RSSEngine:
         # 自动订阅必须消费本轮全部 pending，不能把 API 上限误当成业务上限。
         processed = 0
         for offset in range(0, len(ids), _RSS_DOWNLOAD_BATCH_SIZE):
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= deadline or not auto_guard():
                 break
-            batch = self.download_many(ids[offset:offset + _RSS_DOWNLOAD_BATCH_SIZE])
-            processed += len(ids[offset:offset + _RSS_DOWNLOAD_BATCH_SIZE])
+            batch = self.download_many(
+                ids[offset:offset + _RSS_DOWNLOAD_BATCH_SIZE], auto_guard=auto_guard,
+            )
+            processed += len(ids[offset:offset + _RSS_DOWNLOAD_BATCH_SIZE]) - int(
+                batch.get("cancelled_count") or 0
+            )
             for key in ("succeeded", "existing", "unverified", "failed"):
                 result[key].extend(batch.get(key) or [])
             for key in (
@@ -1228,6 +1271,9 @@ class RSSEngine:
         )
         return {
             "refresh": refreshed,
+            # 有已开始的提交时必须保留真实失败/未知结果摘要，不能用 conflict
+            # 抢占 scheduler 的人工核验告警分支。未开始任何提交才是整轮冲突。
+            **({"cancelled": True, "conflict": processed == 0} if not auto_guard() else {}),
             "downloaded": result["success_count"],
             "existing": result["existing_count"],
             "unverified": result["unverified_count"],

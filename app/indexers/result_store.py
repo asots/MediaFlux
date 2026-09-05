@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import heapq
 import re
 import secrets
 import threading
@@ -39,7 +40,8 @@ class IndexerResultStore:
         self.max_entries = int(max_entries)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._entries: OrderedDict[str, _StoredEntry] = OrderedDict()
-        self._expired_ids: set[str] = set()
+        self._expired_ids: OrderedDict[str, None] = OrderedDict()
+        self._expiry_heap: list[tuple[datetime, str]] = []
         self._lock = threading.RLock()
 
     def put(self, item: IndexerItem) -> str:
@@ -49,11 +51,8 @@ class IndexerResultStore:
             self._prune_expired(now)
             while len(self._entries) >= self.max_entries:
                 evicted_id, _ = self._entries.popitem(last=False)
-                self._expired_ids.discard(evicted_id)
-            self._entries[result_id] = _StoredEntry(
-                item=copy.deepcopy(item),
-                expires_at=now + timedelta(seconds=self.ttl_seconds),
-            )
+                self._expired_ids.pop(evicted_id, None)
+            self._store_entry(result_id, item, now)
         return result_id
 
     def restore(self, result_id: str, item: IndexerItem) -> str:
@@ -68,13 +67,10 @@ class IndexerResultStore:
             self._prune_expired(now)
             while token not in self._entries and len(self._entries) >= self.max_entries:
                 evicted_id, _ = self._entries.popitem(last=False)
-                self._expired_ids.discard(evicted_id)
-            self._entries[token] = _StoredEntry(
-                item=copy.deepcopy(item),
-                expires_at=now + timedelta(seconds=self.ttl_seconds),
-            )
+                self._expired_ids.pop(evicted_id, None)
+            self._store_entry(token, item, now)
             self._entries.move_to_end(token)
-            self._expired_ids.discard(token)
+            self._expired_ids.pop(token, None)
         return token
 
     def get(self, result_id: str) -> IndexerItem:
@@ -90,14 +86,33 @@ class IndexerResultStore:
                 raise IndexerResultNotFound()
             if entry.expires_at <= now:
                 self._entries.pop(token, None)
-                self._expired_ids.add(token)
+                self._remember_expired(token)
                 raise IndexerResultExpired()
             return copy.deepcopy(entry.item)
 
+    def _store_entry(self, token: str, item: IndexerItem, now: datetime) -> None:
+        entry = _StoredEntry(copy.deepcopy(item), now + timedelta(seconds=self.ttl_seconds))
+        self._entries[token] = entry
+        heapq.heappush(self._expiry_heap, (entry.expires_at, token))
+        # restore/容量淘汰留下的旧节点惰性清理；最多 2N，重建成本摊到此前
+        # 至少 N 次写入。TTL/时钟倒退不要求 OrderedDict 按到期时间有序。
+        if len(self._expiry_heap) > 2 * self.max_entries:
+            self._expiry_heap = [
+                (stored.expires_at, result_id) for result_id, stored in self._entries.items()
+            ]
+            heapq.heapify(self._expiry_heap)
+
+    def _remember_expired(self, token: str) -> None:
+        self._expired_ids[token] = None
+        self._expired_ids.move_to_end(token)
+        while len(self._expired_ids) > self.max_entries:
+            self._expired_ids.popitem(last=False)
+
     def _prune_expired(self, now: datetime) -> None:
-        expired = [result_id for result_id, entry in self._entries.items() if entry.expires_at <= now]
-        for result_id in expired:
-            self._entries.pop(result_id, None)
-            self._expired_ids.add(result_id)
-        if len(self._expired_ids) > self.max_entries:
-            self._expired_ids = set(list(self._expired_ids)[-self.max_entries :])
+        while self._expiry_heap and self._expiry_heap[0][0] <= now:
+            expires_at, token = heapq.heappop(self._expiry_heap)
+            entry = self._entries.get(token)
+            # 原 ID 恢复后有了新 TTL，旧节点不可误删新值。
+            if entry is not None and entry.expires_at == expires_at:
+                self._entries.pop(token)
+                self._remember_expired(token)

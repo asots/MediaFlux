@@ -145,7 +145,10 @@ def _parent_path_text(path: str) -> str:
     return str(parent)
 
 
-def _record_changed_path(stats: dict, target: object) -> None:
+def _record_changed_path(
+    stats: dict, target: object,
+    *, on_refresh_paths: Callable[[list[str]], object] | None = None,
+) -> None:
     paths = stats.setdefault("changed_strm_paths", [])
     if not isinstance(paths, list):
         return
@@ -158,22 +161,41 @@ def _record_changed_path(stats: dict, target: object) -> None:
         ) + 1
         overflow_dirs = stats.setdefault("changed_overflow_dirs", [])
         parent = _parent_path_text(path)
-        if (
-            isinstance(overflow_dirs, list)
-            and parent
-            and parent not in overflow_dirs
-            and len(overflow_dirs) < _MAX_TRACKED_OVERFLOW_DIRS
-        ):
-            overflow_dirs.append(parent)
+        if not isinstance(overflow_dirs, list):
+            raise ValueError("STRM 刷新目录集合无效")
+        if parent in overflow_dirs:
+            return
+        overflow_dirs.append(parent)
+        if len(overflow_dirs) > _MAX_TRACKED_OVERFLOW_DIRS:
+            # 精确执行意图独立于展示预算；不猜库根、不丢后续独立媒体库。
+            # scheduler 注入本轮策略感知的 persist-only sink（禁用/Emby/停止）。
+            # 无回调的旧调用没有本轮策略；必须停止并保留批次，禁止自行
+            # 猜测 provider/刷新开关，或把这些路径提前交给后台消费者。
+            try:
+                if on_refresh_paths is None:
+                    raise RuntimeError("STRM 刷新执行预算耗尽，但调用者未提供刷新策略")
+                on_refresh_paths(list(overflow_dirs))
+            except Exception as exc:
+                # 保留尚未交接的整个批次；本来源下一项前停止，避免继续落盘
+                # 堆积无界内存。收尾仍可从 changed_dirs 重试这批确切变化。
+                stats["stopped"] = True
+                stats["stop_stage"] = "refresh-persist"
+                stats["clean_skipped"] = True
+                logger.warning("STRM 刷新意图持久化失败，停止继续生成 type=%s", type(exc).__name__)
+            else:
+                overflow_dirs.clear()
         return
     paths.append(path)
 
 
-def _track_change(stats: dict, action: str, target, strm_root) -> None:
-    """记录展示用变化，同时保留真实 STRM 路径供精准刷新使用。"""
+def _track_change(
+    stats: dict, action: str, target, strm_root,
+    *, on_refresh_paths: Callable[[list[str]], object] | None = None,
+) -> None:
+    """记录有界展示变化；执行路径溢出时交给策略感知的持久化回调。"""
     append_change(stats, relative_change(action, target, strm_root))
     if action != "removed_dir":
-        _record_changed_path(stats, target)
+        _record_changed_path(stats, target, on_refresh_paths=on_refresh_paths)
 
 
 @dataclass(frozen=True)
@@ -838,6 +860,10 @@ def prepare_metadata_download(
                         if downloaded > byte_limit:
                             raise ValueError("元数据实际下载内容超过大小上限")
                         fh.write(chunk)
+            if declared_file_size and downloaded != declared_file_size:
+                # HTTP framing 只保证响应自身完整，不保证它是云端声明的对象。
+                # 作为可重试内容错误处理：不发布临时文件，重新取直链后重试。
+                raise RuntimeError("元数据实际下载大小与云端对象不一致")
             return PreparedMetadataDownload(
                 target=target,
                 temp=temp,
@@ -1255,7 +1281,9 @@ def commit_strm_metadata_job(
     expected = _metadata_target(remote, rel_dir, strm_root)
     source_id = str(job.get("source_id") or "")
     metadata_source_key = f"guangya-meta:{source_id}"
-    existing_rows = db.list_strm_index(metadata_source_key)
+    existing_rows = db.list_strm_installation_rows(
+        metadata_source_key, file_id, str(expected)
+    )
     current = next(
         (row for row in existing_rows if str(row["file_id"]) == file_id), None
     )
@@ -1574,6 +1602,7 @@ def _sync_strm_incremental_impl(
     source_name: str = "",
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
+    on_refresh_paths: Callable[[list[str]], object] | None = None,
 ) -> dict:
     """只处理整理成功的最终对象；Client 生命周期由公开入口统一管理。"""
     exts = video_exts or DEFAULT_VIDEO_EXTS
@@ -1609,6 +1638,8 @@ def _sync_strm_incremental_impl(
     fingerprint_backfills: list[dict[str, object]] = []
 
     def stop_requested(stage: str) -> bool:
+        if stats["stopped"]:
+            return True
         if should_stop and should_stop():
             stats["stopped"] = True
             stats["stop_stage"] = stage
@@ -1741,13 +1772,15 @@ def _sync_strm_incremental_impl(
                         video_by_id, video_by_path,
                     )
                     stats["cleaned"] += cleaned
+                    if cleaned and current:
+                        _track_change(stats, "removed", current["strm_path"], strm_root, on_refresh_paths=on_refresh_paths)
                     _update_video_index_snapshot(
                         video_by_id, video_by_path, file, expected,
                         installed_fingerprint,
                     )
                     stats["generated"] += 1
                     stats["updated" if is_update else "created"] += 1
-                    _track_change(stats, "generated", expected, strm_root)
+                    _track_change(stats, "generated", expected, strm_root, on_refresh_paths=on_refresh_paths)
                 pending_resolutions["generate"].add(file_id)
             else:
                 stats["metadata_total"] += 1
@@ -1813,7 +1846,7 @@ def _sync_strm_incremental_impl(
                 else:
                     stats["cleaned"] += cleaned
                 if removed_path is not None:
-                    _track_change(stats, "removed", removed_path, strm_root)
+                    _track_change(stats, "removed", removed_path, strm_root, on_refresh_paths=on_refresh_paths)
             except Exception as exc:
                 logger.warning("STRM 精准清理失败 file=%s: %s", file_id, exc)
                 stats["fallback_required"] = True
@@ -1852,6 +1885,7 @@ def sync_strm_incremental(
     source_name: str = "",
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
+    on_refresh_paths: Callable[[list[str]], object] | None = None,
 ) -> dict:
     """执行可信变化的精准同步，并释放本函数创建的光鸭连接池。"""
     with _guangya_client_scope(client) as runtime_client:
@@ -1868,6 +1902,7 @@ def sync_strm_incremental(
             source_name=source_name,
             on_progress=on_progress,
             should_stop=should_stop,
+            on_refresh_paths=on_refresh_paths,
         )
 
 
@@ -1888,6 +1923,7 @@ def _sync_strm_impl(
     source_name: str = "",
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
+    on_refresh_paths: Callable[[list[str]], object] | None = None,
 ) -> dict:
     """递归扫描光鸭目录，为视频生成 STRM；Client 由公开入口持有。"""
     exts = video_exts or DEFAULT_VIDEO_EXTS
@@ -1987,6 +2023,8 @@ def _sync_strm_impl(
         return False
 
     def stop_requested(stage: str) -> bool:
+        if stats["stopped"]:
+            return True
         if should_stop and should_stop():
             stats["stopped"] = True
             stats["stop_stage"] = stage
@@ -2330,11 +2368,13 @@ def _sync_strm_impl(
                         existing_by_id, existing_by_path,
                     )
                     stats["cleaned"] += cleaned
+                    if cleaned and current:
+                        _track_change(stats, "removed", current["strm_path"], strm_root, on_refresh_paths=on_refresh_paths)
                     seen_ids.add(str(file.file_id))
                     stats["generated"] += 1
                     stats["updated" if is_update else "created"] += 1
                     pending_resolutions["generate"].add(str(file.file_id))
-                    _track_change(stats, "generated", expected, strm_root)
+                    _track_change(stats, "generated", expected, strm_root, on_refresh_paths=on_refresh_paths)
                     _update_video_index_snapshot(
                         existing_by_id, existing_by_path, file, expected,
                         installed_fingerprint,
@@ -2583,7 +2623,7 @@ def _sync_strm_impl(
                 stats["cleaned"] += cleanup["cleaned"]
                 stats["empty_dirs_cleaned"] += cleanup["empty_dirs_cleaned"]
                 for removed_path in cleanup.get("removed_paths", []):
-                    _track_change(stats, "removed", removed_path, strm_root)
+                    _track_change(stats, "removed", removed_path, strm_root, on_refresh_paths=on_refresh_paths)
                 removed_dir_paths.update(cleanup.get("removed_dir_paths", []))
                 if metadata and metadata_queue_cleanup_ready:
                     # 新 file_id 正在后台替换同一路径时，旧索引仍是当前磁盘文件
@@ -2611,7 +2651,7 @@ def _sync_strm_impl(
                     stats["metadata_cleaned"] += metadata_cleanup["cleaned"]
                     stats["empty_dirs_cleaned"] += metadata_cleanup["empty_dirs_cleaned"]
                     for removed_path in metadata_cleanup.get("removed_paths", []):
-                        _track_change(stats, "removed", removed_path, strm_root)
+                        _track_change(stats, "removed", removed_path, strm_root, on_refresh_paths=on_refresh_paths)
                     removed_dir_paths.update(metadata_cleanup.get("removed_dir_paths", []))
                 if clean_empty_dirs and not (should_stop and should_stop()):
                     empty_cleanup = clean_empty_strm_dirs(
@@ -2627,7 +2667,7 @@ def _sync_strm_impl(
                         empty_cleanup.get("removed_dir_paths") or []
                     )
                 for removed_dir_path in sorted(removed_dir_paths):
-                    _track_change(stats, "removed_dir", removed_dir_path, strm_root)
+                    _track_change(stats, "removed_dir", removed_dir_path, strm_root, on_refresh_paths=on_refresh_paths)
                 stats["cleanup_elapsed_seconds"] = round(
                     float(stats.get("cleanup_elapsed_seconds", 0.0) or 0.0)
                     + max(0.0, time.monotonic() - action_started),
@@ -2675,6 +2715,7 @@ def sync_strm(
     source_name: str = "",
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
+    on_refresh_paths: Callable[[list[str]], object] | None = None,
 ) -> dict:
     """执行一次全量同步；只关闭本函数创建的光鸭连接池。"""
     with _guangya_client_scope(client) as runtime_client:
@@ -2695,6 +2736,7 @@ def sync_strm(
             source_name=source_name,
             on_progress=on_progress,
             should_stop=should_stop,
+            on_refresh_paths=on_refresh_paths,
         )
 
 

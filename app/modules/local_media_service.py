@@ -40,6 +40,7 @@ from app.modules.local_storage import (
     LocalContentChanged,
     LocalFileSnapshot,
     LocalFilesystemAdapter,
+    LocalSiblingScanBatch,
     LocalStorageError,
     snapshot_digest,
 )
@@ -282,6 +283,7 @@ class LocalMediaService:
         self.scraper = scraper or TMDBScraper()
         self.organizer = Organizer(client=object(), scraper=self.scraper)
         self.inspections = inspection_store or _InspectionStore()
+        self._sibling_scan_batch = LocalSiblingScanBatch()
 
     def parallel_planning_safe(self) -> bool:
         """仅默认 TMDB Scraper 声明可共享缓存并发规划。"""
@@ -293,7 +295,9 @@ class LocalMediaService:
         if not self.parallel_planning_safe():
             raise LocalMediaServiceError("当前本地媒体识别器不支持并行规划")
         worker = LocalMediaService(scraper=self.scraper)
-        # 与光鸭组级并行保持同一契约：只共享强制详情刷新去重状态，
+        # 只共享受锁保护的短批次目录名称，检查仓与文件身份仍由 Worker 独享。
+        worker._sibling_scan_batch = self._sibling_scan_batch
+        # Organizer 与光鸭组级并行保持同一契约：只共享强制详情刷新去重状态，
         # 其余 Organizer 任务缓存、ProbeBudget 和目标库存均由 Worker 独享。
         worker.organizer._forced_detail_refreshes = (
             self.organizer._forced_detail_refreshes
@@ -378,6 +382,7 @@ class LocalMediaService:
                 resources_closed = bool(organizer_closed and self._scraper_closed)
 
             if resources_closed:
+                self._sibling_scan_batch.clear()
                 with self._lifecycle_condition:
                     self._closed = True
                     self._closing = False
@@ -395,7 +400,10 @@ class LocalMediaService:
             require_container_absolute_path(path, label="目录路径"), root,
         )
         adapter = LocalFilesystemAdapter(root)
-        snapshots = adapter.scan(selected, include_non_media=True)
+        snapshots = adapter.scan(
+            selected, include_non_media=True, sibling_batch=self._sibling_scan_batch,
+            new_inspection=True,
+        )
         visible_snapshots = [
             item for item in snapshots
             if item.size > 0
@@ -1061,6 +1069,7 @@ class LocalMediaService:
             raise LocalMediaServiceError("本地媒体来源已被删除")
         current = LocalFilesystemAdapter(inspection.root).scan(
             inspection.selected_path, include_non_media=True,
+            sibling_batch=self._sibling_scan_batch,
         )
         if snapshot_digest(current) != inspection.digest:
             raise LocalMediaServiceError("源文件在检查后发生变化，请重新检查")

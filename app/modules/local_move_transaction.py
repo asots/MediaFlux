@@ -586,7 +586,8 @@ class LocalMoveTransaction:
                     else:
                         published_identity = self._publish_no_replace(source, target)
                     target_created = True
-                    self._require_identity(target, published_identity, label="事务目标")
+                    # 发布已消耗源目录项，先登记补偿，再进行任何可能失败的读取。
+                    # 此后失败必须恢复源文件，不能按复制失败清理唯一目标副本。
                     moved = MovedItem(
                         source=source_display,
                         target=target_display,
@@ -596,6 +597,7 @@ class LocalMoveTransaction:
                     )
                     self._moved.append(moved)
                     self._moved_steps[target_display] = index
+                    self._require_identity(target, published_identity, label="事务目标")
                     if published_identity != plan.source.identity:
                         raise LocalMoveError(
                             f"源文件在最终移动前发生变化: {plan.source.relative_path}"
@@ -679,7 +681,8 @@ class LocalMoveTransaction:
             if self._identity_or_none(source) is not None:
                 raise FileExistsError(f"回滚源路径已被占用: {moved.source}")
             if LocalFilesystemAdapter.same_filesystem(target, source):
-                os.replace(target, source)
+                # 占用检查与恢复之间，下载器仍可能创建同名文件；原子拒绝覆盖。
+                self._publish_no_replace(target, source)
                 self._require_identity(
                     source,
                     moved.published_identity,
@@ -697,7 +700,7 @@ class LocalMoveTransaction:
                     dst.flush()
                     os.fsync(dst.fileno())
                 self._verify_target(fingerprint, partial, size)
-                os.replace(partial, source)
+                self._publish_no_replace(partial, source)
                 self._unlink_owned(
                     target,
                     moved.published_identity,

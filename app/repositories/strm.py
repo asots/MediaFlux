@@ -140,6 +140,22 @@ def list_strm_index(source: str = "guangya") -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def list_strm_installation_rows(
+    source: str, file_id: str, strm_path: str,
+) -> list[sqlite3.Row]:
+    """读取当前项及同来源目标 owner；复用现有 ID/路径索引，不扫描整源。
+
+    UNION 去重同 ID 同路径的行，但不截断冲突集合，保留所有权与回滚依据。
+    调用方仍须在 STRM 写锁内查询后提交，不能跨任务缓存文件所有权快照。
+    """
+    with _database().get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM strm_index WHERE source=? AND file_id=? "
+            "UNION SELECT * FROM strm_index WHERE strm_path=? AND source=?",
+            (str(source), str(file_id), str(strm_path), str(source)),
+        ).fetchall()
+
+
 def list_strm_indexes_by_file_id(file_id: str) -> list[sqlite3.Row]:
     """查询所有来源中引用同一远端文件的 STRM 索引。"""
     with _database().get_conn() as conn:

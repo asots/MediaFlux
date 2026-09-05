@@ -230,10 +230,18 @@ class LocalMoveTransactionTests(IsolatedDatabaseTestCase):
                 Plan(adapter.snapshot(first), old_target, action="replace"),
                 Plan(adapter.snapshot(second), target_root / "B.mkv"),
             ]
+            real_publish = LocalMoveTransaction._publish_no_replace
+
+            def fail_second_publication(src, dst):
+                # 仅第二个新文件发布失败；回滚也复用无覆盖发布，不应同时注入故障。
+                if Path(src).name == "B.mkv":
+                    raise OSError("injected later failure")
+                return real_publish(src, dst)
+
             with patch.object(
                 LocalMoveTransaction,
                 "_publish_no_replace",
-                side_effect=OSError("injected later failure"),
+                side_effect=fail_second_publication,
             ):
                 with self.assertRaisesRegex(LocalMoveError, "injected later failure"):
                     LocalMoveTransaction(
@@ -397,8 +405,10 @@ class LocalMoveTransactionTests(IsolatedDatabaseTestCase):
             real_publish = transaction._publish_no_replace
 
             def swap_then_publish(src, dst):
-                src.replace(displaced)
-                replacement.replace(src)
+                # 模拟一次外部换源，不在恢复发布时重复换源。
+                if replacement.exists():
+                    src.replace(displaced)
+                    replacement.replace(src)
                 return real_publish(src, dst)
 
             with patch.object(transaction, "_publish_no_replace", side_effect=swap_then_publish):

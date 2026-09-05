@@ -19,7 +19,6 @@ from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.utils import formatdate
 from functools import partial
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -3817,64 +3816,6 @@ def _parse_range(value: str, size: int) -> tuple[int, int] | None:
     if start < 0 or start >= size or end < start:
         raise ValueError("Range 超出文件范围")
     return start, min(end, size - 1)
-
-
-def _file_chunks(path: Path, start: int, length: int, chunk_size: int = 1024 * 1024):
-    remaining = length
-    with path.open("rb") as handle:
-        handle.seek(start)
-        while remaining > 0:
-            chunk = handle.read(min(chunk_size, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-
-
-def local_file_response(request: Request, path: Path) -> Response:
-    if not path.is_file():
-        return JSONResponse({"error": "本地媒体文件不存在"}, status_code=404)
-    stat = path.stat()
-    size = stat.st_size
-    etag = f'"{stat.st_mtime_ns:x}-{size:x}"'
-    common = {
-        "Accept-Ranges": "bytes",
-        "ETag": etag,
-        "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
-        "Content-Type": media_content_type(path.name),
-    }
-    try:
-        selected = _parse_range(request.headers.get("range", ""), size)
-    except (ValueError, TypeError):
-        return Response(
-            status_code=416,
-            headers={**common, "Content-Range": f"bytes */{size}"},
-        )
-    if selected is None:
-        headers = {**common, "Content-Length": str(size)}
-        if request.method == "HEAD":
-            return Response(status_code=200, headers=headers)
-        return StreamingResponse(
-            _file_chunks(path, 0, size),
-            status_code=200,
-            headers=headers,
-            media_type=common["Content-Type"],
-        )
-    start, end = selected
-    length = end - start + 1
-    headers = {
-        **common,
-        "Content-Length": str(length),
-        "Content-Range": f"bytes {start}-{end}/{size}",
-    }
-    if request.method == "HEAD":
-        return Response(status_code=206, headers=headers)
-    return StreamingResponse(
-        _file_chunks(path, start, length),
-        status_code=206,
-        headers=headers,
-        media_type=common["Content-Type"],
-    )
 
 
 def media_content_type(filename: str) -> str:

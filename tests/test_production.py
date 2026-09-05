@@ -48,7 +48,7 @@ from app.modules.local_media_scheduler import (
 from app.modules.media_proxy import (
     _parse_range,
     _websocket_upstream_url,
-    local_file_response,
+    media_content_type,
     resolve_local_binding,
     rewrite_playback_info,
     validate_listen_host,
@@ -477,38 +477,9 @@ class MediaProxyTests(InitializedWebTestCase):
         with self.assertRaises(ValueError):
             _parse_range("bytes=1-2,4-5", 10)
 
-    def test_local_file_response_range_and_head(self):
-        with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "video.bin"
-            path.write_bytes(b"0123456789")
-            ranged = SimpleNamespace(method="GET", headers={"range": "bytes=2-5"})
-            response = local_file_response(ranged, path)
-            self.assertEqual(response.status_code, 206)
-            self.assertEqual(response.headers["content-range"], "bytes 2-5/10")
-            body = asyncio.run(self._stream_body(response))
-            self.assertEqual(body, b"2345")
-            head = SimpleNamespace(method="HEAD", headers={})
-            head_response = local_file_response(head, path)
-            self.assertEqual(head_response.status_code, 200)
-            self.assertEqual(head_response.headers["content-length"], "10")
-
-    def test_local_file_response_uses_stable_matroska_content_type(self):
-        with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "video.mkv"
-            path.write_bytes(b"matroska")
-            request = SimpleNamespace(method="HEAD", headers={})
-
-            response = local_file_response(request, path)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.headers["content-type"], "video/x-matroska")
-
-    @staticmethod
-    async def _stream_body(response) -> bytes:
-        chunks = []
-        async for chunk in response.body_iterator:
-            chunks.append(chunk)
-        return b"".join(chunks)
+    def test_media_content_type_uses_stable_matroska_type(self):
+        # 本地响应 helper 已退役；共享 MIME 的跨 Python 版本兼容意图仍保留。
+        self.assertEqual(media_content_type("video.mkv"), "video/x-matroska")
 
     def test_websocket_target_is_derived_only_from_fixed_upstream(self):
         websocket = SimpleNamespace(url=SimpleNamespace(query="api_key=client-token"))

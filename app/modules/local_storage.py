@@ -6,13 +6,15 @@ import errno
 import os
 import shutil
 import stat as stat_module
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from app.modules.local_path_mapping import assert_within
 from app.modules.organize import METADATA_EXTS, VIDEO_EXTS
-from app.modules.subtitle_identity import plan_subtitle_companions
+from app.modules.subtitle_identity import SubtitleIdentity, plan_subtitle_companions
 
 
 class LocalStorageError(RuntimeError):
@@ -76,6 +78,85 @@ class _SiblingMediaFile:
     path: Path
     name: str
     file_id: str
+
+
+class LocalSiblingScanBatch:
+    """短批次只共享目录名称索引；文件状态和字幕归属始终现场复核。
+
+    只保留一个目录，重复检查同一视频、目录身份变化或 30 秒到期即换批。
+    不缓存 size/inode、匹配结果或媒体快照，零字节文件也进入名称索引，
+    避免文件原地写入（不会更新父目录 mtime）后漏掉歧义或字幕。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.clear()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._scope: tuple | None = None
+            self._identity: tuple | None = None
+            self._expires_at = 0.0
+            self._seen: set[Path] = set()
+            self._videos: dict[str, list[Path]] = {}
+            self._subtitles: dict[str, list[Path]] = {}
+
+    @staticmethod
+    def _directory_identity(directory: Path) -> tuple[int, int, int, int]:
+        info = directory.stat()
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+
+    @staticmethod
+    def _stem(path: Path) -> str:
+        return path.stem.casefold()
+
+    def candidates(
+        self, video: Path, adapter: LocalFilesystemAdapter, *, new_inspection: bool,
+    ) -> tuple[list[Path], tuple[int, int, int, int]]:
+        with self._lock:
+            directory = video.parent
+            scope = (adapter.allowed_root, directory, adapter.item_limit)
+            identity = self._directory_identity(directory)
+            if (
+                self._scope != scope or self._identity != identity
+                or time.monotonic() >= self._expires_at
+                or (new_inspection and video in self._seen)
+            ):
+                self.clear()
+                # 目录快照只有名称，相关候选的类型/大小由下游 lstat 现读。
+                for count, candidate in enumerate(directory.iterdir(), 1):
+                    if count > adapter.item_limit:
+                        raise LocalScanLimitExceeded("目录文件数量超过安全上限")
+                    if adapter.is_temporary(candidate):
+                        continue
+                    role = adapter.role_for(candidate)
+                    stem = self._stem(candidate)
+                    if role == "video":
+                        self._videos.setdefault(stem, []).append(candidate)
+                    elif role == "subtitle":
+                        media_stem = SubtitleIdentity.parse(candidate.name).media_stem.casefold()
+                        for key in {stem, media_stem}:
+                            self._subtitles.setdefault(key, []).append(candidate)
+                if self._directory_identity(directory) != identity:
+                    self.clear()
+                    raise LocalContentChanged("字幕目录在扫描期间发生变化，请重新检查")
+                self._scope = scope
+                self._identity = identity
+                self._expires_at = time.monotonic() + 30.0
+            if new_inspection:
+                self._seen.add(video)
+            stem = self._stem(video)
+            subtitles = self._subtitles.get(stem, [])
+            # exact stem 优先于语言后缀归一化；必须一并纳入这两组视频，
+            # 否则 Show.en.mkv 会被错误地当成 Show.mkv 的英文字幕来源。
+            video_stems = {stem}
+            for subtitle in subtitles:
+                video_stems.add(self._stem(subtitle))
+                video_stems.add(SubtitleIdentity.parse(subtitle.name).media_stem.casefold())
+            candidates = set(subtitles)
+            for key in video_stems:
+                candidates.update(self._videos.get(key, []))
+            return sorted(candidates, key=lambda item: item.name.casefold()), identity
 
 
 class LocalFilesystemAdapter:
@@ -226,6 +307,8 @@ class LocalFilesystemAdapter:
         path: Path | None = None,
         *,
         include_non_media: bool = False,
+        sibling_batch: LocalSiblingScanBatch | None = None,
+        new_inspection: bool = False,
     ) -> list[LocalFileSnapshot]:
         start = assert_within(Path(path) if path is not None else self.allowed_root, self.allowed_root)
         relative_parts = start.relative_to(self.allowed_root).parts
@@ -235,7 +318,9 @@ class LocalFilesystemAdapter:
             raise LocalStorageError("禁止扫描符号链接")
         candidates: list[Path] = []
         if start.is_file():
-            candidates = self._single_video_candidates(start)
+            candidates = self._single_video_candidates(
+                start, sibling_batch=sibling_batch, new_inspection=new_inspection,
+            )
         elif start.is_dir():
             base_depth = len(start.parts)
             def raise_walk_error(exc: OSError) -> None:
@@ -279,14 +364,21 @@ class LocalFilesystemAdapter:
             snapshots.append(snapshot)
         return snapshots
 
-    def _single_video_candidates(self, video: Path) -> list[Path]:
+    def _single_video_candidates(
+        self, video: Path, *, sibling_batch: LocalSiblingScanBatch | None = None,
+        new_inspection: bool = False,
+    ) -> list[Path]:
         """单视频任务只附带能唯一匹配该视频的同级字幕。"""
         if self.role_for(video) != "video":
             return [video]
+        batch = sibling_batch if sibling_batch is not None else LocalSiblingScanBatch()
         try:
-            entries = sorted(video.parent.iterdir(), key=lambda item: item.name.casefold())
-        except OSError:
-            return [video]
+            entries, directory_identity = batch.candidates(
+                video, self, new_inspection=new_inspection,
+            )
+        except OSError as exc:
+            batch.clear()
+            raise LocalStorageError(f"字幕目录暂时不可完整读取: {video.parent.name}") from exc
 
         videos: list[_SiblingMediaFile] = []
         subtitles: list[_SiblingMediaFile] = []
@@ -312,6 +404,9 @@ class LocalFilesystemAdapter:
             elif role == "subtitle":
                 subtitles.append(item)
 
+        if batch._directory_identity(video.parent) != directory_identity:
+            batch.clear()
+            raise LocalContentChanged("字幕目录在扫描期间发生变化，请重新检查")
         selected_id = video.as_posix()
         subtitle_result = plan_subtitle_companions(videos, subtitles)
         matched = [

@@ -623,7 +623,7 @@ class P2OwnershipRaceRegressionTests(IsolatedDatabaseTestCase):
 
         source_id = f"meta-race-{uuid.uuid4().hex}"
         source_key = f"guangya-meta:{source_id}"
-        remote = GuangYaFile("poster", "poster.jpg", False, 8, "etag-2", source_id)
+        remote = GuangYaFile("poster", "poster.jpg", False, len(b"new-poster"), "etag-2", source_id)
 
         class Client(_TreeClient):
             def get_download_url(self, file_id):
@@ -674,6 +674,7 @@ class P2OwnershipRaceRegressionTests(IsolatedDatabaseTestCase):
                 worked = _process_metadata_once(worker, root)
 
             self.assertTrue(worked)
+            self.assertTrue(changed_once["done"], "必须实际进入安装期外部改写窗口")
             self.assertEqual(stats["metadata_generated"], 0)
             self.assertEqual(stats["metadata_queued"], 1)
             self.assertEqual(stats["metadata_failed"], 0)

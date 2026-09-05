@@ -164,12 +164,22 @@ class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
 
                 button = page.locator('#settings-panel-metadata [data-save-settings]')
                 button.scroll_into_view_if_needed()
+                page.mouse.move(0, 0)
+                rest_state = """() => {
+                    const button = document.querySelector('#settings-panel-metadata [data-save-settings]');
+                    const transform = getComputedStyle(button).transform;
+                    return transform === 'none' || new DOMMatrixReadOnly(transform).isIdentity;
+                }"""
+                page.wait_for_function(rest_state)
                 before_save = button.bounding_box()
                 button.click()
                 # 去掉既有 hover 的 1px transform，只比较加载/完成状态本身。
                 page.mouse.move(0, 0)
                 page.wait_for_function("typeof window.__resolveSettingsSave === 'function'")
                 self.assertTrue(button.is_disabled())
+                # mousemove 的返回不保证 hover 样式已经复位；等真实 transform
+                # 回到静止态，不放宽几何容差，也不跳过 loading 状态断言。
+                page.wait_for_function(rest_state)
                 self._assert_same_rect(before_save, button.bounding_box())
                 page.evaluate("window.__resolveSettingsSave()")
                 page.wait_for_function("!document.querySelector('#settings-panel-metadata [data-save-settings]').disabled")

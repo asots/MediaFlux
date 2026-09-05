@@ -11,23 +11,27 @@ import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from time import monotonic
 from typing import Any, Iterable
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.agent.resource_recommendation import rank_episode_search
 from app.clients.tmdb import TMDBClient, close_tmdb_client
 from app.discovery.models import ProviderError, ProviderNotConfigured
 from app.indexers.config import tmdb_detail_is_animation
+from app.indexers.downloads import download_indexer_result_public
 from app.indexers.models import IndexerMediaSearchRequest
 from app.indexers.runtime import get_indexer_service, run_indexer_awaitable
 from app.logger import get_logger
-from app.indexers.downloads import download_indexer_result_public
 from app.modules.media_identity import build_media_key
 from app.sensitive_data import redact_sensitive_text
 from app.services import inspect_media_identity_sources, inspect_series_episode_sources
 
 logger = get_logger(__name__)
 
+_MAX_TV_SEASONS = 100
+_TV_SEASON_BUDGET_SECONDS = 60
 _MAX_SEARCH_EPISODES = 12
 _MAX_CANDIDATES_PER_MEDIA = 8
 _PREVIEW_MAX_SEARCH_EPISODES = 3
@@ -863,19 +867,40 @@ class MediaSubscriptionService:
         selected = [int(value) for value in _loads(row["seasons_json"], [])]
         if mode == "selected":
             available = [season for season in available if season in selected]
+        if len(available) > _MAX_TV_SEASONS:
+            raise MediaSubscriptionError(
+                f"监控范围包含 {len(available)} 季，超过单次 {_MAX_TV_SEASONS} 季上限；"
+                "请改用指定季度，未完成的范围不会标记为已满足",
+                status_code=422, code="season_limit_exceeded",
+            )
+        if any(season > 100 for season in available):
+            raise MediaSubscriptionError(
+                "TMDB 季号超出支持范围（0–100），请改用指定季度",
+                status_code=422, code="unsupported_season",
+            )
         today = date.today()
         created_day = _parse_air_date(str(row["created_at"] or "")[:10]) or today
         expected: list[_ExpectedMedia] = []
         future_count = 0
         unknown_dates = 0
+        deadline = monotonic() + _TV_SEASON_BUDGET_SECONDS
         client = TMDBClient()
         try:
-            for season in available[:30]:
+            # 完整读取所选季集合，串行且限制请求数/启动时间；不能用部分集合
+            # 得出 satisfied。超预算明确失败，已发出的同步请求仍等待安全收尾。
+            for season in available:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise MediaSubscriptionError("季度读取已取消", status_code=409, code="cancelled")
+                if monotonic() >= deadline:
+                    raise MediaSubscriptionError(
+                        "季度读取超过本轮时间预算，请稍后重试或缩小指定季度范围",
+                        status_code=503, code="season_budget_exceeded",
+                    )
                 payload = await _await_sync_request(
                     client.tv_season_detail, str(row["tmdb_id"]), season
                 )
                 # 已开始的同步 HTTP 请求无法被 asyncio 取消；每季返回后立即复核，
-                # 避免停机/配置变更后继续请求其余最多 29 季。
+                # 避免停机/配置变更后继续请求剩余季度。
                 if require_active_check:
                     self._ensure_active_check(
                         int(row["id"]), int(row["revision"] or 1), cancel_event
@@ -1803,6 +1828,11 @@ class MediaSubscriptionService:
                     admission_id=admission_id,
                 )
             )
+        except asyncio.CancelledError:
+            # resolver 热关闭或调用方取消不属于普通 Exception。仓储 CAS 与请求
+            # 原子绑定串行：未绑定则释放并拒绝迟到绑定；已绑定/未知结果仍防重。
+            db.fail_unbound_media_download_admission(admission_id, "下载提交已取消")
+            raise
         except Exception as exc:
             db.fail_unbound_media_download_admission(admission_id, "下载提交异常")
             raise MediaSubscriptionError(

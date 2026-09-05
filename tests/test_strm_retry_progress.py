@@ -1173,7 +1173,8 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
     def test_metadata_retry_replaces_conflicting_target_index(self):
         source = "source-meta"
         source_key = f"guangya-meta:{source}"
-        fresh = GuangYaFile("fresh", "poster.jpg", False, 8, "fresh", source)
+        # 冲突替换用例应提供完整对象；正文 fresh-data 实际为 10 字节。
+        fresh = GuangYaFile("fresh", "poster.jpg", False, 10, "fresh", source)
         client = _TreeClient({source: [fresh]})
         failure_id = self._failure(source, fresh.file_id, fresh.name)
 
