@@ -871,7 +871,7 @@ class AgentSession:
                 await self.state_store.commit(
                     lease,
                     conversation=conversation,
-                    updates=(StateUpdate("pending_effect_plan_id", ""),),
+                    updates=(StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),),
                 )
             except StalePublicationError:
                 raise

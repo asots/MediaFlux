@@ -3445,7 +3445,8 @@ class TelegramBotTests(unittest.TestCase):
             handlers._dispatch_download_callback(bot, 100, 7, 9, "qb")
 
         text = bot.edit_message_text.call_args.args[0]
-        self.assertIn("下载提交异常", text)
+        self.assertIn("下载提交结果待核对", text)
+        self.assertIn("勿直接重复提交", text)
         self.assertNotIn(secret, text)
         self.assertNotIn("SECRET", text)
         self.assertIsNone(bot.edit_message_text.call_args.kwargs["reply_markup"])

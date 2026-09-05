@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from tests.support import InitializedWebTestCase
 
-from app.clients.guangya import GuangYaClient
+from app.clients.guangya import GuangYaClient, IncompleteOfflineTaskListError
 from app.config import web_credentials
 from app.main import create_app
 from app.routes import downloads_api
@@ -102,9 +102,8 @@ class GuangYaDownloadOverviewTests(InitializedWebTestCase):
         client._call_read = Mock(side_effect=lambda _name, callback: callback())
 
         with patch.object(GuangYaClient, "raw", new_callable=PropertyMock, return_value=raw):
-            tasks = client.list_offline_tasks()
-
-        self.assertEqual(len(tasks), 50)
+            with self.assertRaises(IncompleteOfflineTaskListError):
+                client.list_offline_tasks()
         self.assertEqual(raw.cloud_task_list.call_count, 2)
 
     def test_overview_does_not_query_or_return_guangya_live_tasks(self):

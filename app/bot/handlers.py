@@ -2791,48 +2791,66 @@ def _download_follow_up_text(succeeded: list[str]) -> str:
 def _dispatch_download_callback(
     bot, chat_id, message_id, request_id: int, target: str
 ) -> None:
-    try:
-        from app.modules.download_dispatcher import dispatch_request
-        from app.modules.download_tracker import get_download_tracker
+    from app.modules.download_dispatcher import dispatch_request, public_dispatch_summary
+    from app.modules.download_tracker import get_download_tracker
 
-        result = dispatch_request(request_id, target)
-        if result.get("ok"):
-            labels = {"qb": "qBittorrent", "guangya": "光鸭云盘"}
-            succeeded_items = list(result.get("succeeded") or [])
-            succeeded = "、".join(labels.get(item, item) for item in succeeded_items)
-            failed = "、".join(
-                labels.get(item, item) for item in result.get("failed", [])
-            )
-            text = (
-                f"<b>下载任务已提交</b>\n请求: #{request_id}\n成功: {succeeded or '无'}"
-            )
-            if failed:
-                text += f"\n失败: {failed}\n{html.escape(result.get('error') or '')}"
-            text += "\n" + _download_follow_up_text(succeeded_items)
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=None)
-            get_download_tracker().reload()
-        else:
-            bot.edit_message_text(
-                f"下载提交失败\n{html.escape(result.get('error') or '未知错误')}",
-                chat_id,
-                message_id,
-                reply_markup=None,
-            )
+    try:
+        summary = public_dispatch_summary(dispatch_request(request_id, target))
     except Exception as exc:
         logger.error(
             "Telegram 下载分流失败 request#%s type=%s",
             request_id,
             type(exc).__name__,
         )
+        # 外部写入可能已经发生；异常本身不能证明下载器没有受理。
+        summary = public_dispatch_summary({"outcome_unknown": True})
+
+    # 跟踪唤醒与回执均不参与业务结果判定，也不能互相阻断。
+    try:
+        get_download_tracker().reload()
+    except Exception as exc:
+        logger.warning(
+            "Telegram 下载跟踪唤醒失败 request#%s type=%s",
+            request_id, type(exc).__name__,
+        )
+
+    status = summary["status"]
+    title = {
+        "submitted": "下载任务已提交",
+        "partial": "下载任务部分提交",
+        "manual_review": "下载提交结果待核对",
+        "duplicate": "下载请求已存在",
+        "failed": "下载提交失败",
+    }[status]
+    text = f"<b>{title}</b>\n请求: #{request_id}"
+    labels = {"qb": "qBittorrent", "guangya": "光鸭云盘"}
+    succeeded = summary["succeeded"]
+    if succeeded:
+        text += "\n成功: " + "、".join(labels[item] for item in succeeded)
+    if summary["failed"]:
+        label = "未确认成功" if status == "manual_review" else "失败"
+        text += f"\n{label}: " + "、".join(labels[item] for item in summary["failed"])
+    if summary["error"]:
+        text += "\n" + html.escape(summary["error"])
+    if succeeded:
         try:
-            bot.edit_message_text(
-                "下载提交异常，请检查下载器连接与任务配置后重试",
-                chat_id,
-                message_id,
-                reply_markup=None,
+            text += "\n" + _download_follow_up_text(succeeded)
+        except Exception as exc:
+            logger.warning(
+                "Telegram 下载后续步骤提示生成失败 request#%s type=%s",
+                request_id, type(exc).__name__,
             )
-        except Exception:
-            pass
+
+    # 仅有界重试同一条可信回执，不重发下载、不把通知失败改报提交失败。
+    for _attempt in range(2):
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=None)
+            break
+        except Exception as exc:
+            logger.warning(
+                "Telegram 下载回执投递失败 request#%s type=%s",
+                request_id, type(exc).__name__,
+            )
 
 
 _MAX_STRM_PROGRESS_EDITS = 6

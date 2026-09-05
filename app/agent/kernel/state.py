@@ -107,7 +107,13 @@ class SessionState:
             if key == "summary":
                 self.summary = str(update.value or "")[:8_000]
             elif key == "pending_effect_plan_id":
-                self.pending_effect_plan_id = str(update.value or "")[:200]
+                if update.mode == "clear_if_equals":
+                    # 必须在 store.commit 的锁/事务内比较最新值；旧票据的
+                    # 迟到取消或确认结果不能清掉同代次刚发布的新计划。
+                    if self.pending_effect_plan_id == str(update.value or ""):
+                        self.pending_effect_plan_id = ""
+                else:
+                    self.pending_effect_plan_id = str(update.value or "")[:200]
             elif key == "recent_refs":
                 values = [str(item) for item in (update.value or []) if str(item)]
                 if update.mode == "append":

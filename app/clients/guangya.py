@@ -36,6 +36,10 @@ from app.private_files import protect_private_file
 logger = get_logger(__name__)
 
 
+class IncompleteOfflineTaskListError(RuntimeError):
+    """离线任务分页不完整，禁止调用方据此判断任务已消失。"""
+
+
 def guangya_offline_task_state(status: object, progress: object = 0) -> str:
     """客户端展示与下载跟踪共用的离线任务分类；明确失败优先于进度。"""
     normalized = str(status).strip().lower()
@@ -2211,11 +2215,14 @@ class GuangYaClient:
             if len(items) < page_size:
                 break
             if not items or signature in seen_pages or new_count == 0:
-                logger.warning("光鸭离线任务分页未推进，已停止读取 page=%s", page)
-                break
+                raise IncompleteOfflineTaskListError(
+                    "光鸭离线任务分页未推进，列表不完整"
+                )
             seen_pages.add(signature)
         else:
-            logger.warning("光鸭离线任务超过安全分页上限 pages=%s", max_pages)
+            raise IncompleteOfflineTaskListError(
+                "光鸭离线任务达到安全分页上限，列表不完整"
+            )
         return tasks
 
     @staticmethod

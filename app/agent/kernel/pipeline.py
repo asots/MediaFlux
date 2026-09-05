@@ -602,7 +602,7 @@ class ToolPipeline:
             self.projector.project(value), context=context
         )
         updates = tuple(outcome.state_updates) + (
-            StateUpdate("pending_effect_plan_id", ""),
+            StateUpdate("pending_effect_plan_id", plan.plan_id, mode="clear_if_equals"),
         )
         outcome = replace(outcome, state_updates=updates, effect_plan=plan)
         await self._commit_updates(context.lease, updates)
@@ -629,11 +629,11 @@ class ToolPipeline:
         )
         if cancelled_plan is not None:
             self._effect_cancelled(cancelled_plan)
-        # 即使票据已过期或被抢先消费，当前会话也不能继续保留一个
-        # 永远无法执行的 pending_effect_plan_id。
+        # 过期的当前票据也应清理，但旧票据不能清掉新 pending。
+        # 比较在 store.commit 原子应用时执行，而不是先 load 再无条件写。
         await self._commit_updates(
             context.lease,
-            (StateUpdate("pending_effect_plan_id", ""),),
+            (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),),
         )
         return cancelled_plan is not None
 

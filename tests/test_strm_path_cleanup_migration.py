@@ -39,7 +39,7 @@ class StrmPathCleanupMigrationTests(unittest.TestCase):
                 receipt,
             )
             with db.get_conn() as conn:
-                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 26)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
                 self.assertEqual(
                     conn.execute("PRAGMA integrity_check").fetchone()[0], "ok"
                 )

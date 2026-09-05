@@ -102,14 +102,24 @@ def template_has_media_identity(
     return False
 
 
-def sanitize_name(value: str) -> str:
+def _clean_name(value: str) -> str:
     name = _INVALID_NAME.sub("_", str(value or "")).strip().rstrip(".")
     if not name or name in {".", ".."}:
         raise ValueError("模板渲染结果为空")
-    return name[:240]
+    return name
+
+
+def _utf8_prefix(value: str, limit: int) -> str:
+    # 沿用 240 的保守命名上限，但按文件系统实际字节计算，不切断中文码点。
+    return value.encode("utf-8")[:max(0, limit)].decode("utf-8", errors="ignore")
+
+
+def sanitize_name(value: str) -> str:
+    return _utf8_prefix(_clean_name(value), 240).rstrip(".")
 
 
 def render_template(template: str, context: NamingContext) -> str:
+    """目录/通用模板：只压缩自由标题，保留年份、稳定身份等结构字段。"""
     validate_template(template)
     values = context.values()
 
@@ -117,7 +127,71 @@ def render_template(template: str, context: NamingContext) -> str:
         field = match.group(1) or match.group(2)
         return values[_ALIASES.get(field, field)]
 
-    return sanitize_name(_TOKEN.sub(replace, template))
+    raw = _TOKEN.sub(replace, template)
+    rendered = _clean_name(raw)
+    if len(rendered.encode("utf-8")) <= 240:
+        return rendered
+    fields = [_ALIASES.get(match.group(1) or match.group(2), match.group(1) or match.group(2))
+              for match in _TOKEN.finditer(template)]
+    flexible: dict[str, tuple[str, str, int]] = {}
+    for field in ("title", "original_stem", "original_name"):
+        count = fields.count(field)
+        value = _INVALID_NAME.sub("_", values[field])
+        if not count or not value:
+            continue
+        stem, suffix = value, ""
+        if field == "original_name" and "." in value:
+            stem, extension = value.rsplit(".", 1)
+            suffix = "." + extension
+        flexible[field] = (stem, suffix, count)
+        values[field] = suffix
+    # 原文件名的扩展名和模板中的固定/结构变量均计入必要尾部，绝不粗截它们。
+    fixed = _INVALID_NAME.sub("_", _TOKEN.sub(replace, template))
+    count = sum(item[2] for item in flexible.values())
+    budget = (240 - len(fixed.encode("utf-8"))) // count if count else 0
+    if budget < 1:
+        raise ValueError("命名模板的必要尾部超过文件名长度上限")
+    for field, (stem, suffix, _count) in flexible.items():
+        shortened = _utf8_prefix(stem, budget)
+        if stem and not shortened:
+            raise ValueError("命名可变部分无法在长度上限内保留")
+        values[field] = shortened + suffix
+    return _clean_name(_TOKEN.sub(replace, template))
+
+
+def fit_media_filename(value: str, *, protected_suffix: str = "") -> str:
+    """文件名独立于目录截断：保留扩展名以及季集/CD/年份后的结构尾部。"""
+    name = _clean_name(value)
+    if len(name.encode("utf-8")) <= 240:
+        return name
+    stem, separator, ext = name.rpartition(".")
+    if not separator or not stem or not ext:
+        raise ValueError("媒体文件名缺少真实扩展名")
+    suffix_start = len(stem) - len(protected_suffix) if protected_suffix and stem.endswith(protected_suffix) else len(stem)
+    for pattern in (
+        r"(?i)[._ -]S[0-9]{1,2}(?:E[0-9]{1,4})?(?=[._ -]|$)",
+        r"(?i)[._ -]CD[0-9]{1,2}(?=[._ -]|$)",
+        r"[._ -](?:19|20)[0-9]{2}(?=[._ -]|$)",
+    ):
+        matches = list(re.finditer(pattern, stem))
+        if matches:
+            suffix_start = min(suffix_start, matches[-1].start())
+    suffix = stem[suffix_start:] + "." + ext
+    budget = 240 - len(suffix.encode("utf-8"))
+    if budget < 1:
+        raise ValueError("媒体必要尾部超过文件名长度上限")
+    prefix = _utf8_prefix(stem[:suffix_start], budget).rstrip(" .")
+    if not prefix:
+        raise ValueError("媒体标题无法在长度上限内保留")
+    return prefix + suffix
+
+
+def render_media_template(template: str, context: NamingContext) -> str:
+    """媒体模板必须保留来源的真实扩展名，不能把截断结果当成新扩展名。"""
+    rendered = render_template(template, context)
+    if not rendered.casefold().endswith("." + context.ext.casefold()):
+        raise ValueError("媒体命名模板未保留真实扩展名")
+    return fit_media_filename(rendered)
 
 
 def append_variant_tags(name: str, tags: tuple[str, ...] | list[str]) -> str:
@@ -137,10 +211,9 @@ def append_variant_tags(name: str, tags: tuple[str, ...] | list[str]) -> str:
         if tag and tag.lower() not in existing and tag.lower() not in {item.lower() for item in stable_tags}:
             stable_tags.append(tag)
     if not stable_tags:
-        return safe_name
+        return fit_media_filename(safe_name)
     suffix = "." + ".".join(stable_tags)
-    stem_limit = max(1, 240 - len(suffix) - len(extension))
-    return f"{stem[:stem_limit].rstrip('.')}{suffix}{extension}"
+    return fit_media_filename(f"{stem}{suffix}{extension}", protected_suffix=suffix)
 
 
 def build_context(*, title: str, year: str, tmdb_id: str = "",

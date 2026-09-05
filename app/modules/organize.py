@@ -40,6 +40,7 @@ from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.config import get, get_bool, get_int
 from app.database import add_organize_log, add_organize_log_items, get_media_probe_cache
 from app.logger import get_logger, log_throttled
+from app.modules.guangya_compensation import restore_guangya_file
 from app.modules.media_variant import MediaVariant, classify_variant, variants_can_coexist
 from app.modules.recognition_policy import (
     automatic_match_confirmation_message,
@@ -64,6 +65,8 @@ from app.modules.directory_scrape_errors import (
 from app.modules.naming import (
     append_variant_tags,
     build_context,
+    fit_media_filename,
+    render_media_template,
     render_template,
     template_has_media_identity,
 )
@@ -261,6 +264,51 @@ def _optional_execution_lock(lock: object | None):
         yield
     finally:
         release()
+
+
+class _ConflictIdentityIndex:
+    """一次只读库存生命周期内的身份事实；批内新增项直接使用已验证 plan。"""
+
+    def __init__(self, files: list[GuangYaFile], parser: Callable, video_exts: set[str]):
+        self.files = files
+        self.parser = parser
+        self.video_exts = video_exts
+        self.parsed_names: dict[str, dict] = {}
+        self.fields: dict[str, dict] = {}
+        self.episodes: dict[tuple[object, object], dict[str, GuangYaFile]] = {}
+        for file in files:
+            self.add(file)
+
+    def add(self, file: GuangYaFile, plan: OrganizePlan | None = None) -> None:
+        if file.is_dir or file.name.rsplit(".", 1)[-1].lower() not in self.video_exts:
+            return
+        if plan is not None and plan.match is not None:
+            fields = {
+                "season": plan.season, "episode": plan.episode,
+                "title": plan.match.title, "year": plan.match.year,
+                "tmdb_id": plan.match.tmdb_id, "type": plan.match.media_type,
+            }
+        else:
+            fields = self.parsed_names.get(file.name)
+            if fields is None:
+                fields = dict(self.parser(file.name))
+                self.parsed_names[file.name] = fields
+        self.fields[file.file_id] = fields
+        position = (fields.get("season"), fields.get("episode"))
+        if None not in position:
+            self.episodes.setdefault(position, {})[file.file_id] = file
+
+    def remove(self, file_id: str) -> None:
+        fields = self.fields.pop(file_id, {})
+        bucket = self.episodes.get((fields.get("season"), fields.get("episode")))
+        if bucket is not None:
+            bucket.pop(file_id, None)
+
+    def candidates(self, plan: OrganizePlan):
+        if plan.match and plan.match.media_type == "tv":
+            return self.episodes.get((plan.season, plan.episode), {}).values()
+        # 电影/NSFW 仍保留原有标题/年份、辅助视频、CD 及版本安全判定。
+        return self.files
 
 
 class Organizer:
@@ -1109,7 +1157,7 @@ class Organizer:
         def with_variant_tags(rendered: str) -> str:
             rendered = with_part_marker(rendered)
             if not include_variant_tags:
-                return rendered
+                return fit_media_filename(rendered)
             variant = classify_variant(
                 file.name,
                 media_variant_override if media_variant_override is not None else media_info_override,
@@ -1128,7 +1176,7 @@ class Organizer:
             return with_variant_tags(rendered)
         template = configured_template
         try:
-            return with_variant_tags(render_template(template, context))
+            return with_variant_tags(render_media_template(template, context))
         except ValueError as exc:
             log_throttled(
                 logger, logging.WARNING, f"file-template:{exc}",
@@ -6693,7 +6741,7 @@ class Organizer:
         return sorted(episodes)
 
     def _same_media_identity(self, plan: OrganizePlan, candidate: GuangYaFile,
-                             rules: OrganizeRules) -> bool:
+                             rules: OrganizeRules, *, parsed_fields: dict | None = None) -> bool:
         """目标媒体目录内按电影或剧集集号识别同一媒体，不比较技术规格。"""
         if candidate.is_dir:
             return False
@@ -6720,7 +6768,10 @@ class Organizer:
                 # 成人媒体目录已由 provider + 番号身份隔离；目录内未分段视频
                 # 视为同一作品的版本候选，继续沿用现有冲突策略。
                 return True
-            candidate_fields = self._parse_existing_media_fields(candidate.name)
+            candidate_fields = (
+                parsed_fields if parsed_fields is not None
+                else self._parse_existing_media_fields(candidate.name)
+            )
             candidate_tmdb_id = str(candidate_fields.get("tmdb_id") or "")
             if not candidate_tmdb_id:
                 tmdb_match = re.search(
@@ -6777,7 +6828,8 @@ class Organizer:
             )
         if plan.season is None or plan.episode is None:
             return False
-        parsed = self._parse_existing_media_fields(candidate.name)
+        parsed = (parsed_fields if parsed_fields is not None
+                  else self._parse_existing_media_fields(candidate.name))
         return (
             parsed.get("season") is not None
             and parsed.get("episode") is not None
@@ -6901,6 +6953,7 @@ class Organizer:
         target_files: list[GuangYaFile],
         rules: OrganizeRules,
         evidence_names: dict[str, str] | None = None,
+        *, identity_index: _ConflictIdentityIndex | None = None,
     ) -> tuple[GuangYaFile | None, str, str]:
         """用同一判定供预览和执行选择新建、共存、替换或跳过。"""
         incoming = GuangYaFile(
@@ -6913,7 +6966,8 @@ class Organizer:
         evidence_names = evidence_names or {}
         same_variant: list[GuangYaFile] = []
         coexist_count = 0
-        for candidate in target_files:
+        candidates = identity_index.candidates(plan) if identity_index is not None else target_files
+        for candidate in candidates:
             # 归档目录被再次作为待整理来源时，目标列表可能包含计划文件自身。
             # 自身绝不能参与版本替换，否则会把同一 file_id 当旧版本回收。
             if (
@@ -6921,7 +6975,10 @@ class Organizer:
                 and str(candidate.file_id or "") == str(plan.file_id)
             ):
                 continue
-            if not self._same_media_identity(plan, candidate, rules):
+            if not self._same_media_identity(
+                plan, candidate, rules,
+                parsed_fields=identity_index.fields.get(candidate.file_id, {}) if identity_index is not None else None,
+            ):
                 continue
             existing_variant = self._existing_variant(
                 candidate,
@@ -7081,6 +7138,7 @@ class Organizer:
             str, tuple[str | None, list[GuangYaFile], dict[str, str]]
         ] = {}
         batch_plans_by_file_id: dict[str, OrganizePlan] = {}
+        identity_indexes: dict[str, _ConflictIdentityIndex] = {}
         for plan in plans:
             if plan.action != "move":
                 continue
@@ -7097,6 +7155,9 @@ class Organizer:
                     cached_inventory = (
                         target_id, target_files, evidence_names
                     )
+                    identity_indexes[inventory_key] = _ConflictIdentityIndex(
+                        target_files, self._parse_existing_media_fields, self.video_exts(rules),
+                    )
                     inventory_cache[inventory_key] = cached_inventory
                 target_id, target_files, evidence_names = cached_inventory
                 if (
@@ -7111,7 +7172,8 @@ class Organizer:
                     plan.note = note
                     continue
                 existing, decision, note = self._resolve_variant_conflict(
-                    plan, target_files, rules, evidence_names
+                    plan, target_files, rules, evidence_names,
+                    identity_index=identity_indexes[inventory_key],
                 )
                 previous_plan = (
                     batch_plans_by_file_id.get(str(existing.file_id or ""))
@@ -7161,6 +7223,7 @@ class Organizer:
                                 "未执行云盘写入或本地文件事务"
                             )
                             previous_plan.note = previous_plan.conflict_note
+                        identity_indexes[inventory_key].remove(existing.file_id)
                         target_files[:] = [
                             item for item in target_files
                             if item.file_id != existing.file_id
@@ -7174,6 +7237,7 @@ class Organizer:
                         etag=plan.etag,
                         parent_id=target_id or "0",
                     ))
+                    identity_indexes[inventory_key].add(target_files[-1], plan)
                     evidence_names[plan.file_id] = (
                         f"{plan.original_name} {plan.new_name}"
                     )
@@ -7227,34 +7291,11 @@ class Organizer:
         original_parent_id: str,
         known_current_name: str,
     ) -> None:
-        """尽力恢复一次可能已在服务端提交、但客户端收到异常的移动/重命名。"""
-        current_name = str(known_current_name or item.name)
-        current_parent_id = ""
-        state_verified = False
-        try:
-            current = self.client.file_info(item.file_id)
-        except Exception:
-            current = None
-        if current is not None:
-            state_verified = True
-            current_name = str(current.name or current_name)
-            current_parent_id = str(current.parent_id or "")
-
-        errors: list[Exception] = []
-        # 查询状态失败时按“服务端操作可能已经提交”处理：重命名和移动都
-        # 使用幂等目标重放，避免客户端超时后留下半提交状态。
-        if not state_verified or current_name != item.name:
-            try:
-                self.client.rename(item.file_id, item.name)
-            except Exception as exc:
-                errors.append(exc)
-        if original_parent_id and current_parent_id != original_parent_id:
-            try:
-                self.client.move([item.file_id], original_parent_id)
-            except Exception as exc:
-                errors.append(exc)
-        if errors:
-            raise errors[0]
+        """三条整理写入链共享实际状态补偿，不以响应异常推断未提交。"""
+        restore_guangya_file(
+            self.client,
+            GuangYaFile(item.file_id, item.name, False, item.size, item.etag, original_parent_id),
+        )
 
     def _verify_remote_snapshot(self, expected: GuangYaFile, *, role: str) -> GuangYaFile:
         """在第一次写操作前复核远端对象，拒绝使用过期扫描快照。"""

@@ -43,7 +43,7 @@ _lock = threading.RLock()
 _wal_setup_lock = threading.Lock()
 _wal_mode_cache: dict[str, tuple[int, int, int]] = {}
 _configured_test_mode = False
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX = "上次进程在本地媒体写操作期间中断"
 _LOCAL_MEDIA_INTERRUPTED_PREWRITE_ERROR = (
@@ -278,6 +278,7 @@ from app.database_migrations import (  # noqa: E402,F401
     _migrate_agent_capability_closure_v24,
     _migrate_durable_handoffs_v25,
     _migrate_strm_path_cleanup_v26,
+    _migrate_organize_business_snapshot_v27,
 )
 
 
@@ -1794,12 +1795,6 @@ def list_organize_log_items(log_id: int) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def list_organize_operation_steps(log_id: int, limit: int = 300) -> list[sqlite3.Row]:
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM organize_operation_steps WHERE log_id=? ORDER BY id DESC LIMIT ?",
-            (log_id, max(1, min(int(limit or 300), 1000))),
-        ).fetchall()
 
 
 def claim_organize_log_operation(
@@ -1869,6 +1864,18 @@ def claim_organize_log_operations_batch(
     return True
 
 
+# 操作步骤与可逆业务快照由同一仓储持有；保留原有数据库门面。
+from app.repositories.organize_history import (  # noqa: E402,F401
+    add_organize_operation_step,
+    capture_organize_business_snapshot,
+    finish_organize_operation_step,
+    list_organize_operation_steps,
+    list_latest_reversible_organize_steps,
+    list_pending_organize_probe_steps,
+    restore_organize_business_snapshot,
+)
+
+
 def update_organize_log(log_id: int, **fields) -> bool:
     allowed = {
         "status",
@@ -1884,6 +1891,7 @@ def update_organize_log(log_id: int, **fields) -> bool:
         "year",
         "season",
         "episode",
+        "release_parse_json",
         "error",
         "operation_type",
         "operation_token",
@@ -1932,45 +1940,8 @@ def update_organize_log_item(item_id: int, **fields) -> bool:
         return cur.rowcount == 1
 
 
-def add_organize_operation_step(
-    log_id: int,
-    operation_token: str,
-    step_index: int,
-    action: str,
-    **fields,
-) -> int:
-    timestamp = now()
-    with get_conn() as conn:
-        cur = conn.execute(
-            "INSERT INTO organize_operation_steps(log_id,operation_token,step_index,action,file_id,"
-            "from_parent_id,from_name,to_parent_id,to_name,status,error,started_at,finished_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                log_id,
-                operation_token,
-                int(step_index),
-                action,
-                str(fields.get("file_id") or ""),
-                str(fields.get("from_parent_id") or ""),
-                str(fields.get("from_name") or ""),
-                str(fields.get("to_parent_id") or ""),
-                str(fields.get("to_name") or ""),
-                str(fields.get("status") or "pending"),
-                str(fields.get("error") or ""),
-                fields.get("started_at") or timestamp,
-                fields.get("finished_at"),
-            ),
-        )
-        return int(cur.lastrowid)
 
 
-def finish_organize_operation_step(step_id: int, status: str, error: str = "") -> bool:
-    with get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE organize_operation_steps SET status=?,error=?,finished_at=? WHERE id=?",
-            (status, error, now(), step_id),
-        )
-        return cur.rowcount == 1
 
 
 def recover_interrupted_organize_operations() -> dict[str, int]:

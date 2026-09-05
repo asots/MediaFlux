@@ -1434,6 +1434,16 @@ def _migrate_strm_path_cleanup_v26(conn: sqlite3.Connection) -> None:
     conn.execute('CREATE INDEX IF NOT EXISTS idx_strm_path_cleanup_source\n    ON strm_path_cleanup(source, id)')
 
 
+def _migrate_organize_business_snapshot_v27(conn: sqlite3.Connection) -> None:
+    """保留旧步骤原样；没有前像的数据不能凭文件名猜出旧媒体身份。"""
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(organize_operation_steps)")}
+    if columns and "state_before_json" not in columns:
+        conn.execute(
+            "ALTER TABLE organize_operation_steps ADD COLUMN "
+            "state_before_json TEXT NOT NULL DEFAULT ''"
+        )
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1461,4 +1471,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     23: _migrate_agent_capability_closure_v24,
     24: _migrate_durable_handoffs_v25,
     25: _migrate_strm_path_cleanup_v26,
+    26: _migrate_organize_business_snapshot_v27,
 }

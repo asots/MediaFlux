@@ -21,6 +21,10 @@ logger = get_logger(__name__)
 MAX_REFRESH_TARGETS = 200
 
 
+def _batch_size(value: int) -> int:
+    return max(1, int(value or MAX_REFRESH_TARGETS))
+
+
 def _normalize(path: object) -> str:
     text = str(path or "").replace("\\", "/").rstrip("/")
     return text
@@ -41,6 +45,9 @@ class RefreshPlan:
     reason: str = ""
     batch_size: int = MAX_REFRESH_TARGETS
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "batch_size", _batch_size(self.batch_size))
+
     @property
     def has_targets(self) -> bool:
         return bool(self.targets)
@@ -48,7 +55,7 @@ class RefreshPlan:
     @property
     def batches(self) -> tuple[tuple[str, ...], ...]:
         """按单次媒体服务器请求上限切分，但不丢弃任何刷新目标。"""
-        size = max(1, int(self.batch_size or MAX_REFRESH_TARGETS))
+        size = self.batch_size
         return tuple(
             self.targets[offset:offset + size]
             for offset in range(0, len(self.targets), size)
@@ -85,6 +92,7 @@ def plan_refresh_targets(
     max_targets: int = MAX_REFRESH_TARGETS,
 ) -> RefreshPlan:
     """把变化文件与目录收敛成最小刷新目标集合。"""
+    max_targets = _batch_size(max_targets)
     boundary = _Boundary(tuple(
         item for item in (_normalize(root) for root in media_roots or ()) if item
     ))
@@ -125,10 +133,12 @@ def plan_refresh_targets(
 
 def _drop_descendants(paths: list[str]) -> list[str]:
     """祖先已入选时丢弃其后代，保证同一子树只刷新一次。"""
-    ordered = sorted(dict.fromkeys(paths), key=len)
+    # 以目录分隔符结尾排序，让同一子树连续，且父目录先于子目录。
+    # 不能直接按 path 排序后只比最后一项：A-b 会插在 A 与 A/b 之间。
+    ordered = sorted(dict.fromkeys(paths), key=lambda path: f"{path}/")
     kept: list[str] = []
     for path in ordered:
-        if any(_is_descendant(path, existing) for existing in kept):
+        if kept and _is_descendant(path, kept[-1]):
             continue
         kept.append(path)
     return kept

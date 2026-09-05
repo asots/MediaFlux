@@ -14,6 +14,7 @@ import uuid
 from app import database as db
 from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.logger import get_logger
+from app.modules.guangya_compensation import GuangYaCompensationError, restore_guangya_file
 from app.modules.organize_postprocess import companion_target_name
 from app.modules.process_lock import CrossProcessLock
 
@@ -26,6 +27,10 @@ class _ProbeCompletionCancelled(RuntimeError):
 
 class _ProbeCompletionUnavailable(RuntimeError):
     """本次仍未取得媒体规格，可按有限退避重试。"""
+
+
+class _ProbeCompensationFailed(RuntimeError):
+    """本任务写入恢复不确定；停止外部写入，按现有失败次数收束人工核验。"""
 
 
 class _ProbeHandoffUnavailable(RuntimeError):
@@ -224,6 +229,9 @@ class OrganizeProbeWorker:
         if not self._acquire_write_lock():
             raise InterruptedError("服务正在停止")
         journal: list[tuple[str, str, str]] = []
+        step_ids: dict[str, int] = {}
+        operation_token = f"probe:{int(job['id'])}:{uuid.uuid4().hex}"
+        committed = False
         changes: list[dict] = []
         try:
             refreshed: dict[str, GuangYaFile] = {}
@@ -266,9 +274,16 @@ class OrganizeProbeWorker:
                 target_name = targets[file_id]
                 if not target_name or target_name == current_name:
                     continue
+                # 复用已有步骤表记录写意图；进程中断也不能将自己的改名误认成外部变化。
+                step_ids[file_id] = db.add_organize_operation_step(
+                    int(log["id"]), operation_token, len(step_ids) + 1, "probe_rename",
+                    file_id=file_id, from_parent_id=str(item.get("current_parent_id") or ""),
+                    from_name=current_name, to_parent_id=str(item.get("current_parent_id") or ""),
+                    to_name=target_name, status="running",
+                )
+                journal.append((file_id, target_name, current_name))
                 if client.rename(file_id, target_name) is False:
                     raise RuntimeError(f"云端改名失败: {current_name}")
-                journal.append((file_id, target_name, current_name))
 
             rel_dir = str(job.get("rel_dir") or "")
             item_updates: list[dict] = []
@@ -300,22 +315,46 @@ class OrganizeProbeWorker:
                 changes=changes if link_strm else [],
             ):
                 raise _ProbeCompletionCancelled("整理日志或任务 lease 状态已变化")
+            committed = True
             # 后续异常必须按提交后交接处理，不能消耗探测次数或重复改名。
             job["pending_strm_changes_json"] = json.dumps(
                 changes if link_strm else [], ensure_ascii=False,
             )
+            for step_id in step_ids.values():
+                if not db.finish_organize_operation_step(step_id, "success"):
+                    raise _ProbeHandoffUnavailable("改名已提交，操作步骤收尾待重试")
             return changes
-        except Exception:
+        except Exception as failure:
+            if committed:
+                raise _ProbeHandoffUnavailable("改名已提交，操作步骤收尾待重试") from failure
             rollback_errors: list[str] = []
-            for file_id, current_name, old_name in reversed(journal):
+            by_file = {str(item["file_id"]): item for item in items}
+            for file_id, _current_name, old_name in reversed(journal):
+                item = by_file[file_id]
                 try:
-                    if client.rename(file_id, old_name) is False:
-                        raise RuntimeError("provider returned false")
+                    restore_guangya_file(client, GuangYaFile(
+                        file_id, old_name, False, int(item.get("size") or 0),
+                        str(item.get("etag") or ""), str(item.get("current_parent_id") or ""),
+                    ))
+                    if not db.finish_organize_operation_step(step_ids[file_id], "rolled_back"):
+                        raise RuntimeError("补偿步骤状态未持久化")
                 except Exception as exc:
+                    db.finish_organize_operation_step(step_ids[file_id], "rollback_failed", "补偿结果需要人工核验")
+                    remote = exc.snapshot if isinstance(exc, GuangYaCompensationError) else None
+                    db.update_organize_log_item(
+                        int(item["id"]), status="rollback_failed",
+                        current_parent_id=remote.parent_id if remote else "",
+                        current_name=remote.name if remote else "",
+                        error="媒体规格补全回滚无法确认，必须人工核验",
+                    )
                     rollback_errors.append(f"{file_id}:{type(exc).__name__}")
             if rollback_errors:
-                raise RuntimeError(
-                    "媒体规格补全失败且部分文件名回滚失败: " + ",".join(rollback_errors)
+                db.update_organize_log(
+                    int(log["id"]), status="partial_failed", legacy_incomplete=True,
+                    error="媒体规格补全回滚无法确认，必须人工核验",
+                )
+                raise _ProbeCompensationFailed(
+                    "媒体规格补全回滚无法确认，必须人工核验: " + ",".join(rollback_errors)
                 )
             raise
         finally:
@@ -346,11 +385,53 @@ class OrganizeProbeWorker:
                 f"规格补全交接暂不可用（{type(exc).__name__}），保留待交接任务"
             ) from exc
 
+    def _recover_unfinished_rename(self, job: dict) -> None:
+        """旧进程的写意图只按已提交 DB 事实收尾，否则冻结人工核验，不猜着续写。"""
+        steps = [dict(row) for row in db.list_pending_organize_probe_steps(
+            int(job["organize_log_id"]), int(job["id"]),
+        )]
+        if not steps:
+            return
+        if not self._acquire_write_lock():
+            raise InterruptedError("服务正在停止")
+        try:
+            log = self._row_dict(db.get_organize_log(int(job["organize_log_id"])))
+            items = {str(row["file_id"]): dict(row) for row in db.list_organize_log_items(int(job["organize_log_id"]))}
+            if log.get("status") == "partial_failed":
+                raise _ProbeCompensationFailed("上次规格补全无法确认，必须人工核验")
+            if log.get("status") != "success":
+                raise _ProbeCompletionCancelled("整理日志状态已变化")
+            committed = all(
+                (items.get(str(step["file_id"]), {}).get("current_name"),
+                 items.get(str(step["file_id"]), {}).get("current_parent_id"))
+                == (step["to_name"], step["to_parent_id"])
+                for step in steps
+            )
+            if committed:
+                # commit_organize_probe_rename 原子更新全部成员；此时只缺步骤收尾。
+                for step in steps:
+                    if not db.finish_organize_operation_step(int(step["id"]), "success"):
+                        raise _ProbeHandoffUnavailable("已提交改名的步骤收尾尚未完成")
+                return
+            reason = "上次媒体规格改名期间中断，文件状态无法确认，必须人工核验"
+            for step in steps:
+                item = items.get(str(step["file_id"]))
+                if item is not None:
+                    db.update_organize_log_item(int(item["id"]), status="rollback_failed", current_name="", current_parent_id="", error=reason)
+                db.finish_organize_operation_step(int(step["id"]), "rollback_failed", reason)
+            db.update_organize_log(int(log["id"]), status="partial_failed", legacy_incomplete=True, error=reason)
+            raise _ProbeCompensationFailed(reason)
+        finally:
+            self._organize_write_lock.release()
+
     def _execute_job(self, job: dict) -> bool:
+        self._recover_unfinished_rename(job)
         # 优先补交接：不能依赖探测可用性、云端访问或名称是否仍需变化。
         if self._handoff_pending(job):
             return True
         log = self._row_dict(db.get_organize_log(int(job["organize_log_id"])))
+        if log.get("status") == "partial_failed":
+            raise _ProbeCompensationFailed("上次云端写入/补偿未能确认，必须人工核验，不自动续写")
         if not log or str(log.get("status") or "") != "success":
             raise _ProbeCompletionCancelled("整理日志状态已变化")
         if bool(log.get("legacy_incomplete")):

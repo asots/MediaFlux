@@ -338,7 +338,9 @@ class MediaRefreshCoordinator:
                 bool(outcome.get("retryable")),
                 outcome.get("fallback") or "-",
             )
-            if outcome.get("retryable"):
+            if outcome.get("retryable") or not outcome.get("ok"):
+                # “不自动扩大刷新范围”不等于已完成。映射缺失、歧义或部分
+                # 未匹配仍要保留路径，等待配置恢复；不能只看 retryable。
                 fail_media_refresh(
                     group_key,
                     owner=self._owner,
@@ -350,7 +352,10 @@ class MediaRefreshCoordinator:
                 )
                 with self._state_lock:
                     self._failed_session += 1
-                    self._last_error_type = "MediaRefreshRetryable"
+                    self._last_error_type = (
+                        "MediaRefreshRetryable" if outcome.get("retryable")
+                        else "MediaRefreshUnresolved"
+                    )
                 return
             deduplicated = int(outcome.get("deduplicated") or 0)
             if deduplicated:

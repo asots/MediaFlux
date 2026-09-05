@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from app import config, database as db
 from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.logger import get_logger
+from app.modules.guangya_compensation import restore_guangya_file
 from app.modules.organize import (
     OrganizeRules,
     Organizer,
@@ -108,6 +109,20 @@ class OrganizeCorrectionService:
         return payload if isinstance(payload, dict) else None
 
     @staticmethod
+    def _confirmed_position(release_parse: object) -> dict | None:
+        if not isinstance(release_parse, dict):
+            return None
+        position = release_parse.get("manual_position")
+        if not isinstance(position, dict) or position.get("source") != "manual_correction" or position.get("version") != 1:
+            return None
+        season, episode = position.get("season"), position.get("episode")
+        if isinstance(season, bool) or not isinstance(season, int) or not 0 <= season <= 999:
+            return None
+        if episode is not None and (isinstance(episode, bool) or not isinstance(episode, int) or not 1 <= episode <= 999):
+            return None
+        return dict(position)
+
+    @staticmethod
     def _snapshot_complete(data: dict, items: list[dict]) -> tuple[bool, str]:
         if data.get("legacy_incomplete"):
             return False, "历史日志缺少原文件名或父目录快照，仅允许查看，禁止猜测式回退。"
@@ -146,7 +161,7 @@ class OrganizeCorrectionService:
         has_reversible_step = any(
             step.get("status") == "success" and step.get("action") == "move_rename"
             for step in steps
-        )
+        ) or (complete and status in REVERT_STATUSES and bool(db.list_latest_reversible_organize_steps(log_id)))
         data["allowed_actions"] = {
             "search": complete,
             "preview": complete and not busy,
@@ -477,6 +492,10 @@ class OrganizeCorrectionService:
             parsed["season"] = normalize_media_number(detail.get("season"))
         if parsed.get("episode") is None:
             parsed["episode"] = normalize_media_number(detail.get("episode"))
+        confirmed = self._confirmed_position(detail.get("release_parse")) if match.media_type == "tv" else None
+        if confirmed is not None:
+            # 人工位置是独立于原始发布名的已确认事实；只有显式新覆盖才改变它。
+            parsed["season"], parsed["episode"] = confirmed["season"], confirmed.get("episode")
         if match.media_type != "tv" and (season is not None or episode is not None):
             raise ValueError("电影不支持季号或集号覆盖")
         if season is not None:
@@ -537,6 +556,10 @@ class OrganizeCorrectionService:
             "file_name": new_name,
             "season": parsed.get("season"),
             "episode": parsed.get("episode"),
+            "manual_position": {
+                "version": 1, "source": "manual_correction",
+                "season": parsed.get("season"), "episode": parsed.get("episode"),
+            } if match.media_type == "tv" and (confirmed is not None or season is not None or episode is not None) else None,
             "items": planned,
             "rules_snapshot": organize_rules_snapshot(rules),
             "cloud_write": False,
@@ -664,7 +687,8 @@ class OrganizeCorrectionService:
                 )
 
     def _snapshot_after_rollback_failure(self, item: CorrectionItem, error: Exception) -> None:
-        fields = {"status": "rollback_failed", "error": str(error)}
+        fields = {"status": "rollback_failed", "error": str(error),
+                  "current_parent_id": "", "current_name": ""}
         try:
             remote = self.client.file_info(item.file_id)
             if remote:
@@ -681,29 +705,33 @@ class OrganizeCorrectionService:
     def _rollback_remote(self, item: CorrectionItem, current_parent_id: str,
                          current_name: str, target_parent_id: str,
                          target_name: str) -> None:
-        # 先恢复名称再恢复目录，避免目标目录已有同名文件导致移动补偿失败。
-        if current_name != target_name:
-            self.client.rename(item.file_id, target_name)
-            current_name = target_name
-        if current_parent_id != target_parent_id:
-            self.client.move([item.file_id], target_parent_id)
+        restore_guangya_file(
+            self.client,
+            GuangYaFile(item.file_id, target_name, False, item.size, item.etag, target_parent_id),
+        )
 
     def _apply_transition(self, item: CorrectionItem, target_parent_id: str,
                           target_name: str, step_id: int, *,
                           rename_first: bool) -> AppliedTransition:
         current_parent_id = item.current_parent_id
         current_name = item.current_name
+        write_attempted = False
         try:
             if rename_first and current_name != target_name:
+                write_attempted = True
                 self.client.rename(item.file_id, target_name)
                 current_name = target_name
             if current_parent_id != target_parent_id:
+                write_attempted = True
                 self.client.move([item.file_id], target_parent_id)
                 current_parent_id = target_parent_id
             if not rename_first and current_name != target_name:
+                write_attempted = True
                 self.client.rename(item.file_id, target_name)
                 current_name = target_name
         except Exception as exc:
+            if not write_attempted:
+                raise
             try:
                 self._rollback_remote(
                     item, current_parent_id, current_name,
@@ -1219,16 +1247,23 @@ class OrganizeCorrectionService:
                 str(self.detail(log_id).get("source_dir_id") or "")
             ),
         )
+        before = db.capture_organize_business_snapshot(log_id)
+        previous_log = db.get_organize_log(log_id)
+        parent_path = str(previous_log["original_path"] or "") if previous_log else ""
+        previous_tmdb_id = str(before["log"].get("tmdb_id") or "").strip()
+        match = preview["match"]
+        selected_tmdb_id = str(match.get("tmdb_id") or "").strip()
+        rejected_tmdb_ids = [previous_tmdb_id] if previous_tmdb_id and previous_tmdb_id != selected_tmdb_id else []
+        release_parse = self._decode_release_parse(before["log"].get("release_parse_json")) or {}
+        if preview.get("manual_position") is not None:
+            release_parse["manual_position"] = dict(preview["manual_position"])
+        elif match["media_type"] != "tv":
+            release_parse.pop("manual_position", None)
         created_dirs: list[str] = []
         completed: list[AppliedTransition] = []
         try:
-            target_id, created_dirs = self._ensure_target_dir(
-                preview["target_root_id"], preview["target_path"]
-            )
-            targets = [
-                (item, target_id, planned["to_name"])
-                for item, planned in zip(items, preview["items"])
-            ]
+            target_id, created_dirs = self._ensure_target_dir(preview["target_root_id"], preview["target_path"])
+            targets = [(item, target_id, planned["to_name"]) for item, planned in zip(items, preview["items"])]
             self._verify_targets_available(targets)
             for step_index, (item, planned) in enumerate(zip(items, preview["items"]), start=1):
                 step_id = db.add_organize_operation_step(
@@ -1236,47 +1271,45 @@ class OrganizeCorrectionService:
                     file_id=item.file_id, from_parent_id=item.current_parent_id,
                     from_name=item.current_name, to_parent_id=target_id,
                     to_name=planned["to_name"], status="running",
+                    # 每次操作只存一份完整前像，不按成员数量二次复制。
+                    state_before=before if step_index == 1 else None,
                 )
                 try:
-                    transition = self._apply_transition(
-                        item, target_id, planned["to_name"], step_id,
-                        rename_first=False,
-                    )
+                    transition = self._apply_transition(item, target_id, planned["to_name"], step_id, rename_first=False)
                     completed.append(transition)
                     db.update_organize_log_item(
-                        item.id, current_parent_id=target_id,
-                        current_name=planned["to_name"], target_parent_id=target_id,
-                        target_name=planned["to_name"], status="success", error="",
+                        item.id, current_parent_id=target_id, current_name=planned["to_name"],
+                        target_parent_id=target_id, target_name=planned["to_name"], status="success", error="",
                     )
                     db.finish_organize_operation_step(step_id, "success")
                 except Exception as exc:
                     db.finish_organize_operation_step(step_id, "failed", str(exc))
                     raise
+            if not db.update_organize_log(
+                log_id, status="success", operation_type="reorganize",
+                current_parent_id=target_id, current_name=preview["file_name"], target_parent_id=target_id,
+                new_path=preview["target_path"] + "/" + preview["file_name"], tmdb_id=match["tmdb_id"],
+                provider=str(match.get("provider") or ""), external_id=str(match.get("external_id") or ""),
+                media_type=match["media_type"], title=match["title"], year=match["year"],
+                season=preview.get("season") if match["media_type"] == "tv" else None,
+                episode=preview.get("episode") if match["media_type"] == "tv" else None,
+                release_parse_json=json.dumps(release_parse, ensure_ascii=False), error="",
+            ):
+                raise RuntimeError("重整业务结果未能持久化")
         except Exception:
             self._rollback_transitions(completed)
+            if completed and self._failure_status(log_id, "failed") != "partial_failed":
+                try:
+                    if not db.restore_organize_business_snapshot(log_id, before):
+                        raise RuntimeError("重整失败后的业务前像未恢复")
+                except Exception as restore_exc:
+                    for transition in completed:
+                        db.update_organize_log_item(
+                            transition.item.id, status="rollback_failed",
+                            error=f"业务前像恢复失败，必须人工核验: {type(restore_exc).__name__}",
+                        )
             self._cleanup_created_dirs(created_dirs)
             raise
-        match = preview["match"]
-        previous_log = db.get_organize_log(log_id)
-        parent_path = str(previous_log["original_path"] or "") if previous_log else ""
-        previous_tmdb_id = str(previous_log["tmdb_id"] or "").strip() if previous_log else ""
-        selected_tmdb_id = str(match.get("tmdb_id") or "").strip()
-        rejected_tmdb_ids = (
-            [previous_tmdb_id]
-            if previous_tmdb_id and previous_tmdb_id != selected_tmdb_id
-            else []
-        )
-        db.update_organize_log(
-            log_id, status="success", operation_type="reorganize",
-            current_parent_id=target_id, current_name=preview["file_name"],
-            target_parent_id=target_id,
-            new_path=preview["target_path"] + "/" + preview["file_name"],
-            tmdb_id=match["tmdb_id"],
-            provider=str(match.get("provider") or ""),
-            external_id=str(match.get("external_id") or ""),
-            media_type=match["media_type"],
-            title=match["title"], year=match["year"], error="",
-        )
         warnings = self._notify_reorganize_result(preview, items, rules)
         warnings.extend(self._run_post_actions(
             items=items,
@@ -1379,16 +1412,21 @@ class OrganizeCorrectionService:
         detail = self.detail(log_id)
         if not detail["allowed_actions"]["revert"]:
             raise ValueError("没有可安全回退的上一版操作快照")
-        successful = [
-            step for step in detail["operations"]
-            if step.get("status") == "success" and step.get("action") == "move_rename"
-        ]
-        if not successful:
+        steps = [dict(row) for row in db.list_latest_reversible_organize_steps(log_id)]
+        if not steps:
             raise ValueError("没有可安全回退的操作步骤")
-        previous_token = successful[0]["operation_token"]
-        steps = [step for step in successful if step["operation_token"] == previous_token]
+        snapshots = [str(step.get("state_before_json") or "") for step in steps if step.get("state_before_json")]
+        if len(set(snapshots)) > 1:
+            raise ValueError("最近操作包含不一致的业务前像，必须人工核验")
+        try:
+            snapshot = json.loads(snapshots[0]) if snapshots else None
+        except (TypeError, ValueError) as exc:
+            raise ValueError("最近操作的业务前像损坏，必须人工核验") from exc
+        legacy_warning = "" if snapshot is not None else "历史步骤缺少业务前像，本次仅回退文件位置和名称；原媒体身份需人工核验"
         items = self._load_items(log_id)
         items_by_file = {item.file_id: item for item in items}
+        if {str(step.get("file_id") or "") for step in steps} != set(items_by_file):
+            raise ValueError("最近操作的媒体组步骤不完整，禁止只回退部分成员")
         targets: list[tuple[CorrectionItem, str, str]] = []
         for previous in steps:
             item = items_by_file.get(str(previous.get("file_id") or ""))
@@ -1431,21 +1469,28 @@ class OrganizeCorrectionService:
                 except Exception as exc:
                     db.finish_organize_operation_step(step_id, "failed", str(exc))
                     raise
+            refreshed_items = self._load_items(log_id)
+            video = self._video(refreshed_items)
+            finish_fields = {
+                "status": "reverted", "operation_type": "revert",
+                "current_parent_id": video.current_parent_id, "current_name": video.current_name,
+                "error": legacy_warning,
+            }
+            if snapshot is not None:
+                persisted = db.restore_organize_business_snapshot(log_id, snapshot, **finish_fields)
+            else:
+                # 同一执行器的历史降级：只承诺步骤中可证实的路径逆操作，不猜身份。
+                persisted = db.update_organize_log(log_id, **finish_fields)
+            if not persisted:
+                raise RuntimeError("回退后的业务状态未能持久化")
         except Exception as exc:
             self._rollback_transitions(completed)
             db.update_organize_log(
                 log_id, status=self._failure_status(log_id, "revert_failed"), error=str(exc)
             )
             raise
-        refreshed_items = self._load_items(log_id)
-        video = self._video(refreshed_items)
-        db.update_organize_log(
-            log_id, status="reverted", operation_type="revert",
-            current_parent_id=video.current_parent_id,
-            current_name=video.current_name, error="",
-        )
         rules = OrganizeRules.from_config()
-        warnings = self._run_post_actions(
+        warnings = ([legacy_warning] if legacy_warning else []) + self._run_post_actions(
             items=refreshed_items, rules=rules, moved=len(completed)
         )
         return {

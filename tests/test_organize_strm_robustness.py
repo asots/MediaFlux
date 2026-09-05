@@ -83,21 +83,36 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             organizer._validate_target_outside_source("source", "child")
 
     def test_companion_is_rolled_back_when_rename_fails_after_move(self) -> None:
+        from dataclasses import replace
+
         operations: list[tuple] = []
         companion = GuangYaFile("sub", "Movie.nfo", False, 10, "sub-etag", "source-id")
 
+        # 真实可变快照：既验证发起了回源请求，也验证文件最后确实回到原名/原目录。
+        remote = {
+            "video": GuangYaFile("video", "Movie.mkv", False, 100, "video-etag", "source-id"),
+            "sub": replace(companion),
+        }
+
         class Client:
-            def list_dir(self, _file_id: str):
-                return []
+            def file_info(self, file_id: str):
+                item = remote.get(file_id)
+                return replace(item) if item is not None else None
+
+            def list_dir(self, file_id: str):
+                return [replace(item) for item in remote.values() if item.parent_id == file_id]
 
             def move(self, file_ids: list[str], target_id: str):
                 operations.append(("move", tuple(file_ids), target_id))
+                for file_id in file_ids:
+                    remote[file_id].parent_id = target_id
                 return True
 
             def rename(self, file_id: str, name: str):
                 operations.append(("rename", file_id, name))
                 if file_id == "sub":
                     raise RuntimeError("companion rename failed")
+                remote[file_id].name = name
                 return True
 
         plan = OrganizePlan(
@@ -147,6 +162,8 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
         self.assertIn(("move", ("video",), "source-id"), operations)
         self.assertEqual(stats["renamed"], 0)
         self.assertEqual(stats["failed"], 1)
+        self.assertEqual((remote["video"].parent_id, remote["video"].name), ("source-id", "Movie.mkv"))
+        self.assertEqual((remote["sub"].parent_id, remote["sub"].name), ("source-id", "Movie.nfo"))
 
     def test_successful_move_emits_trusted_strm_change_manifest(self) -> None:
         class Client:
@@ -346,7 +363,10 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
         self.assertEqual(latest["status"], "failed")
         self.assertIn("预览后发生变化", latest["error"])
 
-    def test_remote_restore_replays_original_name_when_state_lookup_fails(self) -> None:
+    def test_remote_restore_requires_manual_review_without_blind_writes_when_lookup_fails(self) -> None:
+        """状态不可读不能证明补偿完成，也不应盲目回放云端改名/移动。"""
+        from app.modules.guangya_compensation import GuangYaCompensationError
+
         operations: list[tuple] = []
 
         class Client:
@@ -362,12 +382,11 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
                 return True
 
         item = GuangYaFile("video", "Movie.mkv", False, 100, "etag", "source")
-        Organizer(client=Client(), scraper=object())._restore_remote_file(
-            item, "source", "Movie.mkv"
-        )
-
-        self.assertIn(("rename", "video", "Movie.mkv"), operations)
-        self.assertIn(("move", ("video",), "source"), operations)
+        with self.assertRaisesRegex(GuangYaCompensationError, "人工核验"):
+            Organizer(client=Client(), scraper=object())._restore_remote_file(
+                item, "source", "Movie.mkv"
+            )
+        self.assertEqual(operations, [])
 
 
 class StrmRobustnessTests(IsolatedDatabaseTestCase):

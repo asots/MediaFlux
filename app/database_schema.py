@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS organize_operation_steps (
     to_name TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     error TEXT DEFAULT '',
+    state_before_json TEXT NOT NULL DEFAULT '',
     started_at TEXT,
     finished_at TEXT,
     FOREIGN KEY (log_id) REFERENCES organize_log(id) ON DELETE CASCADE,

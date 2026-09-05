@@ -244,7 +244,7 @@ def reconcile_historical_strm(
     source_keys = {f"guangya:{source['id']}" for source in sources}
     rows = db.list_strm_index_by_prefix("")
     indexed_paths: set[Path] = set()
-    verified: dict[bytes, list[tuple[Path, str]]] = {}
+    replacements: dict[bytes, list[tuple[Path, str]]] = {}
     for row in rows:
         if _stopped(stats, should_stop):
             return
@@ -266,8 +266,9 @@ def reconcile_historical_strm(
                 len(payload) <= MAX_POINTER_BYTES
                 and row["content_fingerprint"] == fingerprint
             ):
-                if not path.is_symlink() and _pointer(path) == payload:
-                    verified.setdefault(payload, []).append((path, fingerprint))
+                # 这里只整理索引与签名 URL 的候选关系；遇到实际旧副本时
+                # 才在删除边界校验新文件，避免每次全量校准重读所有有效指针。
+                replacements.setdefault(payload, []).append((path, fingerprint))
         except (OSError, ValueError, TypeError):
             continue
     if all_sources:
@@ -290,7 +291,7 @@ def reconcile_historical_strm(
             if path in indexed_paths or candidate.is_symlink():
                 continue
             payload = _pointer(path)
-            matches = verified.get(payload, [])
+            matches = replacements.get(payload, [])
             if not matches:
                 # 只提示形似本项目的失联指针；其他工具生成的指针不算同步失败。
                 if b"/playgy/" in payload:
