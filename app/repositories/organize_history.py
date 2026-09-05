@@ -168,12 +168,16 @@ def list_latest_reversible_organize_steps(log_id: int) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def list_pending_organize_probe_steps(log_id: int, job_id: int) -> list[sqlite3.Row]:
-    """恢复指定探测任务的全部未完成写意图，不使用审计页的展示上限。"""
+def list_pending_organize_probe_steps(
+    log_id: int, job_id: int, *, include_succeeded: bool = False,
+) -> list[sqlite3.Row]:
+    """完整恢复写意图；收尾可带成功步骤，作为跨进程的已提交事实。"""
+    statuses = ("running", "interrupted", "success") if include_succeeded else ("running", "interrupted")
+    placeholders = ",".join("?" for _ in statuses)
     with _database().get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_operation_steps WHERE log_id=? "
             "AND operation_token GLOB ? AND action='probe_rename' "
-            "AND status IN ('running','interrupted') ORDER BY id DESC",
-            (int(log_id), f"probe:{int(job_id)}:*"),
+            f"AND status IN ({placeholders}) ORDER BY id DESC",
+            (int(log_id), f"probe:{int(job_id)}:*", *statuses),
         ).fetchall()

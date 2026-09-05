@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import uuid
 
@@ -316,6 +317,7 @@ class OrganizeProbeWorker:
             ):
                 raise _ProbeCompletionCancelled("整理日志或任务 lease 状态已变化")
             committed = True
+            job["rename_committed"] = True
             # 后续异常必须按提交后交接处理，不能消耗探测次数或重复改名。
             job["pending_strm_changes_json"] = json.dumps(
                 changes if link_strm else [], ensure_ascii=False,
@@ -385,18 +387,29 @@ class OrganizeProbeWorker:
                 f"规格补全交接暂不可用（{type(exc).__name__}），保留待交接任务"
             ) from exc
 
-    def _recover_unfinished_rename(self, job: dict) -> None:
+    def _recover_unfinished_rename(self, job: dict) -> bool:
         """旧进程的写意图只按已提交 DB 事实收尾，否则冻结人工核验，不猜着续写。"""
-        steps = [dict(row) for row in db.list_pending_organize_probe_steps(
-            int(job["organize_log_id"]), int(job["id"]),
-        )]
+        try:
+            steps = [dict(row) for row in db.list_pending_organize_probe_steps(
+                int(job["organize_log_id"]), int(job["id"]), include_succeeded=True,
+            )]
+        except sqlite3.Error as exc:
+            # 读不到恢复事实不等于尚未提交，数据库故障不消耗探测重试预算。
+            raise _ProbeHandoffUnavailable("规格补全恢复步骤暂不可读取") from exc
         if not steps:
-            return
+            return False
+        unresolved = [step for step in steps if step["status"] != "success"]
+        # 已完成的历史操作不混入当前未决意图；只有收尾时才读取最近成功操作。
+        latest_token = steps[0]["operation_token"]
+        steps = unresolved or [step for step in steps if step["operation_token"] == latest_token]
         if not self._acquire_write_lock():
             raise InterruptedError("服务正在停止")
         try:
-            log = self._row_dict(db.get_organize_log(int(job["organize_log_id"])))
-            items = {str(row["file_id"]): dict(row) for row in db.list_organize_log_items(int(job["organize_log_id"]))}
+            try:
+                log = self._row_dict(db.get_organize_log(int(job["organize_log_id"])))
+                items = {str(row["file_id"]): dict(row) for row in db.list_organize_log_items(int(job["organize_log_id"]))}
+            except sqlite3.Error as exc:
+                raise _ProbeHandoffUnavailable("规格补全业务快照暂不可读取") from exc
             if log.get("status") == "partial_failed":
                 raise _ProbeCompensationFailed("上次规格补全无法确认，必须人工核验")
             if log.get("status") != "success":
@@ -408,11 +421,28 @@ class OrganizeProbeWorker:
                 for step in steps
             )
             if committed:
-                # commit_organize_probe_rename 原子更新全部成员；此时只缺步骤收尾。
-                for step in steps:
-                    if not db.finish_organize_operation_step(int(step["id"]), "success"):
-                        raise _ProbeHandoffUnavailable("已提交改名的步骤收尾尚未完成")
-                return
+                # 同一日志的 probe 队列幂等；成功步骤即跨进程的提交事实。
+                # 即使所有步骤已成功，任务 ack 失败也不能回到媒体探测。
+                job["rename_committed"] = True
+                try:
+                    for step in steps:
+                        if step["status"] != "success" and not db.finish_organize_operation_step(int(step["id"]), "success"):
+                            raise _ProbeHandoffUnavailable("已提交改名的步骤收尾尚未完成")
+                except Exception as exc:
+                    raise _ProbeHandoffUnavailable("已提交改名的步骤收尾暂不可用") from exc
+                return True
+            if not unresolved:
+                raise _ProbeCompletionCancelled("整理记录已更新，旧规格补全任务不再适用")
+            for step in steps:
+                item = items.get(str(step["file_id"]), {})
+                current = (item.get("current_parent_id"), item.get("current_name"))
+                known_positions = (
+                    (step["from_parent_id"], step["from_name"]),
+                    (step["to_parent_id"], step["to_name"]),
+                )
+                if all(current) and current not in known_positions:
+                    # 后续人工纠偏已保存不同位置；旧意图不能清空新的可信快照。
+                    raise _ProbeCompletionCancelled("整理记录已被后续操作更新，旧规格补全任务已取消")
             reason = "上次媒体规格改名期间中断，文件状态无法确认，必须人工核验"
             for step in steps:
                 item = items.get(str(step["file_id"]))
@@ -425,10 +455,12 @@ class OrganizeProbeWorker:
             self._organize_write_lock.release()
 
     def _execute_job(self, job: dict) -> bool:
-        self._recover_unfinished_rename(job)
+        rename_committed = self._recover_unfinished_rename(job)
         # 优先补交接：不能依赖探测可用性、云端访问或名称是否仍需变化。
         if self._handoff_pending(job):
             return True
+        if rename_committed:
+            return False
         log = self._row_dict(db.get_organize_log(int(job["organize_log_id"])))
         if log.get("status") == "partial_failed":
             raise _ProbeCompensationFailed("上次云端写入/补偿未能确认，必须人工核验，不自动续写")
@@ -511,7 +543,7 @@ class OrganizeProbeWorker:
                 status,
             )
         except Exception as exc:
-            if job.get("pending_strm_changes_json", "[]") != "[]":
+            if job.get("rename_committed") or job.get("pending_strm_changes_json", "[]") != "[]":
                 # 包含下游已接管但本地完成状态写入失败：允许幂等重投，
                 # 不能让 max_attempts 将已提交的交接永久终结。
                 db.release_organize_probe_job(

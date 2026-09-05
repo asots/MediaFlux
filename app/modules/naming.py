@@ -169,7 +169,7 @@ def fit_media_filename(value: str, *, protected_suffix: str = "") -> str:
         raise ValueError("媒体文件名缺少真实扩展名")
     suffix_start = len(stem) - len(protected_suffix) if protected_suffix and stem.endswith(protected_suffix) else len(stem)
     for pattern in (
-        r"(?i)[._ -]S[0-9]{1,2}(?:E[0-9]{1,4})?(?=[._ -]|$)",
+        r"(?i)[._ -]S[0-9]+(?:E[0-9]+)?(?=[._ -]|$)",
         r"(?i)[._ -]CD[0-9]{1,2}(?=[._ -]|$)",
         r"[._ -](?:19|20)[0-9]{2}(?=[._ -]|$)",
     ):
