@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-09-05
+
+### Added
+- Agent 新增动态能力发现、元数据队列控制与光鸭 SDK 管理能力，继续通过明确确认后执行写操作（[`6ee901c`](https://github.com/li88iioo/MediaFlux/commit/6ee901c5b1f3f03ae862e12a4284b01f6e3c1be3)、[`1bca74e`](https://github.com/li88iioo/MediaFlux/commit/1bca74ea5b04aa8488ed6ae8fb411eadc77afcb8)）。
+- 补齐媒体发现、媒体库识别与可信详情链接，以及播放活动、偏好和媒体自动化流程（[`ae47eae`](https://github.com/li88iioo/MediaFlux/commit/ae47eaef4df0cc87ad888456da83f61df30961e9)、[`72459a4`](https://github.com/li88iioo/MediaFlux/commit/72459a411d7f7eee8203d5feeb99259d2d9b30b5)、[`8e9bc79`](https://github.com/li88iioo/MediaFlux/commit/8e9bc7944dae32a69ebc64a14800b1566d545bc1)）。
+- 新增 Agent 辅助整理识别复核；光鸭敏感内容净标题复核为可选功能，默认关闭（[`1bb1a23`](https://github.com/li88iioo/MediaFlux/commit/1bb1a232a80f172b790f017350f1e21872139352)、[`4077240`](https://github.com/li88iioo/MediaFlux/commit/4077240eb71b6755ead0eab63e83613d0c45b051)）。
+
+### Changed
+- Agent 控制面统一为模型驱动的事件式 Kernel，Web 与 Telegram 共用会话、私有工具引用、确认和可信结果合同；移除退役的旧控制面执行入口（[`d0000fa`](https://github.com/li88iioo/MediaFlux/commit/d0000fa439bfb7760e18861cbd04068a3c526a42)、[`4848e8f`](https://github.com/li88iioo/MediaFlux/commit/4848e8f86b1d2352f1525e38f84a26fd208e58b1)、[`f2c3884`](https://github.com/li88iioo/MediaFlux/commit/f2c3884bef78f084d8615b8ee69cd67d35eb54a2)、[`c127cf3`](https://github.com/li88iioo/MediaFlux/commit/c127cf3a82f147772c680b501e7b14e68d15b8c1)、[`e6a49c4`](https://github.com/li88iioo/MediaFlux/commit/e6a49c451d0076647cee4e47b1e0e8364383c440)）。
+- 收敛数据库与整理职责、操作历史仓储和云端补偿实现；优化独立目录刷新、长季冲突预演、STRM 重复读取及备份资源占用（[`8929644`](https://github.com/li88iioo/MediaFlux/commit/89296443e86cd5409e6726b858f0817ed10f1588)、[`a0310b7`](https://github.com/li88iioo/MediaFlux/commit/a0310b777bf1a21269cfe3fe034362ef9de1e876)、[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)）。
+- 调整 Agent 输入区提示和移动端控件对齐，保持桌面与移动端交互布局一致（[`bead475`](https://github.com/li88iioo/MediaFlux/commit/bead475688050efaa4a72d416a8752d67da36f42)、[`75e9f82`](https://github.com/li88iioo/MediaFlux/commit/75e9f82d1a5714f1b2ebdf7a75001671da3eebf3)）。
+
+### Fixed
+- 修复 qBittorrent 重提任务时的身份保持、本地路径映射推导，以及下载完成到整理/媒体刷新之间的交接竞态（[`071a425`](https://github.com/li88iioo/MediaFlux/commit/071a4255a8b9d7444c1701b02ec291c576bccd05)、[`e6a0b26`](https://github.com/li88iioo/MediaFlux/commit/e6a0b260bf6da6d4849d7326aa4c8ea4d56f5413)、[`53c84cf`](https://github.com/li88iioo/MediaFlux/commit/53c84cf28bf76666897d64e6f7aba374eec0882f)）。
+- 修复光鸭种子上传、BT 任务分发和批次结果判定，统一种子解码；不完整离线分页不再被当作任务已消失（[`e34921a`](https://github.com/li88iioo/MediaFlux/commit/e34921a17fe84b32a20bf75edfc3121539a15902)、[`2893b56`](https://github.com/li88iioo/MediaFlux/commit/2893b56cd18cc713bfa6ee925151e14a1ed1cee6)、[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)）。
+- 修复云端文件移动后 STRM 路径收敛、进程中断恢复和可信旧指针清理；刷新未定位或交接暂不可用时保留持久意图（[`a47855f`](https://github.com/li88iioo/MediaFlux/commit/a47855fd8da7908f566a7f8e4824d50c617b58d6)、[`a0310b7`](https://github.com/li88iioo/MediaFlux/commit/a0310b777bf1a21269cfe3fe034362ef9de1e876)、[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)）。
+- 纠偏回退同步恢复媒体身份、季集和成员目标；后台规格改名提交后仅重试收尾，不重复探测，也不覆盖后续人工纠偏的有效快照（[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)、[`03a2f9c`](https://github.com/li88iioo/MediaFlux/commit/03a2f9c1bed4a07cc1656a357ffcf8a2864e04c5)）。
+- 修复混合季动画识别与人工季集持久化，以及长标题、扩展名、自定义模板、宽季集编号和版本标签的命名截断（[`fed3920`](https://github.com/li88iioo/MediaFlux/commit/fed3920643da212d07e2f628e14b3b93963b14e1)、[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)、[`03a2f9c`](https://github.com/li88iioo/MediaFlux/commit/03a2f9c1bed4a07cc1656a357ffcf8a2864e04c5)）。
+- 修复光鸭 Token 更换后的刮削服务恢复，收敛确认、客户端、线程和跨事件循环运行时的生命周期边界（[`1136404`](https://github.com/li88iioo/MediaFlux/commit/11364048c7263ef6324e5b01861c4f04d5a8cb3b)、[`613ee7f`](https://github.com/li88iioo/MediaFlux/commit/613ee7f29f13b705f9618dea8aa64ef81e0f91a8)、[`2893b56`](https://github.com/li88iioo/MediaFlux/commit/2893b56cd18cc713bfa6ee925151e14a1ed1cee6)）。
+- Telegram 投递异常不再覆盖已经受理的下载或已确认业务结果；旧票据的取消和终态回写不再清除较新的待确认计划（[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)、[`a0310b7`](https://github.com/li88iioo/MediaFlux/commit/a0310b777bf1a21269cfe3fe034362ef9de1e876)）。
+
+### 升级说明
+- 从 v0.1.11 升级的完整数据库跨度为 **schema20→27**，不是仅 26→27。首次启动会先创建迁移前备份，再连续迁移；升级前仍应保留完整数据目录和可用备份。
+- Agent 已切换到新的 Kernel：旧 Agent 对话不会自动出现在新历史列表中，旧 Agent 待确认操作请重新发起并确认。旧表或备份保留不代表旧会话可在新界面续接，系统不会自动执行旧待确认操作；这不等于所有传统 Telegram 确认票据统一失效。
+- 旧整理操作没有业务前像时，只能明确回退已知文件位置与名称，历史媒体身份需人工核验。云端状态不可读或补偿无法确认时停止自动写入，不猜测成功。
+- 回退旧版本前必须停止服务，并按离线恢复流程恢复升级前数据库；不要直接让 schema20 程序打开 schema27 数据库。
+
 ## [0.1.11] - 2026-09-03
 
 ### Added
@@ -227,7 +254,8 @@ MediaFlux 首个正式开源版本发布！致力于为家庭媒体中心提供�
 - **本地运行与零遥测**：100% 独立运行在用户设备，无任何远程遥测或数据上报，所有凭据与数据库均保存在本地。
 - **严格安全防护**：全局 CSRF 防护、Session 防篡改、首启绑定本地回环与生产密钥强制校验。
 
-[Unreleased]: https://github.com/li88iioo/MediaFlux/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/li88iioo/MediaFlux/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/li88iioo/MediaFlux/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/li88iioo/MediaFlux/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/li88iioo/MediaFlux/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/li88iioo/MediaFlux/compare/v0.1.8...v0.1.9
