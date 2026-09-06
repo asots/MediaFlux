@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
+from pathlib import Path
 import unittest
 from urllib.parse import unquote, urlsplit
 
@@ -12,7 +14,7 @@ from tests.support import InitializedWebTestCase
 
 
 @unittest.skipIf(browser_support.sync_playwright is None, '系统环境未安装 Playwright')
-class AgentUXShellBrowserTests(InitializedWebTestCase):
+class AgentShellBrowserCase(InitializedWebTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -30,7 +32,7 @@ class AgentUXShellBrowserTests(InitializedWebTestCase):
         finally:
             case.tearDown()
         browser_support.AgentKernelBrowserTests.setUpClass.__func__(cls)
-        cls.static_root = (browser_support.ROOT / 'app/static').resolve()
+        cls.static_root = Path(os.getenv('MEDIAFLUX_BROWSER_STATIC_ROOT') or browser_support.ROOT / 'app/static').resolve()
 
     @classmethod
     def tearDownClass(cls):
@@ -80,6 +82,9 @@ class AgentUXShellBrowserTests(InitializedWebTestCase):
         page.wait_for_function("document.querySelector('#agentSessionList').getAttribute('aria-busy') === 'false'")
         return page, unexpected, errors
 
+
+
+class AgentUXShellBrowserTests(AgentShellBrowserCase):
     def test_real_shell_keeps_composer_centered_and_auxiliary_content_separate(self):
         for viewport in ({'width': 1280, 'height': 800}, {'width': 390, 'height': 844}, {'width': 320, 'height': 360}):
             for history in (False, True):

@@ -1259,6 +1259,10 @@
 
     const collapse = document.getElementById('collapseSidebar');
     const collapsedKey = 'mediaflux.sidebar.collapsed';
+    function readSidebarCollapsed() {
+        try { return localStorage.getItem(collapsedKey) === '1'; }
+        catch (_) { return document.documentElement.dataset.sidebar === 'collapsed'; }
+    }
     function applySidebarCollapsed(collapsed) {
         if (window.innerWidth <= 900) collapsed = false;
         document.documentElement.dataset.sidebar = collapsed ? 'collapsed' : 'expanded';
@@ -1278,10 +1282,10 @@
         renderIcons(collapse);
     }
     if (collapse) {
-        applySidebarCollapsed(localStorage.getItem(collapsedKey) === '1');
+        applySidebarCollapsed(readSidebarCollapsed());
         collapse.addEventListener('click', () => {
             const collapsed = document.documentElement.dataset.sidebar !== 'collapsed';
-            localStorage.setItem(collapsedKey, collapsed ? '1' : '0');
+            try { localStorage.setItem(collapsedKey, collapsed ? '1' : '0'); } catch (_) { /* 私密模式仍允许当前页切换。 */ }
             applySidebarCollapsed(collapsed);
         });
     }
@@ -1326,7 +1330,7 @@
     window.addEventListener('resize', () => {
         if (window.innerWidth > 900) {
             closeMobileSidebar();
-            applySidebarCollapsed(localStorage.getItem(collapsedKey) === '1');
+            applySidebarCollapsed(readSidebarCollapsed());
         } else {
             closeGuangyaFlyout();
             applySidebarCollapsed(false);

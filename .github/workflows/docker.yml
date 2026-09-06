@@ -115,6 +115,7 @@ jobs:
               "tests.test_agent_kernel_browser",
               "tests.test_agent_ux_browser",
               "tests.test_agent_ux_shell_browser",
+              "tests.test_agent_restore_browser",
               "tests.test_agent_nsfw_clean_review_settings_browser",
               "tests.test_guangya_directory_scrape_browser",
               "tests.test_guangya_directory_scrape_ui",

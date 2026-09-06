@@ -30,6 +30,10 @@
     const MAX_DRAFTS = 20;
 
     const SESSION_KEY = 'mediaflux.agent.kernel.session.v1';
+    const LAYOUT_KEY = 'mediaflux.agent.kernel.layout.v1';
+    const restoreNotice = document.getElementById('agentRestoreNotice');
+    const restoreText = document.getElementById('agentRestoreText');
+    const restoreActions = document.getElementById('agentRestoreActions');
     const SESSION_RE = /^[A-Za-z0-9_-]{16,64}$/;
     const MAX_TRANSCRIPT_ITEMS = 120;
     const STREAM_MARKDOWN_INTERVAL_MS = 72;
@@ -65,6 +69,9 @@
     let historyController = null;
     let sessionLoadGeneration = 0;
     let busy = false;
+    let initialRestore = consoleNode?.dataset.initialRestore === 'true';
+    let startupAttempt = 0;
+    let startupController = null;
 
     function createId(prefix) {
         let value = '';
@@ -151,6 +158,7 @@
         let typed = String(promptInput?.value || '');
         const accountChanged = Boolean(draftScope);
         if (accountChanged) {
+            stopInitialRestore();
             // 同一页面的登录主体改变时，不把旧主体的内存/输入传给新主体。
             ++sessionLoadGeneration;
             activeRequest?.controller.abort();
@@ -161,7 +169,6 @@
             transcript?.replaceChildren();
             followOutput = true;
             if (newRepliesButton) newRepliesButton.hidden = true;
-            setConsoleEmpty(true);
         }
         draftScope = value;
         if (accountChanged) sessionId = storedSessionId() || createId('session');
@@ -169,6 +176,7 @@
         if (!busy && !typed && scopedSession) sessionId = scopedSession;
         if (!typed && !busy) restoreDraft();
         saveDraft();
+        if (accountChanged) setConsoleEmpty(true);
     }
 
     function fillDraft(text) {
@@ -210,6 +218,9 @@
 
     function setConsoleEmpty(empty) {
         consoleNode?.classList.toggle('is-empty', Boolean(empty));
+        if (!initialRestore) {
+            try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({session_id: sessionId, mode: empty ? 'empty' : 'conversation'})); } catch (_) { /* 可选布局提示。 */ }
+        }
         const resumeParent = empty && resumeSlot ? resumeSlot : composerActions;
         if (resumeButton && resumeParent && resumeButton.parentElement !== resumeParent) {
             const wasFocused = document.activeElement === resumeButton;
@@ -1198,7 +1209,7 @@
     }
 
     function syncSend() {
-        if (sendButton && !busy) sendButton.disabled = !promptInput?.value.trim();
+        if (sendButton && !busy) sendButton.disabled = initialRestore || !promptInput?.value.trim();
     }
 
     function resizePrompt() {
@@ -1210,7 +1221,7 @@
     }
 
     async function sendQuery(text, {selection = null, preserveDraft = false} = {}) {
-        if (busy || !text.trim()) return;
+        if (busy || initialRestore || !text.trim()) return;
         const message = text.trim();
         ++sessionLoadGeneration;
         expireCandidateCards();
@@ -1547,20 +1558,27 @@
         } finally { nextActions.setAttribute('aria-busy', 'false'); }
     }
 
-    async function refreshSessions({quiet = false} = {}) {
+    async function refreshSessions({quiet = false, signal = null} = {}) {
         historyController?.abort();
         const controller = new AbortController();
         historyController = controller;
+        const abort = () => controller.abort();
+        if (signal?.aborted) controller.abort();
+        else signal?.addEventListener('abort', abort, {once: true});
         if (!quiet) sessionList?.setAttribute('aria-busy', 'true');
         try {
             const payload = await fetchJSON('/api/agent/sessions', {signal: controller.signal});
+            if (!Array.isArray(payload?.sessions)) throw new Error('会话列表响应无效');
             if (historyController !== controller) return;
             configureDraftScope(payload.draft_scope);
             renderSessionList(payload.sessions || []);
             announce(sessionStatus, '会话列表已更新');
+            return payload;
         } catch (error) {
             if (error?.name !== 'AbortError' && !quiet) announce(sessionStatus, '会话列表加载失败');
+            return null;
         } finally {
+            signal?.removeEventListener('abort', abort);
             if (historyController === controller) {
                 historyController = null;
                 sessionList?.setAttribute('aria-busy', 'false');
@@ -1574,11 +1592,13 @@
         view.body.append(buildApproval(approval));
     }
 
-    async function loadSession(targetId, {closeHistory = true} = {}) {
-        if (busy || !SESSION_RE.test(targetId)) return;
+    async function loadSession(targetId, {closeHistory = true, startup = false, signal = null} = {}) {
+        if (busy || !SESSION_RE.test(targetId)) return false;
+        if (!startup) stopInitialRestore();
         const generation = ++sessionLoadGeneration;
         try {
-            const payload = await fetchJSON(`/api/agent/sessions/${encodeURIComponent(targetId)}`);
+            const payload = await fetchJSON(`/api/agent/sessions/${encodeURIComponent(targetId)}`, {signal});
+            if (!Array.isArray(payload?.messages)) throw new Error('会话内容响应无效');
             if (generation !== sessionLoadGeneration) return;
             saveDraft();
             rememberSession(targetId);
@@ -1602,9 +1622,11 @@
             scrollToBottom(true);
             setConsoleEmpty(!transcript?.childElementCount);
             if (closeHistory) closeHistoryRail();
-            refreshSessions({quiet: true});
+            if (!startup) refreshSessions({quiet: true});
+            return true;
         } catch (error) {
-            announce(sessionStatus, error?.message || '会话加载失败');
+            if (generation === sessionLoadGeneration) announce(sessionStatus, error?.message || '会话加载失败');
+            return false;
         }
     }
 
@@ -1625,6 +1647,7 @@
 
     function startNewSession() {
         if (busy) return;
+        stopInitialRestore();
         ++sessionLoadGeneration;
         saveDraft();
         expireCandidateCards();
@@ -1648,7 +1671,8 @@
         }
         historyButton?.setAttribute('aria-expanded', 'true');
         document.getElementById('agent-session-heading')?.focus({preventScroll: true});
-        refreshSessions();
+        // 初始恢复已经在加载列表，打开抽屉只观察它，不中止并替换其请求。
+        if (!startupController) refreshSessions();
     }
 
     function closeHistoryRail() {
@@ -1758,6 +1782,68 @@
         sendQuery(`选择候选 #${selection.position}「${button.dataset.candidateTitle || ''}」并生成下载预览。`, {selection, preserveDraft: true});
     }
 
+    function hideRestoreNotice() {
+        const transferFocus = restoreNotice?.contains(document.activeElement);
+        if (restoreNotice) restoreNotice.hidden = true;
+        if (restoreActions) restoreActions.hidden = true;
+        if (transferFocus) promptInput?.focus({preventScroll: true});
+    }
+
+    function stopInitialRestore() {
+        ++startupAttempt;
+        startupController?.abort();
+        startupController = null;
+        initialRestore = false;
+        consoleNode?.classList.remove('is-restoring');
+        consoleNode?.removeAttribute('data-initial-restore');
+        consoleNode?.setAttribute('aria-busy', 'false');
+        hideRestoreNotice();
+        syncSend();
+    }
+
+    async function restoreInitialSession() {
+        const attempt = ++startupAttempt;
+        const generation = sessionLoadGeneration;
+        startupController?.abort();
+        const controller = new AbortController();
+        startupController = controller;
+        hideRestoreNotice();
+        if (restoreText) restoreText.textContent = '正在恢复上次对话…';
+        consoleNode?.setAttribute('aria-busy', initialRestore ? 'true' : 'false');
+        // 不用闪烁骨架掩盖假空态；慢请求才给固定位置的文字反馈。
+        const noticeTimer = setTimeout(() => {
+            if (attempt === startupAttempt && initialRestore && restoreNotice) restoreNotice.hidden = false;
+        }, 500);
+        const timeout = setTimeout(() => controller.abort(), 12_000);
+        try {
+            const payload = await refreshSessions({quiet: true, signal: controller.signal});
+            if (attempt !== startupAttempt || generation !== sessionLoadGeneration) return;
+            if (!payload) throw new Error('会话列表暂不可用');
+            if (storedSessionId()) {
+                const loaded = await loadSession(sessionId, {closeHistory: false, startup: true, signal: controller.signal});
+                if (attempt !== startupAttempt) return;
+                if (!loaded) throw new Error('会话内容暂不可用');
+            }
+            stopInitialRestore();
+            setConsoleEmpty(!transcript?.childElementCount);
+        } catch (_) {
+            if (attempt !== startupAttempt) return;
+            if (initialRestore && restoreNotice) {
+                restoreNotice.hidden = false;
+                if (restoreActions) restoreActions.hidden = false;
+                if (restoreText) restoreText.textContent = controller.signal.aborted
+                    ? '恢复对话超时。可以重试，或开始新会话；已有历史不会被删除。'
+                    : '暂时无法恢复上次对话。可以重试，或开始新会话；已有历史不会被删除。';
+                consoleNode?.setAttribute('aria-busy', 'false');
+            }
+        } finally {
+            clearTimeout(noticeTimer);
+            clearTimeout(timeout);
+            if (startupController === controller) startupController = null;
+            syncSend();
+        }
+    }
+
     function syncViewportHeight() {
         const height = window.visualViewport?.height || window.innerHeight;
         document.documentElement.style.setProperty('--agent-viewport-height', `${Math.round(height)}px`);
@@ -1783,6 +1869,8 @@
     });
     stopButton?.addEventListener('click', stopActiveRequest);
     newSessionButton?.addEventListener('click', startNewSession);
+    document.getElementById('agentRestoreRetry')?.addEventListener('click', restoreInitialSession);
+    document.getElementById('agentRestoreNew')?.addEventListener('click', startNewSession);
     resumeButton?.addEventListener('click', () => latestSessionId && loadSession(latestSessionId));
     historyButton?.addEventListener('click', openHistoryRail);
     historyRail?.addEventListener('cancel', (event) => {
@@ -1823,10 +1911,8 @@
 
     syncViewportHeight();
     resizePrompt();
-    setConsoleEmpty(true);
+    setConsoleEmpty(!initialRestore);
     refreshNextActions();
     renderIcons(page);
-    refreshSessions({quiet: true}).then(() => {
-        if (storedSessionId()) loadSession(sessionId, {closeHistory: false});
-    });
+    restoreInitialSession();
 })();

@@ -1541,7 +1541,7 @@ body.agent-page-body::after { display: none; }
 .agent-console.is-empty .agent-composer:focus-within { border-color: color-mix(in srgb, var(--accent) 24%, var(--border-strong)); box-shadow: none; }
 .agent-console.is-empty .agent-composer-input-wrap { order: 0; flex: 1 1 auto; width: auto; }
 /* 中文 placeholder 的字形重心略偏上，非对称内边距做 1px 光学校正。 */
-.agent-console.is-empty .agent-composer textarea { min-height: 38px; max-height: 112px; padding: 9px 4px 7px; line-height: 22px; }
+.agent-console.is-empty .agent-composer textarea { min-height: 44px; max-height: 112px; padding: 9px 4px 7px; line-height: 22px; }
 .agent-console.is-empty .agent-composer-header { display: contents !important; }
 .agent-console.is-empty .agent-composer-actions { order: -1; }
 .agent-console.is-empty .agent-composer-actions-right { order: 1; }
@@ -1894,3 +1894,11 @@ body.agent-page-body::after { display: none; }
 @media (max-width: 680px) {
     .agent-console.is-empty .agent-start-panel { height: 224px; }
 }
+
+/* 刷新历史会话时首绘使用正常对话布局，状态提示不参与高度分配。 */
+.agent-restore-notice { position: absolute; inset: 12px 20px calc(var(--agent-composer-height, 124px) + 40px); z-index: 2; max-width: 480px; margin-inline: auto; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; color: var(--text-muted); font-size: 13px; line-height: 1.6; text-align: center; }
+.agent-restore-content { flex: 0 0 auto; margin-block: auto; }
+.agent-restore-notice[hidden], .agent-restore-actions[hidden] { display: none; }
+.agent-restore-notice p { margin: 0; }
+.agent-restore-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 12px; }
+.agent-restore-actions button { flex: 0 0 auto; width: auto; min-height: 44px; padding-inline: 14px; font: inherit; }

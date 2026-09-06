@@ -14,10 +14,21 @@
 
     <div class="agent-workbench">
         <section class="agent-console is-empty" aria-label="Agent 对话工作区">
+            {% include "_agent_bootstrap.html" %}
             <div class="agent-transcript" id="agentTranscript" role="log" aria-live="off" aria-relevant="additions"></div>
 
             <div class="agent-empty-intro" id="agentEmptyIntro">
                 <p>直接描述你想处理的任务</p>
+            </div>
+
+            <div class="agent-restore-notice" id="agentRestoreNotice" role="status" aria-live="polite" hidden>
+                <div class="agent-restore-content">
+                    <p id="agentRestoreText">正在恢复上次对话…</p>
+                    <div class="agent-restore-actions" id="agentRestoreActions" hidden>
+                        <button type="button" class="agent-retry-draft" id="agentRestoreRetry">重试恢复</button>
+                        <button type="button" class="agent-retry-draft" id="agentRestoreNew">开始新会话</button>
+                    </div>
+                </div>
             </div>
 
             <button type="button" class="agent-new-replies" id="agentNewReplies" hidden><i data-lucide="arrow-down"></i><span>有新回复</span></button>
@@ -36,7 +47,7 @@
                         <button type="button" class="agent-action-btn" id="toggleAgentRail" aria-label="历史会话" title="历史会话" aria-expanded="false" aria-controls="agentHistoryRail"><i data-lucide="history"></i></button>
                         <button type="button" class="agent-action-btn" id="agentNewSession" aria-label="新会话" title="新会话"><i data-lucide="plus"></i></button>
                         <span class="agent-submit-slot">
-                            <button type="submit" class="agent-send" id="agentSend" aria-label="发送" title="发送 (Enter)"><i data-lucide="arrow-up"></i></button>
+                            <button type="submit" class="agent-send" id="agentSend" aria-label="发送" title="发送 (Enter)" disabled><i data-lucide="arrow-up"></i></button>
                             <button type="button" class="agent-stop" id="agentStop" aria-label="停止本次任务" title="停止本次任务" hidden disabled><i data-lucide="square"></i></button>
                         </span>
                     </div>
