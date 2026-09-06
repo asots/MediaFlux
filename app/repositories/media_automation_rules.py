@@ -11,25 +11,6 @@ from typing import Any
 from app import database as db
 from app.modules.process_lock import CrossProcessLock
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS media_automation_rules (
-    id TEXT PRIMARY KEY,
-    owner_digest TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    settings_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    revision INTEGER NOT NULL DEFAULT 1,
-    next_run_at TEXT NOT NULL,
-    lease_token TEXT NOT NULL DEFAULT '',
-    lease_until TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_media_automation_rules_due
-ON media_automation_rules(enabled,next_run_at,lease_until);
-CREATE INDEX IF NOT EXISTS idx_media_automation_rules_owner
-ON media_automation_rules(owner_digest,id);
-"""
 KINDS = frozenset({"daily_summary", "activity_follow"})
 _PUBLICATION_LOCK = CrossProcessLock("media-automation-publication")
 
@@ -43,11 +24,6 @@ def publication_guard():
         yield
     finally:
         _PUBLICATION_LOCK.release()
-
-
-def ensure_schema() -> None:
-    with db.get_conn() as conn:
-        conn.executescript(SCHEMA)
 
 
 def _row(row: Any) -> dict[str, Any] | None:

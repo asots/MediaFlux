@@ -19,6 +19,7 @@ from app.modules.strm import sync_strm
 from app import notifier
 from app.notifier import NOTIFICATION_SECTION_BREAK, NotificationEvent
 from tests.support import IsolatedDatabaseTestCase
+from tests.support import PagedDirectoryTestMixin
 
 
 class _RaisingTMDBClient:
@@ -584,7 +585,7 @@ class TelegramStrmCleanupNotificationTests(unittest.TestCase):
         self.assertTrue(any("为避免误删" in line for line in event.lines))
 
 
-class _FailingTreeClient:
+class _FailingTreeClient(PagedDirectoryTestMixin):
     def list_dir(self, dir_id):
         if dir_id == "root":
             return [GuangYaFile("broken", "坏目录", True)]

@@ -31,7 +31,6 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
         )
         enabled.start()
         self.addCleanup(enabled.stop)
-        rules.ensure_schema()
         with db.get_conn() as conn:
             conn.execute("DELETE FROM media_automation_rules")
         self.context = ToolContext(

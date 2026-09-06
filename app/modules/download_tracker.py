@@ -188,10 +188,20 @@ class DownloadTracker:
         qb_index = _QBTaskIndex(qb_tasks)
         gy_index = _GYTaskIndex(gy_tasks)
         for row in rows:
-            self._update_request(
-                row, qb_index, gy_index,
-                qb_available=qb_available, gy_available=gy_available,
-            )
+            try:
+                self._update_request(
+                    row, qb_index, gy_index,
+                    qb_available=qb_available, gy_available=gy_available,
+                )
+            except Exception as exc:  # noqa: BLE001 - 单条故障不能饿死整批下载。
+                # 不猜测失败/成功终态；保留原状态，由持久游标下一轮绕回重试。
+                # KeyboardInterrupt 等进程中断仍向上传播，不提交整批游标。
+                log_throttled(
+                    logger, logging.ERROR,
+                    f"download-tracker-request:{int(row['id'])}:{type(exc).__name__}",
+                    "下载跟踪单条处理失败 request#%s type=%s",
+                    int(row["id"]), type(exc).__name__,
+                )
         db.kv_set(_TRACKER_CURSOR_KEY, str(int(rows[-1]["id"])))
         return len(rows)
 

@@ -30,56 +30,8 @@ from .state import (
 )
 from .ux_display import session_display_patch, session_summary
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS agent_kernel_sessions (
-    owner_digest TEXT NOT NULL,
-    session_digest TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK(generation >= 0),
-    state_json TEXT NOT NULL,
-    state_hmac TEXT NOT NULL,
-    updated_at REAL NOT NULL,
-    PRIMARY KEY(owner_digest, session_digest)
-);
-CREATE TABLE IF NOT EXISTS agent_kernel_session_epochs (
-    owner_digest TEXT NOT NULL,
-    session_digest TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK(generation >= 0),
-    updated_at REAL NOT NULL,
-    PRIMARY KEY(owner_digest, session_digest)
-);
-CREATE TABLE IF NOT EXISTS agent_kernel_refs (
-    ref_id TEXT PRIMARY KEY,
-    owner_digest TEXT NOT NULL,
-    session_digest TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    value_json TEXT NOT NULL,
-    value_hmac TEXT NOT NULL,
-    expires_at REAL NOT NULL,
-    created_at REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_agent_kernel_refs_scope
-    ON agent_kernel_refs(owner_digest, session_digest, expires_at);
-CREATE TABLE IF NOT EXISTS agent_kernel_events (
-    event_id TEXT PRIMARY KEY,
-    owner_digest TEXT NOT NULL,
-    session_digest TEXT NOT NULL,
-    turn_id TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL CHECK(sequence > 0),
-    event_type TEXT NOT NULL,
-    event_json TEXT NOT NULL,
-    event_hmac TEXT NOT NULL,
-    occurred_at TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    UNIQUE(owner_digest, session_digest, turn_id, sequence)
-);
-CREATE INDEX IF NOT EXISTS idx_agent_kernel_events_session
-    ON agent_kernel_events(owner_digest, session_digest, created_at, sequence);
-"""
-
-
 class SQLiteKernelStore:
-    """上层唯一依赖的 SQLite 接口，同时实现 state/ref/event 三种 port。"""
+    """统一 state/ref/event 持久化接口；表结构由 database.init_db 管理。"""
 
     def __init__(
         self,
@@ -204,10 +156,6 @@ class SQLiteKernelStore:
 
     async def delete_session(self, *, owner: str, session_id: str) -> bool:
         return await asyncio.to_thread(self._delete_session_sync, owner, session_id)
-
-    @staticmethod
-    def _ensure_schema(conn: Any) -> None:
-        conn.executescript(_SCHEMA)
 
     def _secret(self) -> bytes:
         secret = str(self._secret_provider() or "")
@@ -471,7 +419,6 @@ class SQLiteKernelStore:
         selection_guard: CandidateSelectionGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, owner, session_id)
             if selection_guard is not None:
@@ -498,7 +445,6 @@ class SQLiteKernelStore:
     def _is_current_sync(self, lease: PublicationLease) -> bool:
         owner_digest, session_digest = self._scope(lease.owner, lease.session_id)
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             row = conn.execute(
                 "SELECT generation FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?",
                 (owner_digest, session_digest),
@@ -512,7 +458,6 @@ class SQLiteKernelStore:
         updates: Sequence[StateUpdate],
     ) -> SessionState:
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, lease.owner, lease.session_id)
             if state.generation != lease.generation:
@@ -527,7 +472,6 @@ class SQLiteKernelStore:
 
     def _load_sync(self, owner: str, session_id: str) -> SessionState:
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             return self._load_row(conn, owner, session_id)
 
     def _patch_session_display_sync(
@@ -535,7 +479,6 @@ class SQLiteKernelStore:
     ) -> dict[str, Any] | None:
         owner_digest, session_digest = self._scope(owner, session_id)
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             # 跨进程事务内读最新签名状态；禁止 load -> commit 覆盖新回合。
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -574,7 +517,6 @@ class SQLiteKernelStore:
         maximum = max(1, min(int(limit), 100))
         result: list[dict[str, Any]] = []
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             # 排序与按键读取共用一个读快照，避免并发 PATCH/新回合混入旧排序。
             conn.execute("BEGIN")
             # 全历史只排序小键；不让完整 state_json 进入临时 B-tree。
@@ -619,7 +561,6 @@ class SQLiteKernelStore:
     def _reset_session_sync(self, owner: str, session_id: str) -> SessionState:
         owner_digest, session_digest = self._scope(owner, session_id)
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             current = self._load_row(conn, owner, session_id)
             reset = SessionState(
@@ -648,7 +589,6 @@ class SQLiteKernelStore:
     def _delete_session_sync(self, owner: str, session_id: str) -> bool:
         owner_digest, session_digest = self._scope(owner, session_id)
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
                 "SELECT generation FROM agent_kernel_sessions "
@@ -696,7 +636,6 @@ class SQLiteKernelStore:
             domain=f"ref:v1:{ref_id}:{owner_digest}:{session_digest}:{normalized_kind}:{expires_at}".encode(),
         )
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM agent_kernel_refs WHERE expires_at<=?", (now,))
             conn.execute(
@@ -728,7 +667,6 @@ class SQLiteKernelStore:
         owner_digest, session_digest = self._scope(owner, session_id)
         now = self._clock()
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             row = conn.execute(
                 "SELECT owner_digest,session_digest,kind,value_json,value_hmac,expires_at "
                 "FROM agent_kernel_refs WHERE ref_id=? AND expires_at>?",
@@ -762,7 +700,6 @@ class SQLiteKernelStore:
             maximum=self.max_event_bytes,
         )
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             now = self._clock()
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -814,7 +751,6 @@ class SQLiteKernelStore:
         owner_digest, session_digest = self._scope(owner, session_id)
         bounded = max(1, min(int(limit), 500))
         with db.get_conn() as conn:
-            self._ensure_schema(conn)
             rows = conn.execute(
                 "SELECT event_id,event_json,event_hmac FROM agent_kernel_events WHERE owner_digest=? AND session_digest=? "
                 "ORDER BY created_at DESC,rowid DESC LIMIT ?",

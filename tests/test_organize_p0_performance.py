@@ -13,7 +13,7 @@ from app.clients.guangya import GuangYaFile
 from app.modules.organize import OrganizeRules, Organizer, _OrganizeAuditWriteError
 from app.modules.scraper import TMDBScraper
 from app.modules.strm import _current_fingerprint_backfills, sync_strm
-from tests.support import IsolatedDatabaseTestCase
+from tests.support import IsolatedDatabaseTestCase, PagedDirectoryTestMixin
 
 
 class _SearchClient:
@@ -158,7 +158,7 @@ class _MetricScraper:
         return dict(self.metrics)
 
 
-class _TreeClient:
+class _TreeClient(PagedDirectoryTestMixin):
     def __init__(self, source_id: str, files: list[GuangYaFile]):
         self.source_id = source_id
         self.files = files

@@ -215,6 +215,23 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 {"query": "示例剧", "season": 2, "sites": ["mikan"]}
             )
 
+    def test_old_sample_cannot_replace_exact_target_verdict(self):
+        arguments = missing_episode_resource_arguments(
+            {"query": "示例剧", "season": 2, "episode": 3}
+        )
+        for verdict in (None, "true", 1, [], {}):
+            audit = _audit_result(missing=[{"season": 2, "episode": 3}])
+            audit.data["target_missing"] = verdict
+            with (
+                self.subTest(verdict=verdict),
+                patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit),
+                patch("app.agent.episode_resource_actions.search_resources") as search,
+            ):
+                result = search_missing_episode_resources(arguments)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.status, "inconclusive")
+            search.assert_not_called()
+
     def test_only_searches_after_exact_missing_episode_is_verified(self):
         arguments = missing_episode_resource_arguments(
             {
@@ -230,7 +247,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         with (
             patch(
                 "app.agent.episode_resource_actions.audit_series_episodes",
-                return_value=_audit_result(missing=[{"season": 2, "episode": 3}]),
+                return_value=_audit_result(missing=[{"season": 2, "episode": 3}], target_missing=True),
             ) as audit,
             patch("app.agent.indexer_actions.config.get_bool", return_value=True),
             patch(
@@ -320,7 +337,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         with (
             patch(
                 "app.agent.episode_resource_actions.audit_series_episodes",
-                return_value=_audit_result(missing=[{"season": 2, "episode": 3}]),
+                return_value=_audit_result(missing=[{"season": 2, "episode": 3}], target_missing=True),
             ),
             patch(
                 "app.agent.episode_resource_actions.search_resources",
@@ -345,7 +362,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         )
         cases = (
             (_audit_result(status="up_to_date", missing=[]), "not_missing"),
-            (_audit_result(missing=[{"season": 2, "episode": 4}]), "not_missing"),
+            (_audit_result(missing=[{"season": 2, "episode": 4}], target_missing=False), "not_missing"),
             (
                 _audit_result(missing=[{"season": 2, "episode": 4}], truncated=True),
                 "inconclusive",

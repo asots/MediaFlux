@@ -76,7 +76,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         ]
         client = SimpleNamespace(
             get_download_url=Mock(
-                side_effect=lambda file_id: f"https://example/{file_id}"
+                side_effect=lambda file_id, *, timeout=None, raise_timeout=False: f"https://example/{file_id}"
             )
         )
         payload = json.dumps({"streams": [
@@ -137,7 +137,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         ]
         client = SimpleNamespace(
             get_download_url=Mock(
-                side_effect=lambda file_id: f"https://example/{file_id}"
+                side_effect=lambda file_id, *, timeout=None, raise_timeout=False: f"https://example/{file_id}"
             )
         )
         budget = ProbeBudget(attempts=len(files) * 2, max_seconds=0.06)
@@ -186,7 +186,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         first_url_started = threading.Event()
         release_url = threading.Event()
 
-        def get_download_url(file_id):
+        def get_download_url(file_id, *, timeout=None, raise_timeout=False):
             first_url_started.set()
             release_url.wait(timeout=1)
             return f"https://example/{file_id}"
@@ -235,7 +235,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         release_request = threading.Event()
         received_timeouts: list[float] = []
 
-        def get_download_url(file_id, *, timeout=None):
+        def get_download_url(file_id, *, timeout=None, raise_timeout=False):
             del file_id
             received_timeouts.append(float(timeout or 0))
             request_started.set()
@@ -282,7 +282,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         )
         received_timeouts: list[float] = []
 
-        def get_download_url(_file_id, *, timeout=None):
+        def get_download_url(_file_id, *, timeout=None, raise_timeout=False):
             received_timeouts.append(float(timeout or 0))
             return ""
 
@@ -316,6 +316,27 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(received_timeouts), 1)
         self.assertGreater(received_timeouts[0], 0)
         self.assertLess(received_timeouts[0], budget_seconds - 0.07)
+
+    def test_cloud_probe_always_passes_timeout_contract_through_wrapper(self):
+        received = []
+
+        def get_download_url(_file_id, **kwargs):
+            received.append(kwargs)
+            raise TimeoutError("wrapped transport timeout")
+
+        client = SimpleNamespace(get_download_url=get_download_url)
+        budget = ProbeBudget(attempts=1, max_seconds=5)
+        with patch("app.modules.media_probe._write_failure_cache"):
+            result = probe_media_profile(
+                GuangYaFile("wrapped", "Wrapped.mkv", False, 1000, "e", "source"),
+                client, enabled=True, timeout=5, prefetched_payload="", cache_prefetched=True,
+                budget=budget,
+            )
+        self.assertIsNone(result)
+        self.assertEqual(len(received), 1)
+        self.assertTrue(received[0].get("raise_timeout"))
+        self.assertGreater(received[0]["timeout"], 0)
+        self.assertEqual(budget.timeouts, 1)
 
     def test_cloud_probe_classifies_download_url_transport_timeout(self):
         file = GuangYaFile(
@@ -399,7 +420,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         ]
         cancel_event = threading.Event()
 
-        def get_download_url(file_id):
+        def get_download_url(file_id, *, timeout=None, raise_timeout=False):
             cancel_event.set()
             return f"https://example/{file_id}"
 

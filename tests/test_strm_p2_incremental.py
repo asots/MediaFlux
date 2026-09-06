@@ -17,9 +17,10 @@ from app.modules.strm import (
     sync_strm_incremental,
 )
 from tests.support import IsolatedDatabaseTestCase
+from tests.support import PagedDirectoryTestMixin
 
 
-class _IncrementalClient:
+class _IncrementalClient(PagedDirectoryTestMixin):
     def __init__(
         self,
         files: dict[str, GuangYaFile],
@@ -54,7 +55,7 @@ class _IncrementalClient:
         raise AssertionError("视频增量不应获取元数据直链")
 
 
-class _TreeClient:
+class _TreeClient(PagedDirectoryTestMixin):
     def __init__(self, tree: dict[str, list[GuangYaFile]]):
         self.tree = tree
 

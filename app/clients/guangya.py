@@ -36,6 +36,10 @@ from app.private_files import protect_private_file
 logger = get_logger(__name__)
 
 
+class DirectoryEntryLimitError(RuntimeError):
+    """目录超过调用方读取预算；不是网络或目录损坏故障。"""
+
+
 class IncompleteOfflineTaskListError(RuntimeError):
     """离线任务分页不完整，禁止调用方据此判断任务已消失。"""
 
@@ -1634,7 +1638,7 @@ class GuangYaClient:
                 if item.file_id and item.file_id in seen_ids:
                     continue
                 if item_limit is not None and yielded >= item_limit:
-                    raise RuntimeError(
+                    raise DirectoryEntryLimitError(
                         f"光鸭目录项目超过调用方安全上限 {item_limit}，已停止读取"
                     )
                 if item.file_id:

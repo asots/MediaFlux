@@ -14,11 +14,12 @@ from app.clients.guangya import GuangYaFile
 from app.modules import strm
 from app.modules.scheduler import STRMScheduler
 from tests.support import isolated_test_database
+from tests.support import PagedDirectoryTestMixin
 
 BASE_URL = "http://play.invalid"
 
 
-class MoveCloud:
+class MoveCloud(PagedDirectoryTestMixin):
     def __init__(self, location="Old", source="source", fail_source=""):
         self.location = location
         self.source = source

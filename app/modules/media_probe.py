@@ -1,7 +1,6 @@
 """本地与光鸭媒体规格探测及稳定缓存。"""
 from __future__ import annotations
 
-import inspect
 import logging
 import json
 import os
@@ -607,30 +606,6 @@ def _acquire_download_url_lock(
     return False
 
 
-def _get_download_url_with_timeout(client, file_id: str, timeout: float):
-    """为正式客户端传递 transport timeout，并兼容旧测试/插件桩。"""
-    method = client.get_download_url
-    signature_target = getattr(method, "side_effect", None)
-    if not callable(signature_target):
-        signature_target = method
-    try:
-        parameters = inspect.signature(signature_target).parameters.values()
-    except (TypeError, ValueError):
-        parameters = ()
-    parameter_names = {parameter.name for parameter in parameters}
-    supports_kwargs = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
-    kwargs = {}
-    if "timeout" in parameter_names or supports_kwargs:
-        kwargs["timeout"] = timeout
-    # 仅正式客户端显式声明该参数时启用，避免改变旧插件桩的调用契约。
-    if "raise_timeout" in parameter_names:
-        kwargs["raise_timeout"] = True
-    return method(file_id, **kwargs)
-
-
 def probe_media_profile(
     file,
     client,
@@ -699,8 +674,8 @@ def probe_media_profile(
                 if active_timeout <= 0:
                     _record_expired_budget_timeout(budget)
                     return None
-                url = _get_download_url_with_timeout(
-                    client, str(file.file_id), active_timeout
+                url = client.get_download_url(
+                    str(file.file_id), timeout=active_timeout, raise_timeout=True
                 )
             else:
                 if not _acquire_download_url_lock(
@@ -718,8 +693,8 @@ def probe_media_profile(
                     if active_timeout <= 0:
                         _record_expired_budget_timeout(budget)
                         return None
-                    url = _get_download_url_with_timeout(
-                        client, str(file.file_id), active_timeout
+                    url = client.get_download_url(
+                        str(file.file_id), timeout=active_timeout, raise_timeout=True
                     )
                 finally:
                     download_url_lock.release()

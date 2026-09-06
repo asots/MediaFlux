@@ -142,3 +142,19 @@ def release_parse_fields(result) -> dict[str, object]:
     if result.tmdb_id:
         payload["tmdb_id"] = result.tmdb_id
     return payload
+
+
+class PagedDirectoryTestMixin:
+    """让内存目录替身显式实现正式分页协议；兼容适配只存在于测试端。"""
+
+    def iter_dir(self, directory_id: str, *, should_stop=None, max_items=None):
+        if should_stop and should_stop():
+            return
+        from app.clients.guangya import DirectoryEntryLimitError
+
+        for index, item in enumerate(self.list_dir(directory_id)):
+            if should_stop and should_stop():
+                return
+            if max_items is not None and index >= max_items:
+                raise DirectoryEntryLimitError("测试目录超过调用方条目预算")
+            yield item

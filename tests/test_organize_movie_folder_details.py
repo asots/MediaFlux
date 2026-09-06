@@ -9,7 +9,7 @@ from app.clients.guangya import GuangYaFile
 from app.modules.naming import build_context, render_template
 from app.modules.organize import OrganizePlan, OrganizeRules, Organizer
 from app.modules.scraper import MatchResult
-from tests.support import IsolatedDatabaseTestCase, release_parse_result
+from tests.support import IsolatedDatabaseTestCase, PagedDirectoryTestMixin, release_parse_result
 
 
 class _MovieScraper:
@@ -465,7 +465,7 @@ class StrmChangeLedgerIntegrationTests(IsolatedDatabaseTestCase):
         from app.modules.strm import STRM_SUBDIR, sync_strm
 
         source_id = f"detail-{uuid.uuid4().hex}"
-        client = type("Client", (), {
+        client = type("Client", (PagedDirectoryTestMixin,), {
             "list_dir": lambda self, file_id: [
                 GuangYaFile("v1", "电影.mkv", False, 100, "etag", source_id)
             ]

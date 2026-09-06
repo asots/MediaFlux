@@ -1383,7 +1383,25 @@ def _migrate_agent_kernel_session_epochs_v23(conn: sqlite3.Connection) -> None:
 
 def _migrate_agent_capability_closure_v24(conn: sqlite3.Connection) -> None:
     """保留旧偏好，增加结构化档案、一次性补偿状态及主动规则。"""
-    from app.repositories.media_automation_rules import SCHEMA as automation_schema
+    automation_schema = """
+CREATE TABLE IF NOT EXISTS media_automation_rules (
+    id TEXT PRIMARY KEY,
+    owner_digest TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    settings_json TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 1,
+    next_run_at TEXT NOT NULL,
+    lease_token TEXT NOT NULL DEFAULT '',
+    lease_until TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_automation_rules_due
+ON media_automation_rules(enabled,next_run_at,lease_until);
+CREATE INDEX IF NOT EXISTS idx_media_automation_rules_owner
+ON media_automation_rules(owner_digest,id);
+"""
 
     for statement in automation_schema.split(";"):
         if statement.strip():

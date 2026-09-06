@@ -362,6 +362,8 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             )
         limiter = AgentRateLimiter(shared=True)
         with patch("app.agent.rate_limit.time.time", return_value=130.0):
+            # 旧表只通过正式启动迁移补齐，限流热路径不再承担第二套迁移。
+            db.init_db()
             self.assertFalse(limiter.allow(key, limit=3, window_seconds=60))
         with db.get_conn() as conn:
             row = conn.execute(

@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
-import inspect
 import json
 import os
 import re
@@ -36,7 +35,9 @@ from urllib3.util import Retry
 
 from app import database as db
 from app.config import get, get_int
-from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
+from app.clients.guangya import (
+    DirectoryEntryLimitError, GuangYaClient, GuangYaFile, close_guangya_client,
+)
 from app.logger import get_logger, redact_sensitive_text
 from app.modules.process_lock import CrossProcessLock
 from app.modules.strm_notifications import append_change, relative_change
@@ -58,28 +59,6 @@ def _guangya_client_scope(
         if owned_client:
             close_guangya_client(runtime_client)
 
-
-def _iter_client_dir(
-    client,
-    dir_id: str,
-    *,
-    should_stop: Callable[[], bool] | None,
-    max_items: int,
-):
-    """兼容旧客户端替身，同时把生产扫描预算下推到分页层。"""
-    iter_dir = getattr(client, "iter_dir", None)
-    if not callable(iter_dir):
-        return iter(client.list_dir(dir_id))
-    kwargs = {"should_stop": should_stop}
-    try:
-        parameters = inspect.signature(iter_dir).parameters.values()
-        if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters) or any(
-            item.name == "max_items" for item in parameters
-        ):
-            kwargs["max_items"] = max(1, int(max_items))
-    except (TypeError, ValueError):
-        kwargs["max_items"] = max(1, int(max_items))
-    return iter_dir(dir_id, **kwargs)
 
 # 全局元数据下载 Session 与连接池，复用 TCP 连接以避免 Windows 端口耗尽
 _METADATA_SESSION: requests.Session | None = None
@@ -1451,8 +1430,7 @@ def _incremental_parent_snapshots(
             return snapshots, True
         started = time.monotonic()
         try:
-            files = list(_iter_client_dir(
-                client,
+            files = list(client.iter_dir(
                 parent_id,
                 should_stop=should_stop,
                 # 小批量变化不应为读取超大目录付出几十页成本；变化越多，
@@ -2071,8 +2049,7 @@ def _sync_strm_impl(
                     int(stats["scan_workers_peak"]), active_scan_workers
                 )
             try:
-                files = iter(_iter_client_dir(
-                    client,
+                files = iter(client.iter_dir(
                     dir_id,
                     should_stop=page_scan_stop_requested,
                     max_items=max_entries,
@@ -2159,6 +2136,9 @@ def _sync_strm_impl(
                     dir_id, rel_parts = inflight.pop(future)
                     try:
                         files = future.result()
+                    except DirectoryEntryLimitError:
+                        abort_scan("entries", "云端目录条目超过扫描上限")
+                        break
                     except ValueError:
                         abort_scan()
                         raise
@@ -2957,8 +2937,7 @@ def _locate_retry_files(
                         return True
                     return False
 
-                items = _iter_client_dir(
-                    client,
+                items = client.iter_dir(
                     dir_id,
                     should_stop=page_scan_stop_requested,
                     max_items=max_entries - entries,

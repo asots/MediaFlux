@@ -9,9 +9,10 @@ from app.clients.guangya import GuangYaFile
 from app.modules import strm
 from app.modules.scheduler import STRMScheduler
 from tests.support import isolated_test_database
+from tests.support import PagedDirectoryTestMixin
 
 
-class Cloud:
+class Cloud(PagedDirectoryTestMixin):
     def __init__(self, parent="OldSeries", count=1):
         self.parent = parent
         self.count = count

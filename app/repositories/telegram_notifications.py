@@ -1,4 +1,4 @@
-"""统一 Telegram 主动通知 outbox 与可更新消息线程仓储。"""
+"""统一 Telegram 主动通知仓储；schema 仅由 database.init_db 初始化和迁移。"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -16,33 +16,6 @@ def _database() -> "ModuleType":
     from app import database
 
     return database
-
-
-def _ensure_schema(conn) -> None:
-    """兼容尚未经过进程启动初始化的 CLI、测试与独立 worker。"""
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS telegram_notification_outbox ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT NOT NULL UNIQUE,"
-        "thread_key TEXT NOT NULL DEFAULT '',topic TEXT NOT NULL DEFAULT 'system',"
-        "importance TEXT NOT NULL DEFAULT 'result',chat_id TEXT NOT NULL DEFAULT '',"
-        "event_json TEXT NOT NULL,message_id INTEGER,"
-        "revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),"
-        "delivered_revision INTEGER NOT NULL DEFAULT 0 CHECK(delivered_revision >= 0),"
-        "status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN "
-        "('pending','sending','retry_wait','sent','failed','outcome_unknown','suppressed')),"
-        "attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),"
-        "lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(lease_generation >= 0),"
-        "next_attempt_at TEXT NOT NULL,last_error TEXT NOT NULL DEFAULT '',"
-        "sent_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_telegram_notification_outbox_due "
-        "ON telegram_notification_outbox(status,next_attempt_at,id)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_telegram_notification_outbox_thread "
-        "ON telegram_notification_outbox(thread_key,chat_id)"
-    )
 
 
 def _future_stamp(delay_seconds: int, *, base_stamp: str = "") -> str:
@@ -78,7 +51,6 @@ def upsert_notification(
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT id,status,revision,delivered_revision,message_id,event_json,"
@@ -174,7 +146,6 @@ def upsert_notification(
 
 def get_notification(event_key: str) -> dict[str, Any] | None:
     with _database().get_conn() as conn:
-        _ensure_schema(conn)
         row = conn.execute(
             "SELECT * FROM telegram_notification_outbox WHERE event_key=?",
             (str(event_key or ""),),
@@ -189,7 +160,6 @@ def claim_due_notifications(
     stamp = database.now()
     claimed: list[dict[str, Any]] = []
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         stale_before = _future_stamp(-_LEASE_SECONDS, base_stamp=stamp)
         # 首次发送没有远端 message_id，租约过期只代表本地失去结果，不能
@@ -244,7 +214,6 @@ def complete_notification(
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT revision FROM telegram_notification_outbox WHERE id=? "
@@ -287,7 +256,6 @@ def retry_notification(
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT attempts,revision FROM telegram_notification_outbox WHERE id=? "
@@ -355,7 +323,6 @@ def fail_notification(
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT revision FROM telegram_notification_outbox WHERE id=? "
@@ -408,7 +375,6 @@ def suppress_notification(
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT revision FROM telegram_notification_outbox WHERE id=? "
@@ -459,7 +425,6 @@ def mark_outcome_unknown(
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT revision,message_id FROM telegram_notification_outbox WHERE id=? "
@@ -517,7 +482,6 @@ def recover_notifications() -> int:
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         cur = conn.execute(
             "UPDATE telegram_notification_outbox SET "
             "status=CASE WHEN COALESCE(message_id,0)>0 "
@@ -538,7 +502,6 @@ def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
     normal_cutoff = _future_stamp(-max(1, int(retention_days)) * 86400)
     diagnostic_cutoff = _future_stamp(-max(90, int(retention_days)) * 86400)
     with database.get_conn() as conn:
-        _ensure_schema(conn)
         cur = conn.execute(
             "DELETE FROM telegram_notification_outbox WHERE id IN ("
             "SELECT id FROM telegram_notification_outbox WHERE "
@@ -552,7 +515,6 @@ def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
 
 def pending_notification_count() -> int:
     with _database().get_conn() as conn:
-        _ensure_schema(conn)
         row = conn.execute(
             "SELECT COUNT(*) AS total FROM telegram_notification_outbox "
             "WHERE status IN ('pending','retry_wait','sending')"

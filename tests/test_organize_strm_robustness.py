@@ -25,9 +25,10 @@ from app.modules.strm_notifications import append_change, relative_change
 from app.routes import proxy as proxy_routes
 from app.routes.proxy import play_gy
 from tests.support import IsolatedDatabaseTestCase
+from tests.support import PagedDirectoryTestMixin
 
 
-class _TreeClient:
+class _TreeClient(PagedDirectoryTestMixin):
     def __init__(self, tree: dict[str, list[GuangYaFile]]) -> None:
         self.tree = tree
 
@@ -1534,7 +1535,7 @@ class StrmSchedulerRobustnessTests(IsolatedDatabaseTestCase):
 
 
 class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
-    class RecordingTreeClient:
+    class RecordingTreeClient(PagedDirectoryTestMixin):
         def __init__(self, tree):
             self.tree = tree
             self.calls = []

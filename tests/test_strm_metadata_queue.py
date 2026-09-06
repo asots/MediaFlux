@@ -5,6 +5,7 @@ import time
 
 from app import database as db
 from tests.support import IsolatedDatabaseTestCase
+from tests.support import PagedDirectoryTestMixin
 
 
 def _job(**updates) -> dict:
@@ -306,7 +307,7 @@ class StrmMetadataQueueTests(IsolatedDatabaseTestCase):
         self.assertEqual(summary["total"], 2)
 
 
-class _TreeClient:
+class _TreeClient(PagedDirectoryTestMixin):
     def __init__(self, tree):
         self.tree = tree
         self.info = {}

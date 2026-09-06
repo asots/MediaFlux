@@ -18,6 +18,8 @@ from unittest.mock import ANY, Mock, patch
 
 from fastapi.testclient import TestClient
 
+from tests.support import PagedDirectoryTestMixin
+
 from app import config
 from app import database as db
 from app.clients.base import DashboardData
@@ -2966,7 +2968,7 @@ class STRMIndexTests(IsolatedDatabaseTestCase):
             ]
         }
         client = type(
-            "Client", (), {"list_dir": lambda inner, file_id: tree[file_id]}
+            "Client", (PagedDirectoryTestMixin,), {"list_dir": lambda inner, file_id: tree[file_id]}
         )()
         try:
             with tempfile.TemporaryDirectory() as root:

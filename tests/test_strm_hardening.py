@@ -22,9 +22,10 @@ from app.modules.strm import (
     sync_strm,
 )
 from app.modules.strm_metadata_worker import STRMMetadataWorker
+from tests.support import PagedDirectoryTestMixin
 
 
-class _TreeClient:
+class _TreeClient(PagedDirectoryTestMixin):
     def __init__(self, tree):
         self.tree = tree
 
@@ -677,7 +678,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
             def __init__(self):
                 self.yielded = 0
 
-            def iter_dir(self, _file_id, *, should_stop=None):
+            def iter_dir(self, _file_id, *, should_stop=None, max_items=None):
                 if should_stop and should_stop():
                     return
                 for index in range(3):

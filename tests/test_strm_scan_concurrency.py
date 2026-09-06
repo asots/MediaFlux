@@ -18,7 +18,7 @@ class _ConcurrentTreeClient:
         self.peak = 0
         self.calls: list[str] = []
 
-    def iter_dir(self, dir_id: str, *, should_stop=None):
+    def iter_dir(self, dir_id: str, *, should_stop=None, max_items=None):
         with self.lock:
             self.calls.append(str(dir_id))
         if dir_id == "root":
@@ -45,10 +45,10 @@ class _ConcurrentTreeClient:
 
 
 class _FailingConcurrentTreeClient(_ConcurrentTreeClient):
-    def iter_dir(self, dir_id: str, *, should_stop=None):
+    def iter_dir(self, dir_id: str, *, should_stop=None, max_items=None):
         if dir_id == "dir-0":
             raise RuntimeError("temporary directory failure")
-        return super().iter_dir(dir_id, should_stop=should_stop)
+        return super().iter_dir(dir_id, should_stop=should_stop, max_items=max_items)
 
 
 class _BudgetTreeClient:
@@ -117,7 +117,7 @@ class StrmDirectoryConcurrencyTests(unittest.TestCase):
 
     def test_deadline_reached_inside_worker_marks_scan_incomplete_before_cleanup(self):
         class DeadlineClient:
-            def iter_dir(self, _dir_id: str, *, should_stop=None):
+            def iter_dir(self, _dir_id: str, *, should_stop=None, max_items=None):
                 time.sleep(0.01)
                 if should_stop and should_stop():
                     return iter(())

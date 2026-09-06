@@ -1,11 +1,11 @@
 """RSS 订阅周期调度器。"""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import threading
 import time
+import uuid
 
 from app import database as db
 from app.logger import get_logger, log_throttled
@@ -29,27 +29,35 @@ class RSSScheduler:
         self._cleanup_interval_seconds = 3600
         self._last_cleanup_at = 0.0
         self._alert_signatures: dict[int, tuple[object, ...]] = {}
-        self._loaded_alert_ids: set[int] = set()
 
     @staticmethod
     def _alert_key(sub_id: int) -> str:
         return f"{_ALERT_KEY_PREFIX}{int(sub_id)}"
 
-    @staticmethod
-    def _serialize_signature(signature: tuple[object, ...]) -> str:
-        return json.dumps(signature, ensure_ascii=False, separators=(",", ":"))
-
-    def _persisted_signature(self, sub_id: int) -> tuple[object, ...] | None:
+    def _persisted_alert(self, sub_id: int) -> dict | None:
         raw = db.kv_get(self._alert_key(sub_id), "")
-        with self._lock:
-            self._loaded_alert_ids.add(sub_id)
         if not raw:
             return None
-        try:
-            value = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-        return tuple(value) if isinstance(value, list) else None
+        value = json.loads(raw)
+        # 历史列表只归一化为“已接纳”，不重放已发告警；恢复后进入同一新状态机。
+        if isinstance(value, list):
+            return {"signature": value, "accepted": True}
+        if (
+            not isinstance(value, dict)
+            or value.get("version") != 1
+            or not isinstance(value.get("signature"), list)
+            or not isinstance(value.get("accepted"), bool)
+            or not isinstance(value.get("event_key"), str)
+            or not value["event_key"].startswith(f"rss-alert:{int(sub_id)}:")
+        ):
+            raise ValueError("RSS 告警持久状态无效，已停止重放")
+        return value
+
+    def _save_alert(self, sub_id: int, alert: dict) -> None:
+        db.kv_set(
+            self._alert_key(sub_id),
+            json.dumps(alert, ensure_ascii=False, separators=(",", ":")),
+        )
 
     def _notify_issue(self, sub_id: int, code: str, fields: list[tuple[str, object]]) -> None:
         signature = (code, *(str(value) for _label, value in fields))
@@ -57,11 +65,20 @@ class RSSScheduler:
             if self._alert_signatures.get(sub_id) == signature:
                 return
         try:
-            persisted = self._persisted_signature(sub_id)
-            if persisted == signature:
+            alert = self._persisted_alert(sub_id)
+            same_issue = alert is not None and tuple(alert["signature"]) == signature
+            if same_issue and alert["accepted"]:
                 with self._lock:
                     self._alert_signatures[sub_id] = signature
                 return
+            if not same_issue:
+                # 先持久化本次故障身份再入 outbox；重启/ACK 失败均复用该 key。
+                # 恢复或问题变化后生成新身份，避免旧一次性事件永久吞掉复发。
+                alert = {
+                    "version": 1, "signature": list(signature), "accepted": False,
+                    "event_key": f"rss-alert:{int(sub_id)}:{uuid.uuid4().hex}",
+                }
+                self._save_alert(sub_id, alert)
             subscription = db.get_rss_subscription(sub_id)
         except Exception as exc:
             logger.warning(
@@ -77,11 +94,8 @@ class RSSScheduler:
                 NotificationImportance, NotificationTopic,
             )
 
-            digest = hashlib.sha256(
-                self._serialize_signature(signature).encode("utf-8")
-            ).hexdigest()[:20]
-            delivered = bool(publish_notification_event(
-                f"rss-alert:{sub_id}:{digest}",
+            accepted = bool(publish_notification_event(
+                alert["event_key"],
                 NotificationEvent(
                     "⚠️ RSS 周期任务需要处理",
                     fields=(
@@ -102,27 +116,27 @@ class RSSScheduler:
                 type(exc).__name__,
             )
             return
-        if not delivered:
+        if not accepted:
             return
-        with self._lock:
-            self._alert_signatures[sub_id] = signature
         try:
-            db.kv_set(self._alert_key(sub_id), self._serialize_signature(signature))
+            self._save_alert(sub_id, {**alert, "accepted": True})
         except Exception as exc:
+            # 已入 outbox 但 ACK 未落盘时不要假装完成；下轮复用同一事件收敛。
             logger.warning(
                 "RSS 周期告警状态保存异常 sub#%s type=%s",
                 sub_id,
                 type(exc).__name__,
             )
+            return
+        with self._lock:
+            self._alert_signatures[sub_id] = signature
 
     def _clear_issue(self, sub_id: int) -> None:
         with self._lock:
-            had_issue = self._alert_signatures.pop(sub_id, None) is not None
+            had_issue = sub_id in self._alert_signatures
         try:
-            # 即使本进程已经读取过签名，也必须核对持久值：若另一种告警发送
-            # 失败，内存不会记住它，但旧签名仍需在订阅恢复后清除，否则旧问题
-            # 下次复发会被误判为“已经通知”。
-            had_issue = self._persisted_signature(sub_id) is not None or had_issue
+            # pending、历史、损坏状态都可在业务明确恢复后清除；不删除通知审计。
+            had_issue = bool(db.kv_get(self._alert_key(sub_id), "")) or had_issue
             if not had_issue:
                 return
             db.kv_set(self._alert_key(sub_id), "")
@@ -132,6 +146,9 @@ class RSSScheduler:
                 sub_id,
                 type(exc).__name__,
             )
+            return
+        with self._lock:
+            self._alert_signatures.pop(sub_id, None)
 
     def start(self) -> None:
         with self._lock:

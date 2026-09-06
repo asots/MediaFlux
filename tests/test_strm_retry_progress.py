@@ -13,9 +13,10 @@ from app import database as db
 from app.clients.guangya import GuangYaFile
 from app.modules import strm as strm_module
 from tests.support import IsolatedDatabaseTestCase
+from tests.support import PagedDirectoryTestMixin
 
 
-class _TreeClient:
+class _TreeClient(PagedDirectoryTestMixin):
     def __init__(self, tree):
         self.tree = tree
         self.download_urls: list[str] = []

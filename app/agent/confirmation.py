@@ -566,38 +566,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
 
     @staticmethod
-    def _ensure_schema(conn: Any) -> None:
-        # Web worker/CLI may construct the Agent service before the application-wide
-        # init hook runs. Keep this repository independently idempotent.
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS agent_confirmation_epochs("
-            "owner_digest TEXT PRIMARY KEY,generation INTEGER NOT NULL "
-            "CHECK(generation>0),touched_at REAL NOT NULL,updated_at TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_agent_confirmation_epochs_touched "
-            "ON agent_confirmation_epochs(touched_at)"
-        )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS agent_confirmations("
-            "confirmation_id TEXT PRIMARY KEY,owner_digest TEXT NOT NULL,"
-            "tool_name TEXT NOT NULL,arguments_json TEXT NOT NULL DEFAULT '{}',"
-            "context_fingerprint TEXT NOT NULL DEFAULT '',expires_at REAL NOT NULL,"
-            "owner_generation INTEGER NOT NULL CHECK(owner_generation>0),"
-            "followup_context_json TEXT NOT NULL DEFAULT '{}',"
-            "confirmation_contract_json TEXT NOT NULL DEFAULT '{}',"
-            "created_at TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_agent_confirmations_owner_expiry "
-            "ON agent_confirmations(owner_digest,expires_at)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_agent_confirmations_expiry "
-            "ON agent_confirmations(expires_at)"
-        )
-
-    @staticmethod
     def _owner_digest(owner: str) -> str:
         import hashlib
         import hmac
@@ -723,7 +691,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         expires_at = now + self.ttl_seconds
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             self._prune(conn, now)
             owner_generation = self._owner_generation(
                 conn, owner_digest, now=now, touch=True
@@ -831,7 +798,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         now = self._clock()
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             self._prune(conn, now)
             row = conn.execute(
                 "SELECT owner_digest,owner_generation,expires_at "
@@ -882,7 +848,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         invalid_payload = False
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             self._prune(conn, now)
             row = conn.execute(
                 "SELECT confirmation_id,tool_name,arguments_json,context_fingerprint,"
@@ -971,7 +936,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         tickets: list[ConfirmationTicket] = []
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             self._prune(conn, now)
             epoch = conn.execute(
                 "SELECT generation FROM agent_confirmation_epochs WHERE owner_digest=?",
@@ -1031,7 +995,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         now = self._clock()
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             self._prune(conn, now)
             deleted = conn.execute(
                 "DELETE FROM agent_confirmations WHERE confirmation_id=? AND owner_digest=?",
@@ -1053,7 +1016,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         now = self._clock()
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             self._prune(conn, now)
             return self._rotate_owner_state(
                 conn,
@@ -1081,7 +1043,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
         now = self._clock()
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             self._prune(conn, now)
             return self._owner_generation(conn, owner_digest, now=now, touch=True)
 
@@ -1090,7 +1051,6 @@ class SQLiteConfirmationStore(ConfirmationStore):
 
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._ensure_schema(conn)
             conn.execute("DELETE FROM agent_confirmations")
             conn.execute("DELETE FROM agent_confirmation_epochs")
 

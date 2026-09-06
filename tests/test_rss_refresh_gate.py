@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import socket
 import threading
@@ -572,7 +573,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
         scheduler = RSSScheduler()
         db.kv_set(
             scheduler._alert_key(9),
-            scheduler._serialize_signature(("old_issue", "旧错误")),
+            json.dumps(["old_issue", "旧错误"], ensure_ascii=False),
         )
         with patch(
             "app.modules.rss_scheduler.db.get_rss_subscription",

@@ -391,7 +391,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
 
     def test_read_error_retry_cap_is_bounded_to_one_hour(self):
         self.enqueue()
-        with patch.object(self.cloud, 'list_dir', side_effect=OSError('offline')):
+        # 退避从尝试前检查点计算，finish 会更新 updated_at；固定时间避免跨秒误报。
+        with patch.object(db, 'now', return_value=db.now()), \
+                patch.object(self.cloud, 'list_dir', side_effect=OSError('offline')):
             for _ in range(11):
                 self.due_now()
                 self.drain()

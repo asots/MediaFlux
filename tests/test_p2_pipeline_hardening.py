@@ -21,9 +21,10 @@ from app.modules.strm import (
     sync_strm,
 )
 from tests.support import IsolatedDatabaseTestCase
+from tests.support import PagedDirectoryTestMixin
 
 
-class _TreeClient:
+class _TreeClient(PagedDirectoryTestMixin):
     def __init__(self, tree):
         self.tree = tree
 

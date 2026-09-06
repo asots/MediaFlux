@@ -43,14 +43,12 @@ class CapabilityMigrationTests(unittest.TestCase):
             )
 
     def test_fresh_schema_contains_same_automation_columns(self):
-        from app.repositories.media_automation_rules import SCHEMA
-
         with (
             sqlite3.connect(":memory:") as fresh,
             sqlite3.connect(":memory:") as migrated,
         ):
             fresh.executescript(db._SCHEMA)
-            migrated.executescript(SCHEMA)
+            db._migrate_agent_capability_closure_v24(migrated)
             expected = list(
                 migrated.execute("PRAGMA table_info(media_automation_rules)")
             )

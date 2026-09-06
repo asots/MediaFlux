@@ -294,7 +294,6 @@ def search_missing_episode_resources(
     if arguments.get("library_name"):
         audit_arguments["library_name"] = arguments["library_name"]
     audit = audit_series_episodes(audit_arguments)
-    target = {"season": arguments["season"], "episode": arguments["episode"]}
     verification = _verification(arguments, audit, verified=False)
 
     if not audit.ok or audit.status != "updates_available":
@@ -319,33 +318,25 @@ def search_missing_episode_resources(
 
     audit_data = audit.data if isinstance(audit.data, dict) else {}
     target_missing = audit_data.get("target_missing")
-    if target_missing is not True:
-        # 新版审计会直接比较指定季集，不再依赖最多 100 条的展示样本。
-        # 保留样本回退仅用于兼容旧结果或测试替身。
-        raw_sample = audit_data.get("missing_sample", [])
-        sample = [item for item in raw_sample if isinstance(item, dict)]
-        if target_missing is None and target in sample:
-            pass
-        elif target_missing is None and bool(
-            audit_data.get("missing_sample_truncated")
-        ):
-            return ToolResult(
-                False,
-                "inconclusive",
-                "缺集清单已截断，无法可靠确认指定集",
-                data={"verification": verification},
-                evidence=list(audit.evidence),
-                suggestions=["请缩小到明确季度后重新搜索。"],
-            )
-        else:
-            return ToolResult(
-                False,
-                "not_missing",
-                f"第 {arguments['season']} 季第 {arguments['episode']} 集未被确认缺失",
-                data={"verification": verification},
-                evidence=list(audit.evidence),
-                suggestions=["可重新核对季集编号，或直接进行普通资源搜索。"],
-            )
+    if not isinstance(target_missing, bool):
+        # 展示样本可能截断，不能成为第二套业务判定。仅消费正式审计的精确结论。
+        return ToolResult(
+            False,
+            "inconclusive",
+            "缺少指定集的精确审计结论，因此未搜索资源",
+            data={"verification": verification},
+            evidence=list(audit.evidence),
+            suggestions=["请重新审计指定季集后再搜索。"],
+        )
+    if not target_missing:
+        return ToolResult(
+            False,
+            "not_missing",
+            f"第 {arguments['season']} 季第 {arguments['episode']} 集未被确认缺失",
+            data={"verification": verification},
+            evidence=list(audit.evidence),
+            suggestions=["可重新核对季集编号，或直接进行普通资源搜索。"],
+        )
 
     verification["verified_missing"] = True
     search_args = _episode_search_arguments(arguments, verification["title"])
