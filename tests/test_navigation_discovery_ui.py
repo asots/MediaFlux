@@ -175,5 +175,204 @@ class NavigationDiscoveryUiContractTests(unittest.TestCase):
         )
 
 
+@unittest.skipIf(sync_playwright is None, "未安装 Playwright")
+class OrganizeRulesFirstPaintTests(unittest.TestCase):
+    """完整模板与真实静态脚本；API 全部拦截，不连接开发服务或读真实配置。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from jinja2 import Environment, FileSystemLoader
+
+        cls.playwright = sync_playwright().start()
+        bundled = Path(cls.playwright.chromium.executable_path)
+        executable = str(bundled) if bundled.is_file() else next(
+            (path for name in ("google-chrome", "chromium", "chromium-browser")
+             if (path := shutil.which(name))), None,
+        )
+        if not executable:
+            cls.playwright.stop()
+            raise unittest.SkipTest("未找到 Chrome/Chromium")
+        cls.browser = cls.playwright.chromium.launch(
+            executable_path=executable, headless=True, args=["--no-sandbox"],
+        )
+        cls.templates = Environment(loader=FileSystemLoader(ROOT / "app/templates"), autoescape=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+
+    @classmethod
+    def _html(cls, *, execute=False, pause_parser=True):
+        html = cls.templates.get_template("organize.html").render(
+            organize_view="execute" if execute else "rules",
+            active="organize" if execute else "organize_rules",
+            organize_initial_sources=[], organize_video_exts=["mkv", "mp4"],
+            organize_metadata_exts=["srt", "nfo"], csrf_token=lambda: "test",
+            url_for=lambda name: "/" + name.split(".")[-1].replace("_", "-"),
+            static_url=lambda path: "/static/" + path,
+        )
+        if pause_parser and not execute:
+            # 模拟 HTML 分块到达：所有 panel 刚解析完、handoff 尚未运行就强制停下，
+            # 检验首帧 CSS，而不是只等 load 完成后才断言。
+            html = html.replace(
+                '</form>\n    \n</div>',
+                '</form>\n<script src="/__parser_pause.js"></script>\n    \n</div>',
+                1,
+            )
+            if '/__parser_pause.js' not in html:
+                raise AssertionError("规则表单测试解析暂停点失效")
+        return html
+
+    def _page(self, width=1440, *, execute=False, javascript=True, block_business=False):
+        import json
+        import time
+        from urllib.parse import urlparse
+
+        context = self.browser.new_context(
+            viewport={"width": width, "height": 900}, java_script_enabled=javascript,
+            reduced_motion="reduce",
+        )
+        self.addCleanup(context.close)
+        page = context.new_page()
+        errors, writes = [], []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        context.add_init_script("""(() => {
+            window.__rulesFrames = [];
+            window.__captureRules = () => {
+                const panels = [...document.querySelectorAll('#organizeWorkspace [data-tab-panel]')];
+                const tabs = [...document.querySelectorAll('#organizeRulesNav [data-tab-target]')];
+                const form = document.getElementById('organizeConfigForm');
+                const rect = form?.getBoundingClientRect();
+                return {
+                    panels: panels.filter(p => getComputedStyle(p).display !== 'none').map(p => p.dataset.tabPanel),
+                    colors: Object.fromEntries(tabs.map(b => [b.dataset.tabTarget, getComputedStyle(b).backgroundColor])),
+                    active: tabs.filter(b => b.classList.contains('active')).map(b => b.dataset.tabTarget),
+                    marked: document.documentElement.dataset.organizeRulesInitialTab || '',
+                    form: rect ? {x:rect.x, y:rect.y, width:rect.width} : null,
+                };
+            };
+            function sample() {
+                if (document.querySelectorAll('#organizeWorkspace [data-tab-panel]').length === 3)
+                    window.__rulesFrames.push(window.__captureRules());
+                if (window.__rulesFrames.length < 300) requestAnimationFrame(sample);
+            }
+            requestAnimationFrame(sample);
+        })();""")
+        html = self._html(execute=execute)
+
+        def respond(route):
+            request = route.request
+            path = urlparse(request.url).path
+            if request.method != "GET":
+                writes.append((request.method, path))
+                route.abort()
+            elif path in {"/organize-rules", "/organize"}:
+                route.fulfill(body=html, content_type="text/html")
+            elif path == "/__parser_pause.js":
+                time.sleep(0.08)
+                route.fulfill(body="window.__parserCheckpoint=window.__captureRules();", content_type="application/javascript")
+            elif path.startswith("/static/"):
+                file = (ROOT / "app" / path.lstrip("/")).resolve()
+                if not file.is_relative_to(ROOT / "app/static") or not file.is_file():
+                    route.abort()
+                elif path.endswith("/organize.js"):
+                    if block_business:
+                        route.abort()
+                    else:
+                        time.sleep(0.08)
+                        route.fulfill(
+                            body="window.__beforeBusiness=window.__captureRules();\n" + file.read_text(),
+                            content_type="application/javascript",
+                        )
+                else:
+                    route.fulfill(path=str(file))
+            elif path.startswith("/api/"):
+                data = {"GY_ORGANIZE_AUTOMATIC_MATCH_PRESET": "balanced"} if path == "/api/config" else {}
+                route.fulfill(body=json.dumps(data), content_type="application/json")
+            else:
+                route.abort()
+
+        context.route("**/*", respond)
+        return page, errors, writes
+
+    def _assert_initial(self, page, target):
+        page.wait_for_function("window.__rulesFrames.length > 0")
+        checkpoint = page.evaluate("window.__parserCheckpoint")
+        self.assertIsNotNone(checkpoint)
+        self.assertEqual(checkpoint["panels"], [target])
+        # 解析期目标 tab 已高亮，与 DOM 接管完成后的颜色一致。
+        before = page.evaluate("window.__beforeBusiness")
+        current = page.evaluate("window.__captureRules()")
+        self.assertEqual(checkpoint["colors"], current["colors"])
+        self.assertEqual(before["active"], [target])
+        self.assertEqual(before["marked"], "")
+        self.assertEqual(current["panels"], [target])
+        self.assertEqual(before["form"], current["form"])
+        for frame in page.evaluate("window.__rulesFrames"):
+            self.assertEqual(frame["panels"], [target])
+        for name in ("naming", "policy", "delivery"):
+            button = page.locator(f'#organizeRulesNav [data-tab-target="{name}"]')
+            self.assertEqual(button.get_attribute("aria-selected"), str(name == target).lower())
+            self.assertEqual(button.evaluate("el=>el.tabIndex"), 0 if name == target else -1)
+        self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= innerWidth"))
+
+    def test_policy_delivery_repeated_refresh_never_paints_naming(self):
+        for width in (320, 390, 1440):
+            page, errors, writes = self._page(width)
+            for target in ("policy", "delivery"):
+                for attempt in range(5):
+                    with self.subTest(width=width, target=target, refresh=attempt):
+                        if attempt:
+                            page.reload(wait_until="load")
+                        else:
+                            page.goto("about:blank")
+                            page.goto("http://mediaflux.test/organize-rules#" + target)
+                        self._assert_initial(page, target)
+            self.assertEqual(errors, [])
+            self.assertEqual(writes, [])
+
+    def test_default_invalid_hash_and_history_keep_original_navigation(self):
+        page, errors, writes = self._page()
+        for fragment in ("", "#naming", "#unknown", "#POLICY", "#%70olicy"):
+            with self.subTest(fragment=fragment):
+                page.goto("http://mediaflux.test/organize-rules" + fragment)
+                page.reload()
+                self._assert_initial(page, "naming")
+        page.evaluate("location.hash='policy'")
+        page.wait_for_function("document.querySelector('[data-tab-panel=policy]').hidden === false")
+        page.evaluate("location.hash='delivery'")
+        page.wait_for_function("document.querySelector('[data-tab-panel=delivery]').hidden === false")
+        page.go_back()
+        page.wait_for_function("document.querySelector('[data-tab-panel=policy]').hidden === false")
+        page.go_forward()
+        page.wait_for_function("document.querySelector('[data-tab-panel=delivery]').hidden === false")
+        page.locator('#organizeRulesNav [data-tab-target="naming"]').click()
+        self.assertEqual(page.evaluate("location.hash"), "")
+        self.assertEqual(page.evaluate("window.__captureRules().panels"), ["naming"])
+        self.assertEqual(errors, [])
+        self.assertEqual(writes, [])
+
+    def test_failed_business_script_still_displays_requested_panel(self):
+        page, errors, writes = self._page(block_business=True)
+        page.goto("http://mediaflux.test/organize-rules#delivery")
+        self.assertEqual(page.evaluate("window.__captureRules().panels"), ["delivery"])
+        self.assertEqual(page.evaluate("window.__captureRules().active"), ["delivery"])
+        self.assertEqual(page.evaluate("window.__captureRules().marked"), "")
+        self.assertEqual(errors, [])
+        self.assertEqual(writes, [])
+
+    def test_no_javascript_falls_back_to_visible_default_execute_has_no_bootstrap(self):
+        page, _errors, writes = self._page(javascript=False)
+        page.goto("http://mediaflux.test/organize-rules#policy")
+        self.assertTrue(page.locator('[data-tab-panel="naming"]').is_visible())
+        self.assertFalse(page.locator('[data-tab-panel="policy"]').is_visible())
+        self.assertEqual(writes, [])
+        html = self._html(execute=True)
+        self.assertNotIn("organizeRulesInitialTab", html)
+        self.assertNotIn("organize-rules-nav-card", html)
+        self.assertIn('id="organizeSourceList"', html)
+
+
 if __name__ == "__main__":
     unittest.main()

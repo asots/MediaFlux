@@ -3,6 +3,16 @@
 {% block body_class %}organize-page{% if organize_view == "rules" %} organize-rules-page{% endif %} persistent-savebar-page{% endblock %}
 {% block page_title %}{{ "整理规则" if organize_view == "rules" else "光鸭整理" }}{% endblock %}
 {% block page_styles %}
+{% if organize_view == 'rules' %}
+<script>
+(() => {
+    // URL fragment 不会传给服务器：在首帧前确定分区，不等页尾脚本或配置请求。
+    const requested = window.location.hash.slice(1);
+    document.documentElement.dataset.organizeRulesInitialTab =
+        ['naming', 'policy', 'delivery'].includes(requested) ? requested : 'naming';
+})();
+</script>
+{% endif %}
 <link rel="stylesheet" href="{{ static_url('css/organize.css') }}">
 {% endblock %}
 
@@ -588,6 +598,30 @@
     </form>
     {% endif %}
 </div>
+
+{% if organize_view == 'rules' %}
+<script>
+(() => {
+    // 分区结构刚解析完成即同步 DOM；后续 setupTabGroup 直接沿用 active，
+    // 不依赖第三方图标、动画或主业务脚本下载，也不新增 hash 路由。
+    const root = document.documentElement;
+    const target = root.dataset.organizeRulesInitialTab || 'naming';
+    const workspace = document.getElementById('organizeWorkspace');
+    workspace.querySelectorAll('[data-tab-target]').forEach(button => {
+        const active = button.dataset.tabTarget === target;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+        button.tabIndex = active ? 0 : -1;
+    });
+    workspace.querySelectorAll('[data-tab-panel]').forEach(panel => {
+        const active = panel.dataset.tabPanel === target;
+        panel.hidden = !active;
+        panel.classList.toggle('active', active);
+    });
+    delete root.dataset.organizeRulesInitialTab;
+})();
+</script>
+{% endif %}
 
 {% if organize_view == 'execute' %}
 <section class="card card-pad" id="previewCard" hidden>

@@ -663,3 +663,24 @@
 .nsfw-source-empty{grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:8px;min-height:46px;color:var(--text-muted);font-size:9px;border:1px dashed var(--border-soft);border-radius:9px}
 .nsfw-source-empty svg{width:15px;height:15px}
 @media(max-width:620px){.nsfw-source-options{grid-template-columns:1fr}.nsfw-source-scope-head{align-items:center}.nsfw-source-scope-head span{display:none}}
+
+/* 初始 HTML 尚在解析、业务脚本尚未加载时，只显示 URL 指定的规则分区。
+   标记在分区 DOM 同步后移除；正常点击和 hashchange 仍由原 tab 控制器负责。 */
+html[data-organize-rules-initial-tab] #organizeWorkspace [data-tab-panel] {
+    display: none !important;
+}
+html[data-organize-rules-initial-tab="naming"] #organizeWorkspace [data-tab-panel="naming"],
+html[data-organize-rules-initial-tab="policy"] #organizeWorkspace [data-tab-panel="policy"],
+html[data-organize-rules-initial-tab="delivery"] #organizeWorkspace [data-tab-panel="delivery"] {
+    display: block !important;
+}
+html[data-organize-rules-initial-tab] #organizeRulesNav .organize-flow-tab {
+    color: var(--text-muted);
+    background: transparent;
+}
+html[data-organize-rules-initial-tab="naming"] #organizeRulesNav [data-tab-target="naming"],
+html[data-organize-rules-initial-tab="policy"] #organizeRulesNav [data-tab-target="policy"],
+html[data-organize-rules-initial-tab="delivery"] #organizeRulesNav [data-tab-target="delivery"] {
+    color: var(--accent);
+    background: var(--accent-soft);
+}
