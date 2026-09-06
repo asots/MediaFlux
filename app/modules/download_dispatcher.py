@@ -413,7 +413,11 @@ def _public_guangya_failure(error: str) -> str:
         ("光鸭未登录", "光鸭未登录"),
         ("资源中没有符合下载规则的文件", "光鸭未找到符合下载规则的文件"),
         ("种子文件未解析到可验证文件列表", "光鸭种子未解析到有效文件列表"),
-        ("未解析到可验证文件列表", "光鸭磁力未解析到有效文件列表"),
+        (
+            "未解析到可验证文件列表",
+            "光鸭暂未取得磁力文件清单，未创建下载任务；"
+            "请稍后仅重试光鸭，或上传原始种子",
+        ),
         ("创建任务隔离目录失败", "光鸭隔离目录创建失败"),
         ("光鸭资源解析失败", "光鸭资源解析失败"),
         ("光鸭任务创建失败", "光鸭任务创建失败"),
@@ -495,13 +499,14 @@ def _export_qb_torrent_for_resubmit(row, torrent_id: str) -> bytes | None:
         request_id = int(row["id"] or 0)
     except (KeyError, TypeError, ValueError):
         request_id = 0
-    client = QBittorrentClient(
-        url=qb_url,
-        username=get("QB_USERNAME"),
-        password=get("QB_PASSWORD"),
-        api_key=get("QB_API_KEY"),
-    )
+    client = None
     try:
+        client = QBittorrentClient(
+            url=qb_url,
+            username=get("QB_USERNAME"),
+            password=get("QB_PASSWORD"),
+            api_key=get("QB_API_KEY"),
+        )
         payload = client.export_torrent(str(torrent_id).lower())
         _title, exported_id = parse_torrent_metadata(payload)
         if exported_id.lower() != str(torrent_id).lower():
@@ -525,6 +530,31 @@ def _export_qb_torrent_for_resubmit(row, torrent_id: str) -> bytes | None:
     finally:
         close_qbittorrent_client(client)
     return None
+
+
+def _recover_guangya_magnet_torrent(row) -> bytes | None:
+    """只读复用本请求已绑定 qB 任务的元数据，不能借机创建或重投 qB。"""
+    if str(row["kind"] or "") != "magnet":
+        return None
+    if str(row["qb_status"] or "") not in {"submitted", "downloading", "completed"}:
+        return None
+    source_value = str(row["source_value"] or "")
+    torrent_id = str(row["qb_task_id"] or "").strip().lower()
+    if not torrent_id or torrent_id != magnet_infohash(source_value):
+        return None
+    payload = _export_qb_torrent_for_resubmit(row, torrent_id)
+    if payload is None:
+        return None
+
+    # 导出器核对的是 qB 的 40 位 TorrentID；纯 v2 的身份还必须核对完整
+    # BTMH，不能把同前 20 bytes 的另一个 SHA-256 当作原资源。
+    original = DownloadInput(kind="magnet", title="", source_value=source_value)
+    recovered = DownloadInput(kind="torrent", title="", torrent_data=payload)
+    if request_key(original) not in request_keys(recovered):
+        logger.warning("光鸭重试种子与原磁力身份不匹配 request=%s", int(row["id"]))
+        return None
+    logger.info("光鸭重试使用已校验的 qB 种子元数据 request=%s", int(row["id"]))
+    return payload
 
 
 def download_resubmit_capabilities(
@@ -637,7 +667,7 @@ def resubmit_download_request(
     allow_completed: bool = False,
     origin: str = "web",
 ) -> dict[str, Any]:
-    """复制旧请求的后端保存资源，并作为新的下载请求重新分发。"""
+    """安全重试指定目标；活动请求补投失败光鸭，其余创建历史 successor。"""
     if targets not in SUPPORTED_TARGETS:
         return {"ok": False, "error": "下载目标无效"}
     source_row = db.get_download_request(int(source_request_id))
@@ -655,6 +685,25 @@ def resubmit_download_request(
             "error": str(target_capability.get("reason") or "当前目标不可重新提交"),
         }
 
+    # 部分成功请求仍由 qB 跟踪，直接创建同源 successor 会被正确的防重
+    # 约束拒绝。复用已有目标级 CAS，仅认领明确失败的光鸭目标；保留 qB
+    # 状态、身份及本地导入链路，不归档仍在运行的请求。
+    if (
+        targets == "guangya"
+        and str(source_row["status"] or "") in {"submitted", "downloading"}
+        and str(source_row["gy_status"] or "") == "failed"
+        and str(source_row["qb_status"] or "") in {"submitted", "downloading", "completed"}
+    ):
+        result = dispatch_missing_targets(int(source_request_id), "guangya")
+        return {
+            **result,
+            "source_request_id": int(source_request_id),
+            "request_id": int(source_request_id),
+            "created": False,
+            "targets": "guangya",
+            "source_attention_preserved": not bool(result.get("ok")),
+        }
+
     source_kind = str(source_row["kind"] or "")
     source_value = str(source_row["source_value"] or "").strip()
     source_torrent_data = source_row["torrent_data"]
@@ -668,6 +717,11 @@ def resubmit_download_request(
         )
     item_kind = source_kind
     item_torrent_data = source_torrent_data
+    if source_kind == "magnet" and targets in {"guangya", "both"}:
+        recovered = _recover_guangya_magnet_torrent(source_row)
+        if recovered is not None:
+            item_kind = "torrent"
+            item_torrent_data = recovered
     if source_kind == "torrent":
         local_torrent_valid = False
         try:
@@ -1380,7 +1434,10 @@ def _submit_qb(
 
 
 def _submit_guangya(row, *, target_dir_id: str = "", target_dir_name: str = "") -> dict[str, Any]:
-    torrent_data = row["torrent_data"] if row["kind"] == "torrent" else None
+    torrent_data = (
+        row["torrent_data"] if row["kind"] == "torrent"
+        else _recover_guangya_magnet_torrent(row)
+    )
 
     def persist_staging(snapshot: dict) -> None:
         parent_name = str(snapshot.get("parent_name") or target_dir_name or "指定目标目录")

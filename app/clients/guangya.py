@@ -494,14 +494,26 @@ def _first_value(raw: dict, keys: tuple[str, ...]):
 
 
 def _offline_file_index(raw: dict) -> int | None:
-    value = _first_value(raw, OFFLINE_FILE_INDEX_KEYS)
-    if isinstance(value, bool):
-        return None
-    try:
-        index = int(value)
-    except (TypeError, ValueError):
-        return None
-    return index if index >= 0 else None
+    """仅缺省索引返回 None；显式非法值使整份清单失败，禁止补零或静默丢弃。"""
+    index: int | None = None
+    for key in OFFLINE_FILE_INDEX_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        try:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise TypeError
+            if isinstance(value, float) and not value.is_integer():
+                raise ValueError
+            parsed = int(value)
+            if parsed < 0:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"解析结果包含无效文件索引: {key}") from None
+        # 保持既有字段优先级，但不允许合法别名掩盖另一个显式非法索引。
+        if index is None:
+            index = parsed
+    return index
 
 
 def _offline_file_name(raw: dict) -> str:
@@ -524,11 +536,15 @@ def _offline_file_excluded(raw: dict) -> bool:
     return False
 
 
-def _offline_is_file(raw: dict, index: int | None = None) -> bool:
+def _offline_is_directory(raw: dict) -> bool:
     item_type = str(
         raw.get("type") or raw.get("fileType") or raw.get("kind") or raw.get("resType") or ""
     ).strip().lower()
-    if item_type in ("folder", "dir", "directory", "2"):
+    return item_type in ("folder", "dir", "directory", "2")
+
+
+def _offline_is_file(raw: dict, index: int | None = None) -> bool:
+    if _offline_is_directory(raw):
         return False
     if not _offline_file_name(raw):
         return False
@@ -540,7 +556,8 @@ def _bt_positional_file_indexes(parent: dict, key: str, items: list) -> dict[int
 
     光鸭的 Go 响应会在首个文件索引为零时偶发省略该字段。只有能证明当前
     ``subfiles`` 是 BT 根清单、其余显式索引与数组位置完全一致，且唯一缺失项
-    正好位于位置 0 时才补回索引；其他树形响应继续要求显式索引，避免猜测。
+    正好位于位置 0 时才补回索引；显式非法值由索引校验直接拒绝，不视为缺省。
+    其他树形响应继续要求显式索引，避免猜测。
     """
     if str(key).lower() != "subfiles" or not items:
         return {}
@@ -553,7 +570,8 @@ def _bt_positional_file_indexes(parent: dict, key: str, items: list) -> dict[int
     explicit: list[tuple[int, int]] = []
     missing: list[int] = []
     for position, item in enumerate(items):
-        if not isinstance(item, dict):
+        # 含目录的树不是扁平 BT 根清单，目录索引不能用于推断文件位置。
+        if not isinstance(item, dict) or _offline_is_directory(item):
             return {}
         index = _offline_file_index(item)
         if index is None:
@@ -579,6 +597,69 @@ def _excluded_indexes(raw: dict) -> set[int]:
     return result
 
 
+def _single_bt_root_file(response: dict) -> dict | None:
+    """光鸭单文件 BT 直接放在 data.btResInfo；多文件才携带树/数量字段。
+
+    只识别真实接口的成功信封和完整根文件形状，不把任意空树、缺失多文件树
+    或仅有磁力标题的占位响应猜成 index=0。该索引是单文件 BT 的唯一文件。
+    """
+    if not isinstance(response, dict) or response.get("msg") != "success":
+        return None
+    data = response.get("data")
+    if not isinstance(data, dict) or type(data.get("resType")) is not int or data["resType"] != 1:
+        return None
+    for container in (response, data):
+        if any(container.get(key) not in (None, "", "success", "ok") for key in ("msg", "message")):
+            return None
+        if any(key in container and container[key] not in ("success", "completed", "done")
+               for key in ("state", "status")):
+            return None
+        if container.get("error") or container.get("errors"):
+            return None
+        if any(key in container and container[key] is not True for key in ("success", "ok")):
+            return None
+        for key in ("code", "errorCode", "errcode", "errno"):
+            if key in container and not (
+                type(container[key]) is int and container[key] == 0
+                or type(container[key]) is str and container[key] == "0"
+            ):
+                return None
+    info = data.get("btResInfo")
+    if not isinstance(info, dict):
+        return None
+    tree_or_count = (*OFFLINE_FILE_TREE_KEYS, "subfilesNum", "subFilesNum", "fileCount",
+                     "file_count", "filesCount", "totalFiles", "fileTree", "file_tree",
+                     "children", "items", "resources")
+    if any(key in source for source in (response, data, info) for key in tree_or_count) or _offline_is_directory(info):
+        return None
+    if info.get("isDir") not in (None, False, 0, "0", "false", ""):
+        return None
+    info_hash = info.get("infoHash")
+    name = info.get("fileName")
+    size = info.get("fileSize")
+    if not isinstance(info_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", info_hash):
+        return None
+    if (
+        not isinstance(name, str) or not name.strip() or name.strip() in (".", "..")
+        or any(c in name for c in ("/", "\\", "\x00"))
+    ):
+        return None
+    if isinstance(size, str) and re.fullmatch(r"[0-9]+", size):
+        size = int(size)
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return None
+    excluded = _excluded_indexes(response) | _excluded_indexes(data) | _excluded_indexes(info)
+    if any(index > 0 for index in excluded):
+        return None
+    for key in OFFLINE_FILE_INDEX_KEYS:
+        if key in info and _offline_file_index({key: info[key]}) != 0:
+            raise ValueError("单文件 BT 返回非零文件索引")
+    return {
+        "index": 0, "name": name.strip(), "size": size,
+        "excluded": 0 in excluded or _offline_file_excluded(info),
+    }
+
+
 def _collect_offline_files(value, output: list[dict], inherited_excluded: set[int]) -> None:
     if not isinstance(value, dict):
         return
@@ -588,6 +669,10 @@ def _collect_offline_files(value, output: list[dict], inherited_excluded: set[in
             positional_indexes = _bt_positional_file_indexes(value, key, child)
             for position, item in enumerate(child):
                 if not isinstance(item, dict):
+                    continue
+                if _offline_is_directory(item):
+                    # 目录不可选；忽略其占位索引，仍递归校验真实子文件。
+                    _collect_offline_files(item, output, local_excluded)
                     continue
                 index = _offline_file_index(item)
                 if index is None:
@@ -2292,6 +2377,9 @@ class GuangYaClient:
     def normalize_offline_files(response: dict) -> list[dict]:
         """把不同 resolve_res 响应归一化为 index/name/size/excluded。"""
         output: list[dict] = []
+        single_file = _single_bt_root_file(response)
+        if single_file is not None:
+            output.append(single_file)
         _collect_offline_files(response, output, set())
         result: list[dict] = []
         seen: set[int] = set()

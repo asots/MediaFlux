@@ -669,7 +669,10 @@ def claim_download_request_targets(request_id: int, targets: str) -> tuple[str, 
             "SELECT id,status,targets,qb_status,gy_status FROM download_requests WHERE id=?",
             (int(request_id),),
         ).fetchone()
-        if not row or str(row["status"] or "") in {"pending", "completed", "failed"}:
+        # 在同一事务内阻止已取消/已交接的请求被迟到认领重新激活。
+        if not row or str(row["status"] or "") in {
+            "pending", "completed", "failed", "cancelled", "resubmitted",
+        }:
             return ()
         qb_status = str(row["qb_status"] or "")
         gy_status = str(row["gy_status"] or "")

@@ -200,7 +200,8 @@ def _preview(state: dict[str, Any]) -> ToolResult:
             "gy_status": state["gy_status"],
             "attention_stages": list(state["attention_stages"]),
             "effects": [
-                "会复制服务端保留的原始下载请求并创建一条新的提交记录。",
+                "会重试所选目标，保留未重试目标的任务；"
+                "根据当前状态补投原请求或创建新的提交记录。",
                 "不会向 Agent、模型或前端返回下载链接、种子内容、保存路径或凭据。",
                 "若提交失败，原记录会继续保留在待处理列表中。",
             ],
