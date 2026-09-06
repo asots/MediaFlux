@@ -381,3 +381,11 @@ def sanitize_public_text(value: object, *, limit: int = 600) -> str:
     ):
         return ""
     return text[: max(1, int(limit))].rstrip()
+
+
+def sanitize_resource_title(value: object, *, limit: int = 300) -> str:
+    """文件名可含点号/下划线，不能被当成工具名；其余凭据、URL、路径守卫不变。"""
+    text = re.sub(r"<[^>]*>", "", _decode_text(value))
+    text = "".join(char for char in text if char.isspace() or not unicodedata.category(char).startswith("C"))
+    text = sanitize_untrusted_filename(text, limit=limit)
+    return text if sanitize_public_text(text, limit=limit) else ""

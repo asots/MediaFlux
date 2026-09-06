@@ -12,12 +12,32 @@ from app.agent.indexer_actions import (
     submit_resource_confirmed,
 )
 from app.agent.models import ToolContext, ToolResult
+from app.agent.public_safety import sanitize_resource_title
 from app.agent.recent_resource_candidates import (
     RecentResourceCandidateStore,
     normalize_resource_search_id,
     restore_resource_candidate_reference,
 )
 from app.agent.state_commit import active_agent_resource_candidates
+
+
+def _candidate_result(result: ToolResult, candidates: list[dict[str, Any]], positions: list[int], target: str) -> ToolResult:
+    data = dict(result.data) if isinstance(result.data, dict) else {}
+    raw_items = data.get("items")
+    items = raw_items if isinstance(raw_items, list) else [dict(data)] if len(candidates) == 1 else []
+    public_items = []
+    for index, (candidate, position) in enumerate(zip(candidates, positions)):
+        item = dict(items[index]) if index < len(items) and isinstance(items[index], dict) else {}
+        item.update({
+            "position": position, "title": sanitize_resource_title(candidate.get("title"), limit=160),
+            "target": target,
+        })
+        # 没有可信逐项目标状态时不得臆造“失败可重试”或成功。
+        item.setdefault("status", "manual_review")
+        public_items.append(item)
+    data.update({"target": target, "items": public_items})
+    result.data = data
+    return result
 
 
 class IndexerCandidateActions:
@@ -238,8 +258,10 @@ class IndexerCandidateActions:
             context,
             require_search_id=True,
         )
-        del candidate
-        return submit_resource_confirmed(internal, expected_context)
+        return _candidate_result(
+            submit_resource_confirmed(internal, expected_context), [candidate],
+            [arguments["position"]], arguments["target"],
+        )
 
     def prepare_batch(
         self, arguments: dict[str, Any], context: ToolContext
@@ -282,5 +304,7 @@ class IndexerCandidateActions:
             context,
             require_search_id=True,
         )
-        del candidates
-        return submit_resource_batch_confirmed(internal, expected_context)
+        return _candidate_result(
+            submit_resource_batch_confirmed(internal, expected_context), candidates,
+            arguments["positions"], arguments["target"],
+        )

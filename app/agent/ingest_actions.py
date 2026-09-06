@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app import config
 from app import database as db
 from app.agent.download_actions import download_request_public_summary
 from app.agent.errors import AgentToolError
@@ -98,6 +99,31 @@ class IngestSessionSnapshot:
     private: dict[str, Any]
     fingerprint: str
     expires_at: float
+
+
+def _receiving_folders(target: str) -> tuple[list[str], str]:
+    """公开目录名称与配置摘要；不读取远端、泄漏绝对路径或提前创建隔离目录。"""
+    from app.modules.offline import OfflineRules
+
+    public: list[str] = []
+    frozen: dict[str, Any] = {}
+    if target in {"qb", "both"}:
+        path = str(config.get("TG_QB_SAVE_PATH", config.get("RSS_QB_SAVE_PATH", "")) or "").strip()
+        frozen["qb"] = path
+        name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] if path else ""
+        public.append("qBittorrent：" + (_safe_text(name, 100) or "使用下载器默认保存目录"))
+    if target in {"guangya", "both"}:
+        rules = OfflineRules.from_config()
+        frozen["guangya"] = {
+            "id": rules.target_dir_id, "name": rules.target_dir_name,
+            "secondary": rules.secondary_enabled, "secondary_id": rules.secondary_dir_id,
+            "secondary_name": rules.secondary_dir_name, "keywords": rules.secondary_keywords,
+        }
+        text = "光鸭：" + (_safe_text(rules.target_dir_name, 100) or "默认接收目录") + " / 每任务隔离目录"
+        if rules.secondary_enabled and rules.secondary_dir_id not in {"", "0"}:
+            text += "；匹配二次分流规则时改用「" + (_safe_text(rules.secondary_dir_name, 100) or "二次分流目录") + "」"
+        public.append(text)
+    return public, _fingerprint(frozen)
 
 
 class AgentIngestSessionStore:
@@ -858,11 +884,16 @@ class IngestActions:
                 result, inner_context = self.candidate_actions.prepare_batch(
                     internal, context
                 )
+            folders, destination_context = _receiving_folders(arguments["target"])
             # 候选解析器把本轮实际使用的 search_id 写回 internal；这里再冻结进
             # 确认指纹，使执行只能回到同一份 owner/session 引用快照。
             search_id = internal["search_id"]
             arguments["search_id"] = search_id
             if isinstance(result.data, dict):
+                if isinstance(result.data.get("resource"), dict):
+                    result.data["resources"] = [result.data["resource"]]
+                    result.data["count"] = 1
+                result.data["receiving_folders"] = folders
                 result.data["source_type"] = "resource_candidates"
                 result.data["search_id"] = search_id
             frozen_arguments = {
@@ -876,6 +907,7 @@ class IngestActions:
                     "source_type": "resource_candidates",
                     "arguments": frozen_arguments,
                     "inner_context": inner_context,
+                    "destination_context": destination_context,
                 }
             )
 
@@ -1021,11 +1053,13 @@ class IngestActions:
                 "positions": list(arguments["positions"]),
                 "search_id": search_id,
             }
+            _folders, destination_context = _receiving_folders(arguments["target"])
             current = _fingerprint(
                 {
                     "source_type": "resource_candidates",
                     "arguments": frozen_arguments,
                     "inner_context": inner_context,
+                    "destination_context": destination_context,
                 }
             )
             if not secrets.compare_digest(current, str(expected_context or "")):

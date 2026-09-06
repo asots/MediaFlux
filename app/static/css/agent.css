@@ -1838,27 +1838,43 @@ body.agent-page-body::after { display: none; }
     .agent-session-search input, .agent-session-editor input, .agent-composer textarea { font-size: 16px; }
     .agent-new-replies { bottom: calc(var(--agent-composer-height, 100px) + 24px + env(safe-area-inset-bottom, 0px)); }
 }
-.agent-candidates { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--agent-line); }
+/* 原生批选：密度随任务提高，控件尺寸和原位预检保持稳定。 */
+.agent-candidates { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--agent-line); min-width: 0; }
 .agent-candidates-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .agent-candidates-heading strong { font-size: 14px; }
-.agent-candidates-heading > span { color: var(--text-muted); font-size: 11px; }
-.agent-candidates-note { margin: 6px 0 14px; min-height: 20px; color: var(--text-muted); font-size: 11px; line-height: 20px; }
-.agent-candidate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.agent-candidate-card { min-width: 0; display: flex; flex-direction: column; padding: 14px; border: 1px solid var(--agent-line); border-radius: var(--agent-radius-sm); background: var(--bg-input); }
-.agent-candidate-meta { margin: 0 0 7px; color: var(--text-muted); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
-.agent-candidate-card h4 { margin: 0 0 10px; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.agent-candidate-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 9px; }
-.agent-candidate-tags span { max-width: 100%; padding: 3px 6px; border-radius: 5px; color: var(--text-secondary); background: var(--bg-card); font-size: 10px; overflow-wrap: anywhere; }
-.agent-candidate-reasons, .agent-candidate-warnings { margin: 0 0 10px; padding-left: 16px; color: var(--text-secondary); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
-.agent-candidate-warnings { color: var(--warning); }
-.agent-candidate-select { min-height: 44px; width: 100%; margin-top: auto; padding: 8px 12px; color: var(--accent); border: 1px solid var(--accent-border); border-radius: 8px; background: var(--accent-soft); font: inherit; font-size: 12px; cursor: pointer; }
+.agent-candidates-heading > span, .agent-candidate-count { color: var(--text-muted); font-size: 11px; }
+.agent-candidate-recommendation { margin: 12px 0 16px; padding: 0; list-style: none; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.agent-candidate-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 160px; align-items: end; gap: 12px; }
+.agent-candidate-target { display: grid; min-width: 0; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.agent-candidate-target select { width: 100%; min-width: 0; height: 44px; padding: 0 10px; font: inherit; font-size: 13px; color: var(--text-primary); background: var(--bg-input); border: 1px solid var(--agent-line); border-radius: var(--agent-radius-sm); }
+.agent-candidate-select { height: 44px; width: 100%; padding: 8px 12px; color: var(--accent); border: 1px solid var(--accent-border); border-radius: var(--agent-radius-sm); background: var(--accent-soft); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .agent-candidate-select:hover:not(:disabled) { border-color: var(--accent); }
-.agent-candidate-select:disabled { opacity: .55; color: var(--text-muted); border-color: var(--agent-line); background: transparent; cursor: default; }
-.agent-candidates-more { margin-top: 10px; }
-.agent-candidates-more summary { min-height: 44px; display: flex; align-items: center; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+.agent-candidate-select:disabled { opacity: .55; cursor: default; }
+.agent-candidate-select[aria-busy="true"] { cursor: progress; }
+.agent-candidates-note { margin: 10px 0; min-height: 40px; color: var(--text-muted); font-size: 11px; line-height: 20px; overflow-wrap: anywhere; }
+.agent-candidates-note.is-warning { color: var(--warning); }
+.agent-candidates-more { border-top: 1px solid var(--agent-line); }
+.agent-candidates-more > summary { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+.agent-candidates-more > summary::before { content: '+'; color: var(--text-muted); }
+.agent-candidates-more[open] > summary::before { content: '−'; }
+.agent-candidate-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.agent-candidate-list { display: grid; gap: 6px; }
+.agent-candidate-row { min-width: 0; padding: 4px 10px; border: 1px solid var(--agent-line); border-radius: var(--agent-radius-sm); background: var(--bg-input); }
+.agent-candidate-option { display: flex; gap: 10px; min-height: 52px; align-items: center; cursor: pointer; }
+.agent-candidate-option input { flex: 0 0 18px; width: 18px; height: 18px; accent-color: var(--accent); }
+.agent-candidate-info { display: grid; min-width: 0; gap: 3px; }
+.agent-candidate-info strong { font-size: 12px; line-height: 1.7; font-weight: 500; overflow-wrap: anywhere; }
+.agent-candidate-meta { color: var(--text-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-candidate-detail { padding-left: 28px; font-size: 11px; color: var(--text-muted); line-height: 1.7; overflow-wrap: anywhere; }
+.agent-candidate-detail summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
+.agent-candidate-detail p { margin: 4px 0 10px; }
+.agent-candidate-output:not(:empty) { margin-top: 14px; }
+.agent-candidate-output .agent-confirmation-card, .agent-candidate-output .agent-result-card { width: 100%; max-width: none; }
+.agent-candidates :is(button, select, input, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 @media (max-width: 680px) {
     .agent-start-action { min-height: 44px; }
-    .agent-candidate-grid { grid-template-columns: minmax(0, 1fr); }
+    .agent-candidate-toolbar { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .agent-candidate-target select { font-size: 16px; }
 }
 
 /* 用户反馈修正：空态恢复入口独立占位，历史面板只使用一套柔和的圆角控件。 */

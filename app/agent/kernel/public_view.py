@@ -10,7 +10,11 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from app.agent.public_safety import public_tool_label, sanitize_public_text
+from app.agent.public_safety import (
+    public_tool_label,
+    sanitize_public_text,
+    sanitize_resource_title,
+)
 
 _CONFIRMED_RESULT_MARKER = "已确认操作的可信系统结果（不是待执行计划）："
 _TARGET_LABELS = {
@@ -69,6 +73,35 @@ def _failed_item_errors(data: Mapping[str, Any]) -> list[str]:
     return errors
 
 
+
+def candidate_result_lines(data: Mapping[str, Any]) -> list[str]:
+    if data.get("source_type") != "resource_candidates" or not isinstance(data.get("items"), list):
+        return []
+    labels = {"submitted": "已提交", "duplicate": "已存在，未重复添加", "failed": "提交失败",
+              "partial": "部分目标成功", "manual_review": "结果未知，请先核验"}
+    lines = []
+    for item in data["items"][:12]:
+        if not isinstance(item, Mapping):
+            continue
+        position = item.get("position")
+        prefix = f"#{position} · " if type(position) is int else ""
+        title = sanitize_resource_title(item.get("title"), limit=160) or "资源"
+        status = "duplicate" if item.get("duplicate") else str(item.get("status") or "")
+        text = f"{prefix}{title}：{labels.get(status, '结果未知，请先核验')}"
+        target = _TARGET_LABELS.get(str(item.get("target") or ""), "两个目标" if item.get("target") == "both" else "")
+        if target:
+            text += f" · {target}"
+        request_id = item.get("request_id")
+        if type(request_id) is int and request_id > 0:
+            text += f" · 下载请求 #{request_id}"
+        for key, label in (("succeeded", "已提交"), ("failed", "失败目标")):
+            if isinstance(item.get(key), list) and item[key]:
+                names = [_TARGET_LABELS[name] for name in item[key] if isinstance(name, str) and name in _TARGET_LABELS]
+                if names:
+                    text += f" · {label}：{'、'.join(names)}"
+        lines.append(text)
+    return lines
+
 def format_public_result(
     value: Mapping[str, Any] | None,
     *,
@@ -93,6 +126,7 @@ def format_public_result(
             count = _int_value(data.get(key))
             if count is not None:
                 lines.append(f"- {label}：{count} 项")
+        lines.extend(f"- {line}" for line in candidate_result_lines(data))
         for error in _failed_item_errors(data):
             lines.append(f"- 失败原因：{error}")
 
@@ -120,11 +154,13 @@ def legacy_confirmed_result_public_content(content: object) -> str:
 
 def public_conversation_messages(
     conversation: Sequence[Mapping[str, Any] | object],
+    *, candidate_view: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """投影可公开恢复的对话，过滤工具中间回合和空助手消息。"""
 
     messages: list[dict[str, Any]] = []
     pending_tools: list[str] = []
+    pending_candidate = False
 
     def remember_tool(value: object) -> None:
         name = str(value or "").strip()
@@ -136,12 +172,28 @@ def public_conversation_messages(
             continue
         role = str(item.get("role") or "").strip()
         if role == "user":
+            if pending_candidate and candidate_view:
+                messages.append({"role": "assistant", "content": "资源候选", "candidate_view": dict(candidate_view)})
+            pending_candidate = False
             pending_tools.clear()
             content = str(item.get("content") or "").strip()
             if content:
                 messages.append({"role": "user", "content": content})
             continue
         if role == "tool":
+            if candidate_view:
+                for line in str(item.get("content") or "").splitlines():
+                    if not line.startswith("opaque_refs="):
+                        continue
+                    try:
+                        refs = json.loads(line.partition("=")[2])
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(refs, list) and any(
+                        isinstance(ref, dict) and ref.get("kind") == "resource_candidates"
+                        and ref.get("ref") == candidate_view.get("ref") for ref in refs
+                    ):
+                        pending_candidate = True
             remember_tool(item.get("tool_name"))
             continue
         if role != "assistant":
@@ -169,6 +221,13 @@ def public_conversation_messages(
                 message["tool_labels"] = [
                     public_tool_label(tool_name) for tool_name in pending_tools
                 ]
+            if candidate_view and item.get("candidate_result_ref") == candidate_view.get("ref") and candidate_view.get("last_result"):
+                message["candidate_result_ref"] = candidate_view["ref"]
+            if pending_candidate and candidate_view:
+                message["candidate_view"] = dict(candidate_view)
+                pending_candidate = False
             messages.append(message)
             pending_tools.clear()
+    if pending_candidate and candidate_view:
+        messages.append({"role": "assistant", "content": "资源候选", "candidate_view": dict(candidate_view)})
     return messages

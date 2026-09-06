@@ -29,8 +29,8 @@ class SessionBusyError(KernelStateError):
 class SelectionInvalidError(KernelStateError):
     """候选输入在取得新回合前失效，不得改变原会话。"""
 
-    def __init__(self) -> None:
-        super().__init__("候选已失效或不属于当前会话，请重新搜索后选择。")
+    def __init__(self, message: str = "候选已失效或不属于当前会话，请重新搜索后选择。") -> None:
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +38,7 @@ class CandidateSelectionGuard:
     generation: int
     ref: str
     expires_at: float
+    batch_generation: int | None = None
 
     def check(self, state: SessionState) -> None:
         view = state.metadata.get("ux_candidate_view")
@@ -46,7 +47,7 @@ class CandidateSelectionGuard:
             or self.expires_at <= time.time()
             or not isinstance(view, dict)
             or view.get("ref") != self.ref
-            or view.get("generation") != self.generation
+            or view.get("generation") != (self.generation if self.batch_generation is None else self.batch_generation)
         ):
             raise SelectionInvalidError()
 
@@ -151,6 +152,17 @@ class SessionState:
                 self.ref_kinds = (
                     self.ref_kinds | values if update.mode == "append" else values
                 )
+            elif key == "metadata.ux_candidate_draft" and update.mode == "compare_candidate":
+                value = update.value
+                current = self.metadata.get("ux_candidate_draft") or {}
+                view = self.metadata.get("ux_candidate_view") or {}
+                if (
+                    view.get("ref") != value["next"]["candidate_ref"]
+                    or view.get("expires_at", 0) <= time.time()
+                    or (value["expected"] is not None and current.get("handle") != value["expected"])
+                ):
+                    raise SelectionInvalidError("选择状态已更新，请使用当前消息中的按钮。")
+                self.metadata["ux_candidate_draft"] = deepcopy(value["next"])
             elif key.startswith("metadata."):
                 field_name = key.partition(".")[2]
                 if field_name:

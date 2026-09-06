@@ -159,8 +159,7 @@ def test_real_resource_dto_reaches_next_model_request_without_business_field_los
     assert "candidate_view" not in actual and "selection" not in content
     assert_private_absent(content)
     assert "result_id" not in json.dumps(public)
-    for item in public["candidate_view"]["items"]:
-        assert item["selection"]["ref"] not in content
+    assert public["candidate_view"]["selection_ref"] not in content
     data = actual["data"]
     if kind == "search":
         assert data["page"] == 2 and data["has_more"] is True

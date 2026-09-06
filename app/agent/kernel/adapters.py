@@ -55,6 +55,7 @@ class TurnView:
     error_message: str = ""
     tool_calls: tuple[str, ...] = ()
     event_count: int = 0
+    candidate_view: Mapping[str, Any] | None = None
 
     @property
     def terminal(self) -> bool:
@@ -82,6 +83,7 @@ class TurnView:
             else None,
             "tool_calls": list(self.tool_calls),
             "event_count": self.event_count,
+            "candidate_view": deepcopy(self.candidate_view),
         }
         payload["approval"] = self.approval.to_dict() if self.approval else None
         return payload
@@ -98,6 +100,7 @@ class TurnViewBuilder:
         self._answer = ""
         self._approval: ApprovalView | None = None
         self._effect_result: dict[str, Any] = {}
+        self._candidate_view: dict[str, Any] | None = None
         self._effect_failed = False
         self._error_code = ""
         self._error_message = ""
@@ -115,6 +118,13 @@ class TurnViewBuilder:
         self._count += 1
         payload = dict(event.payload)
 
+        if event.type is AgentEventType.TOOL_PROGRESS and payload.get("candidate_view", False) is None:
+            self._candidate_view = None
+        if event.type is AgentEventType.TOOL_COMPLETED:
+            result = payload.get("result")
+            if isinstance(result, Mapping) and "candidate_view" in result:
+                value = result.get("candidate_view")
+                self._candidate_view = deepcopy(dict(value)) if isinstance(value, Mapping) else None
         if event.type is AgentEventType.MODEL_TOOL_CALL:
             tool_name = str(payload.get("tool") or "").strip()
             if tool_name:
@@ -201,6 +211,7 @@ class TurnViewBuilder:
             error_message=self._error_message,
             tool_calls=tuple(self._tool_calls),
             event_count=self._count,
+            candidate_view=deepcopy(self._candidate_view),
         )
 
 

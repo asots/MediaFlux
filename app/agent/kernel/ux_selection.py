@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -10,6 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from app.agent.public_safety import sanitize_resource_title
 from app.agent.recent_resource_candidates import validate_safe_resource_snapshot
 from app.sensitive_data import is_sensitive_key, redact_sensitive_text
 
@@ -59,16 +61,60 @@ def resource_model_content(content: str, *, maximum: int) -> str:
 
 
 def normalize_selection(value: Any) -> dict[str, Any]:
+    """新协议只接受批次凭证、明确位置集合和目标；旧单卡协议只读。"""
     if (
-        not isinstance(value, dict)
-        or set(value) != {"ref", "position"}
-        or not isinstance(value["ref"], str)
-        or not _REF_RE.fullmatch(value["ref"])
-        or type(value["position"]) is not int
-        or not 1 <= value["position"] <= 12
+        not isinstance(value, dict) or set(value) != {"ref", "positions", "target"}
+        or not isinstance(value["ref"], str) or not _REF_RE.fullmatch(value["ref"])
+        or not isinstance(value["positions"], list) or not 1 <= len(value["positions"]) <= 12
+        or any(type(pos) is not int or not 1 <= pos <= 12 for pos in value["positions"])
+        or len(set(value["positions"])) != len(value["positions"])
+        or value["target"] not in ("qb", "guangya", "both")
     ):
         raise SelectionInvalidError()
-    return {"ref": value["ref"], "position": value["position"]}
+    return {"ref": value["ref"], "positions": sorted(value["positions"]), "target": value["target"]}
+
+
+def _target_options(owner: str) -> dict[str, Any]:
+    # 配置/登录状态来自领域现有契约；只用于展示，提交仍会再次预检。
+    from app.agent.indexer_actions import download_target_readiness
+    from app.agent.media_consumption_actions import explicit_preferred_download_target
+
+    ready = download_target_readiness("both")
+    preferred = explicit_preferred_download_target(owner)
+    return {
+        "target": preferred or "guangya",
+        "target_source": "saved_preference" if preferred else "product_default",
+        "targets": [
+            {"value": name, "label": label, "available": available}
+            for name, label, available in (
+                ("qb", "qBittorrent", ready.get("qb", False)),
+                ("guangya", "光鸭", ready.get("guangya", False)),
+                ("both", "两个目标", all(ready.values()) and len(ready) == 2),
+            )
+        ],
+    }
+
+
+def _recommend(items: list[dict[str, Any]]) -> list[int]:
+    """仅以明确集数范围推荐互补项；无法证明覆盖关系时只推荐首项。"""
+    scopes = {
+        re.split(r"(?i)s\d{1,2}\s*e\d|[\[(【]\s*\d+\s*[-~～–—]", item["title"], maxsplit=1)[0].strip(" ._-[]").casefold()
+        for item in items if item.get("coverage")
+    }
+    if len(scopes) != 1 or not all(scopes):
+        return [items[0]["position"]]
+    covered: set[tuple[int | None, int]] = set()
+    recommended: list[int] = []
+    for item in items:
+        coverage = item.get("coverage")
+        if not coverage:
+            continue
+        season, start, end = coverage
+        episodes = {(season, episode) for episode in range(start, end + 1)}
+        if not covered.intersection(episodes):
+            recommended.append(item["position"])
+            covered.update(episodes)
+    return recommended or [items[0]["position"]]
 
 
 def _snapshot(value: Any) -> dict[str, Any] | None:
@@ -90,12 +136,18 @@ def _messages(value: Any, *, maximum: int) -> list[str]:
 
 
 def candidate_item(value: Mapping[str, Any], position: int) -> dict[str, Any]:
+    from app.modules.episode_mapping import extract_release_episode_range
+
+    title = sanitize_resource_title(value.get("title")) or f"候选 {position}"
+    season, start, end = extract_release_episode_range(title)
+    coverage = [season, start, end] if start and end and end - start < 1000 else None
     quality = value.get("quality")
     quality = quality if isinstance(quality, dict) else value
     tags = quality.get("tags")
     return {
         "position": position,
-        "title": display_text(value.get("title")) or f"候选 {position}",
+        "title": title,
+        "coverage": coverage,
         "site_name": display_text(value.get("site_name"), limit=80),
         "size_text": display_text(value.get("size_text"), limit=32),
         "tags": {
@@ -136,7 +188,7 @@ def _display_sources(public: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
 
 async def issue_candidate_view(
     *, store: ReferenceStore, owner: str, session_id: str, generation: int,
-    ref: str, value: Any, ttl_seconds: int, public: Mapping[str, Any],
+    ref: str, value: Any, ttl_seconds: int, public: Mapping[str, Any], turn_id: str = "",
 ) -> dict[str, Any] | None:
     snapshot = _snapshot(value)
     if snapshot is None or not snapshot["candidates"]:
@@ -147,14 +199,18 @@ async def issue_candidate_view(
     items: list[dict[str, Any]] = []
     for candidate in snapshot["candidates"]:
         position = candidate["position"]
-        item = candidate_item({**candidate, **sources.get(candidate["result_id"], {})}, position)
-        selection = await store.put(
-            owner=owner, session_id=session_id, kind=SELECTION_KIND, ttl_seconds=ttl,
-            value={"ref": ref, "position": position, "generation": generation, "expires_at": expires_at},
-        )
-        item["selection"] = {"ref": selection.ref, "position": position}
-        items.append(item)
-    return {"ref": ref, "expires_at": expires_at, "generation": generation, "items": items}
+        items.append(candidate_item({**candidate, **sources.get(candidate["result_id"], {})}, position))
+    selection = await store.put(
+        owner=owner, session_id=session_id, kind=SELECTION_KIND, ttl_seconds=ttl,
+        value={"ref": ref, "generation": generation, "expires_at": expires_at},
+    )
+    return {
+        "ref": ref, "selection_ref": selection.ref, "expires_at": expires_at,
+        "generation": generation, "turn_id": turn_id, "items": items,
+        "recommended_positions": _recommend(items),
+        **await asyncio.to_thread(_target_options, owner),
+    }
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,19 +220,21 @@ class ValidatedSelection:
 
 
 async def validate_selection(
-    value: Any, *, state: SessionState, store: ReferenceStore,
+    value: Any, *, state: SessionState, store: ReferenceStore, for_preview: bool = True,
 ) -> ValidatedSelection:
     selection = normalize_selection(value)
     view = state.metadata.get(CANDIDATE_VIEW_KEY)
     try:
         if not isinstance(view, dict):
             raise SelectionInvalidError()
-        guard = CandidateSelectionGuard(view["generation"], view["ref"], view["expires_at"])
+        guard = CandidateSelectionGuard(
+            state.generation, view["ref"], view["expires_at"], batch_generation=view["generation"],
+        )
         guard.check(state)
         items = view.get("items")
-        if not isinstance(items, list) or not any(
-            isinstance(item, dict) and item.get("position") == selection["position"]
-            and item.get("selection") == selection for item in items
+        if (
+            not isinstance(items, list) or selection["ref"] != view.get("selection_ref")
+            or not set(selection["positions"]).issubset({item["position"] for item in items})
         ):
             raise SelectionInvalidError()
         bound = await store.resolve(
@@ -184,22 +242,27 @@ async def validate_selection(
             expected_kind=SELECTION_KIND,
         )
         if bound != {
-            "ref": guard.ref, "position": selection["position"],
-            "generation": guard.generation, "expires_at": guard.expires_at,
+            "ref": guard.ref, "generation": guard.batch_generation, "expires_at": guard.expires_at,
         }:
             raise SelectionInvalidError()
         resource = await store.resolve(
             guard.ref, owner=state.owner, session_id=state.session_id, expected_kind=RESOURCE_KIND,
         )
         snapshot = _snapshot(resource)
-        if snapshot is None or not any(
-            item["position"] == selection["position"] for item in snapshot["candidates"]
+        if snapshot is None or not set(selection["positions"]).issubset(
+            {item["position"] for item in snapshot["candidates"]}
         ):
             raise SelectionInvalidError()
+        pending = state.metadata.get("ux_candidate_plan")
+        if (
+            for_preview and state.pending_effect_plan_id and isinstance(pending, dict)
+            and pending.get("plan_id") == state.pending_effect_plan_id and pending.get("ref") == guard.ref
+        ):
+            raise SelectionInvalidError("已有这批资源的待确认计划，请先确认或取消后再改选。")
         guard.check(state)
         return ValidatedSelection(guard, {
             "source_type": RESOURCE_KIND, "resource_candidates_ref": guard.ref,
-            "positions": [selection["position"]], "target": "preferred",
+            "positions": selection["positions"], "target": selection["target"],
         })
     except (ReferenceError, KeyError, TypeError, ValueError) as exc:
         raise SelectionInvalidError() from exc
@@ -211,20 +274,22 @@ async def current_candidate_view(
     view = getattr(state, "metadata", {}).get(CANDIDATE_VIEW_KEY)
     if not isinstance(view, dict) or not isinstance(view.get("items"), list):
         return None
-    items: list[dict[str, Any]] = []
     try:
-        for raw in view["items"][:12]:
-            if not isinstance(raw, dict):
-                return None
-            await validate_selection(raw.get("selection"), state=state, store=store)
-            item = candidate_item(raw, raw["position"])
-            item["selection"] = deepcopy(raw["selection"])
-            items.append(item)
+        await validate_selection({
+            "ref": view.get("selection_ref"),
+            "positions": [item["position"] for item in view["items"]], "target": "guangya",
+        }, state=state, store=store, for_preview=False)
+        public = {key: deepcopy(view[key]) for key in (
+            "ref", "selection_ref", "expires_at", "turn_id", "recommended_positions",
+        ) if key in view}
+        public["items"] = [candidate_item(item, item["position"]) for item in view["items"]]
+        result = state.metadata.get("ux_candidate_result")
+        if isinstance(result, dict) and result.get("ref") == view["ref"]:
+            public["last_result"] = {key: deepcopy(result[key]) for key in ("text", "target", "handled_positions") if key in result}
+        public.update(await asyncio.to_thread(_target_options, state.owner))
+        return public
     except (SelectionInvalidError, KeyError, TypeError, ValueError):
         return None
-    if not items:
-        return None
-    return {"ref": view["ref"], "expires_at": view["expires_at"], "items": items}
 
 
 def candidate_result(public: Mapping[str, Any], view: dict[str, Any] | None) -> dict[str, Any]:

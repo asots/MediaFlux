@@ -326,6 +326,10 @@ def _resources(*, ttl=900):
     return result
 
 
+def _selection(view, positions=None, target="guangya"):
+    return {"ref": view["selection_ref"], "positions": positions or [1], "target": target}
+
+
 class SelectionModel:
     def __init__(self, *, forged_position=None):
         self.requests = []
@@ -379,13 +383,13 @@ def test_candidate_projection_is_allowlisted_and_current_view_restores(store):
         encoded = public + result.outcome.model_content
         for private in ("rawresult", "torrent_url", "SECRET", "10.0.0.9", "/private/", "https://"):
             assert private not in encoded
-        assert set(view) == {"ref", "expires_at", "items"}
+        assert set(view) == {"ref", "selection_ref", "expires_at", "items", "turn_id", "recommended_positions", "target", "target_source", "targets"}
         assert view["expires_at"] > time.time()
         item = view["items"][0]
-        assert set(item) == {"position", "title", "site_name", "size_text", "tags", "reasons", "warnings", "selection"}
+        assert set(item) == {"position", "title", "site_name", "size_text", "tags", "reasons", "warnings", "coverage"}
         assert item["tags"] == {"audio": "Atmos", "resolution": "2160p"}
         assert item["reasons"] == ["精确匹配"] and item["warnings"] == ["需要人工确认"]
-        assert item["selection"]["ref"] != view["ref"]
+        assert view["selection_ref"] != view["ref"]
         reloaded = SQLiteKernelStore(secret_provider=lambda: SECRET)
         state = await reloaded.load(owner=OWNER, session_id=SESSION)
         assert await current_candidate_view(state=state, store=reloaded) == view
@@ -394,16 +398,16 @@ def test_candidate_projection_is_allowlisted_and_current_view_restores(store):
         assert await current_candidate_view(state=state, store=reloaded) == view
         await states.begin_turn(owner=OWNER, session_id=SESSION, request_id="new-chat")
         latest = await reloaded.load(owner=OWNER, session_id=SESSION)
-        assert await current_candidate_view(state=latest, store=reloaded) is None
+        assert await current_candidate_view(state=latest, store=reloaded) == view
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("attack", ["foreign_owner", "foreign_session", "expired", "old_snapshot", "old_turn", "position", "boolean", "unknown_ref", "snapshot_ref", "tampered_ref", "wall_expired"])
+@pytest.mark.parametrize("attack", ["foreign_owner", "foreign_session", "expired", "old_snapshot", "position", "boolean", "unknown_ref", "snapshot_ref", "tampered_ref", "wall_expired"])
 def test_invalid_selection_never_calls_model_provider_or_consumes_pending(store, attack):
     async def exercise():
         session, pipeline, states = _runtime(store)
         view, context = await _publish_candidates(pipeline, states)
-        value = dict(view["items"][0]["selection"])
+        value = dict(_selection(view))
         owner, session_id = OWNER, SESSION
         if attack == "foreign_owner":
             owner = "foreign-owner"
@@ -427,9 +431,9 @@ def test_invalid_selection_never_calls_model_provider_or_consumes_pending(store,
             value_view = dict(view, generation=context.lease.generation, expires_at=time.time() - 1)
             await states.commit(context_lease, updates=(StateUpdate(f"metadata.{CANDIDATE_VIEW_KEY}", value_view),))
         if attack == "position":
-            value["position"] = 2  # 另一合法位置仍必须拒绝逐项凭证篡改。
+            value["positions"] = [13]  # 越界位置不能扩大快照。
         if attack == "boolean":
-            value["position"] = True
+            value["positions"] = [True]
         if attack == "unknown_ref":
             value["ref"] = "ref_" + "z" * 24
         if attack == "snapshot_ref":
@@ -457,14 +461,14 @@ def test_selection_guard_closes_cross_store_toctou_and_expiry(store):
         _, pipeline, states = _runtime(store)
         view, context = await _publish_candidates(pipeline, states)
         before = await states.load(owner=OWNER, session_id=SESSION)
-        selection = await validate_selection(view["items"][0]["selection"], state=before, store=store)
+        selection = await validate_selection(_selection(view), state=before, store=store)
         await _publish_candidates(pipeline, states, context=context)
         second_store = SQLiteKernelStore(secret_provider=lambda: SECRET)
         unchanged = await second_store.load(owner=OWNER, session_id=SESSION)
         with pytest.raises(SelectionInvalidError):
             await second_store.begin_turn(owner=OWNER, session_id=SESSION, request_id="stale-selection", selection_guard=selection.guard)
         assert await second_store.load(owner=OWNER, session_id=SESSION) == unchanged
-        latest_selection = unchanged.metadata[CANDIDATE_VIEW_KEY]["items"][0]["selection"]
+        latest_selection = _selection(unchanged.metadata[CANDIDATE_VIEW_KEY])
         validated = await validate_selection(latest_selection, state=unchanged, store=store)
         with patch("app.agent.kernel.state.time.time", return_value=validated.guard.expires_at + 1), pytest.raises(SelectionInvalidError):
             await second_store.begin_turn(owner=OWNER, session_id=SESSION, request_id="expired-admission", selection_guard=validated.guard)
@@ -476,7 +480,7 @@ def test_selection_click_only_previews_and_explicit_confirmation_has_one_effect(
     async def exercise():
         session, pipeline, states = _runtime(store)
         view, _ = await _publish_candidates(pipeline, states)
-        envelope = QueryEnvelope(owner=OWNER, session_id=SESSION, message="选择并预览", selection=view["items"][0]["selection"])
+        envelope = QueryEnvelope(owner=OWNER, session_id=SESSION, message="选择并预览", selection=_selection(view))
         with patch("app.agent.indexer_candidate_actions.prepare_submit_resource") as prepare, \
              patch("app.agent.indexer_candidate_actions.submit_resource_confirmed") as execute:
             prepare.side_effect = lambda args: (ToolResult(True, "confirmation_required", "确认后提交", data={"resource": {"title": "Example"}}), f"{args['result_id']}:{args['target']}")
@@ -486,23 +490,20 @@ def test_selection_click_only_previews_and_explicit_confirmation_has_one_effect(
             assert len(approvals) == 1, [(event.type, event.payload) for event in events]
             prepare.assert_called_once()
             execute.assert_not_called()
-            assert len(session.model.requests) == 1
-            request = session.model.requests[0]
-            intent = json.loads(request.messages[-1].content.splitlines()[-1])
-            assert intent["resource_candidates_ref"] == view["ref"] and intent["positions"] == [1]
-            assert "rawresult" not in str(request) and "10.0.0.9" not in str(request)
+            assert session.model.requests == []
+            assert prepare.call_args.args[0]["target"] == "guangya"
             state = await states.load(owner=OWNER, session_id=SESSION)
             pending = state.pending_effect_plan_id
             assert pending == approvals[0].payload["plan"]["plan_id"]
             stale = await _events(session.run(envelope.to_agent_input()))
             assert stale[0].payload["code"] == "selection_invalid"
             assert (await states.load(owner=OWNER, session_id=SESSION)).pending_effect_plan_id == pending
-            assert len(session.model.requests) == 1
+            assert session.model.requests == []
             first = await _events(session.confirm(owner=OWNER, session_id=SESSION, plan_id=pending))
             assert any(event.type is AgentEventType.EFFECT_COMPLETED for event in first)
             await _events(session.confirm(owner=OWNER, session_id=SESSION, plan_id=pending))
             execute.assert_called_once()
-            assert len(session.model.requests) == 1
+            assert session.model.requests == []
     asyncio.run(exercise())
 
 
@@ -511,7 +512,7 @@ def test_pipeline_rejects_model_rewriting_verified_choice_before_provider(store)
         _, pipeline, states = _runtime(store)
         view, context = await _publish_candidates(pipeline, states)
         state = await states.load(owner=OWNER, session_id=SESSION)
-        verified = await validate_selection(view["items"][0]["selection"], state=state, store=store)
+        verified = await validate_selection(_selection(view), state=state, store=store)
         context = replace(context, selection_arguments=verified.arguments)
         with patch("app.agent.indexer_candidate_actions.prepare_submit_resource") as prepare:
             for arguments in ({**verified.arguments, "positions": [2]},
@@ -534,14 +535,14 @@ def test_get_session_restores_only_valid_current_candidates_and_query_accepts_se
     assert response.status_code == 200 and response.json()["candidate_view"] == view
     class Web:
         async def query(self, envelope):
-            assert envelope.to_agent_input().metadata["selection"] == view["items"][0]["selection"]
+            assert envelope.to_agent_input().metadata["selection"] == _selection(view)
             yield b'{"type":"turn.completed"}\n'
     api.runtime.web = Web()
     response = api.client.post("/api/agent/query", json={
-        "message": "选择并预览", "session_id": SESSION, "selection": view["items"][0]["selection"], "stream": True,
+        "message": "选择并预览", "session_id": SESSION, "selection": _selection(view), "stream": True,
     }, headers=CSRF)
     assert response.status_code == 200 and "turn.completed" in response.text
-    for selection in (None, {}, {"ref": view["ref"], "position": True}, {**view["items"][0]["selection"], "url": "https://private"}):
+    for selection in (None, {}, {"ref": view["ref"], "position": True}, {**_selection(view), "url": "https://private"}):
         assert api.client.post("/api/agent/query", json={"message": "选择", "session_id": SESSION, "selection": selection}, headers=CSRF).status_code == 400
     api.principal["username"] = "foreign"
     assert api.client.get(f"/api/agent/sessions/{SESSION}").json()["candidate_view"] is None
@@ -586,7 +587,7 @@ def test_empty_or_failed_same_turn_search_invalidates_old_candidate(store, faile
         state = await states.load(owner=OWNER, session_id=SESSION)
         assert await current_candidate_view(state=state, store=store) is None
         events = await _events(session.run(AgentInput(message="选择并预览", owner=OWNER, session_id=SESSION,
-                                                     metadata={"selection": view["items"][0]["selection"]})))
+                                                     metadata={"selection": _selection(view)})))
         assert events[0].payload["code"] == "selection_invalid"
         assert session.model.requests == []
     asyncio.run(exercise())
@@ -610,7 +611,7 @@ def test_concurrent_selection_admission_accepts_only_one_cross_store_turn(store)
         _, pipeline, states = _runtime(store)
         view, _ = await _publish_candidates(pipeline, states)
         state = await states.load(owner=OWNER, session_id=SESSION)
-        selection = await validate_selection(view["items"][0]["selection"], state=state, store=store)
+        selection = await validate_selection(_selection(view), state=state, store=store)
         other = SQLiteKernelStore(secret_provider=lambda: SECRET)
         outcomes = await asyncio.gather(*(
             local.begin_turn(owner=OWNER, session_id=SESSION, request_id=f"click-{index}", selection_guard=selection.guard)
@@ -664,7 +665,7 @@ def test_same_turn_read_invalidation_reaches_real_progress_stream_before_termina
         assert await current_candidate_view(state=state, store=store) is None
         assert len(model.requests) == 3
         rejected = await _events(session.run(AgentInput(message="选择并预览", owner=OWNER, session_id=SESSION,
-                                                       metadata={"selection": first_view["items"][0]["selection"]})))
+                                                       metadata={"selection": _selection(first_view)})))
         assert rejected[0].payload["code"] == "selection_invalid" and len(model.requests) == 3
     asyncio.run(exercise())
 
@@ -685,7 +686,7 @@ def test_pre_read_rejection_keeps_current_card_and_emits_no_invalidation(store, 
         after = await states.load(owner=OWNER, session_id=SESSION)
         assert after == before
         assert await current_candidate_view(state=after, store=store) == view
-        assert await validate_selection(view["items"][0]["selection"], state=after, store=store)
+        assert await validate_selection(_selection(view), state=after, store=store)
     asyncio.run(exercise())
 
 

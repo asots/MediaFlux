@@ -860,7 +860,7 @@
 
     function approvalTargetLabel(value) {
         const target = String(value || '').trim().toLowerCase();
-        return ({guangya: '光鸭云盘', qb: 'qBittorrent', qbittorrent: 'qBittorrent'})[target] || target;
+        return ({guangya: '光鸭云盘', qb: 'qBittorrent', qbittorrent: 'qBittorrent', both: 'qBittorrent ＋ 光鸭'})[target] || target;
     }
 
     function scalarPreviewRows(data, confirmation = {}) {
@@ -872,6 +872,7 @@
         if (target) rows.push(['目标', target.slice(0, 80)]);
         const count = Number.isInteger(data.count) ? data.count : Number.isInteger(data.total) ? data.total : null;
         if (count !== null) rows.push(['数量', `${count} 项`]);
+        for (const folder of (Array.isArray(data.receiving_folders) ? data.receiving_folders : []).slice(0, 3)) rows.push(['接收目录', String(folder)]);
         for (const [key, label] of [['selected', '已选择'], ['review_required', '待复核']]) {
             if (Number.isInteger(data[key])) rows.push([label, `${data[key]} 项`]);
         }
@@ -889,7 +890,7 @@
 
     function buildApprovalScope(data) {
         if (!data || typeof data !== 'object') return null;
-        const resources = Array.isArray(data.resources) ? data.resources : [];
+        const resources = Array.isArray(data.resources) ? data.resources : data.resource ? [data.resource] : [];
         const effects = Array.isArray(data.effects) ? data.effects : [];
         if (!resources.length && !effects.length) return null;
         const scope = element('div', 'agent-confirmation-scope');
@@ -938,6 +939,20 @@
             if (target) lines.push(`- 目标：${target}`);
             for (const [key, label] of [['total', '请求'], ['succeeded', '已受理'], ['created', '已创建'], ['review_required', '待复核'], ['duplicate', '已存在'], ['failed', '未完成'], ['skipped', '已跳过']]) {
                 if (Number.isInteger(data[key])) lines.push(`- ${label}：${data[key]} 项`);
+            }
+            if (data.source_type === 'resource_candidates' && Array.isArray(data.items)) {
+                const labels = {submitted: '已提交', duplicate: '已存在，未重复添加', failed: '提交失败', partial: '部分目标成功', manual_review: '结果未知，请先核验'};
+                for (const item of data.items.slice(0, 12)) {
+                    if (!item || typeof item !== 'object') continue;
+                    const status = item.duplicate ? 'duplicate' : item.status;
+                    const prefix = Number.isInteger(item.position) ? `#${item.position} · ` : '';
+                    let text = `${prefix}${clipText(item.title || '资源', 160)}：${labels[status] || labels.manual_review} · ${approvalTargetLabel(item.target || data.target)}`;
+                    if (Number.isInteger(item.request_id) && item.request_id > 0) text += ` · 下载请求 #${item.request_id}`;
+                    for (const [key, label] of [['succeeded', '已提交'], ['failed', '失败目标']]) {
+                        if (Array.isArray(item[key]) && item[key].length) text += ` · ${label}：${item[key].map(approvalTargetLabel).join('、')}`;
+                    }
+                    lines.push(`- ${text}`);
+                }
             }
             if (Array.isArray(data.items)) {
                 const errors = [];
@@ -1040,9 +1055,16 @@
         const body = element('div', 'agent-stream-text agent-rich-text');
         replaceRichText(body, text);
         result.append(head, body);
+        if (card.closest('.agent-candidates') && !cancelled) {
+            const link = element('a', 'agent-result-downloads', '查看下载任务');
+            link.href = '/downloads';
+            result.append(link);
+        }
+        const group = card.closest('.agent-candidates');
         card.replaceWith(result);
         renderIcons(result);
-        scrollToBottom(true);
+        syncCandidateButtons();
+        if (!group) scrollToBottom();
     }
 
     function expireVisibleApprovals() {
@@ -1220,17 +1242,24 @@
         syncViewportHeight();
     }
 
-    async function sendQuery(text, {selection = null, preserveDraft = false} = {}) {
+    function queryRequest(message, requestId, signal, selection = null) {
+        return fetch('/api/agent/query', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message, session_id: sessionId, request_id: requestId, stream: true, ...(selection ? {selection} : {})}),
+            signal,
+        });
+    }
+
+    async function sendQuery(text) {
         if (busy || initialRestore || !text.trim()) return;
         const message = text.trim();
         ++sessionLoadGeneration;
-        expireCandidateCards();
-        if (!selection) expireVisibleApprovals();
+        expireVisibleApprovals();
         appendUser(message);
         const turn = createAssistantTurn();
         turn.requestMessage = message;
-        turn.boundSelection = Boolean(selection);
-        if (!preserveDraft) promptInput.value = '';
+        turn.boundSelection = false;
+        promptInput.value = '';
         saveDraft();
         scrollToBottom(true);
         resizePrompt();
@@ -1241,18 +1270,7 @@
         setBusy(true, {stoppable: true});
         announce(responseStatus, 'Media Agent 正在处理请求');
         try {
-            const response = await fetch('/api/agent/query', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    message,
-                    session_id: sessionId,
-                    request_id: requestId,
-                    stream: true,
-                    ...(selection ? {selection} : {}),
-                }),
-                signal: controller.signal,
-            });
+            const response = await queryRequest(message, requestId, controller.signal);
             await readEventStream(response, (event) => {
                 if (activeRequest?.requestId !== requestId) return;
                 applyEvent(turn, event);
@@ -1355,6 +1373,18 @@
             } else if (transportError) {
                 text += `\n${transportError}`;
             }
+            const group = card.closest('.agent-candidates');
+            const candidateState = group?._candidateState;
+            if (candidateState) {
+                const handled = Array.isArray(result?.data?.items) ? result.data.items : [];
+                for (const item of handled) {
+                    if (item.status !== 'failed') candidateState.selected.delete(item.position);
+                }
+                if (!completed && !failed && card._candidateSelection) {
+                    for (const pos of card._candidateSelection.positions) candidateState.selected.delete(pos);
+                }
+                saveCandidateDraft(group);
+            }
             replaceApprovalWithResult(card, text, {error: failed || !completed || result?.ok === false});
             setBusy(false);
             refreshSessions({quiet: true});
@@ -1379,7 +1409,9 @@
                 {cancelled: true},
             );
         } catch (error) {
-            replaceApprovalWithResult(card, error?.message || '暂时无法取消该计划。', {error: true});
+            if (card.closest('.agent-candidates')) {
+                card.querySelector('.agent-confirmation-status')?.append(element('p', 'agent-candidates-note', '取消状态尚未确认，请刷新会话核对；不会自动重试或提交下载。'));
+            } else replaceApprovalWithResult(card, error?.message || '暂时无法取消该计划。', {error: true});
         } finally {
             refreshSessions({quiet: true});
         }
@@ -1608,16 +1640,20 @@
             for (const message of payload.messages || []) {
                 if (message.role === 'user') appendUser(String(message.content || ''), {recovered: true});
                 else if (message.role === 'assistant') {
+                    if (message.candidate_result_ref === payload.candidate_view?.ref && payload.candidate_view?.last_result) continue;
                     const turn = createAssistantTurn({recovered: true});
                     addRecoveredToolTrace(turn, message.tools, message.tool_labels);
                     finalizeAnswer(turn, String(message.content || ''));
+                    if (message.candidate_view) renderCandidateView(turn, message.candidate_view);
                 }
             }
-            if (payload.candidate_view) {
-                const view = appendMessage('assistant', {recovered: true});
-                renderCandidateView({card: view.body}, payload.candidate_view);
+            const candidateGroup = transcript?.querySelector('.agent-candidates');
+            if (payload.pending_approval) {
+                const data = payload.pending_approval.preview?.data;
+                if (candidateGroup && data?.source_type === 'resource_candidates') candidateGroup._candidateState.output.append(buildApproval(payload.pending_approval));
+                else renderRecoveredApproval(payload.pending_approval);
             }
-            renderRecoveredApproval(payload.pending_approval);
+            syncCandidateButtons();
             followOutput = true;
             scrollToBottom(true);
             setConsoleEmpty(!transcript?.childElementCount);
@@ -1685,101 +1721,208 @@
     function expireCandidateCards() {
         if (candidateExpiryTimer !== null) clearTimeout(candidateExpiryTimer);
         candidateExpiryTimer = null;
-        transcript?.querySelectorAll('[data-candidate-select]').forEach((button) => {
-            button.disabled = true;
-            button.dataset.expired = 'true';
-            button.title = '候选已更新，请基于新的搜索结果选择';
-        });
-        transcript?.querySelectorAll('.agent-candidates-note').forEach(note => {
-            note.textContent = '此批候选仅供回看，请基于新的搜索结果选择。';
-        });
+        transcript?.querySelectorAll('.agent-candidates').forEach(group => { group.dataset.expired = 'true'; });
+        syncCandidateButtons();
+    }
+
+    function candidateStorageKey(ref) {
+        return `mediaflux:agent:batch:${draftScope}:${sessionId}:${ref}`;
+    }
+
+    function saveCandidateDraft(group) {
+        const state = group._candidateState;
+        if (!state) return;
+        try {
+            sessionStorage.setItem(state.storageKey, JSON.stringify({
+                positions: [...state.selected], target: state.target, expanded: state.details.open,
+            }));
+        } catch (_) { /* Storage can be disabled; keep the current in-memory selection. */ }
+    }
+
+    function candidateShortName(item) {
+        const range = item.coverage;
+        const coverage = Array.isArray(range) && Number.isInteger(range[1]) && Number.isInteger(range[2])
+            ? `${range[0] ? `S${String(range[0]).padStart(2, '0')} · ` : ''}${String(range[1]).padStart(2, '0')}–${String(range[2]).padStart(2, '0')} 集`
+            : clipText(item.title, 48);
+        const specs = ['resolution', 'effect', 'media'].map(key => item.tags?.[key]).filter(value => typeof value === 'string' && value.trim() && !coverage.toLowerCase().includes(value.toLowerCase()));
+        return `#${item.position} · ${coverage}${specs.length ? ` · ${specs.join(' / ')}` : ''}`;
     }
 
     function syncCandidateButtons() {
-        transcript?.querySelectorAll('[data-candidate-select]').forEach(button => {
-            const expired = button.dataset.expired === 'true' || Number(button.dataset.expiresAt) * 1000 <= Date.now();
-            button.disabled = busy || expired;
-            if (expired) {
-                button.title = '候选已过期或更新，请重新搜索';
-                const note = button.closest('.agent-candidates')?.querySelector('.agent-candidates-note');
-                if (note) note.textContent = '此批候选仅供回看，请基于新的搜索结果选择。';
+        transcript?.querySelectorAll('.agent-candidates').forEach(group => {
+            const state = group._candidateState;
+            if (!state) return;
+            const expired = group.dataset.expired === 'true' || !state.view.selection_ref || state.view.expires_at * 1000 <= Date.now();
+            const available = state.view.targets?.find(target => target.value === state.target)?.available === true;
+            const pending = Boolean(group.querySelector('.agent-confirmation-card:not(.is-expired)'));
+            group.querySelectorAll('[data-candidate-control]').forEach(control => { control.disabled = busy || expired || pending; });
+            state.preview.disabled = busy || expired || pending || !available || !state.selected.size;
+            state.preview.textContent = group.dataset.previewing === 'true' ? '正在预检…' : `预览下载 ${state.selected.size} 项`;
+            state.preview.setAttribute('aria-busy', String(group.dataset.previewing === 'true'));
+            state.count.textContent = `已选 ${state.selected.size} / ${state.view.items.length} 项`;
+            const occupied = new Set();
+            let overlap = false;
+            for (const item of state.view.items.filter(item => state.selected.has(item.position))) {
+                if (!Array.isArray(item.coverage)) continue;
+                const [season, start, end] = item.coverage;
+                if (!Number.isInteger(start) || !Number.isInteger(end) || end - start > 1000) continue;
+                for (let ep = start; ep <= end; ep++) {
+                    const key = `${season}:${ep}`;
+                    if (occupied.has(key)) overlap = true;
+                    occupied.add(key);
+                }
             }
+            state.note.textContent = expired ? '此批候选仅供回看，请重新搜索后选择。'
+                : pending ? '请核对下方整批预览，确认后才提交；取消可继续改选。'
+                : !available ? '当前目标尚未配置或登录，请切换可用目标，或先完成设置。'
+                : overlap ? '已选版本包含重叠集数；若不需要保留多个版本，请取消重叠项。'
+                : '选择与切换目标不会提交下载；预检后仍需确认一次。';
+            state.note.classList.toggle('is-warning', overlap && !expired);
+            group.querySelectorAll('[data-candidate-position]').forEach(input => {
+                input.checked = state.selected.has(Number(input.dataset.candidatePosition));
+            });
         });
     }
 
     function renderCandidateView(turn, view) {
         if (!view || !Array.isArray(view.items) || typeof view.ref !== 'string' || !Number.isFinite(view.expires_at)) return;
         if (turn.candidateGroup?.dataset.candidateView === view.ref) return;
-        const items = view.items.filter(item => typeof item?.title === 'string' && Number.isInteger(item.position) &&
-            item.position > 0 && item.position <= 12 && typeof item.selection?.ref === 'string' &&
-            /^ref_[A-Za-z0-9_-]{16,160}$/.test(item.selection.ref) && item.selection.position === item.position).slice(0, 12);
+        const items = view.items.filter(item => typeof item?.title === 'string' && Number.isInteger(item.position) && item.position > 0 && item.position <= 12).slice(0, 12);
         if (!items.length) return;
         expireCandidateCards();
         const group = element('section', 'agent-candidates');
         group.dataset.candidateView = view.ref;
-        group.setAttribute('aria-label', '比较资源候选');
+        group.setAttribute('aria-label', '资源批量选择');
         const heading = element('div', 'agent-candidates-heading');
-        heading.append(element('strong', '', '资源候选'), element('span', '', `${items.length} 项可供核对`));
-        const note = element('p', 'agent-candidates-note', '选择后先生成预览，确认后才提交下载。');
-        const grid = element('div', 'agent-candidate-grid');
-        const extra = document.createElement('details');
-        extra.className = 'agent-candidates-more';
-        const summary = document.createElement('summary');
-        summary.textContent = `查看另外 ${Math.max(0, items.length - 4)} 项候选`;
-        const moreGrid = element('div', 'agent-candidate-grid');
-        extra.append(summary, moreGrid);
-        const tagNames = {resolution: '画质', media: '版本', video_codec: '编码', effect: '画面', audio: '音轨'};
-        for (const [index, item] of items.entries()) {
-            const card = element('article', 'agent-candidate-card');
-            const meta = element('p', 'agent-candidate-meta', `#${item.position}${item.site_name ? ` · ${String(item.site_name).slice(0, 80)}` : ''}${item.size_text ? ` · ${String(item.size_text).slice(0, 32)}` : ''}`);
-            const title = element('h4', '', item.title.slice(0, 300));
-            title.title = item.title.slice(0, 300);
-            const tags = element('div', 'agent-candidate-tags');
-            for (const [key, label] of Object.entries(tagNames)) {
-                const value = item.tags?.[key];
-                if (typeof value === 'string' && value.trim()) tags.append(element('span', '', `${label} · ${value.slice(0, 64)}`));
-            }
-            const reasons = element('ul', 'agent-candidate-reasons');
-            for (const reason of (Array.isArray(item.reasons) ? item.reasons : []).filter(value => typeof value === 'string').slice(0, 3)) {
-                reasons.append(element('li', '', reason.slice(0, 120)));
-            }
-            const warnings = element('ul', 'agent-candidate-warnings');
-            for (const warning of (Array.isArray(item.warnings) ? item.warnings : []).filter(value => typeof value === 'string').slice(0, 4)) {
-                warnings.append(element('li', '', warning.slice(0, 120)));
-            }
-            const button = element('button', 'agent-candidate-select', '选择并预览');
-            button.type = 'button';
-            button.dataset.candidateSelect = item.selection.ref;
-            button.dataset.candidatePosition = String(item.selection.position);
-            button.dataset.candidateTitle = clipText(item.title, 160);
-            button.dataset.expiresAt = String(view.expires_at);
-            button.setAttribute('aria-label', `选择候选 ${item.position} 并预览`);
-            card.append(meta, title);
-            if (tags.childElementCount) card.append(tags);
-            if (reasons.childElementCount) card.append(reasons);
-            if (warnings.childElementCount) card.append(warnings);
-            card.append(button);
-            (index < 4 ? grid : moreGrid).append(card);
+        heading.append(element('strong', '', '推荐组合'), element('span', '', `${items.length} 个版本`));
+        const recommended = (Array.isArray(view.recommended_positions) ? view.recommended_positions : []).filter(pos => items.some(item => item.position === pos));
+        const summary = element('ul', 'agent-candidate-recommendation');
+        for (const item of items.filter(item => recommended.includes(item.position))) summary.append(element('li', '', candidateShortName(item)));
+        if (!summary.childElementCount) summary.append(element('li', '', '请展开列表核对版本后选择。'));
+        let stored = null;
+        try { stored = JSON.parse(sessionStorage.getItem(candidateStorageKey(view.ref)) || 'null'); } catch (_) { /* Optional draft. */ }
+        const positions = Array.isArray(stored?.positions) ? stored.positions : recommended;
+        const handled = Array.isArray(view.last_result?.handled_positions) ? view.last_result.handled_positions : [];
+        const selected = new Set(positions.filter(pos => items.some(item => item.position === pos) && !handled.includes(pos)));
+        const targets = Array.isArray(view.targets) ? view.targets : [];
+        const target = targets.some(item => item.value === stored?.target) ? stored.target : view.target || 'guangya';
+        const toolbar = element('div', 'agent-candidate-toolbar');
+        const targetLabel = element('label', 'agent-candidate-target');
+        targetLabel.append(element('span', '', view.target_source === 'saved_preference' ? '下载目标 · 已保存偏好' : '下载目标 · 可切换'));
+        const select = document.createElement('select');
+        select.setAttribute('aria-label', '下载目标');
+        select.dataset.candidateControl = 'target';
+        for (const option of targets) {
+            if (!['qb', 'guangya', 'both'].includes(option.value)) continue;
+            const node = element('option', '', `${option.label}${option.available ? '' : '（未就绪）'}`);
+            node.value = option.value;
+            select.append(node);
         }
-        group.append(heading, note, grid);
-        if (items.length > 4) group.append(extra);
+        select.value = target;
+        targetLabel.append(select);
+        const preview = element('button', 'agent-candidate-select');
+        preview.type = 'button';
+        preview.dataset.candidateControl = 'preview';
+        preview.dataset.candidateSelect = view.selection_ref || '';
+        toolbar.append(targetLabel, preview);
+        const details = document.createElement('details');
+        details.className = 'agent-candidates-more';
+        details.open = stored?.expanded === true;
+        const detailsTitle = element('summary', '', '挑选版本');
+        const count = element('span', 'agent-candidate-count');
+        detailsTitle.append(count);
+        const list = element('div', 'agent-candidate-list');
+        for (const item of items) {
+            const row = element('article', 'agent-candidate-row');
+            const label = element('label', 'agent-candidate-option');
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.dataset.candidateControl = 'position';
+            input.dataset.candidatePosition = String(item.position);
+            input.setAttribute('aria-label', `选择候选 ${item.position}`);
+            const info = element('span', 'agent-candidate-info');
+            info.append(element('strong', '', candidateShortName(item)), element('span', 'agent-candidate-meta', [item.size_text, item.site_name].filter(Boolean).join(' · ')));
+            label.append(input, info);
+            const detail = document.createElement('details');
+            detail.className = 'agent-candidate-detail';
+            detail.append(element('summary', '', '详情'), element('p', '', item.title.slice(0, 300)));
+            for (const reason of [...(Array.isArray(item.reasons) ? item.reasons : []), ...(Array.isArray(item.warnings) ? item.warnings : [])].filter(item => typeof item === 'string').slice(0, 8)) detail.append(element('p', '', reason.slice(0, 120)));
+            row.append(label, detail);
+            list.append(row);
+            input.addEventListener('change', () => {
+                if (input.checked) selected.add(item.position); else selected.delete(item.position);
+                syncCandidateButtons(); saveCandidateDraft(group);
+            });
+        }
+        details.append(detailsTitle, list);
+        const note = element('p', 'agent-candidates-note');
+        note.setAttribute('aria-live', 'polite');
+        const output = element('div', 'agent-candidate-output');
+        group._candidateState = {view: {...view, items}, selected, target, details, preview, count, note, output, storageKey: candidateStorageKey(view.ref)};
+        select.addEventListener('change', () => { group._candidateState.target = select.value; syncCandidateButtons(); saveCandidateDraft(group); });
+        details.addEventListener('toggle', () => saveCandidateDraft(group));
+        group.append(heading, summary, toolbar, note, details, output);
         turn.candidateGroup = group;
         turn.card.append(group);
+        if (typeof view.last_result?.text === 'string' && view.last_result.text) {
+            const restored = element('section');
+            output.append(restored);
+            replaceApprovalWithResult(restored, view.last_result.text);
+        }
         syncCandidateButtons();
         candidateExpiryTimer = setTimeout(syncCandidateButtons, Math.max(0, Math.min(2147483647, view.expires_at * 1000 - Date.now() + 25)));
         scrollToBottom();
     }
 
-    function selectCandidate(button) {
-        if (busy || button.disabled) return;
-        if (button.dataset.expired === 'true' || Number(button.dataset.expiresAt) * 1000 <= Date.now()) {
-            syncCandidateButtons();
-            announce(responseStatus, '候选已过期，请重新搜索后选择');
-            window.showToast?.('候选已过期，请重新搜索后选择', 'warning');
-            return;
+    async function selectCandidate(button) {
+        const group = button.closest('.agent-candidates');
+        const state = group?._candidateState;
+        if (busy || button.disabled || !state) return;
+        syncCandidateButtons();
+        if (button.disabled) return;
+        const selection = {ref: state.view.selection_ref, positions: [...state.selected].sort((a, b) => a - b), target: state.target};
+        const message = `预览候选 ${selection.positions.map(pos => `#${pos}`).join('、')}，下载目标：${approvalTargetLabel(selection.target)}。`;
+        const requestId = createId('rq');
+        const controller = new AbortController();
+        const turn = {boundSelection: true, failed: false};
+        activeRequest = {controller, requestId, turn, sessionId};
+        group.dataset.previewing = 'true';
+        setBusy(true, {stoppable: false});
+        saveCandidateDraft(group);
+        // 保留候选和旧结果，不插入用户/助手气泡，也不卸载列表。
+        let approvalReceived = false;
+        announce(responseStatus, '正在生成整批资源预览，尚未下载');
+        try {
+            const response = await queryRequest(message, requestId, controller.signal, selection);
+            let terminal = false;
+            await readEventStream(response, event => {
+                const payload = event.payload || {};
+                if (event.type === 'turn.started') expireVisibleApprovals();
+                if (event.type === 'effect.approval_required' && payload.plan) {
+                    const plan = payload.plan;
+                    const card = buildApproval({plan_id: plan.plan_id, effect: plan.effect, preview: plan.preview, confirmation: plan.confirmation, expires_at: plan.expires_at, result: payload.result});
+                    card._candidateSelection = selection;
+                    state.output.replaceChildren(card);
+                    approvalReceived = true;
+                    terminal = true;
+                } else if (event.type === 'turn.failed') {
+                    throw new Error(payload.message || '预检未完成，请重试。');
+                } else if (event.type === 'turn.completed') {
+                    terminal = true;
+                    if (payload.status !== 'approval_required') state.output.replaceChildren(element('p', 'agent-candidates-note', payload.answer || '未生成可执行计划，请检查目标与资源状态。'));
+                }
+            });
+            if (!terminal) throw new Error('预检响应中断，未确认执行任何下载；可重新预检。');
+        } catch (error) {
+            const notice = element('p', 'agent-candidates-note agent-candidate-feedback', approvalReceived ? '预览已生成，但连接中断；可刷新核对当前计划后确认。' : error?.message || '预检未完成，请重试。');
+            state.output.querySelector('.agent-candidate-feedback')?.remove();
+            state.output.append(notice);
+            announce(responseStatus, approvalReceived ? '预览已生成，连接已中断' : '预检未完成');
+        } finally {
+            group.dataset.previewing = 'false';
+            if (activeRequest?.requestId === requestId) activeRequest = null;
+            setBusy(false); refreshSessions({quiet: true});
         }
-        const selection = {ref: button.dataset.candidateSelect, position: Number(button.dataset.candidatePosition)};
-        sendQuery(`选择候选 #${selection.position}「${button.dataset.candidateTitle || ''}」并生成下载预览。`, {selection, preserveDraft: true});
     }
 
     function hideRestoreNotice() {

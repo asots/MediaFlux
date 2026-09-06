@@ -145,6 +145,9 @@ class FakeTelegramTransport:
 
 
 class FakeStore:
+    async def load(self, *, owner, session_id):
+        return types.SimpleNamespace(pending_effect_plan_id="plan_1234567890abcdef")
+
     async def reset_session(self, *, owner, session_id):
         return None
 
@@ -158,7 +161,6 @@ class FakeLifecycle:
         self.calls.append((owner, session_id))
         if self.error is not None:
             raise self.error
-        return None
 
 
 class AgentKernelTelegramAdapterTests(unittest.TestCase):

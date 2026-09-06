@@ -314,6 +314,7 @@ class AgentSession:
         factory: EventFactory | None = None
         try:
             validated_selection = None
+            candidate_context = None
             selection_tool = None
             if "selection" in agent_input.metadata:
                 current_state = await self.state_store.load(
@@ -329,6 +330,15 @@ class AgentSession:
                         raise KeyError("selection must require confirmation")
                 except KeyError as exc:
                     raise ToolPipelineError("候选预览能力暂不可用", code="selection_unavailable") from exc
+            if agent_input.metadata.get("candidate_context") and validated_selection is None:
+                current_state = await self.state_store.load(owner=agent_input.owner, session_id=agent_input.session_id)
+                candidate_view = current_state.metadata.get("ux_candidate_view") or {}
+                items = candidate_view.get("items") or []
+                if not items:
+                    raise SelectionInvalidError()
+                candidate_context = await validate_selection({
+                    "ref": agent_input.metadata["candidate_context"], "positions": [items[0]["position"]], "target": "guangya",
+                }, state=current_state, store=self.pipeline.reference_store, for_preview=False)
             admission_token = await self.turn_admission.begin(agent_input)
             async with self._start_lock:
                 if await self.coordinator.has_protected_turn(
@@ -339,6 +349,8 @@ class AgentSession:
                 begin_options = {}
                 if validated_selection is not None:
                     begin_options["selection_guard"] = validated_selection.guard
+                elif candidate_context is not None:
+                    begin_options["selection_guard"] = candidate_context.guard
                 lease, state = await self.state_store.begin_turn(
                     owner=agent_input.owner,
                     session_id=agent_input.session_id,
@@ -389,6 +401,8 @@ class AgentSession:
                 )
                 return
 
+            if candidate_context is not None:
+                contextual_message += "\n已校验的回复批次，仅可从该引用解析候选编号：" + str(candidate_context.guard.ref)
             selection = self.retriever.retrieve(
                 contextual_message,
                 self.catalog,
@@ -412,12 +426,7 @@ class AgentSession:
             )
             selected_tools = discovery.window(selection.tools)
             if validated_selection is not None:
-                # 结构化选择仍走 MODEL -> 原 ToolPipeline -> EffectPlan，不另建执行面。
                 selected_tools = (selection_tool,)
-                contextual_message += (
-                    "\n\n已验证的卡片选择（仅请求预检，必须等待用户单独确认）：\n"
-                    + json.dumps(dict(validated_selection.arguments), ensure_ascii=False, separators=(",", ":"))
-                )
             await publish(
                 AgentEventType.CAPABILITIES_SELECTED,
                 {
@@ -449,6 +458,7 @@ class AgentSession:
                 report_progress=progress,
                 capability_search=discovery.search,
                 selection_arguments=validated_selection.arguments if validated_selection else None,
+                resource_candidate_ref=candidate_context.guard.ref if candidate_context else "",
             )
             # 新的自然语言回合会明确取代尚未确认的旧计划。若只提升
             # generation 而不撤销票据，历史卡片会永久显示“待确认”，
@@ -458,6 +468,45 @@ class AgentSession:
                     state.pending_effect_plan_id,
                     context=tool_context,
                 )
+
+            if validated_selection is not None:
+                call = ModelToolCall(
+                    call_id=f"selection_{lease.turn_id}", name="ingest.submit",
+                    arguments=dict(validated_selection.arguments),
+                )
+                await publish(AgentEventType.TOOL_STARTED, {
+                    "call_id": call.call_id, "tool": call.name,
+                    "label": public_tool_label(call.name), "effect": selection_tool.effect.value,
+                })
+                result = await self.pipeline.execute(call.name, call.arguments, context=tool_context)
+                messages.append(ModelMessage(role="assistant", tool_calls=(call,)))
+                messages.append(ModelMessage(
+                    role="tool", content=result.outcome.model_message(),
+                    tool_call_id=call.call_id, tool_name=call.name,
+                ))
+                plan = result.effect_plan
+                if plan is not None:
+                    await publish(AgentEventType.EFFECT_APPROVAL_REQUIRED, {
+                        "call_id": call.call_id, "tool": call.name, "label": public_tool_label(call.name),
+                        "plan": plan.public_dict(), "result": dict(result.outcome.public_content),
+                    })
+                else:
+                    await publish(AgentEventType.TOOL_COMPLETED, {
+                        "call_id": call.call_id, "tool": call.name, "label": public_tool_label(call.name),
+                        "elapsed_ms": result.elapsed_ms, "result": dict(result.outcome.public_content),
+                    })
+                answer = "" if plan else format_public_result(dict(result.outcome.public_content))
+                if answer:
+                    messages.append(ModelMessage(role="assistant", content=answer))
+                await self.state_store.commit(lease, conversation=self._persisted_conversation(
+                    messages, current_user_index=current_user_index, original_message=agent_input.message,
+                    prior_conversation=state.conversation,
+                ))
+                await publish(AgentEventType.TURN_COMPLETED, {
+                    "status": "approval_required" if plan else "success", "answer": answer,
+                    "plan_id": plan.plan_id if plan else "", "usage": {}, "model_calls": 0, "tool_calls": 1,
+                })
+                return
 
             for round_index in range(self.limits.max_model_rounds):
                 token.raise_if_cancelled()
@@ -658,6 +707,7 @@ class AgentSession:
                                     messages,
                                     current_user_index=current_user_index,
                                     original_message=agent_input.message,
+                                    prior_conversation=state.conversation,
                                 ),
                             )
                             await publish(
@@ -716,6 +766,7 @@ class AgentSession:
                         messages,
                         current_user_index=current_user_index,
                         original_message=agent_input.message,
+                        prior_conversation=state.conversation,
                     ),
                 )
                 await publish(
@@ -889,6 +940,7 @@ class AgentSession:
             tool_name: str,
             content: str,
             public_content: str,
+            candidate_result: Mapping[str, Any] | None = None,
         ) -> None:
             """把确定性确认终态写回会话，供下一轮续问直接引用。"""
             safe_content = str(content or "").strip()
@@ -906,12 +958,16 @@ class AgentSession:
             safe_public_content = str(public_content or "").strip()
             if safe_public_content:
                 item["public_content"] = safe_public_content
+            updates = (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),)
+            if candidate_result:
+                item["candidate_result_ref"] = candidate_result["ref"]
+                updates += (StateUpdate("metadata.ux_candidate_result", dict(candidate_result)),)
             conversation.append(item)
             try:
                 await self.state_store.commit(
                     lease,
                     conversation=conversation,
-                    updates=(StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),),
+                    updates=updates,
                 )
             except StalePublicationError:
                 raise
@@ -934,10 +990,18 @@ class AgentSession:
             )
             result = await self.pipeline.execute_confirmed(plan_id, context=context)
             public_result = dict(result.outcome.public_content)
+            candidate_data = public_result.get("data")
+            candidate_items = candidate_data.get("items") if isinstance(candidate_data, Mapping) else []
+            candidate_items = candidate_items if isinstance(candidate_items, list) else []
             await remember_result(
                 tool_name=result.tool.name,
                 content=result.outcome.model_message(),
                 public_content=format_public_result(public_result),
+                candidate_result={
+                    "ref": result.arguments.get("resource_candidates_ref"), "text": format_public_result(public_result),
+                    "target": result.arguments.get("target"),
+                    "handled_positions": [item.get("position") for item in candidate_items if isinstance(item, dict) and type(item.get("position")) is int and item.get("status") != "failed"],
+                } if result.tool.name == "ingest.submit" and result.arguments.get("source_type") == "resource_candidates" else None,
             )
             if public_result.get("ok") is False:
                 code = str(public_result.get("status") or "effect_failed")[:80]
@@ -1231,10 +1295,21 @@ class AgentSession:
         *,
         current_user_index: int,
         original_message: str,
+        prior_conversation: Sequence[Mapping[str, Any]] = (),
     ) -> list[dict[str, Any]]:
         stored: list[dict[str, Any]] = []
-        for message in messages:
+        public_history: dict[tuple, list[dict[str, Any]]] = {}
+        for prior in prior_conversation[-60:]:
+            if not isinstance(prior, Mapping):
+                continue
+            key = tuple(str(prior.get(field) or "") for field in ("role", "content", "tool_call_id", "tool_name"))
+            public_history.setdefault(key, []).append({key: prior[key] for key in ("public_content", "candidate_result_ref") if isinstance(prior.get(key), str)})
+        for index, message in enumerate(messages):
             item = message.to_dict()
+            key = tuple(str(item.get(field) or "") for field in ("role", "content", "tool_call_id", "tool_name"))
+            prior = public_history.get(key)
+            if index < current_user_index and prior:
+                item.update(prior.pop(0))
             tool_calls = item.get("tool_calls")
             if isinstance(tool_calls, list):
                 item["tool_calls"] = [

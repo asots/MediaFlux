@@ -28,7 +28,7 @@ from app.agent.kernel.adapters import ApprovalView, TurnView
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
 from app.agent.kernel.events import AgentEvent, AgentEventType
 from app.agent.kernel.public_view import format_public_result
-from app.agent.kernel.state import SessionBusyError
+from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import EffectEnvelope, QueryEnvelope
 from app.agent.public_safety import public_tool_label
 from app.agent.rate_limit import agent_rate_limiter
@@ -58,7 +58,7 @@ _MAX_MESSAGE = 3900
 _STREAM_PREVIEW_MAX_CHARS = 720
 _STREAM_PREVIEW_MAX_LINES = 16
 _QUERY_LIMIT_PER_MINUTE = 12
-_CALLBACK_LIMIT_PER_MINUTE = 16
+_CALLBACK_LIMIT_PER_MINUTE = 40
 _CALLBACK_RE = re.compile(r"^agk:(?P<action>[cx]):(?P<plan>[A-Za-z0-9_-]{16,96})$")
 _PATROL_PROMPTS = {
     "agp:summary": "查看最近一次全库缺集巡检的完整结果。",
@@ -315,6 +315,8 @@ def _preview_lines(
         }.get(target, _safe_text(target, limit=40))
         if target_label:
             lines.append(f"<b>目标</b>：{html.escape(target_label)}")
+        for folder in data.get("receiving_folders", [])[:3]:
+            lines.append(f"<b>接收目录</b>：{html.escape(_safe_text(folder, limit=240))}")
         count = data.get("count")
         if type(count) is int:
             lines.append(f"<b>对象</b>：{count} 项")
@@ -602,6 +604,10 @@ def _execute_query(
     ):
         raise RuntimeError("该消息已经处理，请勿重复发送。")
 
+    from app.bot.agent_candidates import reply_selection_ref
+
+    runtime = get_agent_kernel_runtime()
+    candidate_context = _run_async(reply_selection_ref(runtime, owner=owner, session_id=session_id, message=source))
     progress = TelegramProgress(
         bot,
         telebot_module,
@@ -622,6 +628,7 @@ def _execute_query(
                     request_id=_request_id(source, text),
                     channel="telegram",
                     reply_context=_reply_context(source),
+                    metadata={"candidate_context": candidate_context} if candidate_context else {},
                 ),
                 observe=observer,
             )
@@ -634,6 +641,13 @@ def _execute_query(
                 body,
                 reply_markup=_approval_markup(telebot_module, view.approval),
             )
+        elif view.candidate_view:
+            from app.bot.agent_candidates import render, start_draft
+
+            candidates = dict(view.candidate_view)
+            draft = _run_async(start_draft(runtime, owner=owner, session_id=session_id, view=candidates))
+            body, markup = render(telebot_module, candidates, draft)
+            progress.finish(body, reply_markup=markup)
         else:
             progress.finish_many(_turn_chunks(view))
         return view
@@ -663,6 +677,8 @@ def handle_agent_message(bot: Any, telebot_module: Any, message: Any) -> bool:
             user_id=user_id,
             text=text,
         )
+    except SelectionInvalidError as exc:
+        bot.reply_to(message, str(exc))
     except RuntimeError as exc:
         if "频繁" in str(exc) or "重复" in str(exc):
             bot.reply_to(message, str(exc))
@@ -672,6 +688,18 @@ def handle_agent_message(bot: Any, telebot_module: Any, message: Any) -> bool:
         logger.warning("Telegram Agent 请求失败 type=%s", type(exc).__name__)
     return True
 
+
+
+def _candidate_result_markup(owner: str, session_id: str, plan_id: str, body: str, telebot_module: Any) -> Any:
+    from app.bot.agent_candidates import finish_result
+
+    try:
+        return _run_async(finish_result(
+            get_agent_kernel_runtime(), owner=owner, session_id=session_id,
+            plan_id=plan_id, result_html=body, telebot=telebot_module,
+        ))
+    except Exception:  # noqa: BLE001 - UI 恢复不可覆盖已确认的真实业务结果
+        return None
 
 def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> None:
     chat_id, user_id = _identity(call)
@@ -687,6 +715,11 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         window_seconds=60,
     ):
         bot.answer_callback_query(call.id, "操作过于频繁，请稍后重试", show_alert=True)
+        return
+    if str(getattr(call, "data", "") or "").startswith("agk:s:"):
+        from app.bot.agent_candidates import handle_callback
+
+        handle_callback(bot, call, telebot_module, owner=owner, session_id=telegram_agent_session_id(chat_id, user_id))
         return
     match = _CALLBACK_RE.fullmatch(str(getattr(call, "data", "") or ""))
     if match is None:
@@ -706,6 +739,16 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         request_id=f"tgcb_{getattr(call, 'id', '')}"[:150],
         channel="telegram",
     )
+    runtime = get_agent_kernel_runtime()
+    if getattr(runtime, "store", None) is not None:
+        try:
+            state = _run_async(runtime.store.load(owner=owner, session_id=session_id))
+            if state.pending_effect_plan_id != envelope.plan_id:
+                bot.answer_callback_query(call.id, "该计划已处理或被替代，请使用当前消息中的按钮。", show_alert=True)
+                return
+        except Exception:  # noqa: BLE001 - 无法核对当前计划时不触发任何写入
+            bot.answer_callback_query(call.id, "当前计划暂时无法核对，请稍后重试。", show_alert=True)
+            return
     if match.group("action") == "x":
         try:
             discarded = _run_async(
@@ -714,13 +757,9 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
             logger.warning("Telegram Agent 取消计划失败 type=%s", type(exc).__name__)
             discarded = False
-        _edit_final(
-            bot,
-            call.message,
-            "已取消，本次没有执行任何写操作。"
-            if discarded
-            else "该确认已过期或已处理。",
-        )
+        body = "已取消，本次没有执行任何写操作。" if discarded else "该确认已过期或已处理。"
+        markup = _candidate_result_markup(owner, session_id, envelope.plan_id, html.escape(body), telebot_module)
+        _edit_final(bot, call.message, body, reply_markup=markup)
         bot.answer_callback_query(call.id, "已取消" if discarded else "确认已失效")
         return
 
@@ -738,12 +777,11 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
                 observe=observer,
             )
         )
-        _edit_final(
-            bot,
-            call.message,
-            _render_turn(view),
-            rendered_html=True,
-        )
+        if view.error_code in {"effect_in_progress", "confirmation_invalid", "confirmation_stale", "stale_generation"}:
+            return  # 保留另一并发请求的进度或真实终态，不用旧回调覆盖它。
+        body = _render_turn(view)
+        markup = _candidate_result_markup(owner, session_id, envelope.plan_id, body, telebot_module)
+        _edit_final(bot, call.message, body, reply_markup=markup, rendered_html=True)
     except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
         logger.warning("Telegram Agent 确认执行失败 type=%s", type(exc).__name__)
         _edit_final(bot, call.message, "确认执行失败；操作可能未开始，请重新查询状态。")

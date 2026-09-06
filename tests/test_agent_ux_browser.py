@@ -17,14 +17,16 @@ def candidate_view(*, expires_at: float | None = None) -> dict:
     return {
         'ref': 'ref_resource_candidates_0000001',
         'expires_at': expires_at if expires_at is not None else time.time() + 900,
+        'selection_ref': 'ref_selection_batch_0000000001',
+        'recommended_positions': [1], 'target': 'guangya', 'target_source': 'saved_preference',
+        'targets': [{'value': 'qb', 'label': 'qBittorrent', 'available': True}, {'value': 'guangya', 'label': '光鸭', 'available': True}, {'value': 'both', 'label': '两个目标', 'available': True}],
         'items': [
             {'position': 1, 'title': '第一集 1080p <img src=x onerror=window.__ux_xss=1>',
              'site_name': '资源站 A', 'size_text': '1.2 GB', 'tags': {'resolution': '1080p'},
-             'reasons': ['明确匹配 S01E01'], 'warnings': ['字幕需要人工核对'],
-             'selection': {'ref': 'ref_selection_candidate_0000001', 'position': 1}},
+             'reasons': ['明确匹配 S01E01'], 'warnings': ['字幕需要人工核对']},
             {'position': 2, 'title': '第一集 2160p', 'site_name': '资源站 B',
              'tags': {'resolution': '2160p', 'audio': 'AAC'}, 'reasons': ['存在备选版本'],
-             'warnings': [], 'selection': {'ref': 'ref_selection_candidate_0000002', 'position': 2}},
+             'warnings': []},
         ],
     }
 
@@ -300,20 +302,31 @@ class AgentUXBrowserTests(unittest.TestCase):
         page.locator('#agentPrompt').fill('找第一集的版本')
         page.locator('#agentSend').click()
         page.wait_for_selector('.agent-candidate-select:not([disabled])')
-        self.assertEqual(page.locator('.agent-candidate-card').count(), 2)
+        self.assertEqual(page.locator('.agent-candidate-row').count(), 2)
+        self.assertFalse(page.locator('.agent-candidates-more').evaluate('(node) => node.open'))
         self.assertEqual(page.locator('.agent-candidates img').count(), 0)
         self.assertFalse(page.evaluate('Boolean(window.__ux_xss)'))
-        self.assertIn('1080p', page.locator('.agent-candidate-tags').first.inner_text())
-        self.assertIn('字幕需要人工核对', page.locator('.agent-candidate-warnings').inner_text())
+        page.locator('.agent-candidates-more > summary').click()
+        self.assertIn('1080p', page.locator('.agent-candidate-info').first.inner_text())
+        page.locator('.agent-candidate-detail > summary').first.click()
+        self.assertIn('字幕需要人工核对', page.locator('.agent-candidate-detail').first.inner_text())
+        page.locator('[data-candidate-position="2"]').check()
+        page.locator('.agent-candidate-target select').select_option('both')
+        self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 1)
         page.locator('#agentPrompt').fill('下一句草稿保持原样')
+        messages_before = page.locator('.agent-message').count()
         page.evaluate("() => {window.__kernelConfig.queryEvents = [{type: 'turn.started', event_id: 'new-selection', sequence: 1, payload: {}}]; window.__kernelConfig.holdQueryOpen = true;}")
-        page.locator('[data-candidate-position="2"]').click()
-        page.wait_for_selector('#agentStop:not([hidden])')
+        before = page.locator('.agent-candidate-select').bounding_box()
+        page.locator('.agent-candidate-select').click()
+        page.wait_for_selector('.agent-candidate-select[aria-busy="true"]')
         last = page.evaluate("JSON.parse(window.__kernelCalls.filter(call => call.url === '/api/agent/query').at(-1).body)")
-        self.assertEqual(last['selection'], view['items'][1]['selection'])
+        self.assertEqual(last['selection'], {'ref': view['selection_ref'], 'positions': [1, 2], 'target': 'both'})
         self.assertEqual(page.locator('#agentPrompt').input_value(), '下一句草稿保持原样')
         self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
         self.assertTrue(page.locator('[data-candidate-position="1"]').is_disabled())
+        self.assertEqual(page.locator('.agent-message').count(), messages_before)
+        after = page.locator('.agent-candidate-select').bounding_box()
+        self.assertEqual((before['width'], before['height']), (after['width'], after['height']))
         self.snapshot(page, 'candidates-desktop')
 
     def test_same_turn_search_invalidation_disables_previous_cards(self):
@@ -333,12 +346,12 @@ class AgentUXBrowserTests(unittest.TestCase):
     def test_rejected_selection_keeps_existing_approval_and_never_offers_unbound_replay(self):
         approval = {'plan_id': 'plan-already-pending-00001', 'tool_name': 'ingest.submit', 'effect': 'WRITE',
                     'preview': {'summary': '已有待确认计划'}, 'result': {}, 'expires_at': time.time() + 900}
-        page = self.page({'sessionDetails': {SESSION_A: {'messages': [], 'candidate_view': candidate_view(), 'pending_approval': approval}},
+        page = self.page({'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '本次搜索结果', 'candidate_view': candidate_view()}], 'pending_approval': approval}},
                           'queryEvents': [harness._event(1, 'turn.failed', {'code': 'selection_invalid', 'message': '候选已更新，请重新搜索后选择'})]},
                          stored_session=SESSION_A)
         page.wait_for_selector('.agent-candidate-select:not([disabled])')
         page.locator('.agent-candidate-select').first.click()
-        page.wait_for_function("() => document.querySelector('#agentResponseStatus').textContent === '请求失败'")
+        page.wait_for_function("() => document.querySelector('.agent-candidate-output').textContent.includes('候选已更新')")
         self.assertTrue(page.locator('[data-effect-confirm]').is_enabled())
         self.assertEqual(page.locator('.agent-confirmation-card.is-expired').count(), 0)
         self.assertEqual(page.locator('.agent-retry-draft').count(), 0)
@@ -348,7 +361,7 @@ class AgentUXBrowserTests(unittest.TestCase):
         page = self.page({'queryEvents': events_for_candidates(candidate_view(expires_at=time.time() - 5))}, viewport={'width': 390, 'height': 844})
         page.locator('#agentPrompt').fill('显示旧的搜索结果')
         page.locator('#agentSend').click()
-        page.wait_for_selector('.agent-candidate-card')
+        page.wait_for_selector('.agent-candidate-row', state='attached')
         page.wait_for_function("() => document.querySelector('#agentStop').hidden")
         self.assertTrue(page.locator('.agent-candidate-select').first.is_disabled())
         self.assertIn('仅供回看', page.locator('.agent-candidates-note').inner_text())
@@ -374,10 +387,100 @@ class AgentUXBrowserTests(unittest.TestCase):
         page.wait_for_function("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length === 2")
         payload = page.evaluate("JSON.parse(window.__kernelCalls.filter(call => call.url === '/api/agent/query').at(-1).body)")
         payload['message'].encode('utf-8', errors='strict')
-        self.assertEqual(payload['selection'], view['items'][0]['selection'])
+        self.assertEqual(payload['selection'], {'ref': view['selection_ref'], 'positions': [1], 'target': 'guangya'})
 
     def test_verified_candidate_view_can_be_recovered_from_session(self):
-        page = self.page({'sessionDetails': {SESSION_A: {'messages': [], 'candidate_view': candidate_view()}}}, stored_session=SESSION_A)
+        page = self.page({'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '搜索结果', 'candidate_view': candidate_view()}, {'role': 'assistant', 'content': '之后的无关对话'}]}}}, stored_session=SESSION_A)
         page.wait_for_selector('.agent-candidate-select:not([disabled])')
-        self.assertEqual(page.locator('.agent-candidate-card').count(), 2)
+        self.assertEqual(page.locator('.agent-candidate-row').count(), 2)
         self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 0)
+
+    def test_batch_preview_and_results_stay_in_search_card(self):
+        view = candidate_view()
+        events = [harness._event(1, 'turn.started'), harness._event(2, 'effect.approval_required', {
+            'plan': {'plan_id': 'plan_batch_browser_00001', 'effect': 'WRITE', 'preview': {'data': {'source_type': 'resource_candidates', 'count': 2, 'target': 'both', 'resources': [{'position': 1, 'title': '第一集'}, {'position': 2, 'title': '第二集'}], 'receiving_folders': ['光鸭：接收目录 / 每任务隔离目录']}}, 'confirmation': {}}, 'result': {}}),
+            harness._event(3, 'turn.completed', {'status': 'approval_required'})]
+        for viewport in ({'width': 1280, 'height': 800}, {'width': 390, 'height': 844}):
+            with self.subTest(viewport=viewport):
+                page = self.page({'queryEvents': events_for_candidates(view)}, viewport=viewport)
+                page.locator('#agentPrompt').fill('搜索两个版本')
+                page.locator('#agentSend').click()
+                page.wait_for_selector('.agent-candidate-select:not([disabled])')
+                page.locator('.agent-candidates-more > summary').click()
+                page.locator('[data-candidate-position="2"]').check()
+                page.evaluate('(events) => {window.__kernelConfig.queryEvents = events}', events)
+                page.locator('.agent-candidate-select').click()
+                page.wait_for_selector('.agent-candidates [data-effect-confirm]')
+                self.assertEqual(page.locator('.agent-candidates').count(), 1)
+                self.assertIn('接收目录', page.locator('.agent-candidates .agent-confirmation-card').inner_text())
+                page.locator('[data-effect-cancel]').click()
+                page.wait_for_selector('.agent-candidates .agent-result-card')
+                self.assertTrue(page.locator('.agent-candidate-select').is_enabled())
+                self.assertTrue(page.locator('[data-candidate-position="2"]').is_checked())
+                self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
+                self.snapshot(page, 'batch-preview-' + str(viewport['width']))
+
+    def test_candidate_refresh_restores_choices_and_keeps_card_bound_to_search(self):
+        view = candidate_view()
+        payload = {'sessions': {'sessions': [], 'draft_scope': SCOPE}, 'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '搜索结果', 'candidate_view': view}, {'role': 'assistant', 'content': '不相关的后续消息'}]}}}
+        page = self.page(payload, stored_session=SESSION_A)
+        page.wait_for_selector('.agent-candidate-select:not([disabled])')
+        page.locator('.agent-candidates-more > summary').click()
+        page.locator('[data-candidate-position="2"]').check()
+        page.locator('[data-candidate-position="1"]').uncheck()
+        page.locator('.agent-candidate-target select').select_option('qb')
+        self.reload_ui(page, payload)
+        page.wait_for_selector('.agent-candidate-select:not([disabled])')
+        self.assertTrue(page.locator('[data-candidate-position="2"]').is_checked())
+        self.assertFalse(page.locator('[data-candidate-position="1"]').is_checked())
+        self.assertEqual(page.locator('.agent-candidate-target select').input_value(), 'qb')
+        self.assertIn('搜索结果', page.locator('.agent-candidates').locator('..').inner_text())
+        self.assertNotIn('不相关', page.locator('.agent-candidates').locator('..').inner_text())
+
+    def test_recommended_complementary_versions_are_compact_and_warn_on_overlap(self):
+        view = candidate_view()
+        view['recommended_positions'] = [1, 3]
+        view['items'] = [{'position': pos, 'title': f'示例剧集.S01E{start:02}-{end:02}.2160p.{quality}', 'coverage': [1, start, end],
+                          'site_name': '资源站 A', 'size_text': '12.8 GB', 'tags': {'resolution': '4K', 'effect': quality}, 'reasons': [], 'warnings': []}
+                         for pos, start, end, quality in [(1, 5, 6, 'SDR'), (2, 5, 6, 'HDR / 60帧'), (3, 1, 4, 'SDR'), (4, 1, 4, 'HDR / 60帧')]]
+        for viewport in ({'width': 1280, 'height': 800}, {'width': 390, 'height': 844}):
+            with self.subTest(viewport=viewport):
+                page = self.page({'queryEvents': events_for_candidates(view)}, viewport=viewport)
+                page.locator('#agentPrompt').fill('找这部剧第1到6集的资源')
+                page.locator('#agentSend').click()
+                page.wait_for_selector('.agent-candidate-select:not([disabled])')
+                self.assertFalse(page.locator('.agent-candidates-more').evaluate('(node) => node.open'))
+                self.assertEqual(page.locator('.agent-candidate-recommendation li').count(), 2)
+                self.snapshot(page, 'recommendation-' + str(viewport['width']))
+                page.locator('.agent-candidates-more > summary').click()
+                page.locator('[data-candidate-position="2"]').check()
+                self.assertIn('重叠集数', page.locator('.agent-candidates-note').inner_text())
+                self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 1)
+                self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
+
+    def test_legacy_single_card_protocol_is_readonly(self):
+        view = candidate_view()
+        view.pop('selection_ref')
+        page = self.page({'queryEvents': events_for_candidates(view)})
+        page.locator('#agentPrompt').fill('回看历史候选')
+        page.locator('#agentSend').click()
+        page.wait_for_selector('.agent-candidates')
+        self.assertTrue(page.locator('.agent-candidate-select').is_disabled())
+        self.assertIn('仅供回看', page.locator('.agent-candidates-note').inner_text())
+
+    def test_approval_received_before_stream_failure_is_not_lost(self):
+        view = candidate_view()
+        page = self.page({'queryEvents': events_for_candidates(view)})
+        page.locator('#agentPrompt').fill('先搜索')
+        page.locator('#agentSend').click()
+        page.wait_for_selector('.agent-candidate-select:not([disabled])')
+        events = [harness._event(1, 'turn.started'), harness._event(2, 'effect.approval_required', {'plan': {
+            'plan_id': 'plan_batch_disconnect_00001', 'effect': 'WRITE', 'preview': {'summary': '预检已完成'}, 'confirmation': {},
+        }}), harness._event(3, 'turn.failed', {'message': '连接中断'})]
+        page.evaluate('(events) => {window.__kernelConfig.queryEvents = events}', events)
+        page.locator('.agent-candidate-select').click()
+        page.wait_for_selector('.agent-candidate-feedback')
+        self.assertTrue(page.locator('[data-effect-confirm]').is_enabled())
+        self.assertTrue(page.locator('.agent-candidate-select').is_disabled())
+        self.assertIn('预览已生成', page.locator('.agent-candidate-feedback').inner_text())
+        self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)

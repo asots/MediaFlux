@@ -59,6 +59,7 @@ class ToolCallContext:
     report_progress: ProgressSink
     capability_search: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     selection_arguments: Mapping[str, Any] | None = None
+    resource_candidate_ref: str = ""
 
     def policy_context(self) -> dict[str, Any]:
         return {
@@ -408,6 +409,12 @@ class ToolPipeline:
         except KeyError as exc:
             raise ToolPipelineError("未知工具", code="tool_not_found") from exc
         raw_arguments = dict(arguments or {})
+        if (
+            context.resource_candidate_ref and tool.name == "ingest.submit"
+            and raw_arguments.get("source_type") == RESOURCE_KIND
+            and raw_arguments.get("resource_candidates_ref") != context.resource_candidate_ref
+        ):
+            raise ToolPipelineError("请从回复消息所属的候选批次选择，不可替换为其他搜索编号", code="candidate_scope_mismatch")
         if context.selection_arguments is not None:
             expected = dict(context.selection_arguments)
             # 卡片选择限定为既有提交工具的预检；模型不能换资源、扩选或另选目标。
@@ -524,6 +531,10 @@ class ToolPipeline:
             updates = tuple(preview_outcome.state_updates) + (
                 StateUpdate("pending_effect_plan_id", plan.plan_id),
             )
+            if tool.name == "ingest.submit" and raw_arguments.get("source_type") == RESOURCE_KIND:
+                updates += (StateUpdate("metadata.ux_candidate_plan", {
+                    "plan_id": plan.plan_id, "ref": raw_arguments.get("resource_candidates_ref"),
+                }),)
             outcome = replace(preview_outcome, state_updates=updates, effect_plan=plan)
             await self._commit_updates(context.lease, updates)
         except BaseException:
@@ -738,7 +749,7 @@ class ToolPipeline:
                 candidate_view = await issue_candidate_view(
                     store=self.reference_store, owner=context.owner, session_id=context.session_id,
                     generation=context.lease.generation, ref=reference.ref, value=item.value,
-                    ttl_seconds=item.ttl_seconds, public=outcome.public_content,
+                    ttl_seconds=item.ttl_seconds, public=outcome.public_content, turn_id=context.turn_id,
                 )
             exposed.append({"ref": reference.ref, "kind": reference.kind})
             argument_name = (
@@ -768,6 +779,11 @@ class ToolPipeline:
                 separators=(",", ":"),
             )
         )
+        if candidate_view:
+            model_content += "\ncandidate_numbers=" + json.dumps([
+                {"position": item["position"], "title": item["title"], "coverage": item["coverage"]}
+                for item in candidate_view["items"]
+            ], ensure_ascii=False, separators=(",", ":"))
         updates = tuple(outcome.state_updates) + (
             StateUpdate("recent_refs", ids, mode="append"),
             StateUpdate("ref_kinds", kinds, mode="append"),

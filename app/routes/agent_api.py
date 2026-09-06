@@ -351,7 +351,10 @@ async def get_session(request: Request, session_id: str):
             owner=_owner(request),
             session_id=normalized,
         )
-        messages = public_conversation_messages(state.conversation)
+        candidate_view = await current_candidate_view(
+            state=state, store=get_agent_kernel_runtime().store,
+        )
+        messages = public_conversation_messages(state.conversation, candidate_view=candidate_view)
         pending_approval = None
         if state.pending_effect_plan_id:
             events = await get_agent_kernel_runtime().store.list_events(
@@ -395,9 +398,7 @@ async def get_session(request: Request, session_id: str):
                 "generation": state.generation,
                 "messages": messages,
                 "pending_approval": pending_approval,
-                "candidate_view": await current_candidate_view(
-                    state=state, store=get_agent_kernel_runtime().store,
-                ),
+                "candidate_view": candidate_view,
             }
         )
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
