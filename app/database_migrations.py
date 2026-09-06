@@ -1444,6 +1444,38 @@ def _migrate_organize_business_snapshot_v27(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_postprocessing_recovery_v28(conn: sqlite3.Connection) -> None:
+    """只增加持久后处理凭据；不猜旧任务的通知身份、不直接清理旧目录。"""
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(organize_probe_queue)")}
+    if columns and "notification_context_json" not in columns:
+        conn.execute(
+            "ALTER TABLE organize_probe_queue ADD COLUMN "
+            "notification_context_json TEXT NOT NULL DEFAULT '{}'"
+        )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS download_staging_reconcile (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            confirmation_id INTEGER NOT NULL UNIQUE,
+            request_id INTEGER NOT NULL,
+            identity_json TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','retry','completed','retained','blocked')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            next_attempt_at TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (confirmation_id) REFERENCES organize_confirmations(id) ON DELETE CASCADE,
+            FOREIGN KEY (request_id) REFERENCES download_requests(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_staging_reconcile_due "
+        "ON download_staging_reconcile(status, next_attempt_at, id)"
+    )
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1472,4 +1504,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     24: _migrate_durable_handoffs_v25,
     25: _migrate_strm_path_cleanup_v26,
     26: _migrate_organize_business_snapshot_v27,
+    27: _migrate_postprocessing_recovery_v28,
 }

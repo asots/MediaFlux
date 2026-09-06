@@ -83,6 +83,7 @@ class DownloadTracker:
         self._stopping = False
         self._lifecycle_generation = 0
         self._last_torrent_data_cleanup_at = 0.0
+        self._last_staging_reconcile_at = 0.0
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -146,6 +147,7 @@ class DownloadTracker:
             return self._run_once_locked()
 
     def _run_once_locked(self) -> int:
+        self._run_staging_reconciliation_if_due()
         self._run_torrent_data_cleanup_if_due()
         try:
             recovered = db.recover_stale_submitting_download_requests(
@@ -192,6 +194,23 @@ class DownloadTracker:
             )
         db.kv_set(_TRACKER_CURSOR_KEY, str(int(rows[-1]["id"])))
         return len(rows)
+
+    def _run_staging_reconciliation_if_due(self) -> int:
+        current = time.monotonic()
+        if self._last_staging_reconcile_at and current - self._last_staging_reconcile_at < 30:
+            return 0
+        self._last_staging_reconcile_at = current
+        try:
+            from app.modules.download_staging_reconcile import (
+                schedule_staging_reconciliation,
+            )
+            return schedule_staging_reconciliation()
+        except Exception as exc:  # noqa: BLE001 - 隔离维护故障，不阻断下载跟踪。
+            log_throttled(
+                logger, logging.WARNING, f'download-staging-reconcile:{type(exc).__name__}',
+                '下载确认收尾维护暂不可用 type=%s', type(exc).__name__, interval_seconds=300.0,
+            )
+            return 0
 
     @staticmethod
     def _torrent_data_retention_days() -> int:

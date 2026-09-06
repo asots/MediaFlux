@@ -22,7 +22,14 @@ from app.modules.organize import OrganizeRules, Organizer, resolve_organize_work
 from app.modules.organize_runtime import OrganizeTaskRuntime
 from app.modules.organize_results import build_organize_result, read_organize_result
 from app.modules.organize_sources import normalize_organize_sources
-from app.modules.organize_delete_audit import DeleteCandidate, execute_recycle_bin_delete
+from app.modules.download_staging_cleanup import (
+    cleanup_download_staging, cleanup_report, merge_cleanup_report,
+    source_inside_protected_staging, staging_roots_in_source,
+)
+from app.repositories.download_staging import (
+    complete_staging_confirmation_phase, list_staging_cleanup_requests,
+    mark_staging_waiting_confirmation,
+)
 from app.modules.process_lock import CrossProcessLock
 from app.repositories.organize_operation_jobs import (
     claim_organize_operation_job,
@@ -809,64 +816,76 @@ class OrganizeTaskManager:
                 return {"ok": False, "error": "网盘整理任务正在运行"}
             organizer = None
             try:
-                total = 0
+                combined = cleanup_report()
                 details = []
                 organizer = Organizer(client=client) if client is not None else Organizer()
                 try:
-                    protected_source_ids = _protected_source_ids(sources)
+                    rules = OrganizeRules.from_config()
+                    permanent_ids, config_error = _protected_organize_root_ids(rules)
+                    if config_error:
+                        return {"ok": False, "error": config_error}
+                    staging_ids = set(db.list_protected_guangya_staging_ids())
+                    # permanent辅助方法也含活动隔离根；专用收尾单独按请求解保护。
+                    permanent_ids -= staging_ids
+                    configured_sources, _ = normalize_organize_sources(config.get("GY_ORGANIZE_SOURCE_DIRS", ""))
+                    permanent_ids.update(str(item["id"]) for item in configured_sources)
+                    permanent_ids.update({"0", str(rules.target_dir_id or "0")})
+                    protected_source_ids = _protected_source_ids(sources) | permanent_ids
+                    direct_root = sources[0]["id"] if len(sources) == 1 and sources[0]["id"] in staging_ids else ""
+                    rows = list_staging_cleanup_requests(source_id=direct_root)
                 except Exception as exc:
-                    logger.warning(
-                        "读取活动下载隔离目录保护集失败 type=%s",
-                        type(exc).__name__,
-                    )
-                    return {"ok": False, "error": "无法读取活动下载隔离目录，已停止空目录清理"}
+                    logger.warning("读取下载目录清理保护集失败 type=%s", type(exc).__name__)
+                    return {"ok": False, "error": "无法安全读取下载目录与来源配置，已停止空目录清理"}
+                handled: set[str] = set()
                 for source in sources:
+                    report = cleanup_report()
                     try:
-                        report = organizer.clean_empty_dirs(
-                            source["id"],
-                            with_report=True,
-                            protected_source_ids=protected_source_ids,
+                        selected = staging_roots_in_source(organizer.client, rows, source["id"])
+                        selected = [row for row in selected if str(row["gy_target_dir"]) not in handled]
+                        selected_ids = {str(row["gy_target_dir"]) for row in selected}
+                        for row in selected:
+                            if row.get("organize_status") == "requires_manual":
+                                complete_staging_confirmation_phase(row)
+                        specialized = cleanup_download_staging(
+                            organizer.client, [int(row["id"]) for row in selected],
+                            source_ids=selected_ids, protected_ids=permanent_ids,
+                            scope_ids={str(source["id"])},
                         )
+                        merge_cleanup_report(report, specialized)
+                        handled.update(selected_ids)
+                        if source_inside_protected_staging(organizer.client, source["id"], staging_ids):
+                            # 同请求收尾已单独处理；不可再经通用扫描触碰已回收/受保护的根。
+                            if source["id"] not in handled:
+                                report["protected"] += 1
+                                report["reasons"].append("所选目录位于受保护下载范围内，已保留")
+                        else:
+                            ordinary = organizer.clean_empty_dirs(
+                                source["id"], with_report=True, with_diagnostics=True,
+                                protected_source_ids=protected_source_ids,
+                            )
+                            if not isinstance(ordinary, dict):
+                                ordinary = {"cleaned": int(ordinary or 0)}
+                            already_reported = set(ordinary.pop("_protected_directory_ids", [])) & handled
+                            old_scope_reason = ordinary.pop("_protected_scope_reason", "")
+                            if already_reported:
+                                ordinary["protected"] = max(0, int(ordinary.get("protected") or 0) - len(already_reported))
+                                ordinary["reasons"] = [reason for reason in ordinary.get("reasons", []) if reason != old_scope_reason]
+                                if ordinary["protected"]:
+                                    ordinary["reasons"].append(f'{ordinary["protected"]} 个来源或下载范围按保护规则保留')
+                            merge_cleanup_report(report, ordinary)
                     except Exception as exc:
-                        logger.warning(
-                            "清理来源空目录失败 type=%s",
-                            type(exc).__name__,
-                        )
-                        report = {
-                            "cleaned": 0,
-                            "scan_failures": 1,
-                            "delete_failures": 0,
-                            "unsupported": 0,
-                        }
-                    if not isinstance(report, dict):
-                        report = {
-                            "cleaned": int(report or 0),
-                            "scan_failures": 0,
-                            "delete_failures": 0,
-                            "unsupported": 0,
-                        }
-                    cleaned = max(0, int(report.get("cleaned") or 0))
-                    scan_failures = max(0, int(report.get("scan_failures") or 0))
-                    delete_failures = max(0, int(report.get("delete_failures") or 0))
-                    unsupported = max(0, int(report.get("unsupported") or 0))
-                    total += cleaned
-                    details.append({
-                        **source,
-                        "cleaned": cleaned,
-                        "scan_failures": scan_failures,
-                        "delete_failures": delete_failures,
-                        "unsupported": unsupported,
-                    })
-                scan_failures = sum(item["scan_failures"] for item in details)
-                delete_failures = sum(item["delete_failures"] for item in details)
-                unsupported = sum(item["unsupported"] for item in details)
+                        logger.warning("清理来源空目录失败 type=%s", type(exc).__name__)
+                        report["scan_failures"] += 1
+                        report["reasons"].append("来源扫描或保护校验失败，未继续执行清理")
+                    public = {key: value for key, value in report.items() if not key.startswith("_")}
+                    details.append({**source, **public})
+                    merge_cleanup_report(combined, report)
+                result = {key: value for key, value in combined.items() if not key.startswith("_")}
                 return {
                     "ok": True,
-                    "partial": bool(scan_failures or delete_failures),
-                    "cleaned": total,
-                    "scan_failures": scan_failures,
-                    "delete_failures": delete_failures,
-                    "unsupported": unsupported,
+                    "partial": bool(result["scan_failures"] or result["delete_failures"]
+                                    or result["unsupported"] or result["unavailable"]),
+                    **result,
                     "sources": details,
                 }
             finally:
@@ -1659,6 +1678,33 @@ class OrganizeTaskManager:
                 rules.for_source(str(source.get("id") or ""))
                 for source in sources
             ]
+            from app.modules.organize_probe_notifications import build_notification_context
+
+            chat_id = str(chat_id or config.get("TG_CHAT_ID", "") or "").strip()
+            request_sources: dict[int, str] = {}
+            for request_id in download_request_ids or []:
+                try:
+                    row = db.get_download_request(int(request_id))
+                    if row is not None:
+                        request_sources[int(request_id)] = str(row["gy_target_dir"] or "")
+                except Exception as exc:
+                    # 通知身份读取失败不能改写整理业务结果，更不能猜测私聊归属。
+                    logger.warning("冻结补全通知归属失败 type=%s", type(exc).__name__)
+            source_notification_contexts = [
+                build_notification_context(
+                    task_id=task_id if not download_request_ids else "",
+                    chat_id=chat_id,
+                    download_request_ids=[
+                        request_id for request_id, source_id in request_sources.items()
+                        if source_id == str(source.get("id") or "")
+                    ],
+                    notify_enabled=source_rule.notify_enabled and (
+                        not download_request_ids or str(source.get("id") or "") in request_sources.values()
+                    ),
+                    topic_enabled=source_rule.notify_enabled and source_rule.library_notify,
+                )
+                for source, source_rule in zip(sources, source_rules)
+            ]
             probe_worker_budget = resolve_media_probe_workers()
             # 成人来源使用独立 MetaTube 链。当前服务没有与 TMDB/AI 等价的
             # 全局并发治理，因此只要本轮包含成人来源，就保持来源级串行；
@@ -1805,6 +1851,7 @@ class OrganizeTaskManager:
                         planning_executor=shared_planning_executor,
                         execution_lock=source_execution_gate,
                         task_runtime=task_runtime,
+                        notification_context=source_notification_contexts[index],
                     )
                     cleanup_context = (
                         source_execution_gate
@@ -1950,10 +1997,25 @@ class OrganizeTaskManager:
                 or int(aggregate.get("source_dir_cleanup_failed", 0) or 0)
                 or int(aggregate.get("audit_failures", 0) or 0)
             )
+            pending_downloads: dict[int, int] = {}
+            if not stopped and not partial:
+                for request_id in download_request_ids or []:
+                    request_row = db.get_download_request(int(request_id))
+                    if request_row is None:
+                        continue
+                    root_id = str(request_row["gy_target_dir"] or "")
+                    pending_count = sum(
+                        max(0, int((item.get("stats") or {}).get("need_confirm") or 0))
+                        for item in source_results if str(item.get("id") or "") == root_id
+                    )
+                    if pending_count and mark_staging_waiting_confirmation(int(request_id), task_id, pending_count):
+                        pending_downloads[int(request_id)] = pending_count
             notification_sent = False
             if source_results or stopped:
                 # 通知 outbox 用任务 ID 作为幂等键，重试不会重复发送汇总。
                 aggregate["task_id"] = task_id
+                if download_request_ids:
+                    aggregate["download_request_ids"] = list(download_request_ids)
                 Organizer.trigger_post_actions(
                     aggregate,
                     rules,
@@ -1989,7 +2051,16 @@ class OrganizeTaskManager:
             )
             finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if status == "completed":
-                self._cleanup_download_staging(organizer, download_request_ids or [], sources)
+                cleanup = self._cleanup_download_staging(organizer, download_request_ids or [], sources, rules=rules)
+                if isinstance(cleanup, dict):
+                    aggregate["empty_dirs_cleaned"] = int(aggregate.get("empty_dirs_cleaned") or 0) + int(cleanup.get("cleaned") or 0)
+                    for reason in cleanup.get("reasons", []):
+                        Organizer._append_reason(aggregate, "empty_dir_cleanup_reasons", reason, limit=8)
+                    aggregate["download_staging_cleanup"] = {key: value for key, value in cleanup.items() if not key.startswith("_")}
+                    cleanup_failures = sum(int(cleanup.get(key) or 0) for key in ("scan_failures", "delete_failures", "unsupported", "unavailable"))
+                    if cleanup_failures:
+                        aggregate["empty_dir_cleanup_failed"] = int(aggregate.get("empty_dir_cleanup_failed") or 0) + cleanup_failures
+                        partial, status, message = True, "partial", "整理已结束，下载目录清理仍需核验"
             structured_result = build_organize_result(
                 aggregate,
                 status=status,
@@ -2011,8 +2082,10 @@ class OrganizeTaskManager:
                 })
             for request_id in download_request_ids or []:
                 fields = {
-                    "organize_status": status, "organize_error": "",
-                    "organize_finished_at": db.now(),
+                    "organize_status": "requires_manual" if request_id in pending_downloads else status,
+                    "organize_error": (f"仍有 {pending_downloads[request_id]} 项媒体等待人工确认"
+                                       if request_id in pending_downloads else ""),
+                    "organize_finished_at": None if request_id in pending_downloads else db.now(),
                 }
                 if stopped:
                     # 停止不代表回滚；可能已有部分文件移动，禁止跟踪器自动重跑。
@@ -2191,107 +2264,31 @@ class OrganizeTaskManager:
             logger.debug("整理锁释放后唤醒下载跟踪器失败", exc_info=True)
 
     @staticmethod
-    def _cleanup_download_staging(organizer: Organizer, request_ids: list[int], sources: list[dict[str, str]]) -> None:
-        source_ids = {str(source.get("id") or "") for source in sources}
-        for request_id in request_ids:
-            row = db.get_download_request(int(request_id))
-            if row is None or not int(row["gy_isolated"] or 0):
-                continue
-            staging_id = str(row["gy_target_dir"] or "")
-            if not staging_id or staging_id not in source_ids:
-                continue
-            try:
-                remaining = organizer.client.list_dir(staging_id)
-                if remaining:
-                    names = [str(getattr(item, "name", "") or "未命名") for item in remaining]
-                    preview = "、".join(names[:5])
-                    if len(names) > 5:
-                        preview += f" 等 {len(names)} 项"
-                    db.update_download_request(
-                        int(request_id), gy_staging_cleanup_status="retained",
-                        gy_staging_cleanup_error=(
-                            f"隔离目录仍有 {len(names)} 项未整理或未识别：{preview}"
-                        ),
-                    )
-                    continue
-                info = organizer.client.file_info(staging_id)
-                expected_parent = str(row["gy_staging_parent_dir"] or "")
-                expected_name = str(row["gy_staging_name"] or "")
-                if (
-                    info is None
-                    or not bool(getattr(info, "is_dir", False))
-                    or not expected_parent
-                    or not expected_name
-                    or str(getattr(info, "parent_id", "") or "") != expected_parent
-                    or str(getattr(info, "name", "") or "") != expected_name
-                ):
-                    db.update_download_request(
-                        int(request_id), gy_staging_cleanup_status="retained",
-                        gy_staging_cleanup_error=(
-                            "隔离目录身份与请求记录不一致，目录已保留"
-                        ),
-                    )
-                    continue
-                expected_etag = str(getattr(info, "etag", "") or "")
-                try:
-                    expected_updated_at = max(
-                        0, int(getattr(info, "updated_at", 0) or 0)
-                    )
-                except (TypeError, ValueError):
-                    expected_updated_at = 0
-                delete_empty = getattr(
-                    organizer.client, "delete_empty_directory", None
-                )
-                supports_guarded = getattr(
-                    organizer.client, "supports_guarded_empty_directory_delete", None
-                )
-                if supports_guarded is None:
-                    supports_guarded = getattr(
-                        organizer.client, "supports_atomic_empty_directory_delete", None
-                    )
-                if (
-                    not callable(delete_empty)
-                    or supports_guarded is False
-                    or (not expected_etag and not expected_updated_at)
-                ):
-                    db.update_download_request(
-                        int(request_id), gy_staging_cleanup_status="retained",
-                        gy_staging_cleanup_error=(
-                            "Provider 不支持带版本与空目录复核的回收站删除，隔离目录已保留"
-                        ),
-                    )
-                    continue
-                execute_recycle_bin_delete(
-                    organizer.client,
-                    trigger="download_staging_cleanup",
-                    reason="下载自动整理完成后清理空隔离目录",
-                    candidate=DeleteCandidate(
-                        file_id=staging_id,
-                        name=(getattr(info, "name", "") or str(row["gy_staging_name"] or "下载隔离目录")),
-                        parent_id=(str(getattr(info, "parent_id", "") or row["gy_staging_parent_dir"] or "0")),
-                    ),
-                    safe_failure_message="清理下载隔离目录失败，目录已保留",
-                    delete_operation=lambda current_id=staging_id,
-                    current_etag=expected_etag,
-                    current_updated_at=expected_updated_at: delete_empty(
-                        current_id,
-                        expected_etag=current_etag,
-                        expected_updated_at=current_updated_at,
-                    ),
-                )
-                db.update_download_request(
-                    int(request_id), gy_staging_cleanup_status="completed",
-                    gy_staging_cleanup_error="",
-                )
-            except Exception as exc:
-                db.update_download_request(
-                    int(request_id), gy_staging_cleanup_status="failed",
-                    gy_staging_cleanup_error=f"{type(exc).__name__}: {str(exc)[:300]}",
-                )
-                logger.warning(
-                    "下载隔离目录清理失败 request=%s staging=%s type=%s",
-                    request_id, staging_id, type(exc).__name__,
-                )
+    def _cleanup_download_staging(
+        organizer: Organizer, request_ids: list[int], sources: list[dict[str, str]],
+        *, rules: OrganizeRules | None = None,
+        expected_identities: dict[int, dict] | None = None,
+    ) -> dict:
+        current_rules = rules or OrganizeRules.from_config()
+        protected, error = _protected_organize_root_ids(current_rules)
+        if error:
+            result = cleanup_report()
+            result["scan_failures"] = 1
+            result["reasons"] = [error]
+            return result
+        # 永久来源/目标不可解保护；只有明确传入请求的隔离根交给共享服务核验。
+        staging_ids = set(db.list_protected_guangya_staging_ids())
+        protected -= staging_ids
+        configured, config_error = normalize_organize_sources(config.get("GY_ORGANIZE_SOURCE_DIRS", ""))
+        if config_error:
+            raise ValueError(config_error)
+        protected.update(str(item["id"]) for item in configured)
+        protected.update({"0", str(current_rules.target_dir_id or "0")})
+        return cleanup_download_staging(
+            organizer.client, request_ids, source_ids={str(item["id"]) for item in sources},
+            protected_ids=protected, enabled=current_rules.clean_empty, allow_running=True,
+            expected_identities=expected_identities,
+        )
 
 
 _manager = OrganizeTaskManager()

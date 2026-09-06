@@ -43,7 +43,7 @@ _lock = threading.RLock()
 _wal_setup_lock = threading.Lock()
 _wal_mode_cache: dict[str, tuple[int, int, int]] = {}
 _configured_test_mode = False
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX = "上次进程在本地媒体写操作期间中断"
 _LOCAL_MEDIA_INTERRUPTED_PREWRITE_ERROR = (
@@ -279,6 +279,7 @@ from app.database_migrations import (  # noqa: E402,F401
     _migrate_durable_handoffs_v25,
     _migrate_strm_path_cleanup_v26,
     _migrate_organize_business_snapshot_v27,
+    _migrate_postprocessing_recovery_v28,
 )
 
 
@@ -3580,6 +3581,7 @@ def list_unapplied_organize_confirmation_tasks(limit: int = 50) -> list[sqlite3.
             "SELECT organize_task_id,chat_id,MIN(id) AS first_id "
             "FROM organize_confirmations WHERE organize_task_id<>'' "
             "AND rollup_applied=0 AND status IN ('completed','failed','expired','cancelled') "
+            "AND CASE WHEN json_valid(payload_json) THEN json_type(payload_json,'$.organize_rollup')='object' ELSE 0 END "
             "GROUP BY organize_task_id,chat_id ORDER BY first_id ASC LIMIT ?",
             (resolved_limit,),
         ).fetchall()
@@ -4014,7 +4016,7 @@ def complete_organize_confirmation_with_delivery(
     message_id: int | None,
     enqueue_delivery: bool = True,
 ) -> None:
-    """原子保存成功终态；升级前回执队列可按需继续写入。"""
+    """原子保存成功终态、下载收尾意图与可选回执。"""
     timestamp = now()
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -4026,6 +4028,11 @@ def complete_organize_confirmation_with_delivery(
         )
         if cursor.rowcount != 1:
             raise ValueError("确认操作不存在或已失效")
+        # 收尾意图与确认终态同事务落盘；即使回执静默或随后进程中断，
+        # 下载隔离目录也能由后台安全恢复，而不是永久留下旧待处理状态。
+        from app.repositories.download_staging_reconcile import enqueue_confirmation_cleanup
+
+        enqueue_confirmation_cleanup(conn, token=token, timestamp=timestamp)
         if enqueue_delivery:
             _enqueue_organize_confirmation_delivery(
                 conn,

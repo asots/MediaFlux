@@ -125,7 +125,7 @@ _DOWNLOAD_ATTENTION_BASE_WHERE = (
     "status IN ('failed','manual_review') OR "
     "qb_status IN ('failed','manual_review') OR gy_status IN ('failed','manual_review') OR "
     "local_import_status='failed' OR organize_started<0 OR "
-    "organize_status='failed' OR strm_status='failed' OR "
+    "organize_status IN ('failed','requires_manual') OR strm_status='failed' OR "
     "gy_staging_cleanup_status IN ('retained','failed')"
 )
 

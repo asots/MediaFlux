@@ -768,22 +768,83 @@
         setOrganizeActionBusy(true);try{const response=await fetch('/api/guangya/organize/stop',{method:'POST'});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'停止失败');}
         catch(error){await appAlert({type:'error',title:'停止任务失败',message:error.message||'无法停止整理任务'});}finally{setOrganizeActionBusy(false);await loadStatus();}
     }
+    function emptyCleanupText(value,maxLength=80){
+        if(typeof value!=='string')return '';
+        const text=value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,' ').replace(/\s+/g,' ').trim();
+        return text.length>maxLength?`${text.slice(0,maxLength)}…`:text;
+    }
+    function emptyCleanupFeedback(result){
+        const isRecord=result!==null&&typeof result==='object'&&!Array.isArray(result);
+        const data=isRecord?result:{};let invalid=!isRecord;
+        // 缺失的新增字段兼容旧响应；实际清理数量必须有效，不能把坏响应当成清理 0 个。
+        const readCount=(key)=>{
+            const raw=data[key];if(raw===undefined&&key!=='cleaned')return 0;
+            const value=typeof raw==='number'?raw:(typeof raw==='string'&&/^\d+$/.test(raw.trim())?Number(raw.trim()):NaN);
+            if(Number.isSafeInteger(value)&&value>=0)return value;
+            invalid=true;return key==='cleaned'?null:0;
+        };
+        const counts={};
+        for(const key of ['cleaned','scanned','candidates','protected','not_empty','scan_failures','delete_failures','unsupported','unavailable'])counts[key]=readCount(key);
+        const readFlag=(key,fallback)=>{
+            const raw=data[key];if(raw===undefined)return fallback;
+            const value=typeof raw==='string'?raw.trim().toLowerCase():raw;
+            if([true,1,'true','1'].includes(value))return true;
+            if([false,0,'false','0'].includes(value))return false;
+            invalid=true;return fallback;
+        };
+        const ok=readFlag('ok',true);const partial=readFlag('partial',false);
+        const reasons=[];let moreReasons=false;
+        if(data.reasons!==undefined){
+            if(!Array.isArray(data.reasons))invalid=true;
+            else for(const raw of data.reasons){
+                if(typeof raw!=='string'){invalid=true;continue;}
+                const reason=emptyCleanupText(raw);
+                if(!reason||reasons.some(item=>item.toLowerCase()===reason.toLowerCase()))continue;
+                if(reasons.length<3)reasons.push(reason);else moreReasons=true;
+            }
+        }
+        const error=emptyCleanupText(data.error,120);
+        if(data.error!==undefined&&data.error!==null&&typeof data.error!=='string')invalid=true;
+        const cleaned=counts.cleaned;const retained=counts.protected>0||counts.not_empty>0;
+        const hasFailures=['scan_failures','delete_failures','unsupported','unavailable'].some(key=>counts[key]>0);
+        const unexplained=cleaned===0&&counts.candidates>0&&!retained&&!reasons.length&&!hasFailures&&!error;
+        const incomplete=!ok||partial||invalid||!!error||unexplained||hasFailures;
+        const messages=[cleaned===null?'清理数量未返回或无效。':`已清理 ${cleaned} 个空目录。`];
+        if(counts.scanned>0)messages.push(`已扫描 ${counts.scanned} 个目录。`);
+        if(counts.protected>0)messages.push(`受保护目录保留 ${counts.protected} 个（来源根目录、活动下载目录等）。`);
+        if(counts.not_empty>0)messages.push(`非空目录保留 ${counts.not_empty} 个。`);
+        if(counts.scan_failures>0)messages.push(`扫描失败 ${counts.scan_failures} 项。`);
+        if(counts.delete_failures>0)messages.push(`删除失败 ${counts.delete_failures} 项。`);
+        if(counts.unsupported>0)messages.push(`不支持安全删除 ${counts.unsupported} 项。`);
+        if(counts.unavailable>0)messages.push(`来源不可用 ${counts.unavailable} 项。`);
+        if(partial)messages.push('本轮清理未完成，部分目录仍需核对。');
+        if(error)messages.push(error);else if(!ok)messages.push('后端报告清理未完成。');
+        if(invalid)messages.push('部分清理数据缺失或格式异常，结果需核对。');
+        if(unexplained)messages.push(`发现 ${counts.candidates} 个候选目录，但未返回未清理原因。`);
+        if(!incomplete&&cleaned===0&&!retained&&!reasons.length)messages.push('本轮未发现可清理空目录。');
+        // 只交给 appAlert 的纯文本通道，不展开 sources，也不序列化异常对象。
+        if(reasons.length)messages.push(`原因：${reasons.join('；')}`);
+        if(moreReasons)messages.push('更多原因请查看清理日志。');
+        let type=cleaned>0?'success':'info';let title=cleaned>0?'空目录清理完成':'本轮未清理空目录';
+        if(incomplete){
+            type=!ok&&cleaned===0?'error':'warning';
+            title=cleaned>0?'空目录清理部分完成':(type==='error'?'空目录清理失败':'空目录清理未完成');
+            if(cleaned===null)title='空目录清理结果待核对';
+            messages.push('请检查光鸭连接、目录权限或清理日志后再操作。');
+        }
+        return {type,title,message:messages.join('\n')};
+    }
     async function cleanEmpty(){
         if(organizeActionBusy)return;if(!sources.length){await appAlert({type:'warning',title:'未选择源目录',message:'至少选择一个光鸭源目录后才能清理空文件夹。'});return;}
-        const confirmed=await appConfirm({title:'清理空目录',message:`扫描 ${sources.length} 个源目录并删除其中的空子目录。源根目录不会删除。`,confirmText:'清理空目录',danger:true});if(!confirmed)return;
+        const confirmed=await appConfirm({title:'清理空目录',message:`扫描 ${sources.length} 个源目录并清理空子目录。范围内已完成下载任务的空隔离目录也可能一并回收；配置的来源根和归档根不会删除。`,confirmText:'清理空目录',danger:true});if(!confirmed)return;
         setOrganizeActionBusy(true);
         try{
             const response=await fetch('/api/guangya/organize/clean-empty',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_dirs:sources})});
             const data=await response.json().catch(()=>({}));
-            if(!response.ok)throw new Error(data.error||'清理失败');
-            const failed=(data.scan_failures||0)+(data.delete_failures||0);
-            if(data.partial||failed){
-                await appAlert({type:'warning',title:'空目录清理部分完成',message:`已清理 ${data.cleaned||0} 个空目录，${failed} 项未完成。请检查光鸭连接与目录权限后重试。`});
-                return;
-            }
-            await appAlert({type:'success',title:'空目录清理完成',message:`已清理 ${data.cleaned||0} 个空目录。`});
+            if(!response.ok)throw new Error(emptyCleanupText(data?.error,200)||'清理失败');
+            await appAlert(emptyCleanupFeedback(data));
         }
-        catch(error){await appAlert({type:'error',title:'空目录清理失败',message:error.message||'无法清理空目录'});}
+        catch(error){await appAlert({type:'error',title:'空目录清理失败',message:emptyCleanupText(error?.message,200)||'无法清理空目录'});}
         finally{setOrganizeActionBusy(false);await loadStatus();}
     }
     function renderScheduleStatus(schedule){

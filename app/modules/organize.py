@@ -2457,6 +2457,7 @@ class Organizer:
             cancel_event, source_dir_id=source_dir_id,
             on_progress=on_progress,
             operation_token=context.operation_token,
+            notification_context=context.notification_context,
             task_runtime=context.task_runtime,
         )
         stats["execute_elapsed_seconds"] = round(
@@ -2560,12 +2561,27 @@ class Organizer:
                  group_progress: Callable[[dict], None] | None = None,
                  group_pipeline: bool = True,
                  operation_token: str = "",
+                 notification_context: dict | None = None,
                  planning_workers: int | None = None,
                  media_probe_workers: int | None = None,
                  planning_executor: Executor | None = None,
                  execution_lock: object | None = None,
                  task_runtime: OrganizeTaskRuntime | None = None) -> tuple[list, dict]:
         """兼容入口；内部阶段统一通过 :class:`OrganizeContext` 传参。"""
+        from app.modules.organize_probe_notifications import (
+            apply_notification_context, build_notification_context, normalize_notification_context,
+        )
+
+        # 父身份在执行之前生成；不能等 notify_directory_results() 事后补 ID。
+        frozen_notification = {}
+        if notification_context is not None:
+            frozen_notification = normalize_notification_context(notification_context)
+        elif not dry_run:
+            frozen_notification = build_notification_context(
+                task_id=str(operation_token or "").strip() or f"directory-{time.time_ns()}",
+                notify_enabled=rules.notify_enabled,
+                topic_enabled=rules.notify_enabled and rules.library_notify,
+            )
         context = OrganizeContext(
             source_dir_id=str(source_dir_id),
             dry_run=bool(dry_run),
@@ -2585,13 +2601,16 @@ class Organizer:
             group_progress=group_progress,
             group_pipeline=bool(group_pipeline),
             operation_token=str(operation_token or "").strip(),
+            notification_context=frozen_notification,
             planning_workers=planning_workers,
             media_probe_workers=media_probe_workers,
             planning_executor=planning_executor,
             execution_lock=execution_lock,
             task_runtime=task_runtime,
         )
-        return self._organize(context, rules)
+        plans, stats = self._organize(context, rules)
+        apply_notification_context(stats, frozen_notification)
+        return plans, stats
 
     def _group_pipeline_enabled(self, context: OrganizeContext) -> bool:
         """预览仍走整源路径：跨组统一冲突仲裁对只读预演更有价值。
@@ -2632,6 +2651,9 @@ class Organizer:
         performance_before = self._read_performance_snapshot()
         self._reset_task_caches()
         stats = self._initial_stats()
+        from app.modules.organize_probe_notifications import apply_notification_context
+
+        apply_notification_context(stats, context.notification_context)
         scan_result = self._scan_source(context, rules, stats)
         # 写入任务在识别/TMDB/AI 阶段前即拒绝不完整扫描，既避免基于部分
         # 快照规划云盘变更，也避免为注定不能执行的任务继续消耗外部请求。
@@ -3185,6 +3207,9 @@ class Organizer:
         total_started = time.monotonic()
         self._reset_task_caches()
         stats = self._initial_stats()
+        from app.modules.organize_probe_notifications import apply_notification_context
+
+        apply_notification_context(stats, context.notification_context)
         enumeration = enumerate_group_tasks(
             self.client,
             source_dir_id=context.source_dir_id,
@@ -3458,7 +3483,15 @@ class Organizer:
         if base_url and strm_root:
             try:
                 from app.modules.scheduler import get_scheduler
-                linked_threads = (
+                from app.modules.organize_probe_notifications import normalize_notification_context
+
+                context = normalize_notification_context(stats.get("notification_context"))
+                probe_completion = bool(stats.get("probe_completion"))
+                if context and not probe_completion:
+                    download_request_ids = download_request_ids or context["download_request_ids"]
+                    notification_threads = notification_threads or context["notification_threads"]
+                    chat_id = context["chat_id"]
+                linked_threads = [] if probe_completion else (
                     list(notification_threads or [])
                     or ([{
                         "topic": "organize",
@@ -3469,8 +3502,10 @@ class Organizer:
                     }] if str(stats.get("task_id") or "").strip() and not download_request_ids else [])
                 )
                 trigger_options = {
-                    "notify_override": rules.notify_enabled,
-                    "detail_notify_override": rules.notify_enabled and rules.strm_detail_notify,
+                    "notify_override": rules.notify_enabled and context.get("notify_enabled", True),
+                    "detail_notify_override": (
+                        not probe_completion and rules.notify_enabled and rules.strm_detail_notify
+                    ),
                     "emby_refresh_override": rules.emby_refresh,
                     "download_request_ids": download_request_ids,
                     "organize_changes": list(stats.get("strm_changes") or []),
@@ -3768,6 +3803,13 @@ class Organizer:
     def notify_directory_results(stats: dict, rules: OrganizeRules,
                                  source_name: str = "", chat_id: str = "") -> None:
         """目录刮削只发一条汇总；人工候选继续使用独立可更新按钮卡。"""
+        from app.modules.organize_probe_notifications import normalize_notification_context
+
+        context = normalize_notification_context(stats.get("notification_context"))
+        if context:
+            chat_id = context["chat_id"]
+            if not chat_id or not context["notify_enabled"] or not context["topic_enabled"]:
+                return
         if not rules.notify_enabled or not rules.library_notify:
             return
         try:
@@ -3973,6 +4015,7 @@ class Organizer:
         chat_id: str = "",
         organize_task_id: str = "",
         organize_rollup: dict | None = None,
+        download_request_ids: list[int] | None = None,
     ) -> bool:
         """发送独立候选卡；失败时保留已持久化任务并给出 Web 回退。"""
         if not groups:
@@ -3991,9 +4034,12 @@ class Organizer:
                 scope = group_source
             try:
                 confirmation_group = dict(group)
-                if organize_task_id and isinstance(organize_rollup, dict):
+                if organize_task_id:
                     confirmation_group["organize_task_id"] = str(organize_task_id)
+                if isinstance(organize_rollup, dict):
                     confirmation_group["organize_rollup"] = dict(organize_rollup)
+                if download_request_ids:
+                    confirmation_group["download_request_ids"] = list(download_request_ids)
                 event = confirmation_event(
                     f"⚠️ 待确认媒体 {index}/{len(groups)}",
                     {
@@ -4042,6 +4088,8 @@ class Organizer:
                 rules,
                 source_name=source_name,
                 chat_id=chat_id,
+                organize_task_id=str(stats.get("task_id") or ""),
+                download_request_ids=list(stats.get("download_request_ids") or []),
             )
         except Exception as exc:
             logger.warning("整理待确认通知失败 type=%s", type(exc).__name__)
@@ -4051,6 +4099,13 @@ class Organizer:
     def _publish_or_update_task_summary(stats: dict, rules: OrganizeRules,
                        source_name: str = "", chat_id: str = "") -> None:
         """发布或原位更新整理汇总；候选卡由独立通知步骤负责。"""
+        from app.modules.organize_probe_notifications import normalize_notification_context
+
+        context = normalize_notification_context(stats.get("notification_context"))
+        if context:
+            chat_id = context["chat_id"]
+            if not chat_id or not context["notify_enabled"] or not context["topic_enabled"]:
+                return
         if not rules.notify_enabled or not rules.library_notify:
             return
         try:
@@ -7391,11 +7446,13 @@ class Organizer:
         source_dir_id: str,
         *,
         with_report: bool = False,
+        with_diagnostics: bool = False,
         protected_source_ids: set[str] | None = None,
-    ) -> int | dict[str, int]:
+    ) -> int | dict:
         """安全扫描并清理空子目录；扫描不完整时不执行任何删除。"""
         scanned_dirs: list[tuple[str, int, str, int]] = []
         scan_failures = 0
+        protected_seen: set[str] = set()
         protected = {str(item) for item in (protected_source_ids or set()) if str(item)}
         protected.add(str(source_dir_id))
         traversal = _TraversalBudget(*self._traversal_limits)
@@ -7419,7 +7476,10 @@ class Organizer:
             for item in files:
                 if item.is_dir:
                     child_id = str(item.file_id or "").strip()
-                    if not child_id or child_id in protected:
+                    if not child_id:
+                        continue
+                    if child_id in protected:
+                        protected_seen.add(child_id)
                         continue
                     if not scan(child_id, depth + 1):
                         return False
@@ -7453,12 +7513,26 @@ class Organizer:
                 "scan_failures": max(1, scan_failures),
             }
             if with_report:
+                if with_diagnostics:
+                    report.update(scanned=traversal.directories, reasons=["目录扫描不完整，未执行清理"])
                 return report
             raise RuntimeError("空目录扫描不完整，未执行清理")
         report = self._clean_empty_dirs_report(
             scanned_dirs,
             protected_source_ids=protected,
         )
+        if with_report and with_diagnostics:
+            report["scanned"] = traversal.directories
+            report["scan_failures"] = scan_failures
+            report["protected"] = int(report.get("protected", 0) or 0) + len(protected_seen)
+            report["_protected_directory_ids"] = sorted(protected_seen)
+            if protected_seen:
+                scope_reason = f"{len(protected_seen)} 个下载隔离或来源根目录按保护规则跳过"
+                report["_protected_scope_reason"] = scope_reason
+                report.setdefault("reasons", []).append(scope_reason)
+            if not report.get("cleaned") and not report.get("reasons"):
+                report["reasons"] = ["未发现可清理的空子目录；所选来源根目录按规则保留"]
+            return report
         if with_report:
             # 保持公共 clean_empty_dirs() 的历史返回合同稳定；整理主链路需要的
             # 细分保留原因由内部 _clean_empty_dirs_report() 消费，避免 Agent/API

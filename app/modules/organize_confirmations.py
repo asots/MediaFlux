@@ -204,7 +204,7 @@ def _fingerprint(payload: dict) -> str:
         key: value
         for key, value in payload.items()
         if key not in {
-            "organize_task_id", "organize_rollup", "_telegram_message_id",
+            "organize_task_id", "organize_rollup", "download_request_ids", "_telegram_message_id",
             _RETRY_SELECTED_INDEX_KEY, _NOTIFICATION_SUPPRESSED_KEY,
         }
     }
@@ -538,9 +538,16 @@ def create_confirmation_actions(
     }
     organize_task_id = str(group.get("organize_task_id") or "").strip()
     organize_rollup = group.get("organize_rollup")
-    if organize_task_id and isinstance(organize_rollup, dict):
+    if organize_task_id:
         payload["organize_task_id"] = organize_task_id
+    if isinstance(organize_rollup, dict):
         payload["organize_rollup"] = dict(organize_rollup)
+    if "download_request_ids" in group:
+        request_ids = group["download_request_ids"]
+        if (not isinstance(request_ids, list) or not request_ids or len(request_ids) > 100
+                or any(type(item) is not int or item <= 0 for item in request_ids)):
+            raise ValueError("下载请求关联无效")
+        payload["download_request_ids"] = list(dict.fromkeys(request_ids))
     return _persist_confirmation_actions(
         payload,
         chat_id=chat_id,
@@ -1908,6 +1915,16 @@ def _confirmation_unresolved_error(stats: dict) -> str:
     )
 
 
+def _confirmation_source_display(payload: dict) -> str:
+    source = str(payload.get("source_name") or "").strip()
+    directory = str(payload.get("directory") or "").strip()
+    if directory and directory != "/" and directory.startswith("/"):
+        return directory  # 兼容旧的非根绝对路径载荷。
+    if directory not in ("", "/"):
+        return f"{source.rstrip('/')}/{directory}" if source else directory
+    return source or ("/" if directory == "/" else "路径未记录")
+
+
 def _confirmation_result_event(
     payload: dict, candidate: dict, stats: dict, *, actor: str = "human"
 ) -> NotificationEvent:
@@ -1943,7 +1960,7 @@ def _confirmation_result_event(
         fields=(
             ("目标媒体", _candidate_display_name(candidate)),
             *(( ("入库方式", "清洗入库 · 无完整元数据"), ) if _clean_review_candidate(candidate) else ()),
-            ("源文件目录", payload.get("directory") or payload.get("source_name") or "/"),
+            ("源文件目录", _confirmation_source_display(payload)),
             NOTIFICATION_SECTION_BREAK,
             ("执行结果", result_label),
             ("STRM 状态", _terminal_status_label(strm_label)),
@@ -2244,7 +2261,7 @@ def _confirmation_notification_threads(
         "topic_enabled": True,
     }]
     organize_task_id = str(payload.get("organize_task_id") or "").strip()
-    if organize_task_id:
+    if organize_task_id and isinstance(payload.get("organize_rollup"), dict):
         threads.append({
             "topic": "organize",
             "thread_key": f"organize:{organize_task_id}",
@@ -2253,6 +2270,70 @@ def _confirmation_notification_threads(
             "topic_enabled": True,
         })
     return threads
+
+
+def _finalize_confirmed_downloads(payload: dict, client, stats: dict, rules: OrganizeRules,
+                                  *, confirmation_token: str = '') -> list[int]:
+    """完成确认后收口原下载业务；通知rollup不是删除权限或业务身份。"""
+    from types import SimpleNamespace
+
+    from app.modules.organize_tasks import OrganizeTaskManager
+    from app.repositories.download_staging import (
+        complete_staging_confirmation_phase,
+        requests_for_download_confirmation,
+    )
+
+    request_ids: list[int] = []
+    cleanup_ids: list[int] = []
+    try:
+        rows = requests_for_download_confirmation(payload)
+        for row in rows:
+            if (row.get("gy_status") != "completed"
+                    or row.get("status") not in ("completed", "submitted", "downloading", "manual_review")
+                    or row.get("organize_status") in ("resubmitted", "cleared", "failed", "stopped")
+                    or row.get("attention_cleared_at")):
+                continue
+            request_ids.append(int(row["id"]))
+            if not confirmation_token:
+                closed = complete_staging_confirmation_phase(row)
+                if closed and not any(stats.get(key) for key in ("failed", "need_confirm", "stopped", "scan_errors", "audit_failures")):
+                    cleanup_ids.append(int(row["id"]))
+        if not request_ids:
+            return []  # 普通手动确认无下载业务，不能误入下载维护或污染成功统计。
+        if confirmation_token:
+            # 新确认的意图已与终态原子持久化；这里只是当前写锁内的尽力快速路径。
+            from app.modules.download_staging_reconcile import reconcile_with_client
+            from app.modules.organize_tasks import get_organize_manager
+            report = reconcile_with_client(
+                client, rules=rules, confirmation_token=confirmation_token,
+                writer_lock=get_organize_manager()._lock,
+            )
+        else:
+            # 保留既有直接调用契约；历史自动补偿由持久队列单独选取，不重跑确认。
+            if not cleanup_ids:
+                if request_ids:
+                    Organizer._append_reason(stats, "empty_dir_cleanup_reasons", "原下载整理阶段尚未成功收口，已保留隔离目录", limit=8)
+                return request_ids
+            # 绝不能传 organizer.client：候选 Scoped 视图看不到未选择的文件。
+            report = OrganizeTaskManager._cleanup_download_staging(
+                SimpleNamespace(client=client), cleanup_ids,
+                [{"id": str(row["gy_target_dir"]), "name": str(row["gy_staging_name"])}
+                 for row in rows if int(row["id"]) in cleanup_ids],
+                rules=rules,
+            )
+        stats["empty_dirs_cleaned"] = int(stats.get("empty_dirs_cleaned") or 0) + int(report.get("cleaned") or 0)
+        for reason in report.get("reasons", []):
+            Organizer._append_reason(stats, "empty_dir_cleanup_reasons", reason, limit=8)
+        failures = sum(int(report.get(key) or 0) for key in ("scan_failures", "delete_failures", "unsupported", "unavailable"))
+        if failures and not confirmation_token:
+            stats["empty_dir_cleanup_failed"] = int(stats.get("empty_dir_cleanup_failed") or 0) + failures
+        stats["download_staging_cleanup"] = {key: value for key, value in report.items() if not key.startswith("_")}
+    except Exception as exc:  # noqa: BLE001 - 快速路径失败不取消已提交终态/持久意图。
+        logger.warning("人工确认后下载目录收尾失败 type=%s", type(exc).__name__)
+        # 清理的瞬时失败不能污染确认成功证据，否则恢复队列会被自己的失败字段冻结。
+        stats["download_staging_cleanup"] = {"deferred": True, "reason": "收尾暂不可用，将由持久队列复核"}
+        Organizer._append_reason(stats, "empty_dir_cleanup_reasons", "下载目录收尾暂不可用，将由后台退避复核", limit=8)
+    return request_ids
 
 
 def _execute_guangya_confirmation(
@@ -2278,6 +2359,19 @@ def _execute_guangya_confirmation(
         current_rules = OrganizeRules.from_config().for_source(source_dir_id)
         if not organize_rules_snapshot_matches(payload.get("rules"), current_rules):
             raise DirectoryScrapeConflictError("整理规则已变化，请重新执行整理后再确认")
+
+        from app.repositories.download_staging import requests_for_download_confirmation
+        download_owners = requests_for_download_confirmation(payload, strict=True)
+        if "download_request_ids" in payload and not download_owners:
+            raise DirectoryScrapeConflictError("原下载请求关联已变化，请重新核对整理任务")
+        if any(
+            row.get("gy_status") != "completed"
+            or row.get("status") not in ("completed", "submitted", "downloading", "manual_review")
+            or row.get("organize_status") in ("resubmitted", "cleared", "stopped", "failed")
+            or row.get("attention_cleared_at")
+            for row in download_owners
+        ):
+            raise DirectoryScrapeConflictError("原下载请求已取消、重新提交或尚未下载完成，未执行整理")
 
         files = [dict(item) for item in (payload.get("files") or [])]
         companions = [dict(item) for item in (payload.get("companions") or [])]
@@ -2347,6 +2441,18 @@ def _execute_guangya_confirmation(
             for plan in plans:
                 clean_boundary(plan, "prepare")
         scoped.begin_source_scan()
+        from app.modules.organize_probe_notifications import build_notification_context
+        notification_context = build_notification_context(
+            confirmation_token=token,
+            chat_id=chat_id,
+            # 下载归属来自上方严格校验后的 DB owners，不能直接信任卡片 IDs。
+            download_request_ids=[int(row["id"]) for row in download_owners],
+            notification_threads=_confirmation_notification_threads(token, payload, chat_id=chat_id),
+            notify_enabled=delivery_enabled and execution_rules.notify_enabled,
+            topic_enabled=delivery_enabled and execution_rules.notify_enabled and execution_rules.library_notify,
+            # 无 rollup 的业务 taskID 不授权创建额外父线程；现有 threads 已限定通知范围。
+            task_id="",
+        )
         # 从这里开始 Organizer 可以调用真实 provider 写接口。即使异常看似
         # 瞬时，也不能再自动签发重试票据，必须先核对实际落盘结果。
         write_started = True
@@ -2360,6 +2466,7 @@ def _execute_guangya_confirmation(
             # 执行阶段只读缓存，保持与确认预览一致；缓存由预览阶段预热。
             media_probe_cache_only=True,
             operation_token=operation_token,
+            notification_context=notification_context,
         )
         db.mark_organize_logs_confirmation_actor(operation_token, actor)
         if clean_boundary is not None and not clean_boundary.media_write_attempted:
@@ -2376,6 +2483,12 @@ def _execute_guangya_confirmation(
             or ("Agent 确认" if actor == "agent" else "TG 人工确认")
         )
         confirm_debounce = _confirmation_strm_debounce_seconds(payload)
+        if download_owners:
+            from app.repositories.download_staging import staging_identity_snapshot
+            # 记录执行前身份，禁止终态提交期间的同源重绑定获得新的清理授权。
+            stats["download_staging_identity"] = staging_identity_snapshot(download_owners[0])
+        if not execution_rules.clean_empty:
+            stats["download_staging_policy"] = "retained"
         terminal_event = _confirmation_result_event(
             payload, candidate, stats, actor=actor
         )
@@ -2387,6 +2500,11 @@ def _execute_guangya_confirmation(
             message_id=_confirmation_message_id(payload),
             enqueue_delivery=delivery_enabled,
         )
+        download_request_ids = _finalize_confirmed_downloads(
+            payload, client, stats, execution_rules, confirmation_token=token,
+        )
+        if download_request_ids:
+            db.update_organize_confirmation(token, result_json=json.dumps(stats, ensure_ascii=False, default=str))
         # 先把候选卡收敛为整理终态，再排队 STRM；即使 debounce=0，
         # 后续刷新也只会在同一条终态消息上补字段，不会被较旧内容覆盖。
         if delivery_enabled:
@@ -2399,6 +2517,7 @@ def _execute_guangya_confirmation(
                 chat_id=chat_id,
                 notify_result=False,
                 strm_debounce_seconds=confirm_debounce,
+                **({"download_request_ids": download_request_ids} if download_request_ids else {}),
                 notification_threads=(
                     _confirmation_notification_threads(
                         token, payload, chat_id=chat_id,
@@ -2444,6 +2563,13 @@ def _execute_guangya_confirmation(
                 token[:6],
                 type(post_exc).__name__,
             )
+        if download_request_ids:
+            try:
+                from app.modules.telegram_download_lifecycle import publish_download_lifecycle
+                for request_id in download_request_ids:
+                    publish_download_lifecycle(request_id, stats=stats)
+            except Exception as exc:
+                logger.warning("人工确认后下载事务通知刷新失败 type=%s", type(exc).__name__)
         return {"candidate": candidate, "stats": stats}
     except Exception as exc:
         current = db.get_organize_confirmation(token)

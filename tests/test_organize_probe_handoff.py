@@ -13,6 +13,7 @@ from app.clients.guangya import GuangYaFile
 from app.modules.media_probe import MediaProfile
 from app.modules.organize import OrganizeRules
 from app.modules.organize_probe_worker import OrganizeProbeWorker
+from app.modules.organize_probe_notifications import tag_probe_changes
 from tests.support import IsolatedDatabaseTestCase
 from tests import test_organize_probe_worker as probe_fixtures
 
@@ -88,7 +89,7 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
         with patch.object(restarted, "_runtime_client", side_effect=AssertionError("交接不访问云盘")):
             self.assertTrue(restarted._process_one())
         self.assertEqual(self.scheduler.trigger.call_count, 2)
-        self.assertEqual(self.scheduler.trigger.call_args.kwargs["organize_changes"], pending)
+        self.assertEqual(self.scheduler.trigger.call_args.kwargs["organize_changes"], tag_probe_changes(pending, {}, notify_enabled=True))
         self.assertEqual(len(self.client.renames), 2)
         self.assertEqual(self.row()["status"], "completed")
         self.assertEqual(self.row()["pending_strm_changes_json"], "[]")
@@ -104,7 +105,7 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(observed), 1)
         row, log, options = observed[0]
         self.assertEqual(row["status"], "running")
-        self.assertEqual(json.loads(row["pending_strm_changes_json"]), options["organize_changes"])
+        self.assertEqual(tag_probe_changes(json.loads(row["pending_strm_changes_json"]), {}, notify_enabled=True), options["organize_changes"])
         self.assertNotEqual(log["current_name"], self.old_name)
         self.assertEqual(self.row()["status"], "completed")
         self.assertEqual(self.row()["pending_strm_changes_json"], "[]")

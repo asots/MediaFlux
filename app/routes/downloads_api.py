@@ -167,7 +167,7 @@ def _attention_stages(row) -> list[dict[str, str]]:
     if local_status == "failed":
         append("local_import", "本地入库", local_status, row["local_import_error"])
     organize_status = str(row["organize_status"] or "")
-    if int(row["organize_started"] or 0) < 0 or organize_status == "failed":
+    if int(row["organize_started"] or 0) < 0 or organize_status in {"failed", "requires_manual"}:
         append("organize", "自动整理", organize_status or "failed", row["organize_error"])
     strm_status = str(row["strm_status"] or "")
     if strm_status == "failed":

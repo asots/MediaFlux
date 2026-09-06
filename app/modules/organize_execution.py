@@ -51,9 +51,13 @@ def execute_organize_plans(
     source_dir_id: str = "",
     on_progress: Callable[[int, int], None] | None = None,
     operation_token: str = "",
+    notification_context: dict | None = None,
     task_runtime: OrganizeTaskRuntime | None = None,
 ) -> None:
     operation_token = str(operation_token or "").strip()
+    from app.modules.organize_probe_notifications import apply_notification_context
+
+    apply_notification_context(stats, notification_context)
 
     def write_organize_audit(log_args, log_kwargs, items):
         payload = dict(log_kwargs)
@@ -796,6 +800,7 @@ def execute_organize_plans(
                             source_id=str(rules.target_dir_id or ""),
                             rel_dir=str(p.target_path or ""),
                             rules=organize_rules_snapshot(rules),
+                            notification_context=notification_context,
                             delay_seconds=130,
                             max_attempts=2,
                         )

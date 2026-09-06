@@ -124,6 +124,9 @@ class OrganizeContext:
         default=None, repr=False, compare=False,
     )
 
+    # 服务端冻结的父生命周期/收件范围，必须早于 probe 入队。
+    notification_context: dict | None = None
+
     @property
     def probe_cache_only(self) -> bool:
         if self.media_probe_cache_only is None:

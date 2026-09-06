@@ -1423,6 +1423,13 @@ class DirectoryScrapeService:
                 raise DirectoryScrapeConflictError("目录内容已变化，请重新检查并生成预览")
             check_cancel()
             operation_token = f"manual-{uuid.uuid4().hex}"
+            from app.modules.organize_probe_notifications import build_notification_context
+
+            notification_context = build_notification_context(
+                operation_token=operation_token,
+                notify_enabled=record.rules.notify_enabled,
+                topic_enabled=record.rules.notify_enabled and record.rules.library_notify,
+            )
             organizer = self._organizer(
                 record.scope_type,
                 current,
@@ -1468,6 +1475,7 @@ class DirectoryScrapeService:
                 media_probe_cache_only=True,
                 cancel_event=cancel_event,  # type: ignore[arg-type]
                 operation_token=operation_token,
+                notification_context=notification_context,
             )
             if cancellation_requested():
                 stats["stopped"] = 1

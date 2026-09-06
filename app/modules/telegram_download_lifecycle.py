@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 import json
 
 from app import config, database as db
@@ -158,6 +159,51 @@ def _previous_field(event: NotificationEvent | None, label: str) -> str:
     return ""
 
 
+def _load_probe_progress(row) -> dict[str, int]:
+    """只投影本请求、当前收件人的可见补全状态，不改变任何业务终态。"""
+    from app.repositories.organize_probe import get_organize_probe_notification_progress
+
+    request_id = int(_value(row, "id", 0) or 0)
+    chat_id = _chat_id(row) or str(config.get("TG_CHAT_ID", "") or "").strip()
+    if request_id <= 0 or not chat_id:
+        return {}
+    return get_organize_probe_notification_progress(
+        topic=NotificationTopic.DOWNLOAD,
+        thread_key=f"download:{request_id}",
+        chat_id=chat_id,
+        notification_enabled_only=True,
+    )
+
+
+def _probe_needs_attention(progress: Mapping[str, int]) -> bool:
+    return any(int(progress.get(key, 0) or 0) > 0 for key in ("failed", "cancelled", "strm_failed"))
+
+
+def _merge_probe_progress(
+    event: NotificationEvent, row, progress: Mapping[str, int], *, verification_status: str,
+) -> NotificationEvent:
+    if not progress.get("total") and not progress.get("strm_pending"):
+        return event
+    needs_attention = _probe_needs_attention(progress)
+    pending = bool(progress.get("pending") or progress.get("strm_pending"))
+    label = "需要复核" if needs_attention else "进行中" if pending else "完成"
+    fields = tuple(event.fields) + (("后台规格补全", label),)
+    base_state = _overall_state(row, verification_status=verification_status)
+    if needs_attention:
+        # ACTION 优先级与原业务异常保留；不能把后台失败写回 download_requests
+        # 让已成功下载/整理被调度器重新执行。异常细节不跨通知范围外泄。
+        title = event.title if base_state in {"attention", "error"} else "⚠️ 下载入库链路部分完成"
+        note = "后台规格补全或后续 STRM 同步尚有异常，请在 Web 运行记录中复核。"
+        footer = "\n".join(value for value in (event.footer, note) if value)
+        return replace(event, title=title, fields=fields, footer=footer, state="partial")
+    if pending and base_state not in {"attention", "error"}:
+        return replace(
+            event, title="⏳ 下载与入库处理中", fields=fields, state="processing",
+            footer=event.footer or "后续阶段会更新本条消息，无需重复提交。",
+        )
+    return replace(event, fields=fields)
+
+
 def build_download_lifecycle_event(
     row,
     *,
@@ -165,6 +211,7 @@ def build_download_lifecycle_event(
     media_refresh: str = "",
     verification_status: str = "",
     verification_result: str = "",
+    probe_progress: Mapping[str, int] | None = None,
 ) -> NotificationEvent:
     request_id = int(_value(row, "id", 0) or 0)
     chat_id = _chat_id(row)
@@ -250,6 +297,10 @@ def build_download_lifecycle_event(
         footer=footer,
         layout="relaxed",
     )
+    event = _merge_probe_progress(
+        event, row, _load_probe_progress(row) if probe_progress is None else probe_progress,
+        verification_status=verification_status,
+    )
     return attach_bounded_media_details(event, lines)
 
 
@@ -265,14 +316,18 @@ def publish_download_lifecycle(
     row = db.get_download_request(int(request_id))
     if row is None:
         return NotificationPublishResult(False, status="missing_request")
+    probe_progress = _load_probe_progress(row)
     event = build_download_lifecycle_event(
         row,
         stats=stats,
         media_refresh=media_refresh,
         verification_status=verification_status,
         verification_result=verification_result,
+        probe_progress=probe_progress,
     )
     importance = _importance(row, verification_status=verification_status)
+    if importance == NotificationImportance.RESULT and _probe_needs_attention(probe_progress):
+        importance = NotificationImportance.ERROR
     topic_enabled = config.get_bool("GY_ORGANIZE_NOTIFY_ENABLED", True)
     # 下载异常和人工处理不应被“整理成功通知”开关吞掉；全局通知总开关仍生效。
     if importance in {NotificationImportance.ACTION, NotificationImportance.ERROR}:

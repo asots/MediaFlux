@@ -372,10 +372,19 @@ class OrganizeProbeWorker:
                 return False
             from app.modules.organize import Organizer
 
-            stats = {"moved": 1, "failed": 0, "strm_changes": changes}
-            Organizer._post_organize_link(
-                stats, self._rules_from_job(job), force_incremental=True,
+            from app.modules.organize_probe_notifications import (
+                normalize_notification_context, tag_probe_changes,
             )
+
+            rules = self._rules_from_job(job)
+            context = normalize_notification_context(job.get("notification_context_json"))
+            stats = {
+                "moved": 1, "failed": 0,
+                "strm_changes": tag_probe_changes(changes, context, notify_enabled=rules.notify_enabled),
+                "notification_context": context,
+                "probe_completion": True,
+            }
+            Organizer._post_organize_link(stats, rules, force_incremental=True)
             outcome = stats.get("strm")
             if not isinstance(outcome, dict) or outcome.get("ok") is not True:
                 raise _ProbeHandoffUnavailable("STRM 尚未持久接管规格补全变化，保留待交接任务")
@@ -512,6 +521,7 @@ class OrganizeProbeWorker:
             return False
         job = jobs[0]
         job_id = int(job["id"])
+        notification_error = ""
         with self._state_lock:
             self._current_job_id = job_id
         try:
@@ -520,12 +530,21 @@ class OrganizeProbeWorker:
                 job_id, owner=self._owner, handoff_completed=handoff_completed,
             ):
                 raise _ProbeHandoffUnavailable("任务 lease 已变化，未确认规格补全完成")
+            # noop 也是本批次的已提交终态，不能仅在发生 STRM 交接时收尾。
+            try:
+                from app.modules.organize_probe_notifications import publish_probe_acknowledged
+
+                publish_probe_acknowledged(job)
+            except Exception as exc:
+                logger.warning("规格补全完成通知更新失败 type=%s", type(exc).__name__)
         except _ProbeHandoffUnavailable as exc:
             db.release_organize_probe_job(
                 job_id, owner=self._owner, delay_seconds=30, reason=exc,
             )
+            notification_error = "后台规格补全交接尚未完成，将保留任务重试。"
         except _ProbeCompletionCancelled as exc:
-            db.cancel_organize_probe_job(job_id, owner=self._owner, reason=exc)
+            if db.cancel_organize_probe_job(job_id, owner=self._owner, reason=exc):
+                notification_error = "后台规格补全因身份或快照变化取消，请在 Web 运行记录中复核。"
             logger.debug("媒体规格补全任务已取消 job=%s reason=%s", job_id, exc)
         except InterruptedError as exc:
             db.release_organize_probe_job(
@@ -536,6 +555,8 @@ class OrganizeProbeWorker:
                 job_id, owner=self._owner, error_type="ProbeUnavailable", error=exc,
                 base_backoff_seconds=600,
             )
+            if status == "failed":
+                notification_error = "后台规格补全达到重试上限，请在 Web 运行记录中复核。"
             logger.log(
                 logging.WARNING if status == "failed" else logging.DEBUG,
                 "媒体规格补全处理结果 job=%s status=%s",
@@ -555,11 +576,28 @@ class OrganizeProbeWorker:
                 job_id, owner=self._owner, error_type=type(exc).__name__, error=exc,
                 base_backoff_seconds=600,
             )
+            if status == "failed":
+                notification_error = "后台规格补全失败，请在 Web 运行记录中复核。"
             logger.warning(
                 "媒体规格后台补全失败 job=%s status=%s type=%s",
                 job_id, status, type(exc).__name__,
             )
         finally:
+            if notification_error:
+                try:
+                    from app.modules.organize_probe_notifications import (
+                        normalize_notification_context, publish_probe_scope,
+                    )
+
+                    publish_probe_scope(
+                        {"probe": True,
+                         "context": normalize_notification_context(job.get("notification_context_json")),
+                         "notify_override": self._rules_from_job(job).notify_enabled},
+                        strm_status="后台规格补全待复核", media_refresh="",
+                        partial=True, error=notification_error,
+                    )
+                except Exception as exc:
+                    logger.warning("规格补全异常通知更新失败 type=%s", type(exc).__name__)
             with self._state_lock:
                 self._current_job_id = 0
         return True

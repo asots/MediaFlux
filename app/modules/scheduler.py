@@ -27,6 +27,10 @@ from app.modules.strm import (
     finalize_changed_paths, safe_path_component, sync_strm, sync_strm_incremental,
 )
 from app.modules.media_refresh import plan_refresh_targets
+from app.modules.organize_probe_notifications import (
+    merge_notification_scopes, notification_scopes, probe_scopes_from_changes,
+    publish_probe_scope, probe_downstream_state,
+)
 from app.modules.strm_recovery import reconcile_historical_strm
 from app.modules.strm_notifications import append_change, build_strm_detail_messages, relative_change
 from app.notifier import NotificationEvent
@@ -87,7 +91,7 @@ def _merge_notification_threads(*groups) -> list[dict[str, object]]:
 
 def _request_ids(options: dict[str, object]) -> list[int]:
     return [
-        int(item) for item in options.get("download_request_ids", [])
+        int(item) for item in (options.get("download_request_ids") or [])
         if str(item).isdigit()
     ]
 
@@ -126,7 +130,7 @@ def _run_notification_side_effect(label: str, action: Callable[[], None]) -> Non
         )
 
 
-def _publish_linked_notification_threads(
+def _publish_foreground_linked_notification_threads(
     options: dict[str, object],
     *,
     strm_status: str,
@@ -135,6 +139,8 @@ def _publish_linked_notification_threads(
     error: str = "",
 ) -> bool:
     accepted = False
+    if options.get("notify_override") is False:
+        return False
     try:
         from app.modules.telegram_download_lifecycle import publish_download_lifecycle
 
@@ -154,19 +160,22 @@ def _publish_linked_notification_threads(
         )
 
         for ref in _merge_notification_threads(options.get("notification_threads")):
-            if str(ref.get("topic") or "") != "organize":
+            if not ref.get("topic_enabled", True) or str(ref.get("topic") or "") != "organize":
                 continue
             task_id = str(ref.get("task_id") or "").strip()
             if not task_id:
                 continue
+            scoped_status, scoped_partial, scoped_error = probe_downstream_state(
+                ref, strm_status=strm_status, partial=partial, error=error,
+            )
             accepted = bool(
                 update_organize_lifecycle_downstream(
                     task_id,
                     chat_id=str(ref.get("chat_id") or ""),
-                    strm_status=strm_status,
+                    strm_status=scoped_status,
                     media_refresh=media_refresh,
-                    partial=partial,
-                    error=error,
+                    partial=scoped_partial,
+                    error=scoped_error,
                     topic_enabled=bool(ref.get("topic_enabled", True)),
                 )
             ) or accepted
@@ -180,25 +189,51 @@ def _publish_linked_notification_threads(
         )
 
         for ref in _merge_notification_threads(options.get("notification_threads")):
-            if str(ref.get("topic") or "") != "confirmation":
+            if not ref.get("topic_enabled", True) or str(ref.get("topic") or "") != "confirmation":
                 continue
             token = str(ref.get("token") or "").strip()
             if not token:
                 continue
+            scoped_status, scoped_partial, scoped_error = probe_downstream_state(
+                ref, strm_status=strm_status, partial=partial, error=error,
+            )
             accepted = bool(
                 update_confirmation_lifecycle_downstream(
                     token,
                     chat_id=str(ref.get("chat_id") or ""),
-                    strm_status=strm_status,
+                    strm_status=scoped_status,
                     media_refresh=media_refresh,
-                    partial=partial,
-                    error=error,
+                    partial=scoped_partial,
+                    error=scoped_error,
                 )
             ) or accepted
     except Exception as exc:
         logger.warning(
             "STRM 更新人工确认事务通知失败 type=%s", type(exc).__name__
         )
+    return accepted
+
+
+def _publish_linked_notification_threads(
+    options: dict[str, object], *, strm_status: str, media_refresh: str,
+    partial: bool = False, error: str = "",
+) -> bool:
+    accepted = False
+    scopes = notification_scopes(options)
+    for scope in scopes:
+        # 合并后的错误文本不能泄漏其他父任务/私聊的路径或文件名。
+        scoped_error = (
+            "合并同步存在异常，请在 Web 运行记录中查看。"
+            if error and (len(scopes) > 1 or options.get("has_silent_notification_scope")) else error
+        )
+        publish = publish_probe_scope if scope.get("probe") else _publish_foreground_linked_notification_threads
+        try:
+            accepted = bool(publish(
+                scope, strm_status=strm_status, media_refresh=media_refresh,
+                partial=partial, error=scoped_error,
+            )) or accepted
+        except Exception as exc:
+            logger.warning("STRM 更新通知范围失败 type=%s", type(exc).__name__)
     return accepted
 
 
@@ -597,6 +632,8 @@ class STRMScheduler:
         self, options: dict[str, object], *, debounce_seconds: float = 0.0,
         reset_deadline: bool = False,
     ) -> dict:
+        options = dict(options)
+        options["notification_scopes"] = notification_scopes(options)
         with self._state_lock:
             existing = dict(self._pending_organize_options or {})
             # 内部持久队列 waiter 只是一个无通知、无变化清单的定时占位符。
@@ -637,6 +674,8 @@ class STRMScheduler:
                     pending[key] = _merge_notification_threads(
                         pending.get(key), value
                     )
+                elif key == "notification_scopes":
+                    pending[key] = merge_notification_scopes(pending.get(key), value)
                 elif key == "force_full":
                     pending[key] = bool(pending.get(key)) or bool(value)
                 elif key == "sync_mode":
@@ -792,6 +831,7 @@ class STRMScheduler:
                 "has_silent_notification_scope": not notification_scope_enabled,
                 "persisted_queue_only": False,
             }
+            options["notification_scopes"] = notification_scopes(options)
             # 先持久化再触发：进程在排队或执行中崩溃时，变化目标仍可恢复。
             persist_not_before: float | None = 0.0
             if trigger_type == "organize":
@@ -1667,6 +1707,9 @@ class STRMScheduler:
                     for target in claimed_targets
                     for change in (target.get("changes") or [])
                 ]
+                options["notification_scopes"] = merge_notification_scopes(
+                    notification_scopes(options), probe_scopes_from_changes(claimed_changes),
+                )
                 if _claimed_changes_extend_notification_scope(
                     organize_changes, claimed_changes,
                 ):
@@ -1919,40 +1962,9 @@ class STRMScheduler:
                 partial=partial,
                 error=partial_error,
             )
-            if not _has_linked_notification_thread(options):
-                _run_notification_side_effect(
-                    "summary",
-                    lambda: self._notify_success(
-                        stats, media_refresh, elapsed, trigger_type, source_results, strm_root,
-                        run_id=run_id,
-                        notify_override=options.get("notify_override"),
-                        chat_ids=list(options.get("chat_ids") or []),
-                        uses_default_notification_scope=options.get(
-                            "uses_default_notification_scope"
-                        ),
-                        has_silent_notification_scope=bool(
-                            options.get("has_silent_notification_scope")
-                        ),
-                    ),
-                )
-            _run_notification_side_effect(
-                "details",
-                lambda: self._notify_details(
-                    stats, trigger_type, run_id=run_id,
-                    enabled_override=options.get("detail_notify_override"),
-                    chat_ids=list(options.get("chat_ids") or []),
-                    uses_default_notification_scope=options.get(
-                        "uses_default_notification_scope"
-                    ),
-                    has_silent_notification_scope=bool(
-                        options.get("has_silent_notification_scope")
-                    ),
-                ),
-            )
-            logger.info(
-                "STRM 任务%s trigger=%s mode=%s fallback=%s elapsed=%ss",
-                "部分完成" if partial else "完成", trigger_type, mode,
-                fallback_used, elapsed,
+            self._notify_scoped_results(
+                options, stats, media_refresh, elapsed, trigger_type, source_results, strm_root,
+                run_id=run_id,
             )
             return {"ok": True, "partial": partial, **result}
         except Exception as exc:
@@ -1984,23 +1996,7 @@ class STRMScheduler:
                 claimed_targets, "failed", error=error_text,
                 empty_retry_delay=60.0,
             )
-            if not _has_linked_notification_thread(options):
-                _run_notification_side_effect(
-                    "failure",
-                    lambda: self._notify_failure(
-                        error_text,
-                        trigger_type,
-                        run_id=run_id,
-                        notify_override=options.get("notify_override"),
-                        chat_ids=list(options.get("chat_ids") or []),
-                        uses_default_notification_scope=options.get(
-                            "uses_default_notification_scope"
-                        ),
-                        has_silent_notification_scope=bool(
-                            options.get("has_silent_notification_scope")
-                        ),
-                    ),
-                )
+            self._notify_scoped_failure(options, error_text, trigger_type, run_id=run_id)
             return {"ok": False, "error": error_text}
         finally:
             if lease_heartbeat:
@@ -2227,6 +2223,90 @@ class STRMScheduler:
             "⚠️ STRM 同步部分完成" if partial else "✅ STRM 同步完成",
             fields=fields, lines=errors, layout="relaxed",
         )
+
+    def _foreground_notification_scopes(self, options: dict) -> list[dict]:
+        scopes = notification_scopes(options)
+        result = []
+        default_chat = str(get("TG_CHAT_ID", "") or "").strip()
+        for scope in scopes:
+            if scope.get("probe"):
+                continue
+            recipients = list(dict.fromkeys(scope.get("chat_ids") or []))
+            uses_default = scope.get("uses_default_notification_scope")
+            if uses_default is None:
+                uses_default = not recipients
+            targets = [(str(chat), False) for chat in recipients]
+            if uses_default and default_chat not in recipients:
+                targets.append((default_chat, True))
+            if not targets:
+                continue
+            request_chats = {}
+            for request_id in _request_ids(scope):
+                try:
+                    from app.modules.telegram_download_lifecycle import _chat_id
+
+                    row = db.get_download_request(request_id)
+                    if row is not None:
+                        request_chats[request_id] = _chat_id(row) or default_chat
+                except Exception as exc:
+                    logger.warning("STRM 读取通知接收范围失败 type=%s", type(exc).__name__)
+            for recipient, is_default in targets:
+                scoped = dict(scope)
+                scoped["chat_ids"] = [] if is_default else [recipient]
+                scoped["uses_default_notification_scope"] = is_default
+                scoped["notification_threads"] = [
+                    ref for ref in _merge_notification_threads(scope.get("notification_threads"))
+                    if str(ref.get("chat_id") or default_chat) == recipient
+                ]
+                scoped["download_request_ids"] = [
+                    request_id for request_id, chat in request_chats.items() if chat == recipient
+                ]
+                scoped["has_silent_notification_scope"] = bool(
+                    len(scopes) > 1 or len(targets) > 1
+                    or options.get("has_silent_notification_scope")
+                    or scope.get("has_silent_notification_scope")
+                )
+                result.append(scoped)
+        return result
+
+    def _notify_scoped_results(
+        self, options: dict, stats: dict, refresh: dict, elapsed: float,
+        trigger_type: str, sources: list[dict], strm_root: str, *, run_id: int = 0,
+    ) -> None:
+        for scope in self._foreground_notification_scopes(options):
+            kwargs = {
+                "chat_ids": list(scope.get("chat_ids") or []),
+                "uses_default_notification_scope": scope.get("uses_default_notification_scope"),
+                "has_silent_notification_scope": bool(scope.get("has_silent_notification_scope")),
+            }
+            # 只抑制当前接收范围的独立汇总，不以其他 chat/父任务的线程为依据。
+            if not _has_linked_notification_thread(scope):
+                _run_notification_side_effect(
+                    "summary", lambda: self._notify_success(
+                        stats, refresh, elapsed, trigger_type, sources, strm_root,
+                        run_id=run_id, notify_override=scope.get("notify_override"), **kwargs,
+                    ),
+                )
+            _run_notification_side_effect(
+                "details", lambda: self._notify_details(
+                    stats, trigger_type, run_id=run_id,
+                    enabled_override=scope.get("detail_notify_override"), **kwargs,
+                ),
+            )
+
+    def _notify_scoped_failure(self, options: dict, error: str, trigger_type: str, *, run_id: int = 0) -> None:
+        for scope in self._foreground_notification_scopes(options):
+            if _has_linked_notification_thread(scope):
+                continue
+            _run_notification_side_effect(
+                "failure", lambda: self._notify_failure(
+                    error, trigger_type, run_id=run_id,
+                    notify_override=scope.get("notify_override"),
+                    chat_ids=list(scope.get("chat_ids") or []),
+                    uses_default_notification_scope=scope.get("uses_default_notification_scope"),
+                    has_silent_notification_scope=bool(scope.get("has_silent_notification_scope")),
+                ),
+            )
 
     @staticmethod
     def _resolve_notification_scopes(

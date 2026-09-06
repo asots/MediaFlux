@@ -28,6 +28,7 @@ _PENDING_STRM_STATES = frozenset({
     "运行中",
     "同步中",
     "已触发",
+    "后台规格补全进行中",
 })
 _TERMINAL_DELIVERY_FAILURES = frozenset({
     "failed",

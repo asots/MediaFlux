@@ -172,7 +172,8 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         self.assertEqual(aggregated["scan_failures"], 1)
         self.assertEqual(aggregated["delete_failures"], 1)
         organizer.clean_empty_dirs.assert_called_once_with(
-            "secret-source", with_report=True, protected_source_ids={"secret-source"}
+            "secret-source", with_report=True, with_diagnostics=True,
+            protected_source_ids={"secret-source", "0"}
         )
         task_manager._lock.release.assert_called_once_with()
 

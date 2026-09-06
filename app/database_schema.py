@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS organize_probe_queue (
     rel_dir TEXT NOT NULL DEFAULT '',
     rules_json TEXT NOT NULL DEFAULT '{}',
     pending_strm_changes_json TEXT NOT NULL DEFAULT '[]',
+    notification_context_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'queued'
         CHECK(status IN ('queued','running','retry_wait','completed','failed','cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
@@ -306,6 +307,25 @@ CREATE TABLE IF NOT EXISTS download_requests (
     completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_download_requests_status ON download_requests(status, id);
+
+CREATE TABLE IF NOT EXISTS download_staging_reconcile (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    confirmation_id INTEGER NOT NULL UNIQUE,
+    request_id INTEGER NOT NULL,
+    identity_json TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','retry','completed','retained','blocked')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    next_attempt_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (confirmation_id) REFERENCES organize_confirmations(id) ON DELETE CASCADE,
+    FOREIGN KEY (request_id) REFERENCES download_requests(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_download_staging_reconcile_due
+    ON download_staging_reconcile(status, next_attempt_at, id);
 
 CREATE TABLE IF NOT EXISTS download_request_keys (
     request_key TEXT PRIMARY KEY,

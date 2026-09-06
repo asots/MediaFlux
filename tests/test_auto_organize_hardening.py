@@ -1330,120 +1330,70 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(client.get_download_url.call_count, 1)
 
-    def test_completed_isolated_staging_is_deleted_only_after_empty_recheck(self):
-        delete_empty = Mock(return_value=True)
-        organizer = SimpleNamespace(
-            client=SimpleNamespace(
-                list_dir=Mock(return_value=[]),
-                file_info=Mock(return_value=SimpleNamespace(
-                    name="MF-7", parent_id="parent", is_dir=True,
-                    etag="dir-etag", updated_at=123,
-                )),
-                supports_atomic_empty_directory_delete=True,
-                delete_empty_directory=delete_empty,
-            )
+    def _completed_staging_fixture(self):
+        root = "cleanup-stage-" + uuid.uuid4().hex
+        info = SimpleNamespace(file_id=root, name="MF-7", parent_id="parent", is_dir=True,
+                               etag="dir-etag", updated_at=123)
+        client = SimpleNamespace(
+            list_dir=Mock(side_effect=lambda id_: [info] if id_ == "parent" else []),
+            file_info=Mock(return_value=info), supports_guarded_empty_directory_delete=True,
+            delete_empty_directory=Mock(return_value=True),
         )
-        row = {
-            "gy_isolated": 1, "gy_target_dir": "staging", "gy_staging_name": "MF-7",
-            "gy_staging_parent_dir": "parent",
-        }
-        with patch.object(db, "get_download_request", return_value=row), patch(
-            "app.modules.organize_tasks.execute_recycle_bin_delete"
-        ) as delete, patch.object(db, "update_download_request") as update:
-            OrganizeTaskManager._cleanup_download_staging(
-                organizer, [7], [{"id": "staging", "name": "MF-7"}]
-            )
+        request_id, _ = db.create_download_request(root, "magnet")
+        db.update_download_request(
+            request_id, targets="guangya", status="completed", gy_status="completed",
+            gy_isolated=1, gy_target_dir=root, gy_staging_parent_dir="parent", gy_staging_name="MF-7",
+            gy_staging_cleanup_status="retained", organize_status="completed", organize_started=1,
+        )
+        return SimpleNamespace(client=client), request_id, root, info
 
-        delete.assert_called_once()
-        operation = delete.call_args.kwargs["delete_operation"]
-        operation()
-        delete_empty.assert_called_once_with(
-            "staging", expected_etag="dir-etag", expected_updated_at=123
+    def test_completed_isolated_staging_is_deleted_only_after_empty_recheck(self):
+        organizer, request_id, root, _info = self._completed_staging_fixture()
+        report = OrganizeTaskManager._cleanup_download_staging(
+            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            rules=OrganizeRules(clean_empty=True),
         )
-        self.assertEqual(update.call_args.kwargs["gy_staging_cleanup_status"], "completed")
+        self.assertEqual(report["cleaned"], 1)
+        organizer.client.delete_empty_directory.assert_called_once_with(
+            root, expected_etag="dir-etag", expected_updated_at=123,
+        )
+        self.assertEqual(db.get_download_request(request_id)["gy_staging_cleanup_status"], "completed")
 
     def test_completed_isolated_staging_is_retained_without_atomic_delete_capability(self):
-        organizer = SimpleNamespace(
-            client=SimpleNamespace(
-                list_dir=Mock(return_value=[]),
-                file_info=Mock(return_value=SimpleNamespace(
-                    name="MF-7", parent_id="parent", is_dir=True,
-                    etag="", updated_at=0,
-                )),
-                supports_atomic_empty_directory_delete=False,
-            )
+        organizer, request_id, root, _info = self._completed_staging_fixture()
+        organizer.client.supports_guarded_empty_directory_delete = False
+        report = OrganizeTaskManager._cleanup_download_staging(
+            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            rules=OrganizeRules(clean_empty=True),
         )
-        row = {
-            "gy_isolated": 1, "gy_target_dir": "staging", "gy_staging_name": "MF-7",
-            "gy_staging_parent_dir": "parent",
-        }
-        with patch.object(db, "get_download_request", return_value=row), patch(
-            "app.modules.organize_tasks.execute_recycle_bin_delete"
-        ) as delete, patch.object(db, "update_download_request") as update:
-            OrganizeTaskManager._cleanup_download_staging(
-                organizer, [7], [{"id": "staging", "name": "MF-7"}]
-            )
-
-        delete.assert_not_called()
-        self.assertEqual(update.call_args.kwargs["gy_staging_cleanup_status"], "retained")
+        self.assertEqual(report["unsupported"], 1)
+        organizer.client.delete_empty_directory.assert_not_called()
+        self.assertEqual(db.get_download_request(request_id)["gy_staging_cleanup_status"], "retained")
 
     def test_completed_isolated_staging_cleanup_failure_is_persisted(self):
-        organizer = SimpleNamespace(
-            client=SimpleNamespace(
-                list_dir=Mock(return_value=[]),
-                file_info=Mock(return_value=SimpleNamespace(
-                    name="MF-7", parent_id="parent", is_dir=True,
-                    etag="dir-etag", updated_at=123,
-                )),
-                supports_atomic_empty_directory_delete=True,
-                delete_empty_directory=Mock(side_effect=RuntimeError("version changed")),
-            )
+        organizer, request_id, root, _info = self._completed_staging_fixture()
+        organizer.client.delete_empty_directory.side_effect = RuntimeError("version changed")
+        report = OrganizeTaskManager._cleanup_download_staging(
+            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            rules=OrganizeRules(clean_empty=True),
         )
-        row = {
-            "gy_isolated": 1, "gy_target_dir": "staging", "gy_staging_name": "MF-7",
-            "gy_staging_parent_dir": "parent",
-        }
-
-        def execute(_client, **kwargs):
-            kwargs["delete_operation"]()
-
-        with patch.object(db, "get_download_request", return_value=row), patch(
-            "app.modules.organize_tasks.execute_recycle_bin_delete",
-            side_effect=execute,
-        ), patch.object(db, "update_download_request") as update:
-            OrganizeTaskManager._cleanup_download_staging(
-                organizer, [7], [{"id": "staging", "name": "MF-7"}]
-            )
-
-        self.assertEqual(update.call_args.kwargs["gy_staging_cleanup_status"], "failed")
-        self.assertIn("RuntimeError", update.call_args.kwargs["gy_staging_cleanup_error"])
+        self.assertEqual(report["delete_failures"], 1)
+        row = db.get_download_request(request_id)
+        self.assertEqual(row["gy_staging_cleanup_status"], "failed")
+        self.assertIn("结果未确认", row["gy_staging_cleanup_error"])
 
     def test_completed_isolated_staging_is_retained_on_identity_mismatch(self):
-        organizer = SimpleNamespace(
-            client=SimpleNamespace(
-                list_dir=Mock(return_value=[]),
-                file_info=Mock(return_value=SimpleNamespace(
-                    name="other", parent_id="parent", is_dir=True,
-                    etag="dir-etag", updated_at=123,
-                )),
-                supports_atomic_empty_directory_delete=True,
-                delete_empty_directory=Mock(return_value=True),
-            )
+        organizer, request_id, root, info = self._completed_staging_fixture()
+        info.name = "other"
+        report = OrganizeTaskManager._cleanup_download_staging(
+            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            rules=OrganizeRules(clean_empty=True),
         )
-        row = {
-            "gy_isolated": 1, "gy_target_dir": "staging", "gy_staging_name": "MF-7",
-            "gy_staging_parent_dir": "parent",
-        }
-        with patch.object(db, "get_download_request", return_value=row), patch(
-            "app.modules.organize_tasks.execute_recycle_bin_delete"
-        ) as delete, patch.object(db, "update_download_request") as update:
-            OrganizeTaskManager._cleanup_download_staging(
-                organizer, [7], [{"id": "staging", "name": "MF-7"}]
-            )
-
-        delete.assert_not_called()
-        self.assertEqual(update.call_args.kwargs["gy_staging_cleanup_status"], "retained")
-        self.assertIn("身份", update.call_args.kwargs["gy_staging_cleanup_error"])
+        self.assertGreater(report["unavailable"], 0)
+        organizer.client.delete_empty_directory.assert_not_called()
+        row = db.get_download_request(request_id)
+        self.assertEqual(row["gy_staging_cleanup_status"], "retained")
+        self.assertIn("身份", row["gy_staging_cleanup_error"])
 
     def test_download_task_propagates_automatic_mode_to_organizer(self):
         organizer = Mock()

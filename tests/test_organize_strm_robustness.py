@@ -202,6 +202,9 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
         }
         organizer = Organizer(client=Client(), scraper=object())
         probe_worker = unittest.mock.Mock()
+        from app.modules.organize_probe_notifications import build_notification_context
+
+        notification_context = build_notification_context(task_id="web-batch", chat_id="private-chat")
         with patch.object(organizer, "_ensure_dir_chain", return_value="target-id"), patch.object(
             organizer, "_resolve_variant_conflict", return_value=(None, "none", "")
         ), patch.object(organizer, "_write_organize_audit", return_value=1), patch(
@@ -218,8 +221,12 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
                     nsfw_metatube_token="server-secret",
                 ),
                 stats, {}, None, source_dir_id="source-id",
+                notification_context=notification_context,
             )
 
+        self.assertEqual(stats["notification_context"], notification_context)
+        self.assertEqual(enqueue_probe.call_args.kwargs["notification_context"], notification_context)
+        self.assertNotIn("notification_context", enqueue_probe.call_args.kwargs["rules"])
         self.assertEqual(stats["moved"], 1)
         self.assertEqual(stats["media_probe_background_queued"], 1)
         self.assertFalse(stats["strm_force_full"])

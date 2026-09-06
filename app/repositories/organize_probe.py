@@ -35,23 +35,27 @@ def enqueue_organize_probe_completion(
     rules: dict,
     delay_seconds: int = 130,
     max_attempts: int = 2,
+    notification_context: dict | None = None,
 ) -> int:
     """登记整理成功但在线探测未完成的文件；同一日志幂等。"""
     database = _database()
     stamp = database.now()
     next_attempt = _future_stamp(max(30, int(delay_seconds)))
     payload = json.dumps(rules if isinstance(rules, dict) else {}, ensure_ascii=False)
+    from app.modules.organize_probe_notifications import normalize_notification_context
+
+    context_json = json.dumps(normalize_notification_context(notification_context), ensure_ascii=False)
     with database.get_conn() as conn:
         conn.execute(
             "INSERT INTO organize_probe_queue(organize_log_id,provider,source_id,rel_dir,"
-            "rules_json,status,attempts,max_attempts,next_attempt_at,lease_owner,lease_until,"
+            "rules_json,notification_context_json,status,attempts,max_attempts,next_attempt_at,lease_owner,lease_until,"
             "last_error_type,last_error,created_at,updated_at) "
-            "VALUES(?, 'guangya', ?, ?, ?, 'queued', 0, ?, ?, '', 0, '', '', ?, ?) "
+            "VALUES(?, 'guangya', ?, ?, ?, ?, 'queued', 0, ?, ?, '', 0, '', '', ?, ?) "
             "ON CONFLICT(organize_log_id) DO UPDATE SET source_id=excluded.source_id,"
             "rel_dir=excluded.rel_dir,rules_json=excluded.rules_json,"
             "max_attempts=excluded.max_attempts,updated_at=excluded.updated_at",
             (
-                int(organize_log_id), str(source_id or ""), str(rel_dir or ""), payload,
+                int(organize_log_id), str(source_id or ""), str(rel_dir or ""), payload, context_json,
                 max(1, min(int(max_attempts or 2), 5)), next_attempt, stamp, stamp,
             ),
         )
@@ -276,3 +280,86 @@ def commit_organize_probe_rename(
             # 此处不能 return False：必须让审计更新一并回滚。
             raise RuntimeError("规格补全任务 lease 已变化，拒绝提交交接")
         return True
+
+
+def probe_rules_notify_enabled(encoded: object) -> bool:
+    """身份快照不能重新打开后来明确关闭的交接通知策略。"""
+    try:
+        rules = json.loads(encoded or "{}") if isinstance(encoded, str) else encoded
+    except (TypeError, ValueError):
+        return False
+    return isinstance(rules, dict) and rules.get("notify_enabled", True) is True
+
+
+def get_organize_probe_notification_progress(
+    *, topic: str, thread_key: str, chat_id: str, notification_enabled_only: bool = False,
+) -> dict[str, int]:
+    """只按持久父线程+收件人读进度，不从来源目录推测旧批次。
+
+    STRM 成功接管不代表执行完成；连同既有 changes 的 pending/inflight 载荷
+    一起检查，覆盖 probe ACK 与 STRM 结算任意先后顺序。只读，不修改 STRM 表。
+    """
+    progress = {"total": 0, "pending": 0, "failed": 0, "cancelled": 0, "strm_pending": 0, "strm_failed": 0}
+    if not topic or not thread_key or not chat_id:
+        return progress
+
+    def matches(value: object) -> bool:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return False
+        if not isinstance(value, dict) or value.get("version") != 1:
+            return False
+        if notification_enabled_only and (
+            value.get("notify_enabled") is not True or value.get("topic_enabled") is not True
+        ):
+            return False
+        refs = value.get("notification_threads")
+        return isinstance(refs, list) and any(
+            isinstance(ref, dict) and ref.get("topic") == topic
+            and ref.get("thread_key") == thread_key and ref.get("chat_id") == chat_id
+            and (not notification_enabled_only or ref.get("topic_enabled") is True)
+            for ref in refs
+        )
+
+    database = _database()
+    with database.get_conn() as conn:
+        # 两个队列读取同一 SQLite 快照，不能把两次查询之间的交接误判为排空。
+        conn.execute("BEGIN")
+        jobs = conn.execute(
+            "SELECT status,rules_json,notification_context_json FROM organize_probe_queue "
+            "WHERE notification_context_json <> '{}'"
+        ).fetchall()
+        targets = conn.execute(
+            "SELECT state,last_error,pending_changes_json,inflight_changes_json FROM strm_change_queue "
+            "WHERE state <> 'completed'"
+        ).fetchall()
+    for job in jobs:
+        if notification_enabled_only and not probe_rules_notify_enabled(job["rules_json"]):
+            continue
+        if not matches(job["notification_context_json"]):
+            continue
+        progress["total"] += 1
+        status = str(job["status"])
+        if status in {"queued", "retry_wait", "running"}:
+            progress["pending"] += 1
+        elif status in {"failed", "cancelled"}:
+            progress[status] += 1
+    for target in targets:
+        for column in ("pending_changes_json", "inflight_changes_json"):
+            try:
+                changes = json.loads(target[column] or "[]")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(changes, list):
+                matched = sum(
+                    1 for change in changes if isinstance(change, dict)
+                    and (not notification_enabled_only or change.get("_probe_notify_enabled", True) is True)
+                    and matches(change.get("_probe_notification_context"))
+                )
+                progress["strm_pending"] += matched
+                if target["state"] in {"failed", "retry_wait"} or target["last_error"]:
+                    # 业务请求的初始 STRM 已完成，也不能抹掉这批后续交接的真实失败。
+                    progress["strm_failed"] += matched
+    return progress
