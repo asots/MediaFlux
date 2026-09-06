@@ -2419,6 +2419,7 @@ from app.repositories.agent_library_patrol import (  # noqa: E402,F401
 
 # ===== 下载请求认领与本地入库状态 =====
 from app.repositories.download_requests import (  # noqa: E402,F401
+    cancel_qb_download_tracking,
     claim_download_request,
     claim_download_request_notification,
     claim_download_request_organize,

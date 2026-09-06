@@ -22,6 +22,7 @@ from app.modules.qb_control import (
     QBControlConflict,
     QBControlSafetyUnavailable,
 )
+from tests.support import isolated_test_database
 
 
 class _FakeMediaClient:
@@ -515,14 +516,15 @@ def test_qb_transport_writes_are_bounded_and_delete_keeps_files(monkeypatch):
         {"torrent_refs": [{"name": "Demo"}]},
     )
     assert preview.data["delete_files"] is False
-    result = transport.execute_write(
-        "configured:qbittorrent",
-        "qb.torrents.delete_task",
-        {"torrent_refs": [target_hash]},
-        expected_profile_revision=transport.profile_revision(
-            "configured:qbittorrent"
-        ),
-    )
+    with isolated_test_database():
+        result = transport.execute_write(
+            "configured:qbittorrent",
+            "qb.torrents.delete_task",
+            {"torrent_refs": [target_hash]},
+            expected_profile_revision=transport.profile_revision(
+                "configured:qbittorrent"
+            ),
+        )
     assert result.data["delete_files"] is False
     assert calls == [("delete", target_hash, False)]
 

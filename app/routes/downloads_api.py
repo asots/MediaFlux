@@ -22,8 +22,10 @@ from app.modules.download_dispatcher import (
 from app.modules.qb_control import (
     QBControlConflict,
     QBControlSafetyUnavailable,
+    QBTaskRemovalUnconfirmed,
     assert_qb_control_allowed,
     qb_control_write_lease,
+    remove_qb_tasks,
 )
 from app.web import api_error, api_response, require_api_login
 
@@ -625,12 +627,14 @@ def qb_action(action: str, request: Request, data: dict | None = Body(default=No
                 client.resume_torrents(joined_hashes)
             else:
                 # 下载页删除始终只移除 qB 任务，不允许客户端请求删除媒体文件。
-                client.delete_torrents(joined_hashes, delete_files=False)
+                remove_qb_tasks(client, hashes)
         return api_response({
             "success": True,
             "action": action,
             "accepted": len(hashes),
         })
+    except QBTaskRemovalUnconfirmed as exc:
+        return api_error(str(exc), 502)
     except QBControlSafetyUnavailable as exc:
         return api_error(str(exc), 503)
     except QBControlConflict as exc:

@@ -1035,6 +1035,71 @@ def update_download_request_and_sync_media_admission(request_id: int, **fields) 
         )
 
 
+def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
+    """持久化用户移除意图，只停止精确绑定的未完成 qB 分支。
+
+    必须在用户控制入口的 qB writer lease 内、远端删除之前调用。这里的
+    cancelled 表示用户已停止跟踪，不是远端删除成功的凭据；即使随后超时
+    或进程退出也不能重新启动入库/缺失告警。已完成入库及另一下载后端保留。
+    """
+    normalized = list(dict.fromkeys(str(value or "").strip().lower() for value in hashes))
+    if not normalized:
+        return []
+    if any(not 40 <= len(value) <= 64 or set(value) - set("0123456789abcdef") for value in normalized):
+        raise ValueError("无效的 qB 任务标识")
+    if len(normalized) > 200:
+        raise ValueError("一次最多移除 200 个 qB 任务")
+    placeholders = ",".join("?" for _ in normalized)
+    timestamp = now()
+    note = "用户已停止此 qB 任务的下载跟踪；远端移除结果以 qB 实时任务为准"
+    changed: list[int] = []
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # 只认请求当前绑定的 hash；历史日志可能属于上一次尝试，不用它或标题猜测身份。
+        rows = conn.execute(
+            "SELECT * FROM download_requests WHERE status!='cancelled' "
+            "AND qb_status IN ('submitting','submitted','downloading','outcome_unknown','manual_review') "
+            f"AND lower(trim(qb_task_id)) IN ({placeholders})",
+            tuple(normalized),
+        ).fetchall()
+        for row in rows:
+            request_id = int(row["id"])
+            gy_status = str(row["gy_status"] or "")
+            if row["status"] == "resubmitted":
+                root_status = "resubmitted"
+            elif gy_status in {"submitting", "submitted", "downloading", "manual_review", "completed", "failed"}:
+                root_status = gy_status
+            elif gy_status == "outcome_unknown":
+                root_status = "downloading"
+            else:
+                root_status = "cancelled"
+            updates = {
+                "qb_status": "cancelled", "qb_task_missing_since": None,
+                "status": root_status,
+                "completed_at": timestamp if root_status in {"cancelled", "completed", "failed", "manual_review", "resubmitted"} else None,
+            }
+            # 仅 qB 的取消无需发布新的异常；另一后端的失败/后处理及其投递不被抹掉。
+            if root_status == "cancelled":
+                updates.update({
+                    "notification_delivery_status": "", "notification_event_status": "",
+                    "notification_next_retry_at": None, "notification_lease_token": "",
+                    "notification_lease_expires_at": None,
+                })
+            _update_download_request_conn(conn, request_id, updates, timestamp)
+            conn.execute(
+                "UPDATE download_log SET status='cancelled',completed_at=?,updated_at=?,"
+                "error=CASE WHEN COALESCE(error,'')='' THEN ? ELSE substr(error || char(10) || ?,1,1000) END "
+                "WHERE request_id=? AND source='qb' "
+                "AND status NOT IN ('success','completed','failed','cancelled','resubmitted')",
+                (timestamp, timestamp, note, note, request_id),
+            )
+            from app.repositories.media_subscriptions import _sync_media_download_admission_for_request_conn
+
+            _sync_media_download_admission_for_request_conn(conn, request_id, timestamp)
+            changed.append(request_id)
+    return changed
+
+
 def apply_download_tracker_update(
     snapshot: sqlite3.Row | Mapping[str, object],
     **fields,

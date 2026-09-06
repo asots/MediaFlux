@@ -528,9 +528,14 @@ _AVAILABILITY_TAG = re.compile(
 )
 _BRACKET_EPISODE_TOKEN = re.compile(r"(?i)[\[【(（]\s*(\d{1,4})(?:v\d+)?\s*[\]】)）]")
 _BRACKET_EPISODE_SUFFIX = re.compile(r"(?i)[\[【(（]\s*(\d{1,4})(?:v\d+)?\s*[\]】)）]\s*$")
+# 混合整包只在“集范围 + TV/完结状态”后接受完整的已知附加项；不能把
+# 真实括号副标题或独立 OVA/S00 当作整包范围。整段由既有清洗链记录到
+# noise_tokens，原始发布名和特别篇位置解析保持独立。
 _BRACKET_EPISODE_RANGE = re.compile(
     r"(?i)^\s*(?:(?:e?p?\s*)?\d{1,4}\s*[-~～–—]\s*\d{1,4}"
-    r"(?:\s*(?:tv\s*)?[（(]?(?:fin(?:al)?|end|complete|全集)[）)]?)?|"
+    r"(?:(?:\s*(?:tv\s*)?[（(]?(?:fin(?:al)?|end|complete|全集)[）)]?|\s*tv)"
+    r"(?:\s*\+\s*(?:ova|oav|oad|sp|specials?|ncop|nced)"
+    r"(?:[ ._-]*\d{1,3}(?:\s*[-~～–—]\s*\d{1,3})?)?)*)?|"
     r"第\s*\d{1,3}\s*[-~～–—]\s*\d{1,3}\s*(?:集|[话話]))\s*$"
 )
 _BRACKETED_SEGMENT = re.compile(r"[\[【(（]([^\]】)）]{1,160})[\]】)）]")
@@ -1662,6 +1667,11 @@ def _non_destructive_release_title_candidates(
         # 分类标签单独提成标题；这里只消费真正相邻的括号链。
         if source[current.end():following_match.start()].strip():
             continue
+        # 前面已有裸片名时，当前括号可能只是其副标题；即使后面紧邻
+        # 整包范围，也不能把“作品名（副标题）”退化成孤立的“副标题”。
+        previous_end = bracket_segments[index - 1].end() if index else 0
+        if source[previous_end:current.start()].strip():
+            continue
         content = current.group(1).strip()
         following = following_match.group(1).strip()
         has_position = bool(
@@ -2165,15 +2175,22 @@ def extract_recognition_context(filename: str, parent_path: str = "") -> Recogni
     title_source = _strip_known_episode_suffix(stem, episode, season)
     if explicit_season is None and implicit_season is not None:
         title_source = _remove_text_span(title_source, implicit_season_span)
-    if special_episode is not None:
-        title_source = _SPECIAL_EPISODE_TOKEN.sub(" ", title_source)
-        title_source = strip_special_media_markers(title_source)
-    elif fractional_position is not None:
+    if fractional_position is not None:
         title_source = strip_special_media_markers(title_source)
     release_title_candidates, semantic_components = (
         _non_destructive_release_title_candidates(title_source)
     )
     filename_title, cleaned = _clean_release_stem(title_source)
+    if special_episode is not None:
+        # 先按完整括号清洗整包元数据，再去除独立特别篇标记；反过来会把
+        # ``[01-46 FIN + OVA]`` 拆成无法再完整识别的残缺范围。
+        filename_title = strip_special_media_markers(
+            _SPECIAL_EPISODE_TOKEN.sub(" ", filename_title)
+        )
+        release_title_candidates = _unique_text(
+            strip_special_media_markers(_SPECIAL_EPISODE_TOKEN.sub(" ", candidate))
+            for candidate in release_title_candidates
+        )
     for component_name, values in semantic_components.items():
         cleaned[component_name] = _unique_text((
             *cleaned.get(component_name, []), *values,

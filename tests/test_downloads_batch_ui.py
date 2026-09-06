@@ -85,10 +85,16 @@ class DownloadBatchUiContractTests(unittest.TestCase):
             "qbBulkAction('resume')",
             "qbBulkAction('pause')",
             "qbBulkAction('delete')",
-            "只从 qBittorrent 移除任务，不删除已经下载的文件。",
+            "从 qBittorrent 移除任务，并停止对应未完成下载的本地跟踪；不删除已经下载的文件。",
             "selectedQbHashes.clear()",
         ):
             self.assertIn(contract, self.template)
+
+    def test_delete_keeps_row_visible_until_server_confirms(self):
+        single_delete = self.template.split("async function qbDelete(hash){", 1)[1].split("async function qbBulkAction", 1)[0]
+        self.assertNotIn("slideOutAndCollapse", single_delete)
+        self.assertIn("return runQbAction('delete',[hash],false)", single_delete)
+        self.assertIn("cancelled:['已停止跟踪','paused']", self.template)
 
     def test_toolbar_has_stable_geometry_and_mobile_layout(self):
         for contract in (

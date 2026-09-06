@@ -17,8 +17,10 @@ from app.clients.qbittorrent import QBittorrentClient, close_qbittorrent_client
 from app.modules.qb_control import (
     QBControlConflict,
     QBControlSafetyUnavailable,
+    QBTaskRemovalUnconfirmed,
     assert_qb_control_allowed,
     qb_control_write_lease,
+    remove_qb_tasks,
 )
 
 _PROFILE_REF = "configured:qbittorrent"
@@ -440,7 +442,7 @@ class QBittorrentProviderTransport:
                         action = "恢复"
                     else:
                         accepted = bool(
-                            client.delete_torrents(joined, delete_files=False)
+                            remove_qb_tasks(client, hashes)
                         )
                         action = "移除"
                     if not accepted:
@@ -450,11 +452,15 @@ class QBittorrentProviderTransport:
                             external_write_possible=True,
                         )
                     after, after_missing = self._selected_tasks(client, hashes)
+            except QBTaskRemovalUnconfirmed as exc:
+                raise ProviderGatewayError(
+                    str(exc), code="provider_write_failed", external_write_possible=True,
+                ) from exc
             except QBControlSafetyUnavailable as exc:
                 raise ProviderGatewayError(
                     str(exc),
                     code="provider_unavailable",
-                    external_write_possible=external_write_possible,
+                    external_write_possible=False,
                 ) from exc
             except QBControlConflict as exc:
                 raise ProviderGatewayError(

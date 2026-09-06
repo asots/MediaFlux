@@ -39,6 +39,7 @@ _STATUS_LABELS = {
     "manual_review": "需要人工核对",
     "partial": "部分完成",
     "stopped": "已停止",
+    "cancelled": "已停止跟踪",
     "skipped": "已跳过",
     "failed": "失败",
 }
@@ -97,6 +98,9 @@ def _archive_label(row) -> tuple[str, str]:
         return "本地整理", _label(local_status)
     if organize_status:
         return "光鸭整理", _label(organize_status)
+    downloads = {_status(_value(row, key)) for key in ("qb_status", "gy_status")} - {""}
+    if downloads and downloads.issubset({"failed", "manual_review", "cancelled", "resubmitted"}):
+        return "自动整理", "未启动（需核对下载状态）" if "manual_review" in downloads else "未启动（下载已停止）"
     return "自动整理", "等待下载完成"
 
 
@@ -144,6 +148,8 @@ def _overall_state(row, *, verification_status: str = "") -> str:
     } - {""}
     if downstream and downstream.issubset({"completed", "success", "skipped"}):
         return "completed"
+    if _status(_value(row, "status")) == "cancelled":
+        return "cancelled"
     if _status(_value(row, "status")) in {"completed", "success"}:
         return "completed"
     return "processing"
@@ -226,6 +232,7 @@ def build_download_lifecycle_event(
         "completed": "✅ 下载与入库完成",
         "downloaded": "✅ 下载完成（自动入库已跳过）",
         "processing": "⏳ 下载与入库处理中",
+        "cancelled": "⏹️ 下载跟踪已停止",
     }[state]
     archive_name, archive_value = _archive_label(row)
     fields: list[tuple[object, object]] = [
@@ -285,6 +292,15 @@ def build_download_lifecycle_event(
             footer = "请在 Agent 中查询最近下载状态，或前往 Web 查看入库复核详情。"
         else:
             footer = "请前往 Web 下载任务核对当前状态；为避免重复提交，请勿直接重试。"
+        if _status(_value(row, "qb_status")) == "manual_review" and _value(row, "qb_task_missing_since"):
+            fields.append(("发现 qB 缺失", str(_value(row, "qb_task_missing_since"))))
+            if _value(row, "created_at"):
+                fields.append(("请求创建", str(_value(row, "created_at"))))
+            footer = (
+                "qB 任务持续未找到，无法仅凭缺失判断是否主动删除。"
+                "若已主动移除，可在 Web 下载任务的待处理区移出记录；"
+                "否则请核对下载器。为避免重复提交，请勿直接重试。"
+            )
     elif state == "error":
         footer = errors[0] if errors else "本次链路存在未完成阶段，请查看 Web 运行记录。"
     elif state == "downloaded":

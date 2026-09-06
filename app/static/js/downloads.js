@@ -424,7 +424,7 @@ function renderLogs(data) {
     document.getElementById('downloadLogNext').disabled=!pages||page>=pages;
     const body=document.getElementById('logList');
     if(!rows.length){body.innerHTML='<tr><td colspan="5" class="table-empty">暂无下载日志</td></tr>';syncLogSelectionControls();return;}
-    const statuses={success:['成功','done'],existing:['已存在','done'],failed:['失败','failed'],submitted:['已提交','running'],downloading:['下载中','running'],unverified:['待确认','paused'],outcome_unknown:['结果待确认','paused']};
+    const statuses={success:['成功','done'],existing:['已存在','done'],failed:['失败','failed'],submitted:['已提交','running'],downloading:['下载中','running'],unverified:['待确认','paused'],outcome_unknown:['结果待确认','paused'],cancelled:['已停止跟踪','paused']};
     body.innerHTML=rows.map(r=>{
         const id=Number(r.id)||0;
         const selected=selectedLogIds.has(id);
@@ -846,19 +846,15 @@ async function runQbAction(action, hashes, clearSelection=false) {
 
 function qbAction(action, hash){return runQbAction(action,[hash],false);}
 async function qbDelete(hash){
-    const confirmed=await appConfirm({title:'移除 qB 任务',message:'只从 qBittorrent 移除任务，不删除已经下载的文件。',confirmText:'移除任务',danger:true});
+    const confirmed=await appConfirm({title:'移除 qB 任务',message:'从 qBittorrent 移除任务，并停止对应未完成下载的本地跟踪；不删除已经下载的文件。',confirmText:'移除任务',danger:true});
     if(!confirmed)return false;
-    const row=document.querySelector(`.qb-task-row[data-qb-hash="${hash}"]`);
-    if(row && window.MFAnim){
-        window.MFAnim.slideOutAndCollapse(row);
-    }
     return runQbAction('delete',[hash],false);
 }
 async function qbBulkAction(action){
     const hashes=[...selectedQbHashes];
     if(!hashes.length)return false;
     if(action==='delete'){
-        const confirmed=await appConfirm({title:`移除 ${hashes.length} 个 qB 任务`,message:'只从 qBittorrent 移除任务，不删除已经下载的文件。',confirmText:`移除 ${hashes.length} 个任务`,danger:true});
+        const confirmed=await appConfirm({title:`移除 ${hashes.length} 个 qB 任务`,message:'从 qBittorrent 移除任务，并停止对应未完成下载的本地跟踪；不删除已经下载的文件。',confirmText:`移除 ${hashes.length} 个任务`,danger:true});
         if(!confirmed)return false;
     }
     return runQbAction(action,hashes,true);

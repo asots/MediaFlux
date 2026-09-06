@@ -8,10 +8,11 @@ from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
+from app import database as db
 from app.config import web_credentials
 from app.main import create_app
 from app.modules.qb_control import QBControlConflict
-from tests.support import InitializedWebTestCase
+from tests.support import InitializedWebTestCase, isolated_test_database
 
 
 class DownloadBatchActionApiTests(InitializedWebTestCase):
@@ -210,7 +211,7 @@ class DownloadBatchActionApiTests(InitializedWebTestCase):
         headers = self._headers()
         client = Mock()
         torrent_hash = "3" * 40
-        with patch(
+        with isolated_test_database(), patch(
             "app.modules.qb_control.db.list_local_media_qb_write_conflicts",
             return_value=[],
         ), patch("app.routes.downloads_api._qb", return_value=client):
@@ -268,3 +269,35 @@ class DownloadBatchActionApiTests(InitializedWebTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "不支持的操作")
         qb.assert_not_called()
+
+    def test_web_delete_closes_bound_download_before_qb_call(self):
+        headers = self._headers()
+        torrent_hash = "7" * 40
+        with isolated_test_database():
+            request_id, _ = db.create_download_request("web-delete", "magnet", title="Web delete")
+            db.update_download_request(request_id, status="downloading", qb_status="downloading", qb_task_id=torrent_hash)
+            client = Mock()
+
+            def delete(hashes, *, delete_files):
+                self.assertEqual(hashes, torrent_hash)
+                self.assertFalse(delete_files)
+                self.assertEqual(db.get_download_request(request_id)["qb_status"], "cancelled")
+                return True
+
+            client.delete_torrents.side_effect = delete
+            with patch("app.routes.downloads_api._qb", return_value=client):
+                response = self.client.post("/api/downloads/qb/delete", headers=headers, json={"hashes": [torrent_hash]})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(db.list_active_download_requests(), [])
+
+    def test_web_delete_timeout_reports_unknown_not_success(self):
+        headers = self._headers()
+        torrent_hash = "8" * 40
+        with isolated_test_database():
+            client = Mock()
+            client.delete_torrents.side_effect = TimeoutError("test")
+            with patch("app.routes.downloads_api._qb", return_value=client):
+                response = self.client.post("/api/downloads/qb/delete", headers=headers, json={"hashes": [torrent_hash]})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("qB 任务移除未确认", response.json()["error"])
+        self.assertNotIn("success", response.json())

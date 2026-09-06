@@ -1318,6 +1318,147 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(context.normalized_title, "Kage no Jitsuryokusha ni Naritakute!")
         self.assertEqual(context.episode, 1)
 
+    def test_mixed_tv_bundle_range_is_removed_from_search_title(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper()
+        bundles = (
+            "01-46TV全集+OVA",
+            "01-46 TV+OVA",
+            "01-46 FIN + OVA",
+            "01-46 TV FIN+OVA01-03",
+            "01-46TV全集+OVA 01-03+SP01-02+NCOP+NCED",
+            "01-46 END+OAD+OAV01-02",
+            "EP01-46 COMPLETE+OVA01~03",
+            "01-46tv全集+ova01-03",
+            "01-46 TV全集 + OVA + SP",
+            "01-46 TV+Specials 01-02+NCOP1+NCED2",
+        )
+
+        for bundle in bundles:
+            with self.subTest(bundle=bundle):
+                release = (
+                    f"[DBD-Raws][魔神英雄传2][{bundle}]"
+                    "[1080P][BDRip][HEVC-10bit][FLAC][MKV]"
+                )
+                self.assertEqual(parser.clean_title(release), "魔神英雄传2")
+                self.assertEqual(parser.parse_media(release).title, "魔神英雄传2")
+                self.assertEqual(
+                    scraper.extract_recognition_context(release).normalized_title,
+                    "魔神英雄传2",
+                )
+                self.assertTrue(scraper._is_bracket_noise(bundle))
+
+    def test_mixed_tv_bundle_keeps_raw_name_and_cleaning_evidence(self):
+        scraper = self.recognition_module()
+        bundle = "01-46TV全集+OVA"
+        release = (
+            f"[DBD-Raws][魔神英雄传2][{bundle}]"
+            "[1080P][BDRip][HEVC-10bit][FLAC][MKV]"
+        )
+
+        parsed = scraper.TMDBScraper().parse_media(release)
+
+        self.assertEqual(parsed.title, "魔神英雄传2")
+        self.assertEqual(parsed.context.normalized_title, "魔神英雄传2")
+        self.assertEqual(parsed.filename, release)
+        self.assertEqual(parsed.context.filename, release)
+        self.assertIn(bundle, parsed.context.cleaned_components["noise_tokens"])
+        self.assertIn(
+            {"kind": "noise_tokens", "value": bundle, "source": "filename"},
+            parsed.diagnostic_dict()["tokens"],
+        )
+        self.assertIsNone(parsed.source_season)
+
+    def test_mixed_tv_bundle_preserves_title_number_and_real_parenthesis(self):
+        parser = self.recognition_module().TMDBScraper()
+
+        for title in (
+            "魔神英雄传2",
+            "魔神英雄传2（再会篇）",
+            "魔神英雄传2（OVA的故事）",
+            "被解雇的暗黑士兵（30多岁）开始了慢生活的第二人生",
+        ):
+            with self.subTest(title=title):
+                release = f"[DBD-Raws]{title}[01-46TV全集+OVA][1080P][BDRip]"
+                self.assertEqual(parser.clean_title(release), title)
+                self.assertEqual(
+                    self.recognition_module().extract_recognition_context(release).normalized_title,
+                    title,
+                )
+
+        self.assertEqual(
+            parser.clean_title(
+                "[DBD-Raws]魔神英雄传2[再会篇][01-46TV全集+OVA][1080P]"
+            ),
+            "魔神英雄传2 再会篇",
+        )
+
+    def test_mixed_tv_bundle_requires_complete_known_addon_markers(self):
+        scraper = self.recognition_module()
+
+        for content in (
+            "01-46+OVA",
+            "01-46TV全集+OVATION",
+            "01-46TV全集+OVA幕后访谈",
+            "01-46TV全集+OVA1080P",
+            "01-46TV全集+OVA1.5",
+            "01-46TV全集+OVA01-03预告",
+            "01-46TV全集+OVA+DramaCD",
+            "01-46TV全集+OVA+Bonus Story",
+            "01-46TV全集+OVA+",
+            "01-46TV全集+OVA/NCOP",
+            "01-46TV全集+OVA01-0030",
+            "TV全集+OVA",
+            "Final Fantasy+OVA",
+            "魔神英雄传2（再会篇）",
+        ):
+            with self.subTest(content=content):
+                self.assertFalse(scraper._is_bracket_noise(content))
+
+    def test_bare_episode_inherits_clean_mixed_tv_bundle_parent(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper()
+
+        for bundle in (
+            "01-46TV全集+OVA",
+            "01-46 FIN + OVA 01-03+NCOP+NCED",
+        ):
+            with self.subTest(bundle=bundle):
+                parent = (
+                    f"/动漫/[DBD-Raws][魔神英雄传2][{bundle}]"
+                    "[1080P][BDRip][HEVC-10bit][FLAC][MKV]"
+                )
+                parsed = parser.parse_media("01.mkv", parent)
+                self.assertEqual(parsed.title, "魔神英雄传2")
+                self.assertEqual(parsed.context.folder_title, "魔神英雄传2")
+                self.assertEqual(parsed.context.normalized_title, "魔神英雄传2")
+                self.assertEqual(parsed.parent_path, parent)
+                self.assertEqual(parsed.effective_episode, 1)
+                self.assertIsNone(parsed.effective_season)
+
+    def test_mixed_bundle_cleaning_does_not_change_standalone_special_positions(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper()
+
+        for filename in (
+            "[魔神英雄传2][OVA][02][1080P].mkv",
+            "魔神英雄传2.S00E02.1080p.mkv",
+        ):
+            with self.subTest(filename=filename):
+                parsed = parser.parse_media(filename)
+                self.assertEqual(parsed.title, "魔神英雄传2")
+                self.assertEqual((parsed.effective_season, parsed.effective_episode), (0, 2))
+                self.assertEqual(
+                    scraper.parse_release_position(filename),
+                    {"season": 0, "episode": 2, "episode_end": None},
+                )
+        self.assertEqual(
+            scraper.parse_release_position("魔神英雄传2 [OVA 01-03]"),
+            {"season": 0, "episode": 1, "episode_end": 3},
+        )
+        self.assertFalse(scraper._BRACKET_EPISODE_RANGE.fullmatch("OVA"))
+        self.assertFalse(scraper._BRACKET_EPISODE_RANGE.fullmatch("OVA 01-03"))
+
     def test_compact_season_episode_and_chinese_numeral_season_are_consistent(self):
         scraper = self.recognition_module()
 

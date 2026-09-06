@@ -68,3 +68,31 @@ def assert_qb_control_allowed(hashes: Iterable[str], *, operation: str) -> None:
         raise QBControlConflict(
             "所选下载任务正在执行本地整理写入，请等待整理完成后再操作"
         )
+
+
+class QBTaskRemovalUnconfirmed(RuntimeError):
+    """跟踪已按用户意图停止，但远端移除未确认。"""
+
+
+def remove_qb_tasks(client, hashes: Iterable[str]) -> bool:
+    """Web / Agent 的用户移除共用入口；调用方必须持有 qB writer lease。
+
+    本地入库完成后的自动删种不能走此入口：那是成功收尾，不是用户取消。
+    先落盘停止跟踪意图，防止远端成功、回包丢失或重启后旧请求再次告警。
+    """
+    normalized = list(dict.fromkeys(str(value or "").strip().lower() for value in hashes))
+    try:
+        changed = db.cancel_qb_download_tracking(normalized)
+    except Exception as exc:
+        raise QBControlSafetyUnavailable("下载跟踪状态暂不可用，未执行 qB 任务移除") from exc
+    if changed:
+        logger.info("用户移除 qB 任务，已停止 %s 条未完成下载请求的跟踪", len(changed))
+    try:
+        if not client.delete_torrents("|".join(normalized), delete_files=False):
+            raise RuntimeError("qB 未确认接收任务移除")
+    except Exception as exc:
+        raise QBTaskRemovalUnconfirmed(
+            "相关未完成下载的本地跟踪已停止，但 qB 任务移除未确认；"
+            "请核对 qB 实时任务。不会删除已下载文件，也不会重新提交下载。"
+        ) from exc
+    return True
