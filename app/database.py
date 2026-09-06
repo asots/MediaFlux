@@ -32,6 +32,7 @@ from pathlib import Path
 
 from app.config import PATHS
 from app.logger import get_logger
+from app.modules.media_identity import normalize_media_number as _normalize_organize_position
 from app.private_files import protect_sqlite_files
 from app.runtime_paths import get_runtime_paths
 
@@ -253,7 +254,6 @@ from app.database_migrations import (  # noqa: E402,F401
     _migrate_agent_session_context_v3,
     _migrate_organize_operation_jobs_v4,
     _migrate_organize_operation_jobs_v5,
-    _ensure_agent_action_history_schema,
     _migrate_agent_action_history_v6,
     _migrate_local_media_recognition_summary_v7,
     _migrate_local_library_target_server_path_v8,
@@ -1097,37 +1097,6 @@ def kv_set(key: str, value: str) -> None:
         )
 
 
-def _ensure_organize_delete_audit_schema(conn: sqlite3.Connection) -> None:
-    """兼容未经过完整应用启动的维护脚本和单元测试连接。"""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS organize_delete_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            organize_log_id INTEGER,
-            trigger TEXT NOT NULL,
-            provider TEXT NOT NULL DEFAULT 'guangya',
-            file_id TEXT NOT NULL,
-            file_name TEXT DEFAULT '',
-            parent_id TEXT DEFAULT '',
-            size INTEGER DEFAULT 0,
-            gcid TEXT DEFAULT '',
-            replacement_file_id TEXT DEFAULT '',
-            replacement_name TEXT DEFAULT '',
-            replacement_size INTEGER DEFAULT 0,
-            replacement_gcid TEXT DEFAULT '',
-            reason TEXT NOT NULL,
-            status TEXT NOT NULL,
-            provider_result TEXT DEFAULT '',
-            error TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_organize_delete_audit_log_id
-            ON organize_delete_audit(organize_log_id, id DESC);
-        CREATE INDEX IF NOT EXISTS idx_organize_delete_audit_file_id
-            ON organize_delete_audit(file_id, id DESC);
-    """)
-
-
 def add_organize_delete_audit(
     *,
     trigger: str,
@@ -1149,7 +1118,6 @@ def add_organize_delete_audit(
 ) -> int:
     timestamp = now()
     with get_conn() as conn:
-        _ensure_organize_delete_audit_schema(conn)
         cur = conn.execute(
             "INSERT INTO organize_delete_audit(organize_log_id,trigger,provider,file_id,"
             "file_name,parent_id,size,gcid,replacement_file_id,replacement_name,"
@@ -1191,7 +1159,6 @@ def update_organize_delete_audit(audit_id: int, **fields) -> bool:
     sets.append("updated_at=?")
     values.extend([now(), int(audit_id)])
     with get_conn() as conn:
-        _ensure_organize_delete_audit_schema(conn)
         cur = conn.execute(
             f"UPDATE organize_delete_audit SET {', '.join(sets)} WHERE id=?", values
         )
@@ -1200,7 +1167,6 @@ def update_organize_delete_audit(audit_id: int, **fields) -> bool:
 
 def get_organize_delete_audit(audit_id: int) -> sqlite3.Row | None:
     with get_conn() as conn:
-        _ensure_organize_delete_audit_schema(conn)
         return conn.execute(
             "SELECT * FROM organize_delete_audit WHERE id=?", (int(audit_id),)
         ).fetchone()
@@ -1218,23 +1184,7 @@ def list_organize_delete_audits(
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(max(1, min(int(limit or 100), 1000)))
     with get_conn() as conn:
-        _ensure_organize_delete_audit_schema(conn)
         return conn.execute(sql, params).fetchall()
-
-
-def _normalize_organize_position(value) -> int | None:
-    """防止外部解析器的 list/dict 等值直接进入 SQLite INTEGER 参数。"""
-    candidates = value if isinstance(value, (list, tuple, set)) else (value,)
-    for candidate in candidates:
-        if candidate in (None, "") or isinstance(candidate, bool):
-            continue
-        try:
-            number = int(float(candidate))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if number >= 0:
-            return number
-    return None
 
 
 def add_organize_log(
@@ -2564,16 +2514,6 @@ from app.repositories.strm import (  # noqa: E402,F401
 _STRM_SOURCE_SNAPSHOT_KEY = "strm.configured_sources.snapshot.v1"
 
 
-def _ensure_strm_retired_sources_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS strm_retired_sources ("
-        "source_id TEXT PRIMARY KEY,source_name TEXT DEFAULT '',"
-        "strm_root TEXT NOT NULL DEFAULT '',queued_at TEXT NOT NULL,"
-        "updated_at TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,"
-        "last_error TEXT DEFAULT '')"
-    )
-
-
 def _normalize_strm_source_snapshot(
     sources: Iterable[object],
 ) -> dict[str, str]:
@@ -2644,7 +2584,6 @@ def _apply_strm_source_reconciliation(
     active_ids: tuple[str, ...],
     retired_sources: dict[str, tuple[str, str]],
 ) -> None:
-    _ensure_strm_retired_sources_table(conn)
     if active_ids:
         placeholders = ",".join("?" for _ in active_ids)
         conn.execute(
@@ -2729,7 +2668,6 @@ def enqueue_strm_retired_source(
 ) -> None:
     timestamp = now()
     with get_conn() as conn:
-        _ensure_strm_retired_sources_table(conn)
         conn.execute(
             "INSERT INTO strm_retired_sources(source_id,source_name,strm_root,queued_at,"
             "updated_at,attempts,last_error) VALUES(?,?,?,?,?,0,'') "
@@ -2751,7 +2689,6 @@ def cancel_strm_retired_sources(source_ids: list[str]) -> int:
         return 0
     placeholders = ",".join("?" for _ in ids)
     with get_conn() as conn:
-        _ensure_strm_retired_sources_table(conn)
         cur = conn.execute(
             f"DELETE FROM strm_retired_sources WHERE source_id IN ({placeholders})", ids
         )
@@ -2760,7 +2697,6 @@ def cancel_strm_retired_sources(source_ids: list[str]) -> int:
 
 def list_strm_retired_sources() -> list[sqlite3.Row]:
     with get_conn() as conn:
-        _ensure_strm_retired_sources_table(conn)
         return conn.execute(
             "SELECT * FROM strm_retired_sources ORDER BY queued_at, source_id"
         ).fetchall()
@@ -2768,7 +2704,6 @@ def list_strm_retired_sources() -> list[sqlite3.Row]:
 
 def update_strm_retired_source_error(source_id: str, error: str) -> None:
     with get_conn() as conn:
-        _ensure_strm_retired_sources_table(conn)
         conn.execute(
             "UPDATE strm_retired_sources SET attempts=attempts+1,last_error=?,updated_at=? "
             "WHERE source_id=?",
@@ -2778,7 +2713,6 @@ def update_strm_retired_source_error(source_id: str, error: str) -> None:
 
 def delete_strm_retired_source(source_id: str) -> int:
     with get_conn() as conn:
-        _ensure_strm_retired_sources_table(conn)
         cur = conn.execute(
             "DELETE FROM strm_retired_sources WHERE source_id=?", (str(source_id),)
         )
@@ -4465,7 +4399,6 @@ def add_agent_action_history(
     started = str(started_at or finished).strip()
 
     def write(conn: sqlite3.Connection) -> int:
-        _ensure_agent_action_history_schema(conn)
         history_id = 0
         if normalized_confirmation:
             existing = conn.execute(

@@ -1132,7 +1132,7 @@ class DownloadTracker:
         request_id = int(DownloadTracker._row_value(row, "id", 0) or 0)
         if (
             delivery_status not in {"pending", "retry_wait", "sending"}
-            or event_status not in {"completed", "failed", "manual_review"}
+            or event_status not in {"completed", "failed", "manual_review", "submitting", "submitted", "downloading"}
             or request_id <= 0
         ):
             return

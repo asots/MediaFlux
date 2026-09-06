@@ -1,12 +1,13 @@
 """Agent 会话重置/删除的统一一致性边界。"""
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any, Protocol
 
 from .effects import ConfirmationEffectPlanStore
 from .session import AgentSession
+from .session_guard import guarded_state_call, session_scope_guard
 from .state import SessionBusyError, SessionState
 
 
@@ -32,52 +33,30 @@ class AgentSessionLifecycle:
         self.effect_store = effect_store
         self.clear_provider_state = clear_provider_state
 
-    @staticmethod
-    def _scope(owner: str, session_id: str) -> tuple[str, str]:
-        owner_key = str(owner or "").strip()
-        session_key = str(session_id or "").strip()
-        if not owner_key or not session_key:
-            raise ValueError("Agent 会话 scope 无效")
-        return owner_key, session_key
-
     async def _invalidate(self, *, owner: str, session_id: str) -> None:
-        await asyncio.to_thread(
-            self.effect_store.revoke_session,
-            owner=owner,
-            session_id=session_id,
-        )
-        await asyncio.to_thread(
-            self.clear_provider_state,
-            owner=owner,
-            session_id=session_id,
-        )
+        await guarded_state_call(owner, session_id, partial(
+            self.effect_store.revoke_session, owner=owner, session_id=session_id,
+        ))
+        await guarded_state_call(owner, session_id, partial(
+            self.clear_provider_state, owner=owner, session_id=session_id,
+        ))
+
+    async def _change[T](
+        self, change: Callable[..., Awaitable[T]], owner: str, session_id: str,
+    ) -> T:
+        owner_key, session_key = str(owner or "").strip(), str(session_id or "").strip()
+        with session_scope_guard(owner_key, session_key):
+            async with self.session._start_lock:
+                if await self.session.coordinator.has_protected_turn(
+                    owner=owner_key, session_id=session_key,
+                ):
+                    raise SessionBusyError("confirmed effect is executing")
+                await self.session.cancel(owner=owner_key, session_id=session_key)
+                await self._invalidate(owner=owner_key, session_id=session_key)
+                return await change(owner=owner_key, session_id=session_key)
 
     async def reset(self, *, owner: str, session_id: str) -> SessionState:
-        owner_key, session_key = self._scope(owner, session_id)
-        async with self.session._start_lock:
-            if await self.session.coordinator.has_protected_turn(
-                owner=owner_key,
-                session_id=session_key,
-            ):
-                raise SessionBusyError("confirmed effect is executing")
-            await self.session.cancel(owner=owner_key, session_id=session_key)
-            await self._invalidate(owner=owner_key, session_id=session_key)
-            return await self.store.reset_session(
-                owner=owner_key,
-                session_id=session_key,
-            )
+        return await self._change(self.store.reset_session, owner, session_id)
 
     async def delete(self, *, owner: str, session_id: str) -> bool:
-        owner_key, session_key = self._scope(owner, session_id)
-        async with self.session._start_lock:
-            if await self.session.coordinator.has_protected_turn(
-                owner=owner_key,
-                session_id=session_key,
-            ):
-                raise SessionBusyError("confirmed effect is executing")
-            await self.session.cancel(owner=owner_key, session_id=session_key)
-            await self._invalidate(owner=owner_key, session_id=session_key)
-            return await self.store.delete_session(
-                owner=owner_key,
-                session_id=session_key,
-            )
+        return await self._change(self.store.delete_session, owner, session_id)

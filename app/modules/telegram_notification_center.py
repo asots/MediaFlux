@@ -356,6 +356,30 @@ def _dispatch_item(item: dict) -> bool:
         )
         return False
 
+    if str(item.get("topic") or "") == NotificationTopic.DOWNLOAD.value:
+        try:
+            from app.modules.telegram_download_lifecycle import download_notification_obsolescence
+
+            stale = download_notification_obsolescence(str(item.get("thread_key") or ""), event)
+        except Exception as exc:
+            retry_notification(
+                notification_id, lease_generation=generation, claimed_revision=claimed_revision,
+                error=f"DownloadStateUnavailable:{type(exc).__name__}",
+            )
+            return False
+        if stale == "cancelled":
+            suppress_notification(
+                notification_id, lease_generation=generation, claimed_revision=claimed_revision,
+                reason="DownloadRequestCancelled",
+            )
+            return True
+        if stale == "stale":
+            retry_notification(
+                notification_id, lease_generation=generation, claimed_revision=claimed_revision,
+                error="AwaitingDownloadStateRefresh", retry_after_seconds=1,
+            )
+            return False
+
     chat_id = str(item.get("chat_id") or "")
     message_id = int(item.get("message_id") or 0)
     outcome: TelegramSendResult

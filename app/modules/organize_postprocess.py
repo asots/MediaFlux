@@ -8,6 +8,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.modules.media_identity import normalize_media_number as normalize_media_number
+
 
 SUBTITLE_EXTS = frozenset({"srt", "ass", "ssa", "sup", "vtt", "sub", "idx"})
 
@@ -90,21 +92,6 @@ def replacement_delete_block_reason(
     if int(expected_new.size or 0) > 0 and int(new_detail.size or 0) != int(expected_new.size or 0):
         return "替换文件 size 不一致，禁止将旧文件移入回收站"
     return ""
-
-
-def normalize_media_number(value: object) -> int | None:
-    """把外部解析器的季集值收敛为 SQLite 可绑定标量。"""
-    candidates = value if isinstance(value, (list, tuple, set)) else (value,)
-    for candidate in candidates:
-        if candidate in (None, "") or isinstance(candidate, bool):
-            continue
-        try:
-            number = int(float(candidate))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if number >= 0:
-            return number
-    return None
 
 
 def resolved_plan_position(

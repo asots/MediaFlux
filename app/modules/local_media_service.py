@@ -1735,6 +1735,10 @@ class LocalMediaService:
         task = db.get_local_media_task(task_id, owner=owner)
         if task is None:
             raise LocalMediaServiceError("本地媒体任务不存在")
+        # 位于 writer 内且在异常持久化范围外：重复投递不得覆盖完成态，
+        # 更不能把原路径后来出现的新媒体当作旧任务再次执行。
+        if task.status == "completed":
+            raise LocalMediaServiceError("本地媒体任务已完成，请创建新任务")
         source = db.get_local_media_source(task.source_id, owner=owner)
         if source is None:
             raise LocalMediaServiceError("本地媒体来源不存在")

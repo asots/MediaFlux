@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from app.agent.confirmation import ConfirmationStore
@@ -12,7 +13,10 @@ from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.state import (
+    CancellationToken, InMemorySessionStateStore, SessionBusyError,
+    StalePublicationError, StateUpdate,
+)
 from tests.support import isolated_test_database
 
 
@@ -49,18 +53,33 @@ class ConfirmationSessionPointerTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_old_confirmation_retains_current_ticket_and_result_history(self):
         for kind in ("memory", "sqlite"):
             with self.subTest(store=kind):
-                session, context, old, execute = await self.fixture(kind)
+                session, context, previous, execute = await self.fixture(kind)
+                events = [e async for e in session.confirm(owner=context.owner,
+                    session_id=context.session_id, plan_id=previous)]
+                self.assertEqual(events[-1].type.value, "turn.completed")
+                history = (await session.state_store.load(owner=context.owner,
+                    session_id=context.session_id)).conversation
+                self.assertTrue(history)  # 真实确认产生的已有可信回执，不用失败文本充数。
+                execute.reset_mock()
+                lease, _ = await session.state_store.begin_turn(owner=context.owner,
+                    session_id=context.session_id, request_id="next-prepare")
+                context = replace(context, lease=lease, turn_id=lease.turn_id, request_id=lease.request_id)
+                old = await session.pipeline.execute("downloads.submit", {}, context=context)
                 new = await session.pipeline.execute("downloads.submit", {}, context=context)
                 events = [e async for e in session.confirm(owner=context.owner,
-                    session_id=context.session_id, plan_id=old)]
+                    session_id=context.session_id, plan_id=old.effect_plan.plan_id)]
                 state = await session.state_store.load(owner=context.owner, session_id=context.session_id)
                 self.assertEqual(state.pending_effect_plan_id, new.effect_plan.plan_id)
                 self.assertEqual(events[-1].type.value, "turn.failed")
-                self.assertTrue(state.conversation)
+                self.assertEqual(state.conversation, history)
                 execute.assert_not_called()
-                claimed = session.pipeline.effect_store.claim(owner=context.owner, session_id=context.session_id,
-                    generation=context.lease.generation, plan_id=new.effect_plan.plan_id)
-                self.assertEqual(claimed.plan_id, new.effect_plan.plan_id)
+                events = [e async for e in session.confirm(owner=context.owner,
+                    session_id=context.session_id, plan_id=new.effect_plan.plan_id)]
+                self.assertEqual(events[-1].type.value, "turn.completed")
+                self.assertEqual(execute.call_count, 1)
+                state = await session.state_store.load(owner=context.owner, session_id=context.session_id)
+                self.assertEqual(state.conversation[:len(history)], history)
+                self.assertGreater(len(state.conversation), len(history))
 
     async def test_same_generation_replacement_at_terminal_write_is_not_erased(self):
         for kind in ("memory", "sqlite"):
@@ -71,15 +90,34 @@ class ConfirmationSessionPointerTests(unittest.IsolatedAsyncioTestCase):
 
                 async def commit(lease, **kwargs):
                     if kwargs.get("conversation") and not replacement:
-                        new = await session.pipeline.execute("downloads.submit", {}, context=context)
-                        replacement.append(new.effect_plan.plan_id)
+                        # A4 有意禁止旧读上下文在确认持锁期再预检。拒绝不能遮蔽成功回执。
+                        with self.assertRaises(SessionBusyError):
+                            await session.pipeline.execute("downloads.submit", {}, context=context)
+                        # 单独注入已经持久化的新票据/指针，保留原子 clear_if_equals 的
+                        # 同 generation 验收；不把拒绝的旧预检冒充成功替换。
+                        new = session.pipeline.effect_store.freeze(owner=context.owner,
+                            session_id=context.session_id, generation=lease.generation,
+                            tool_name="downloads.submit", effect=ToolEffect.WRITE, arguments={},
+                            prepared=PreparedEffect(preview={"summary": "next"}, snapshot_fingerprint="stable"))
+                        await original(lease, updates=(StateUpdate("pending_effect_plan_id", new.plan_id),))
+                        replacement.append(new.plan_id)
                     return await original(lease, **kwargs)
 
                 with patch.object(session.state_store, "commit", side_effect=commit):
                     events = [e async for e in session.confirm(owner=context.owner,
                         session_id=context.session_id, plan_id=old)]
                 state = await session.state_store.load(owner=context.owner, session_id=context.session_id)
+                self.assertEqual(len(replacement), 1)
                 self.assertEqual(state.pending_effect_plan_id, replacement[0])
                 self.assertEqual(events[-1].type.value, "turn.completed")
                 self.assertEqual(execute.call_count, 1)
                 self.assertTrue(state.conversation)
+                with self.assertRaises(StalePublicationError):
+                    await original(context.lease, conversation=[], updates=(
+                        StateUpdate("pending_effect_plan_id", old, mode="clear_if_equals"),))
+                latest = await session.state_store.load(owner=context.owner, session_id=context.session_id)
+                self.assertEqual(latest.conversation, state.conversation)
+                self.assertEqual(latest.pending_effect_plan_id, replacement[0])
+                claimed = session.pipeline.effect_store.claim(owner=context.owner,
+                    session_id=context.session_id, generation=context.lease.generation, plan_id=replacement[0])
+                self.assertEqual(claimed.plan_id, replacement[0])

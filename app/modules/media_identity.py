@@ -1,4 +1,4 @@
-"""跨入口共享的可信媒体身份键。"""
+"""跨入口共享的媒体身份键与季集标量规范化。"""
 from __future__ import annotations
 
 import re
@@ -49,3 +49,18 @@ def parse_episode_label(value: object, *, default_season: int = 1) -> tuple[int,
     if not 0 <= season <= 100 or not 1 <= episode <= 9999:
         return None
     return season, episode
+
+
+def normalize_media_number(value: object) -> int | None:
+    """把外部解析器的季集值收敛为 SQLite 可绑定标量。"""
+    candidates = value if isinstance(value, (list, tuple, set)) else (value,)
+    for candidate in candidates:
+        if candidate in (None, "") or isinstance(candidate, bool):
+            continue
+        try:
+            number = int(float(candidate))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if number >= 0:
+            return number
+    return None

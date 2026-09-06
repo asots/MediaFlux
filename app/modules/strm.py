@@ -34,6 +34,7 @@ import requests
 from urllib3.util import Retry
 
 from app import database as db
+from app.repositories.strm import resolve_strm_failure_with_refresh
 from app.config import get, get_int
 from app.clients.guangya import (
     DirectoryEntryLimitError, GuangYaClient, GuangYaFile, close_guangya_client,
@@ -3009,16 +3010,32 @@ def _process_claimed_strm_failures(
     progress: _BoundedProgress,
     progress_offset: int,
     progress_total: int,
+    should_stop: Callable[[], bool] | None = None,
+    index_maps: dict | None = None,
 ) -> None:
     """处理已 claim 的失败项；扫描结果可由单选或“全部”重试共享。"""
     located = lookup.located
     base_url = runtime["base_url"]
     strm_root = runtime["strm_root"]
-    video_index_maps: dict[str, tuple[dict[str, object], dict[str, dict[str, object]]]] = {}
-    metadata_index_maps: dict[str, tuple[dict[str, object], dict[str, dict[str, object]]]] = {}
+    # “全部”重试跨 claim 分页共享，避免每 1000 项重新全读来源索引。
+    index_maps = {} if index_maps is None else index_maps
     for completed, row in enumerate(rows, 1):
         failure_id = int(row["id"])
         try:
+            # 扫描已找到的对象也受取消约束；停止后释放本批 claim，
+            # 保留已提交项的 ACK/刷新，不开启后续文件安装。
+            if result["stopped"] or (should_stop and should_stop()):
+                result["stopped"] = True
+                result["stop_stage"] = result["stop_stage"] or "retry"
+                if not db.release_strm_failure_retry(
+                    failure_id,
+                    error=("STRM 重试扫描已停止，尚未确认云端对象状态"
+                           if result["stop_stage"] == "scan" else "STRM 失败重试已停止"),
+                    expected_status="retrying",
+                ):
+                    raise RuntimeError("STRM deferred 状态已变化，拒绝覆盖")
+                result["deferred"] += 1
+                continue
             resolved = located.get(str(row["file_id"]))
             if resolved is None:
                 if lookup.scan_incomplete or lookup.stopped:
@@ -3055,12 +3072,13 @@ def _process_claimed_strm_failures(
                 target = _require_target_within_root(target, strm_root)
                 if action == "generate":
                     source_key = source["source_key"]
-                    maps = video_index_maps.get(source_key)
+                    maps = index_maps.get(source_key)
                     if maps is None:
                         maps = _build_video_index_maps(db.list_strm_index(source_key))
-                        video_index_maps[source_key] = maps
+                        index_maps[source_key] = maps
                     existing_by_id, existing_by_path = maps
-                    _cleaned, installed_fingerprint = _install_video_candidate(
+                    current_before_install = existing_by_id.get(str(file.file_id))
+                    cleaned, installed_fingerprint = _install_video_candidate(
                         file, rel_dir, target, base_url, strm_root, source_key,
                         existing_by_id, existing_by_path,
                     )
@@ -3073,25 +3091,47 @@ def _process_claimed_strm_failures(
                     if not url:
                         raise RuntimeError("无法获取元数据下载直链")
                     source_key = source["metadata_source_key"]
-                    maps = metadata_index_maps.get(source_key)
+                    maps = index_maps.get(source_key)
                     if maps is None:
                         maps = _build_video_index_maps(db.list_strm_index(source_key))
-                        metadata_index_maps[source_key] = maps
+                        index_maps[source_key] = maps
                     existing_by_id, existing_by_path = maps
-                    _install_metadata_candidate(
+                    current_before_install = existing_by_id.get(str(file.file_id))
+                    # 安装器只需当前 file_id 与目标路径所有者，不逐项复制/扫描
+                    # 全来源索引；仍保留同路径多所有者的冲突与回滚语义。
+                    related = dict(existing_by_path.get(str(target), {}))
+                    if current_before_install is not None:
+                        related[str(file.file_id)] = current_before_install
+                    cleaned = _install_metadata_candidate(
                         file, rel_dir, target, strm_root, source_key,
-                        list(existing_by_id.values()), url,
+                        list(related.values()), url, should_stop=should_stop,
                     )
                     _update_video_index_snapshot(
                         existing_by_id, existing_by_path, file, target
                     )
                 else:
                     raise ValueError("未知 STRM 重试动作")
-                if not db.resolve_strm_failure(
-                    failure_id, expected_status="retrying"
+                refresh_paths = [str(target)]
+                if cleaned:
+                    previous = current_before_install
+                    if previous:
+                        refresh_paths.append(str(_row_field(previous, "strm_path", "")))
+                if not resolve_strm_failure_with_refresh(
+                    failure_id,
+                    refresh_paths if runtime.get("media_server_refresh", True) else [],
+                    allow_emby=bool(runtime.get("allow_emby", True)),
+                    expected_status="retrying",
                 ):
                     raise RuntimeError("STRM 失败项状态已变化，拒绝覆盖")
                 result["resolved"] += 1
+            except _STRMStopped as exc:
+                result["stopped"] = True
+                result["stop_stage"] = "retry"
+                if not db.release_strm_failure_retry(
+                    failure_id, error=exc, expected_status="retrying",
+                ):
+                    raise RuntimeError("STRM deferred 状态已变化，拒绝覆盖")
+                result["deferred"] += 1
             except Exception as exc:
                 if not db.update_strm_failure_retry(
                     failure_id, source_id=source["id"],
@@ -3157,6 +3197,7 @@ def _retry_strm_failures_locked(
             progress=progress,
             progress_offset=0,
             progress_total=len(rows),
+            should_stop=should_stop,
         )
         return result
 
@@ -3242,6 +3283,7 @@ def retry_all_strm_failures(
             progress = _BoundedProgress(on_progress)
             total = len(snapshot)
             progress.emit("retry", 0, total, "重试失败项")
+            index_maps: dict = {}
             for offset in range(0, total, 1000):
                 batch = snapshot[offset:offset + 1000]
                 rows = db.claim_strm_failures(
@@ -3258,6 +3300,8 @@ def retry_all_strm_failures(
                     progress=progress,
                     progress_offset=offset,
                     progress_total=total,
+                    should_stop=should_stop,
+                    index_maps=index_maps,
                 )
                 progress.emit(
                     "retry",

@@ -9,6 +9,9 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
+from app import database as db
+from tests.support import isolated_test_database
+
 from app.agent import guangya_fs_change_actions as change_actions
 from app.agent import guangya_workspace_actions as workspace_actions
 from app.agent.errors import AgentToolError
@@ -118,6 +121,8 @@ class FakeGatewayClient:
 
 class GuangYaFSGatewayTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(isolated_test_database())
+        self.enterContext(mock.patch("socket.socket.connect", side_effect=AssertionError("禁止外联")))
         workspace_actions.reset_guangya_workspace_context_for_tests()
         change_actions.reset_guangya_fs_change_context_for_tests()
         self.temp = tempfile.TemporaryDirectory()
@@ -511,6 +516,10 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(result["stats"]["moved"], 1)
         self.assertEqual(result["stats"]["trashed"], 1)
         self.assertEqual(result["stats"]["created"], 1)
+        audits = db.list_organize_delete_audits()
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0]["status"], "success")
+        self.assertEqual(audits[0]["file_id"], "trash")
         self.assertEqual(
             [item.name for item in client.directories["source"]], ["ABC.mp4"]
         )

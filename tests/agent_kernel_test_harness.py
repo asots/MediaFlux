@@ -26,7 +26,7 @@ from app.agent.kernel.pipeline import (
 )
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore, SessionBusyError
 from app.agent.models import ToolContext
 
 
@@ -212,6 +212,9 @@ class KernelDomainTestHarness:
         context = await self._context(owner, begin=False)
         try:
             result = await self.pipeline.execute_confirmed(plan_id, context=context)
+        except SessionBusyError as exc:
+            # 与生产 Session 的 effect_in_progress 对齐；未领取的票据可稍后重试。
+            raise AgentToolError("另一项会话操作正在执行，请稍后重试。", code="effect_in_progress") from exc
         except ToolPipelineError as exc:
             if exc.code in {
                 "confirmation_invalid",

@@ -22,11 +22,13 @@ from .effects import (
     PreparedEffect,
 )
 from .projection import DefaultProjector, ReferenceValue, ToolOutcome
+from .session_guard import guarded_state_call, session_scope_guard
 from .references import InMemoryReferenceStore, ReferenceError, ReferenceStore
 from .state import (
     CancellationToken,
     PublicationLease,
     SessionStateStore,
+    SessionBusyError,
     StalePublicationError,
     StateUpdate,
 )
@@ -43,6 +45,10 @@ class ToolPipelineError(RuntimeError):
     def __init__(self, message: str, *, code: str = "tool_failed") -> None:
         super().__init__(message)
         self.code = code
+
+
+class ConfirmationClaimError(ToolPipelineError):
+    """未认领票据的请求错误，不代表一次已确认操作的业务终态。"""
 
 
 ProgressSink = Callable[[Mapping[str, Any]], Awaitable[None]]
@@ -269,11 +275,19 @@ def _validate_json_schema(
             _validate_json_schema(item, schema["items"], path=f"{path}[{index}]")
 
 
-async def _invoke(handler: Callable[..., Any], *args: Any) -> Any:
+async def _invoke(
+    handler: Callable[..., Any], *args: Any, protection: ToolCallContext | None = None,
+) -> Any:
     try:
         if inspect.iscoroutinefunction(handler):
             return await handler(*args)
-        value = await asyncio.to_thread(handler, *args)
+        value = (
+            await guarded_state_call(
+                protection.owner, protection.session_id, handler, *args,
+                kind="effect", complete_on_cancel=True,
+            )
+            if protection is not None else await asyncio.to_thread(handler, *args)
+        )
         if inspect.isawaitable(value):
             return await value
         return value
@@ -331,44 +345,13 @@ class ToolPipeline:
     def _effect_prepare_failed(
         self, *, prepared: PreparedEffect, context: ToolCallContext
     ) -> None:
-        try:
-            self.effect_lifecycle.prepare_failed(
-                prepared=prepared,
-                context=context,
-            )
-        except Exception:  # noqa: BLE001 - 清理失败不得覆盖原始错误
-            return
+        self._notify_effect("prepare_failed", prepared=prepared, context=context)
 
-    def _effect_completed(self, plan: EffectPlan, value: Any, elapsed_ms: int) -> None:
+    def _notify_effect(self, method: str, **payload: Any) -> None:
+        """终态钩子共享容错边界；辅助审计/清理故障不覆写执行事实。"""
         try:
-            self.effect_lifecycle.completed(
-                plan=plan,
-                value=value,
-                elapsed_ms=elapsed_ms,
-            )
-        except Exception:  # noqa: BLE001 - audit hooks may not change effect outcome
-            return
-
-    def _effect_failed(self, plan: EffectPlan, code: str, elapsed_ms: int) -> None:
-        try:
-            self.effect_lifecycle.failed(
-                plan=plan,
-                code=code,
-                elapsed_ms=elapsed_ms,
-            )
-        except Exception:  # noqa: BLE001 - audit hooks may not mask domain failure
-            return
-
-    def _effect_interrupted(self, plan: EffectPlan) -> None:
-        try:
-            self.effect_lifecycle.interrupted(plan=plan)
-        except Exception:  # noqa: BLE001 - audit hooks may not mask interruption
-            return
-
-    def _effect_cancelled(self, plan: EffectPlan) -> None:
-        try:
-            self.effect_lifecycle.cancelled(plan=plan)
-        except Exception:  # noqa: BLE001 - 清理失败不得改变取消结果
+            getattr(self.effect_lifecycle, method)(**payload)
+        except Exception:  # noqa: BLE001 - hooks cannot change authoritative outcome
             return
 
     async def _discard_frozen_effect(
@@ -391,7 +374,7 @@ class ToolPipeline:
         except Exception:  # noqa: BLE001 - 原始发布失败仍是主错误
             cancelled = None
         if cancelled is not None:
-            self._effect_cancelled(cancelled)
+            self._notify_effect("cancelled", plan=cancelled)
         else:
             self._effect_prepare_failed(prepared=prepared, context=context)
 
@@ -507,52 +490,63 @@ class ToolPipeline:
             prepared=prepared_value,
             context=context,
         )
-        if not await self.state_store.is_current(context.lease):
-            self._effect_prepare_failed(prepared=prepared_value, context=context)
-            raise StalePublicationError("turn lost publication authority")
         try:
-            plan = await asyncio.to_thread(
-                self.effect_store.freeze,
-                owner=context.owner,
-                session_id=context.session_id,
-                generation=context.lease.generation,
-                tool_name=tool.name,
-                effect=tool.effect,
-                arguments=normalized,
-                prepared=prepared_value,
-            )
-        except BaseException:
+            with session_scope_guard(context.owner, context.session_id):
+                if not await self.state_store.is_current(context.lease):
+                    self._effect_prepare_failed(prepared=prepared_value, context=context)
+                    raise StalePublicationError("turn lost publication authority")
+                try:
+                    plan = await asyncio.to_thread(
+                        self.effect_store.freeze,
+                        owner=context.owner,
+                        session_id=context.session_id,
+                        generation=context.lease.generation,
+                        tool_name=tool.name,
+                        effect=tool.effect,
+                        arguments=normalized,
+                        prepared=prepared_value,
+                    )
+                except BaseException:
+                    self._effect_prepare_failed(prepared=prepared_value, context=context)
+                    raise
+                try:
+                    preview_outcome = await self._materialize_refs(
+                        self.projector.project(prepared_value.preview), context=context
+                    )
+                    updates = tuple(preview_outcome.state_updates) + (
+                        StateUpdate("pending_effect_plan_id", plan.plan_id),
+                    )
+                    if tool.name == "ingest.submit" and raw_arguments.get("source_type") == RESOURCE_KIND:
+                        updates += (StateUpdate("metadata.ux_candidate_plan", {
+                            "plan_id": plan.plan_id, "ref": raw_arguments.get("resource_candidates_ref"),
+                        }),)
+                    outcome = replace(preview_outcome, state_updates=updates, effect_plan=plan)
+                    await self._commit_updates(context.lease, updates)
+                except BaseException:
+                    await self._discard_frozen_effect(
+                        plan=plan,
+                        prepared=prepared_value,
+                        context=context,
+                    )
+                    raise
+                return PipelineResult(
+                    tool=tool,
+                    arguments=normalized,
+                    outcome=outcome,
+                    effect_plan=plan,
+                    elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+                )
+        except SessionBusyError:
             self._effect_prepare_failed(prepared=prepared_value, context=context)
             raise
-        try:
-            preview_outcome = await self._materialize_refs(
-                self.projector.project(prepared_value.preview), context=context
-            )
-            updates = tuple(preview_outcome.state_updates) + (
-                StateUpdate("pending_effect_plan_id", plan.plan_id),
-            )
-            if tool.name == "ingest.submit" and raw_arguments.get("source_type") == RESOURCE_KIND:
-                updates += (StateUpdate("metadata.ux_candidate_plan", {
-                    "plan_id": plan.plan_id, "ref": raw_arguments.get("resource_candidates_ref"),
-                }),)
-            outcome = replace(preview_outcome, state_updates=updates, effect_plan=plan)
-            await self._commit_updates(context.lease, updates)
-        except BaseException:
-            await self._discard_frozen_effect(
-                plan=plan,
-                prepared=prepared_value,
-                context=context,
-            )
-            raise
-        return PipelineResult(
-            tool=tool,
-            arguments=normalized,
-            outcome=outcome,
-            effect_plan=plan,
-            elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
-        )
 
     async def execute_confirmed(
+        self, plan_id: str, *, context: ToolCallContext,
+    ) -> PipelineResult:
+        with session_scope_guard(context.owner, context.session_id, kind="effect"):
+            return await self._execute_confirmed_scoped(plan_id, context=context)
+
+    async def _execute_confirmed_scoped(
         self,
         plan_id: str,
         *,
@@ -560,7 +554,8 @@ class ToolPipeline:
     ) -> PipelineResult:
         started = time.monotonic()
         context.cancellation.raise_if_cancelled()
-        if not await self.state_store.is_current(context.lease):
+        current = await self.state_store.load(owner=context.owner, session_id=context.session_id)
+        if current.generation != context.lease.generation:
             raise StalePublicationError("turn lost publication authority")
         try:
             plan = await asyncio.to_thread(
@@ -573,12 +568,18 @@ class ToolPipeline:
         except ToolPipelineError:
             raise
         except Exception as exc:
-            raise ToolPipelineError(
+            raise ConfirmationClaimError(
                 "确认计划无效、已过期或已被使用",
                 code="confirmation_invalid",
             ) from exc
 
         try:
+            # 只有真实领到票据才接管同 generation 的发布权。该标记在原状态
+            # JSON 内持久化，使锁释放/进程结束后旧读回合仍无法覆盖确认回执。
+            await self.state_store.commit(context.lease, updates=(StateUpdate(
+                "metadata.confirmed_publication",
+                {"generation": context.lease.generation, "turn_id": context.lease.turn_id},
+            ),))
             try:
                 tool = self.catalog.get(plan.tool_name)
             except KeyError as exc:
@@ -614,6 +615,7 @@ class ToolPipeline:
                 resolved_arguments,
                 plan.snapshot_fingerprint,
                 context,
+                protection=context,
             )
             if tool.verify is not None:
                 verified = await _invoke(
@@ -621,6 +623,7 @@ class ToolPipeline:
                     resolved_arguments,
                     value,
                     context,
+                    protection=context,
                 )
                 if verified is False:
                     raise ToolPipelineError(
@@ -629,20 +632,19 @@ class ToolPipeline:
                 if verified is not True and verified is not None:
                     value = verified
         except ToolPipelineError as exc:
-            self._effect_failed(
-                plan,
-                exc.code,
-                max(0, int((time.monotonic() - started) * 1000)),
+            self._notify_effect(
+                "failed", plan=plan, code=exc.code,
+                elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
             )
             raise
         except BaseException:
-            self._effect_interrupted(plan)
+            self._notify_effect("interrupted", plan=plan)
             raise
 
         elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
         # 写操作与写后验证已取得可信终态。先收束审计并推进全局运行代次；
         # 后续 DTO 投影、引用或会话提交失败，不得把已发生的副作用伪装成未执行。
-        self._effect_completed(plan, value, elapsed_ms)
+        self._notify_effect("completed", plan=plan, value=value, elapsed_ms=elapsed_ms)
         outcome = await self._materialize_refs(
             self.projector.project(value), context=context
         )
@@ -673,7 +675,7 @@ class ToolPipeline:
             plan_id=plan_id,
         )
         if cancelled_plan is not None:
-            self._effect_cancelled(cancelled_plan)
+            self._notify_effect("cancelled", plan=cancelled_plan)
         # 过期的当前票据也应清理，但旧票据不能清掉新 pending。
         # 比较在 store.commit 原子应用时执行，而不是先 load 再无条件写。
         await self._commit_updates(

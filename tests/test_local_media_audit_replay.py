@@ -1,0 +1,47 @@
+"""本地媒体终态不得因重复执行被覆写或再次消费同路径的新文件。"""
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from app import database as db
+from app.modules.local_media_service import LocalMediaService, LocalMediaServiceError
+from app.modules.organize import OrganizeRules
+from app.modules.scraper import MatchResult
+from tests.support import isolated_test_database
+from tests.test_local_media_service import FakeScraper
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_completed_task_replay_preserves_result_and_new_source(tmp_path, recreate):
+    with isolated_test_database(), patch("socket.socket.connect", side_effect=AssertionError("network forbidden")):
+        source_root = tmp_path / "incoming"
+        target_root = tmp_path / "library"
+        source_root.mkdir(); target_root.mkdir()
+        incoming = source_root / "Movie.2026.mkv"
+        incoming.write_bytes(b"first-media")
+        source_id = db.create_local_media_source(name="S", qb_profile="", qb_path_prefix="", local_root=str(source_root), owner="admin")
+        db.upsert_local_library_target(source_id, "movie", str(target_root), owner="admin")
+        service = LocalMediaService(scraper=FakeScraper(MatchResult(tmdb_id="1", title="Movie", year="2026", media_type="movie", confidence=1.0)))
+        rules = OrganizeRules(region_split=False, year_split=False, naming_scope="both", conflict_strategy=3, emby_refresh=False, media_probe_enabled=False)
+        with patch("app.modules.local_media_service.OrganizeRules.from_config", return_value=rules):
+            inspection = service.inspect_source("admin", source_id, incoming)
+            preview = service.preview("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie")
+            task_id = service.create_manual_task("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie", rules_snapshot=preview["rules_snapshot"])
+            assert db.claim_local_media_task(task_id, owner="admin")
+            first = service.execute_task("admin", task_id)
+            assert first["status"] == "completed"
+            target = Path(first["moved"][0])
+            before = db.get_local_media_task(task_id, owner="admin")
+            if recreate:
+                incoming.write_bytes(b"new-distinct-media")
+            try:
+                service.execute_task("admin", task_id)
+            except LocalMediaServiceError:
+                pass  # 显式拒绝与幂等返回均可，但必须保持已完成结果。
+            after = db.get_local_media_task(task_id, owner="admin")
+            assert after.status == "completed", after
+            assert after.version == before.version
+            assert target.read_bytes() == b"first-media"
+            if recreate:
+                assert incoming.read_bytes() == b"new-distinct-media"
+        service.close()

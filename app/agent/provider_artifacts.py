@@ -6,6 +6,7 @@ import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
 
 from app.agent.provider_models import ProviderGatewayError
@@ -100,6 +101,7 @@ class ProviderArtifactStore:
         profile_ref: str,
         operation: str,
         data: dict[str, Any],
+        max_items: int = 32,
     ) -> tuple[str, dict[str, Any]]:
         if not owner:
             raise ProviderGatewayError("Provider 查询需要已登录会话", code="precondition_failed")
@@ -108,23 +110,44 @@ class ProviderArtifactStore:
         objects: dict[str, _ProviderObject] = {}
         allow_open_url = str(provider or "").strip().casefold() == "media"
 
-        def visit(value: Any) -> Any:
-            if isinstance(value, list):
-                return [visit(item) for item in value]
+        item_limit = max(1, min(int(max_items), 500))
+        projection_truncated = False
+
+        def visit(value: Any, depth: int = 0) -> Any:
+            nonlocal projection_truncated
+            if depth > 4:
+                if value is not None:
+                    projection_truncated = True
+                return None
+            if isinstance(value, (list, tuple)):
+                if len(value) > item_limit:
+                    projection_truncated = True
+                return [visit(item, depth + 1) for item in value[:item_limit]]
             if not isinstance(value, dict):
                 return value
             raw_id = str(value.get("__object_id") or "").strip()
             kind = str(value.get("__object_kind") or "item").strip().casefold()
+            if len(value) > 32:
+                projection_truncated = True
             projected = {
-                str(key): visit(item)
-                for key, item in value.items()
+                str(key): visit(item, depth + 1)
+                for key, item in islice(value.items(), 32)
                 if key not in {"__object_id", "__object_kind"}
             }
+            # count 若明确对应本层被裁剪的集合，保留来源计数并改为实际
+            # 展示数量；total 仍是上游库存总量，不能据展示上限推断缺集。
+            for key, item in islice(value.items(), 32):
+                if isinstance(item, (list, tuple)) and len(item) > item_limit:
+                    projected["truncated"] = True
+                    if type(value.get("count")) is int and value["count"] == len(item):
+                        projected["source_count"] = value["count"]
+                        projected["count"] = item_limit
             if raw_id:
                 object_ref = self._ref("PO")
                 projected["object_ref"] = object_ref
                 safe_snapshot = project_provider_value(
                     projected,
+                    max_items=max(32, item_limit),
                     allow_open_url=allow_open_url,
                 )
                 objects[object_ref] = _ProviderObject(
@@ -137,13 +160,18 @@ class ProviderArtifactStore:
                 )
             return projected
 
-        visited = visit(deepcopy(data))
+        # 先按预算遍历再复制公开投影，不能为最终不可见的条目签发句柄。
+        visited = visit(data)
         public_data = project_provider_value(
             visited,
+            max_items=max(32, item_limit),
             allow_open_url=allow_open_url,
         )
         if not isinstance(public_data, dict):
             raise ProviderGatewayError("Provider 响应结构无效", code="invalid_response")
+        if projection_truncated:
+            public_data["projection_truncated"] = True
+            public_data["truncated"] = True
         item = _ProviderArtifact(
             artifact_ref=artifact_ref,
             owner=owner,

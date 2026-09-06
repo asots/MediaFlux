@@ -58,7 +58,8 @@ class GuangYaSubmissionOutcomeTests(unittest.TestCase):
         self.assertTrue(result["outcome_unknown"])
         self.assertTrue(result["review_required"])
         self.assertEqual(finalize.call_args.kwargs["gy_status"], "outcome_unknown")
-        self.assertEqual(finalize.call_args.kwargs["status"], "submitted")
+        # 执行器只提交后端事实，根状态由仓储事务中的唯一归并逻辑返回。
+        self.assertNotIn("status", finalize.call_args.kwargs)
         self.assertNotIn("completed_at", finalize.call_args.kwargs)
         self.assertEqual(json.loads(finalize.call_args.kwargs["gy_task_ids"]), ["gy-accepted"])
         self.assertEqual(add_log.call_args.kwargs["status"], "outcome_unknown")

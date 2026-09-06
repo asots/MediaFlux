@@ -1,6 +1,8 @@
 """统一 Telegram 主动通知仓储；schema 仅由 database.init_db 初始化和迁移。"""
 from __future__ import annotations
 
+import sqlite3
+
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -151,6 +153,31 @@ def get_notification(event_key: str) -> dict[str, Any] | None:
             (str(event_key or ""),),
         ).fetchone()
         return dict(row) if row is not None else None
+
+
+def invalidate_pending_download_notifications_conn(
+    conn: sqlite3.Connection, request_ids: list[int], *, timestamp: str,
+) -> set[int]:
+    """同业务撤销事务阻止未投递的旧快照；实际发送仍只归通知中心。
+
+    按批查询和失效，不对每个请求重新全表查询；sending/unknown
+    不能认定尚未发出，因此不重置其投递身份或自动重放。
+    """
+    threads = {f"download:{request_id}": request_id for request_id in request_ids}
+    if not threads:
+        return set()
+    placeholders = ",".join("?" for _ in threads)
+    rows = conn.execute(
+        "SELECT thread_key FROM telegram_notification_outbox WHERE topic='download' "
+        f"AND thread_key IN ({placeholders})", tuple(threads),
+    ).fetchall()
+    conn.execute(
+        "UPDATE telegram_notification_outbox SET status='suppressed',"
+        "last_error='DownloadStateChanged',updated_at=? "
+        "WHERE topic='download' AND status IN ('pending','retry_wait') "
+        f"AND thread_key IN ({placeholders})", (timestamp, *threads),
+    )
+    return {threads[str(row["thread_key"])] for row in rows}
 
 
 def claim_due_notifications(

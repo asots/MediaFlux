@@ -35,6 +35,17 @@ class OrganizePostprocessTests(unittest.TestCase):
             (2, 7),
         )
 
+    def test_database_and_postprocess_share_one_media_number_normalizer(self):
+        from app import database as db
+
+        self.assertIs(db._normalize_organize_position, normalize_media_number)
+        cases = ((None, None), ('', None), (True, None), ({'episode': 2}, None),
+                 ([None, '3.0', 4], 3), ([True, 'bad', -1], None),
+                 (0, 0), ('3.8', 3), ('inf', None), ('nan', None), ((False, '2'), 2))
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(normalize_media_number(value), expected)
+
     def test_notification_projection_has_original_shape(self):
         match = SimpleNamespace(title="Show", year="2026", media_type="tv", tmdb_id="9")
         plan = SimpleNamespace(

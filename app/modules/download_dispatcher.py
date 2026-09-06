@@ -862,106 +862,15 @@ def dispatch_missing_targets(
     if not claimed:
         return {"handled": False, "ok": False, "duplicate": True, "error": "该目标已提交或正在处理"}
 
-    title = str(row["title"] or "未命名任务")
-    source_value = str(row["source_value"] or "")
-    results: dict[str, dict[str, Any]] = {}
-    if "qb" in claimed:
-        results["qb"] = _safe_submit(
-            "qBittorrent",
-            _submit_qb,
-            row,
-            **_qb_submit_overrides(
-                save_path=qb_save_path,
-                category=qb_category,
-                runtime_config=qb_runtime_config,
-                task_id_hint=qb_task_id_hint,
-            ),
-        )
-    if "guangya" in claimed:
-        results["guangya"] = _safe_submit(
-            "光鸭云盘", _submit_guangya, row,
-            target_dir_id=gy_target_dir, target_dir_name=gy_target_name,
-        )
-    succeeded = [name for name, result in results.items() if result.get("ok")]
-    failed = [name for name, result in results.items() if not result.get("ok")]
-    updates: dict[str, Any] = {}
-    if "qb" in results:
-        updates["qb_status"] = (
-            "submitted" if results["qb"].get("ok") else
-            "outcome_unknown" if results["qb"].get("failure_code") == "qb_outcome_unknown" else
-            "failed"
-        )
-        updates["qb_task_id"] = results["qb"].get("task_id", "")
-    if "guangya" in results:
-        gy_result = results["guangya"]
-        updates["gy_status"] = _backend_submission_status("guangya", gy_result)
-        task_ids = [str(item) for item in (gy_result.get("task_ids") or []) if str(item)]
-        updates["gy_task_ids"] = json.dumps(task_ids, ensure_ascii=False)
-        updates["gy_task_id"] = task_ids[0] if task_ids else str(gy_result.get("task_id") or "")
-        updates["gy_batch_count"] = int(gy_result.get("batch_count") or len(task_ids))
-        decision = gy_result.get("decision") or {}
-        staging = gy_result.get("staging") or {}
-        updates["gy_target_dir"] = decision.get("target_dir_id", "")
-        updates["gy_target_name"] = decision.get("target_dir_name", "")
-        updates["gy_isolated"] = 1 if staging.get("isolated") else 0
-        updates["gy_staging_parent_dir"] = str(staging.get("parent_id") or "")
-        updates["gy_staging_name"] = str(staging.get("name") or "")
-        updates["gy_staging_cleanup_status"] = str(
-            staging.get("cleanup_status") or ("pending" if staging.get("isolated") and (
-                gy_result.get("ok") or gy_result.get("partial_success")
-            ) else "")
-        )
-        updates["gy_staging_cleanup_error"] = str(staging.get("cleanup_error") or "")[:500]
-        updates["gy_expected_file_count"] = max(0, int(gy_result.get("selected_count") or 0))
-        updates["gy_settle_observed_file_count"] = 0
-        updates["gy_settle_attempts"] = 0
-        updates["gy_settle_snapshot"] = ""
-        updates["gy_settle_stable_count"] = 0
-        updates["gy_selection_mode"] = str(gy_result.get("selection_mode") or "")
-        updates["gy_unverified_manifest"] = 1 if gy_result.get("unverified_manifest") else 0
-
-    current_qb = updates.get("qb_status", str(row["qb_status"] or ""))
-    current_gy = updates.get("gy_status", str(row["gy_status"] or ""))
-    statuses = [value for value in (current_qb, current_gy) if value]
-    if any(value in {"submitting", "submitted", "downloading", "outcome_unknown"} for value in statuses):
-        overall_status = "submitted"
-    elif any(value == "completed" for value in statuses):
-        overall_status = "completed"
-    else:
-        overall_status = "failed"
-    error = "; ".join(f"{name}: {results[name].get('error', '提交失败')}" for name in failed)
-    updates.update({"status": overall_status, "error": error})
-    if overall_status in {"completed", "failed"}:
-        updates["completed_at"] = db.now()
-    overall_status, late_notice = _finalize_submission_state(
-        int(request_id), list(claimed), updates
+    result = _dispatch_claimed_targets(
+        row, tuple(claimed),
+        gy_target_dir=gy_target_dir, gy_target_name=gy_target_name,
+        qb_save_path=qb_save_path, qb_category=qb_category,
+        qb_runtime_config=qb_runtime_config, qb_task_id_hint=qb_task_id_hint,
+        rss_item_id=rss_item_id, log_path=log_path,
     )
+    return {"handled": True, "duplicate": False, **result}
 
-    for source, result in results.items():
-        db.add_download_log(
-            source=source,
-            title=title,
-            path=source_value if log_path is None else str(log_path),
-            rss_item_id=rss_item_id,
-            request_id=int(request_id),
-            backend_task_id=str(result.get("task_id") or ""),
-            status=_backend_submission_status(source, result),
-            error=_submission_log_error(result, late_notice),
-        )
-    has_unknown = _submission_has_unknown(results)
-    if late_notice:
-        return {
-            "handled": True, "ok": False, "request_id": int(request_id),
-            "status": overall_status, "succeeded": succeeded, "failed": failed,
-            "results": results, "error": late_notice, "duplicate": False,
-            "outcome_unknown": True, "review_required": True, "stale_result": True,
-        }
-    return {
-        "handled": True, "ok": bool(succeeded), "request_id": int(request_id),
-        "status": overall_status, "succeeded": succeeded, "failed": failed,
-        "results": results, "error": error, "duplicate": False,
-        "outcome_unknown": has_unknown, "review_required": has_unknown,
-    }
 
 def dispatch_request(
     request_id: int,
@@ -984,10 +893,35 @@ def dispatch_request(
     if not db.claim_download_request(request_id, targets):
         return {"ok": False, "duplicate": True, "error": "该请求已提交或正在处理"}
 
+    claimed = ("qb", "guangya") if targets == "both" else (targets,)
+    return _dispatch_claimed_targets(
+        row, claimed,
+        gy_target_dir=gy_target_dir, gy_target_name=gy_target_name,
+        qb_save_path=qb_save_path, qb_category=qb_category,
+        qb_runtime_config=qb_runtime_config, qb_task_id_hint=qb_task_id_hint,
+        rss_item_id=rss_item_id, log_path=log_path,
+    )
+
+
+def _dispatch_claimed_targets(
+    row,
+    claimed_targets: tuple[str, ...],
+    *,
+    gy_target_dir: str = "",
+    gy_target_name: str = "",
+    qb_save_path: str | None = None,
+    qb_category: str | None = None,
+    qb_runtime_config: dict[str, Any] | None = None,
+    qb_task_id_hint: str = "",
+    rss_item_id: int | None = None,
+    log_path: str | None = None,
+) -> dict[str, Any]:
+    """两个认领入口共用唯一提交/结果转换/日志执行链，根状态只由仓储原子归并。"""
+    request_id = int(row["id"])
     title = str(row["title"] or "未命名任务")
     source_value = str(row["source_value"] or "")
     results: dict[str, dict[str, Any]] = {}
-    if targets in {"qb", "both"}:
+    if "qb" in claimed_targets:
         results["qb"] = _safe_submit(
             "qBittorrent",
             _submit_qb,
@@ -999,7 +933,7 @@ def dispatch_request(
                 task_id_hint=qb_task_id_hint,
             ),
         )
-    if targets in {"guangya", "both"}:
+    if "guangya" in claimed_targets:
         results["guangya"] = _safe_submit(
             "光鸭云盘", _submit_guangya, row,
             target_dir_id=gy_target_dir,
@@ -1009,17 +943,12 @@ def dispatch_request(
     succeeded = [name for name, result in results.items() if result.get("ok")]
     failed = [name for name, result in results.items() if not result.get("ok")]
     has_unknown = _submission_has_unknown(results)
-    status = "submitted" if succeeded or has_unknown else "failed"
     error = "; ".join(
         f"{name}: {results[name].get('error', '提交失败')}" for name in failed
     )
-    updates: dict[str, Any] = {"status": status, "error": error}
+    updates: dict[str, Any] = {"error": error}
     if "qb" in results:
-        updates["qb_status"] = (
-            "submitted" if results["qb"].get("ok") else
-            "outcome_unknown" if results["qb"].get("failure_code") == "qb_outcome_unknown" else
-            "failed"
-        )
+        updates["qb_status"] = _backend_submission_status("qb", results["qb"])
         updates["qb_task_id"] = results["qb"].get("task_id", "")
     if "guangya" in results:
         gy_result = results["guangya"]
@@ -1051,10 +980,8 @@ def dispatch_request(
         updates["gy_settle_stable_count"] = 0
         updates["gy_selection_mode"] = str(gy_result.get("selection_mode") or "")
         updates["gy_unverified_manifest"] = 1 if gy_result.get("unverified_manifest") else 0
-    if status == "failed":
-        updates["completed_at"] = db.now()
     status, late_notice = _finalize_submission_state(
-        request_id, list(results), updates
+        request_id, list(claimed_targets), updates
     )
 
     for source, result in results.items():

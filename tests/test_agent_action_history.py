@@ -94,9 +94,11 @@ class AgentActionHistoryCoreTests(unittest.TestCase):
                 safe_details={"nested": {"path": "/private"}},
             )
 
-    def test_first_write_repairs_missing_history_table_in_legacy_database(self):
+    def test_initialization_repairs_missing_history_table_before_first_write(self):
         with db.get_conn() as conn:
             conn.execute("DROP TABLE agent_action_history")
+        # 历史恢复统一走启动/备份恢复的正式初始化入口，CRUD 不再建表。
+        db.init_db()
         history_id = db.add_agent_action_history(
             owner_digest=OWNER_DIGEST,
             tool_name="telegram.send_test_notification",

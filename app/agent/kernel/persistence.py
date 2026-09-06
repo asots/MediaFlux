@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import hmac
@@ -21,7 +20,12 @@ from app.modules.web_secret import get_web_secret
 
 from .events import AgentEvent
 from .references import OpaqueReference, ReferenceError
+from .session_guard import guarded_state_call, session_scope_guard, session_io
 from .state import (
+    SessionBusyError,
+    SelectionInvalidError,
+    candidate_metadata_only,
+    publication_matches,
     CandidateSelectionGuard,
     PublicationLease,
     SessionState,
@@ -58,16 +62,21 @@ class SQLiteKernelStore:
         self, *, owner: str, session_id: str, request_id: str,
         selection_guard: CandidateSelectionGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
-        return await asyncio.to_thread(
-            self._begin_turn_sync,
-            owner,
-            session_id,
-            request_id,
-            selection_guard,
-        )
+        try:
+            return await guarded_state_call(
+                owner, session_id, self._begin_turn_sync,
+                owner,
+                session_id,
+                request_id,
+                selection_guard,
+            )
+        except SessionBusyError as exc:
+            if selection_guard is not None:
+                raise SelectionInvalidError("候选正在处理，请使用最新选择状态。") from exc
+            raise
 
     async def is_current(self, lease: PublicationLease) -> bool:
-        return await asyncio.to_thread(self._is_current_sync, lease)
+        return await session_io(self._is_current_sync, lease)
 
     async def commit(
         self,
@@ -76,15 +85,21 @@ class SQLiteKernelStore:
         conversation: Sequence[Mapping[str, Any]] | None = None,
         updates: Sequence[StateUpdate] = (),
     ) -> SessionState:
-        return await asyncio.to_thread(
-            self._commit_sync,
-            lease,
-            conversation,
-            tuple(updates),
-        )
+        try:
+            return await guarded_state_call(
+                lease.owner, lease.session_id, self._commit_sync,
+                lease,
+                conversation,
+                tuple(updates),
+                kind="commit",
+            )
+        except SessionBusyError as exc:
+            if candidate_metadata_only(conversation, updates):
+                raise SelectionInvalidError("选择状态正在更新，请稍后使用当前按钮。") from exc
+            raise StalePublicationError("session is protected by another operation") from exc
 
     async def load(self, *, owner: str, session_id: str) -> SessionState:
-        return await asyncio.to_thread(self._load_sync, owner, session_id)
+        return await session_io(self._load_sync, owner, session_id)
 
     async def put(
         self,
@@ -95,7 +110,7 @@ class SQLiteKernelStore:
         value: Any,
         ttl_seconds: int = 900,
     ) -> OpaqueReference:
-        return await asyncio.to_thread(
+        return await session_io(
             self._put_ref_sync,
             owner,
             session_id,
@@ -112,7 +127,7 @@ class SQLiteKernelStore:
         session_id: str,
         expected_kind: str = "",
     ) -> Any:
-        return await asyncio.to_thread(
+        return await session_io(
             self._resolve_ref_sync,
             ref,
             owner,
@@ -121,7 +136,7 @@ class SQLiteKernelStore:
         )
 
     async def append(self, event: AgentEvent, *, owner: str) -> None:
-        await asyncio.to_thread(self._append_event_sync, event, owner)
+        await session_io(self._append_event_sync, event, owner)
 
     async def list_events(
         self,
@@ -130,7 +145,7 @@ class SQLiteKernelStore:
         session_id: str,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(
+        return await session_io(
             self._list_events_sync,
             owner,
             session_id,
@@ -143,19 +158,19 @@ class SQLiteKernelStore:
         owner: str,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_sessions_sync, owner, limit)
+        return await session_io(self._list_sessions_sync, owner, limit)
 
     async def patch_session_display(
         self, *, owner: str, session_id: str, patch: Mapping[str, Any]
     ) -> dict[str, Any] | None:
         validated = session_display_patch(dict(patch))
-        return await asyncio.to_thread(self._patch_session_display_sync, owner, session_id, validated)
+        return await session_io(self._patch_session_display_sync, owner, session_id, validated)
 
     async def reset_session(self, *, owner: str, session_id: str) -> SessionState:
-        return await asyncio.to_thread(self._reset_session_sync, owner, session_id)
+        return await guarded_state_call(owner, session_id, self._reset_session_sync, owner, session_id)
 
     async def delete_session(self, *, owner: str, session_id: str) -> bool:
-        return await asyncio.to_thread(self._delete_session_sync, owner, session_id)
+        return await guarded_state_call(owner, session_id, self._delete_session_sync, owner, session_id)
 
     def _secret(self) -> bytes:
         secret = str(self._secret_provider() or "")
@@ -418,7 +433,7 @@ class SQLiteKernelStore:
         self, owner: str, session_id: str, request_id: str,
         selection_guard: CandidateSelectionGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
-        with db.get_conn() as conn:
+        with session_scope_guard(owner, session_id), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, owner, session_id)
             if selection_guard is not None:
@@ -446,10 +461,18 @@ class SQLiteKernelStore:
         owner_digest, session_digest = self._scope(lease.owner, lease.session_id)
         with db.get_conn() as conn:
             row = conn.execute(
-                "SELECT generation FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?",
+                "SELECT generation, "
+                "json_extract(CASE WHEN json_valid(state_json) THEN state_json ELSE '{}' END, "
+                "'$.metadata.confirmed_publication.generation') AS confirmed_generation, "
+                "json_extract(CASE WHEN json_valid(state_json) THEN state_json ELSE '{}' END, "
+                "'$.metadata.confirmed_publication.turn_id') AS confirmed_turn "
+                "FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?",
                 (owner_digest, session_digest),
             ).fetchone()
-        return bool(row is not None and int(row["generation"]) == lease.generation)
+        return bool(row is not None and publication_matches(
+            lease, generation=int(row["generation"]),
+            confirmed={"generation": row["confirmed_generation"], "turn_id": row["confirmed_turn"]},
+        ))
 
     def _commit_sync(
         self,
@@ -457,10 +480,14 @@ class SQLiteKernelStore:
         conversation: Sequence[Mapping[str, Any]] | None,
         updates: Sequence[StateUpdate],
     ) -> SessionState:
-        with db.get_conn() as conn:
+        with session_scope_guard(lease.owner, lease.session_id, kind="commit"), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, lease.owner, lease.session_id)
-            if state.generation != lease.generation:
+            if not publication_matches(
+                lease, generation=state.generation,
+                confirmed=None if candidate_metadata_only(conversation, updates)
+                else state.metadata.get("confirmed_publication"),
+            ):
                 raise StalePublicationError("turn no longer owns publication authority")
             if conversation is not None:
                 state.conversation = deepcopy([dict(item) for item in conversation])[
@@ -560,7 +587,7 @@ class SQLiteKernelStore:
 
     def _reset_session_sync(self, owner: str, session_id: str) -> SessionState:
         owner_digest, session_digest = self._scope(owner, session_id)
-        with db.get_conn() as conn:
+        with session_scope_guard(owner, session_id), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = self._load_row(conn, owner, session_id)
             reset = SessionState(
@@ -588,7 +615,7 @@ class SQLiteKernelStore:
 
     def _delete_session_sync(self, owner: str, session_id: str) -> bool:
         owner_digest, session_digest = self._scope(owner, session_id)
-        with db.get_conn() as conn:
+        with session_scope_guard(owner, session_id), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
                 "SELECT generation FROM agent_kernel_sessions "

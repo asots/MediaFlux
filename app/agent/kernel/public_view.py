@@ -161,13 +161,30 @@ def public_conversation_messages(
     messages: list[dict[str, Any]] = []
     pending_tools: list[str] = []
     pending_candidate = False
+    # 候选卡只展示最后一次确认结果。同一批候选可以分次提交，不能按 ref
+    # 隐藏全部历史回执；旧历史没有 plan ID，以最后一条同引用、同公开文本
+    # 的回执定位卡片实际替代的消息，相同文本也只能折叠一次。
+    folded_result_index = -1
+    last_result = candidate_view.get("last_result") if candidate_view else None
+    last_text = last_result.get("text") if isinstance(last_result, Mapping) else None
+    if isinstance(last_text, str) and last_text.strip():
+        for index in range(len(conversation) - 1, -1, -1):
+            item = conversation[index]
+            if (
+                isinstance(item, Mapping)
+                and item.get("role") == "assistant"
+                and item.get("candidate_result_ref") == candidate_view.get("ref")
+                and str(item.get("public_content") or "").strip() == last_text.strip()
+            ):
+                folded_result_index = index
+                break
 
     def remember_tool(value: object) -> None:
         name = str(value or "").strip()
         if name and name not in pending_tools:
             pending_tools.append(name)
 
-    for item in conversation:
+    for index, item in enumerate(conversation):
         if not isinstance(item, Mapping):
             continue
         role = str(item.get("role") or "").strip()
@@ -221,7 +238,7 @@ def public_conversation_messages(
                 message["tool_labels"] = [
                     public_tool_label(tool_name) for tool_name in pending_tools
                 ]
-            if candidate_view and item.get("candidate_result_ref") == candidate_view.get("ref") and candidate_view.get("last_result"):
+            if candidate_view and index == folded_result_index:
                 message["candidate_result_ref"] = candidate_view["ref"]
             if pending_candidate and candidate_view:
                 message["candidate_view"] = dict(candidate_view)

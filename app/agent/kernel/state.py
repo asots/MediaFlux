@@ -94,11 +94,38 @@ class PublicationLease:
     request_id: str
 
 
+def publication_matches(
+    lease: PublicationLease, *, generation: int, confirmed: Any = None,
+) -> bool:
+    """普通回合按 generation；已认领确认还必须匹配持久化的执行 turn。
+
+    不增加 generation，避免破坏已冻结票据。旧历史没有标记时继续兼容；
+    新普通回合增加 generation 后，上一代确认标记自然失效。
+    """
+    if generation != lease.generation:
+        return False
+    if not isinstance(confirmed, Mapping) or confirmed.get("generation") != generation:
+        return True
+    return confirmed.get("turn_id") == lease.turn_id
+
+
 @dataclass(frozen=True, slots=True)
 class StateUpdate:
     key: str
     value: Any
     mode: str = "set"
+
+
+def candidate_metadata_only(
+    conversation: Sequence[Mapping[str, Any]] | None, updates: Sequence[StateUpdate],
+) -> bool:
+    # TG 候选 UI 使用专门的事务内 CAS，不是模型回合的 conversation 发布。
+    # 只给这一窄契约例外，不能借 metadata 更新携带回执/计划覆盖。
+    return (
+        conversation is None and len(updates) == 1
+        and updates[0].key == "metadata.ux_candidate_draft"
+        and updates[0].mode == "compare_candidate"
+    )
 
 
 @dataclass(slots=True)
@@ -227,7 +254,10 @@ class InMemorySessionStateStore:
     async def is_current(self, lease: PublicationLease) -> bool:
         async with self._lock:
             state = self._states.get((lease.owner, lease.session_id))
-            return bool(state and state.generation == lease.generation)
+            return bool(state and publication_matches(
+                lease, generation=state.generation,
+                confirmed=state.metadata.get("confirmed_publication"),
+            ))
 
     async def commit(
         self,
@@ -239,7 +269,11 @@ class InMemorySessionStateStore:
         key = (lease.owner, lease.session_id)
         async with self._lock:
             state = self._states.get(key)
-            if state is None or state.generation != lease.generation:
+            if state is None or not publication_matches(
+                lease, generation=state.generation,
+                confirmed=None if candidate_metadata_only(conversation, updates)
+                else state.metadata.get("confirmed_publication"),
+            ):
                 raise StalePublicationError("turn no longer owns publication authority")
             if conversation is not None:
                 state.conversation = deepcopy([dict(item) for item in conversation])[

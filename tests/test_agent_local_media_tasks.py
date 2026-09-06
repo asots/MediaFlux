@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -829,9 +830,27 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
                     return exc.code
                 return "confirmed"
 
+            entered, release = threading.Event(), threading.Event()
+            response = client.refresh_for_paths.return_value
+
+            def refresh(*args, **kwargs):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                return response
+
+            client.refresh_for_paths.side_effect = refresh
             with ThreadPoolExecutor(max_workers=2) as pool:
-                outcomes = sorted(pool.map(confirm, tickets))
-        self.assertEqual(outcomes, ["confirmation_invalid", "confirmed"])
+                valid = pool.submit(confirm, tickets[-1])
+                try:
+                    self.assertTrue(entered.wait(5))
+                    busy = pool.submit(confirm, tickets[0]).result(timeout=5)
+                    self.assertEqual(busy, "effect_in_progress")
+                finally:
+                    release.set()
+                self.assertEqual(valid.result(timeout=5), "confirmed")
+            # busy 是未认领的请求拒绝，不是票据消费结果；放锁后旧/已用票均不可重放。
+            self.assertEqual(confirm(tickets[0]), "confirmation_invalid")
+            self.assertEqual(confirm(tickets[-1]), "confirmation_invalid")
         client.refresh_for_paths.assert_called_once()
 
     def test_cross_owner_refresh_confirmations_share_a_deduplication_lease(

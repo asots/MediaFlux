@@ -24,9 +24,15 @@ from .model import (
     ModelRequest,
     ModelToolCall,
 )
-from .pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from .pipeline import (
+    ConfirmationClaimError,
+    ToolCallContext,
+    ToolPipeline,
+    ToolPipelineError,
+)
 from .provider_model import ModelProviderError
 from .public_view import format_public_result
+from .session_guard import session_scope_guard
 from .state import (
     AgentInput,
     CancellationToken,
@@ -340,24 +346,25 @@ class AgentSession:
                     "ref": agent_input.metadata["candidate_context"], "positions": [items[0]["position"]], "target": "guangya",
                 }, state=current_state, store=self.pipeline.reference_store, for_preview=False)
             admission_token = await self.turn_admission.begin(agent_input)
-            async with self._start_lock:
-                if await self.coordinator.has_protected_turn(
-                    owner=agent_input.owner,
-                    session_id=agent_input.session_id,
-                ):
-                    raise SessionBusyError("confirmed effect is executing")
-                begin_options = {}
-                if validated_selection is not None:
-                    begin_options["selection_guard"] = validated_selection.guard
-                elif candidate_context is not None:
-                    begin_options["selection_guard"] = candidate_context.guard
-                lease, state = await self.state_store.begin_turn(
-                    owner=agent_input.owner,
-                    session_id=agent_input.session_id,
-                    request_id=agent_input.request_id,
-                    **begin_options,
-                )
-                token = await self.coordinator.begin(lease)
+            with session_scope_guard(agent_input.owner, agent_input.session_id):
+                async with self._start_lock:
+                    if await self.coordinator.has_protected_turn(
+                        owner=agent_input.owner,
+                        session_id=agent_input.session_id,
+                    ):
+                        raise SessionBusyError("confirmed effect is executing")
+                    begin_options = {}
+                    if validated_selection is not None:
+                        begin_options["selection_guard"] = validated_selection.guard
+                    elif candidate_context is not None:
+                        begin_options["selection_guard"] = candidate_context.guard
+                    lease, state = await self.state_store.begin_turn(
+                        owner=agent_input.owner,
+                        session_id=agent_input.session_id,
+                        request_id=agent_input.request_id,
+                        **begin_options,
+                    )
+                    token = await self.coordinator.begin(lease)
             factory = EventFactory(
                 session_id=agent_input.session_id,
                 turn_id=lease.turn_id,
@@ -870,229 +877,221 @@ class AgentSession:
                 await self.coordinator.finish(lease, token)
 
     async def _drive_confirmation(
-        self,
-        *,
-        owner: str,
-        session_id: str,
-        plan_id: str,
-        request_id: str,
-        channel: str,
-        queue: asyncio.Queue[AgentEvent | None],
+        self, *, owner: str, session_id: str, plan_id: str, request_id: str,
+        channel: str, queue: asyncio.Queue[AgentEvent | None],
     ) -> None:
         if not owner or not session_id or not plan_id:
             return
         try:
-            async with self._start_lock:
-                state = await self.state_store.load(owner=owner, session_id=session_id)
-                lease = PublicationLease(
+            # 外层保护覆盖票据认领、远端执行、审计及 conversation 回执落盘。
+            with session_scope_guard(owner, session_id, kind="effect"):
+                async with self._start_lock:
+                    state = await self.state_store.load(owner=owner, session_id=session_id)
+                    lease = PublicationLease(
+                        owner=owner,
+                        session_id=session_id,
+                        generation=state.generation,
+                        turn_id=secrets.token_urlsafe(12),
+                        request_id=request_id,
+                    )
+                    token = await self.coordinator.begin(lease, protected=True)
+                factory = EventFactory(
+                    session_id=session_id, turn_id=lease.turn_id, request_id=request_id
+                )
+
+                async def publish(
+                    event_type: AgentEventType, payload: Mapping[str, Any] | None = None
+                ) -> None:
+                    token.raise_if_cancelled()
+                    event = factory.create(event_type, payload)
+                    if self.journal is not None:
+                        await self.journal.append(event, owner=owner)
+                    await queue.put(event)
+
+                async def progress(payload: Mapping[str, Any]) -> None:
+                    await publish(AgentEventType.TOOL_PROGRESS, payload)
+
+                context = ToolCallContext(
                     owner=owner,
                     session_id=session_id,
-                    generation=state.generation,
-                    turn_id=secrets.token_urlsafe(12),
                     request_id=request_id,
+                    turn_id=lease.turn_id,
+                    lease=lease,
+                    cancellation=token,
+                    report_progress=progress,
                 )
-                token = await self.coordinator.begin(lease, protected=True)
+
+                async def remember_result(
+                    *,
+                    tool_name: str,
+                    content: str,
+                    public_content: str,
+                    candidate_result: Mapping[str, Any] | None = None,
+                ) -> None:
+                    """把确定性确认终态写回会话，供下一轮续问直接引用。"""
+                    safe_content = str(content or "").strip()
+                    if not safe_content:
+                        return
+                    conversation = [dict(item) for item in state.conversation]
+                    item = ModelMessage(
+                        role="assistant",
+                        content=(
+                            "已确认操作的可信系统结果（不是待执行计划）：\n"
+                            + safe_content
+                        ),
+                        tool_name=tool_name,
+                    ).to_dict()
+                    safe_public_content = str(public_content or "").strip()
+                    if safe_public_content:
+                        item["public_content"] = safe_public_content
+                    updates = (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),)
+                    if candidate_result:
+                        item["candidate_result_ref"] = candidate_result["ref"]
+                        updates += (StateUpdate("metadata.ux_candidate_result", dict(candidate_result)),)
+                    conversation.append(item)
+                    try:
+                        await self.state_store.commit(
+                            lease,
+                            conversation=conversation,
+                            updates=updates,
+                        )
+                    except StalePublicationError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - 已执行副作用不得被状态写回遮蔽
+                        logger.warning(
+                            "Agent 确认结果写回会话失败 type=%s", type(exc).__name__
+                        )
+                try:
+                    await publish(
+                        AgentEventType.TURN_STARTED,
+                        {
+                            "channel": channel,
+                            "generation": lease.generation,
+                            "kind": "confirmation",
+                        },
+                    )
+                    await publish(
+                        AgentEventType.TOOL_STARTED,
+                        {"plan_id": plan_id, "kind": "confirmed_effect"},
+                    )
+                    result = await self.pipeline.execute_confirmed(plan_id, context=context)
+                    public_result = dict(result.outcome.public_content)
+                    candidate_data = public_result.get("data")
+                    candidate_items = candidate_data.get("items") if isinstance(candidate_data, Mapping) else []
+                    candidate_items = candidate_items if isinstance(candidate_items, list) else []
+                    await remember_result(
+                        tool_name=result.tool.name,
+                        content=result.outcome.model_message(),
+                        public_content=format_public_result(public_result),
+                        candidate_result={
+                            "ref": result.arguments.get("resource_candidates_ref"), "text": format_public_result(public_result),
+                            "target": result.arguments.get("target"),
+                            "handled_positions": [item.get("position") for item in candidate_items if isinstance(item, dict) and type(item.get("position")) is int and item.get("status") != "failed"],
+                        } if result.tool.name == "ingest.submit" and result.arguments.get("source_type") == "resource_candidates" else None,
+                    )
+                    if public_result.get("ok") is False:
+                        code = str(public_result.get("status") or "effect_failed")[:80]
+                        await publish(
+                            AgentEventType.EFFECT_FAILED,
+                            {
+                                "plan_id": plan_id,
+                                "tool": result.tool.name,
+                                "code": code,
+                                "message": str(
+                                    public_result.get("error")
+                                    or public_result.get("summary")
+                                    or "执行未完成"
+                                )[:500],
+                                "elapsed_ms": result.elapsed_ms,
+                                "result": public_result,
+                            },
+                        )
+                        await publish(
+                            AgentEventType.TURN_FAILED,
+                            {"code": code, "message": "已确认操作未能完成"},
+                        )
+                    else:
+                        await publish(
+                            AgentEventType.EFFECT_COMPLETED,
+                            {
+                                "plan_id": plan_id,
+                                "tool": result.tool.name,
+                                "elapsed_ms": result.elapsed_ms,
+                                "result": public_result,
+                            },
+                        )
+                        await publish(
+                            AgentEventType.TURN_COMPLETED,
+                            {"status": "effect_completed", "plan_id": plan_id},
+                        )
+                except (asyncio.CancelledError, StalePublicationError) as exc:
+                    event = factory.create(
+                        AgentEventType.TURN_CANCELLED,
+                        {"reason": str(exc) or token.reason},
+                    )
+                    if self.journal is not None:
+                        await self.journal.append(event, owner=owner)
+                    await queue.put(event)
+                except ToolPipelineError as exc:
+                    # 未领取票据的重复/失效确认不能用旧快照覆盖另一 worker 已提交的
+                    # 成功回执，也不能清除仍在执行的计划。错误仅投影到本次请求。
+                    if not isinstance(exc, ConfirmationClaimError):
+                        await remember_result(
+                            tool_name="confirmed_effect",
+                            content=f"执行失败：{str(exc)[:500]}（错误码：{exc.code[:80]}）",
+                            public_content=format_public_result(
+                                {
+                                    "ok": False,
+                                    "status": exc.code,
+                                    "summary": str(exc),
+                                },
+                                fallback="确认执行未能完成。",
+                            ),
+                        )
+                    await publish(
+                        AgentEventType.EFFECT_FAILED,
+                        {"plan_id": plan_id, "code": exc.code, "message": str(exc)},
+                    )
+                    await publish(
+                        AgentEventType.TURN_FAILED,
+                        {"code": exc.code, "message": str(exc)},
+                    )
+                except Exception as exc:  # noqa: BLE001 - confirmed-effect fault boundary
+                    logger.error("Agent confirmed effect failed type=%s", type(exc).__name__)
+                    await remember_result(
+                        tool_name="confirmed_effect",
+                        content=(
+                            "执行状态未知：确认执行发生内部错误"
+                            "（错误码：internal_error），请先查询真实业务状态再决定是否重试。"
+                        ),
+                        public_content=(
+                            "❌ 确认执行发生内部错误，请先查询真实业务状态再决定是否重试。"
+                        ),
+                    )
+                    await publish(
+                        AgentEventType.EFFECT_FAILED,
+                        {
+                            "plan_id": plan_id,
+                            "code": "internal_error",
+                            "message": "确认执行失败",
+                        },
+                    )
+                    await publish(
+                        AgentEventType.TURN_FAILED,
+                        {"code": "internal_error", "message": "确认执行失败"},
+                    )
+                finally:
+                    await self.coordinator.finish(lease, token)
+
         except SessionBusyError:
-            factory = EventFactory(
-                session_id=session_id,
-                turn_id=secrets.token_urlsafe(12),
-                request_id=request_id,
-            )
-            event = factory.create(
-                AgentEventType.TURN_FAILED,
-                {
-                    "code": "effect_in_progress",
-                    "message": "另一项已确认写操作正在执行。",
-                },
-            )
+            event = EventFactory(
+                session_id=session_id, turn_id=secrets.token_urlsafe(12), request_id=request_id,
+            ).create(AgentEventType.TURN_FAILED, {
+                "code": "effect_in_progress", "message": "另一项会话操作正在执行，请稍后重试。",
+            })
             if self.journal is not None:
                 await self.journal.append(event, owner=owner)
             await queue.put(event)
-            return
-        factory = EventFactory(
-            session_id=session_id, turn_id=lease.turn_id, request_id=request_id
-        )
-
-        async def publish(
-            event_type: AgentEventType, payload: Mapping[str, Any] | None = None
-        ) -> None:
-            token.raise_if_cancelled()
-            event = factory.create(event_type, payload)
-            if self.journal is not None:
-                await self.journal.append(event, owner=owner)
-            await queue.put(event)
-
-        async def progress(payload: Mapping[str, Any]) -> None:
-            await publish(AgentEventType.TOOL_PROGRESS, payload)
-
-        context = ToolCallContext(
-            owner=owner,
-            session_id=session_id,
-            request_id=request_id,
-            turn_id=lease.turn_id,
-            lease=lease,
-            cancellation=token,
-            report_progress=progress,
-        )
-
-        async def remember_result(
-            *,
-            tool_name: str,
-            content: str,
-            public_content: str,
-            candidate_result: Mapping[str, Any] | None = None,
-        ) -> None:
-            """把确定性确认终态写回会话，供下一轮续问直接引用。"""
-            safe_content = str(content or "").strip()
-            if not safe_content:
-                return
-            conversation = [dict(item) for item in state.conversation]
-            item = ModelMessage(
-                role="assistant",
-                content=(
-                    "已确认操作的可信系统结果（不是待执行计划）：\n"
-                    + safe_content
-                ),
-                tool_name=tool_name,
-            ).to_dict()
-            safe_public_content = str(public_content or "").strip()
-            if safe_public_content:
-                item["public_content"] = safe_public_content
-            updates = (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),)
-            if candidate_result:
-                item["candidate_result_ref"] = candidate_result["ref"]
-                updates += (StateUpdate("metadata.ux_candidate_result", dict(candidate_result)),)
-            conversation.append(item)
-            try:
-                await self.state_store.commit(
-                    lease,
-                    conversation=conversation,
-                    updates=updates,
-                )
-            except StalePublicationError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - 已执行副作用不得被状态写回遮蔽
-                logger.warning(
-                    "Agent 确认结果写回会话失败 type=%s", type(exc).__name__
-                )
-        try:
-            await publish(
-                AgentEventType.TURN_STARTED,
-                {
-                    "channel": channel,
-                    "generation": lease.generation,
-                    "kind": "confirmation",
-                },
-            )
-            await publish(
-                AgentEventType.TOOL_STARTED,
-                {"plan_id": plan_id, "kind": "confirmed_effect"},
-            )
-            result = await self.pipeline.execute_confirmed(plan_id, context=context)
-            public_result = dict(result.outcome.public_content)
-            candidate_data = public_result.get("data")
-            candidate_items = candidate_data.get("items") if isinstance(candidate_data, Mapping) else []
-            candidate_items = candidate_items if isinstance(candidate_items, list) else []
-            await remember_result(
-                tool_name=result.tool.name,
-                content=result.outcome.model_message(),
-                public_content=format_public_result(public_result),
-                candidate_result={
-                    "ref": result.arguments.get("resource_candidates_ref"), "text": format_public_result(public_result),
-                    "target": result.arguments.get("target"),
-                    "handled_positions": [item.get("position") for item in candidate_items if isinstance(item, dict) and type(item.get("position")) is int and item.get("status") != "failed"],
-                } if result.tool.name == "ingest.submit" and result.arguments.get("source_type") == "resource_candidates" else None,
-            )
-            if public_result.get("ok") is False:
-                code = str(public_result.get("status") or "effect_failed")[:80]
-                await publish(
-                    AgentEventType.EFFECT_FAILED,
-                    {
-                        "plan_id": plan_id,
-                        "tool": result.tool.name,
-                        "code": code,
-                        "message": str(
-                            public_result.get("error")
-                            or public_result.get("summary")
-                            or "执行未完成"
-                        )[:500],
-                        "elapsed_ms": result.elapsed_ms,
-                        "result": public_result,
-                    },
-                )
-                await publish(
-                    AgentEventType.TURN_FAILED,
-                    {"code": code, "message": "已确认操作未能完成"},
-                )
-            else:
-                await publish(
-                    AgentEventType.EFFECT_COMPLETED,
-                    {
-                        "plan_id": plan_id,
-                        "tool": result.tool.name,
-                        "elapsed_ms": result.elapsed_ms,
-                        "result": public_result,
-                    },
-                )
-                await publish(
-                    AgentEventType.TURN_COMPLETED,
-                    {"status": "effect_completed", "plan_id": plan_id},
-                )
-        except (asyncio.CancelledError, StalePublicationError) as exc:
-            event = factory.create(
-                AgentEventType.TURN_CANCELLED,
-                {"reason": str(exc) or token.reason},
-            )
-            if self.journal is not None:
-                await self.journal.append(event, owner=owner)
-            await queue.put(event)
-        except ToolPipelineError as exc:
-            await remember_result(
-                tool_name="confirmed_effect",
-                content=f"执行失败：{str(exc)[:500]}（错误码：{exc.code[:80]}）",
-                public_content=format_public_result(
-                    {
-                        "ok": False,
-                        "status": exc.code,
-                        "summary": str(exc),
-                    },
-                    fallback="确认执行未能完成。",
-                ),
-            )
-            await publish(
-                AgentEventType.EFFECT_FAILED,
-                {"plan_id": plan_id, "code": exc.code, "message": str(exc)},
-            )
-            await publish(
-                AgentEventType.TURN_FAILED,
-                {"code": exc.code, "message": str(exc)},
-            )
-        except Exception as exc:  # noqa: BLE001 - confirmed-effect fault boundary
-            logger.error("Agent confirmed effect failed type=%s", type(exc).__name__)
-            await remember_result(
-                tool_name="confirmed_effect",
-                content=(
-                    "执行状态未知：确认执行发生内部错误"
-                    "（错误码：internal_error），请先查询真实业务状态再决定是否重试。"
-                ),
-                public_content=(
-                    "❌ 确认执行发生内部错误，请先查询真实业务状态再决定是否重试。"
-                ),
-            )
-            await publish(
-                AgentEventType.EFFECT_FAILED,
-                {
-                    "plan_id": plan_id,
-                    "code": "internal_error",
-                    "message": "确认执行失败",
-                },
-            )
-            await publish(
-                AgentEventType.TURN_FAILED,
-                {"code": "internal_error", "message": "确认执行失败"},
-            )
-        finally:
-            await self.coordinator.finish(lease, token)
 
     @staticmethod
     def _estimated_tokens(value: object) -> int:

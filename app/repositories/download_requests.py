@@ -1035,6 +1035,31 @@ def update_download_request_and_sync_media_admission(request_id: int, **fields) 
         )
 
 
+def _download_notification_refresh_fields(status: str, timestamp: str) -> dict:
+    """下载侧只持久化待交接意图；真正投递和重试由唯一通知 outbox 执行。"""
+    return {
+        "notification_event_status": status, "notification_delivery_status": "pending",
+        "notification_attempts": 0, "notification_next_retry_at": timestamp,
+        "notification_sent_at": None, "notification_lease_token": "",
+        "notification_lease_expires_at": None,
+    }
+
+
+def request_download_notification_refresh(request_id: int) -> bool:
+    """旧通知快照需要重投影时唤醒原生命周期生产者，不另造渲染/发送轨道。"""
+    timestamp = now()
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM download_requests WHERE id=?", (int(request_id),)).fetchone()
+        if row is None or row["status"] in {"cancelled", "resubmitted"}:
+            return False
+        if row["notification_delivery_status"] in {"pending", "retry_wait", "sending"}:
+            return False
+        return _update_download_request_conn(
+            conn, int(request_id), _download_notification_refresh_fields(str(row["status"]), timestamp), timestamp,
+        )
+
+
 def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
     """持久化用户移除意图，只停止精确绑定的未完成 qB 分支。
 
@@ -1062,6 +1087,11 @@ def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
             f"AND lower(trim(qb_task_id)) IN ({placeholders})",
             tuple(normalized),
         ).fetchall()
+        from app.repositories.telegram_notifications import invalidate_pending_download_notifications_conn
+
+        notification_requests = invalidate_pending_download_notifications_conn(
+            conn, [int(row["id"]) for row in rows], timestamp=timestamp,
+        )
         for row in rows:
             request_id = int(row["id"])
             gy_status = str(row["gy_status"] or "")
@@ -1085,6 +1115,8 @@ def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
                     "notification_next_retry_at": None, "notification_lease_token": "",
                     "notification_lease_expires_at": None,
                 })
+            elif request_id in notification_requests and root_status != "resubmitted":
+                updates.update(_download_notification_refresh_fields(root_status, timestamp))
             _update_download_request_conn(conn, request_id, updates, timestamp)
             conn.execute(
                 "UPDATE download_log SET status='cancelled',completed_at=?,updated_at=?,"

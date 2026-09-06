@@ -268,6 +268,7 @@ class StrmRetirementTransactionTests(unittest.TestCase):
             path = Path(tmp) / "mediaflux.db"
             try:
                 db.configure_database(path, test_mode=True)
+                db.init_db()
                 with self.assertRaisesRegex(RuntimeError, "abort"):
                     with db.reconcile_strm_retired_sources_transaction(
                         [], [("11", "旧来源", "/data/strm")]

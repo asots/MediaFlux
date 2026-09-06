@@ -321,7 +321,7 @@ def _migrate_organize_operation_jobs_v5(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_agent_action_history_schema(conn: sqlite3.Connection) -> None:
-    """兼容最小/旧数据库，在首条确认审计写入前补齐表与索引。"""
+    """仅由正式历史迁移补齐确认审计表与索引；业务 CRUD 不承担 schema 修复。"""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_action_history ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,"

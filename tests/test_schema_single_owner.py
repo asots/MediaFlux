@@ -63,7 +63,7 @@ class SchemaSingleOwnerTests(IsolatedDatabaseTestCase):
 
     def test_no_alternative_runtime_table_definitions_remain(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        owners = {"app/database.py", "app/database_schema.py", "app/database_migrations.py"}
+        owners = {"app/database_schema.py", "app/database_migrations.py"}
         violations = []
         for path in (root / "app").rglob("*.py"):
             relative = path.relative_to(root).as_posix()
@@ -76,3 +76,24 @@ class SchemaSingleOwnerTests(IsolatedDatabaseTestCase):
                     if value.startswith(("CREATE TABLE ", "CREATE INDEX ")):
                         violations.append(f"{relative}:{node.lineno}")
         self.assertEqual(violations, [])
+
+    def test_organize_delete_audit_crud_uses_initialized_schema_only(self):
+        with self._without_ddl():
+            audit_id = db.add_organize_delete_audit(trigger="audit-test", file_id="audit-file", reason="test", status="pending")
+            self.assertTrue(db.update_organize_delete_audit(audit_id, status="success"))
+            self.assertEqual(db.get_organize_delete_audit(audit_id)["status"], "success")
+            self.assertTrue(any(row["id"] == audit_id for row in db.list_organize_delete_audits()))
+
+    def test_retired_strm_source_crud_uses_initialized_schema_only(self):
+        with self._without_ddl():
+            db.enqueue_strm_retired_source("audit-source", "audit", "/isolated/strm")
+            self.assertTrue(any(row["source_id"] == "audit-source" for row in db.list_strm_retired_sources()))
+            db.update_strm_retired_source_error("audit-source", "test")
+            self.assertEqual(db.cancel_strm_retired_sources(["audit-source"]), 1)
+            db.enqueue_strm_retired_source("audit-source", "audit", "/isolated/strm")
+            self.assertEqual(db.delete_strm_retired_source("audit-source"), 1)
+
+    def test_confirmed_action_audit_uses_initialized_schema_only(self):
+        with self._without_ddl():
+            audit_id = db.add_agent_action_history(owner_digest="a"*64, tool_name="audit.test", risk="write", status="succeeded", ok=True, summary="test")
+            self.assertGreater(audit_id, 0)

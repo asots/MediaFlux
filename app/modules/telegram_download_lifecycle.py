@@ -320,6 +320,30 @@ def build_download_lifecycle_event(
     return attach_bounded_media_details(event, lines)
 
 
+def download_notification_obsolescence(thread_key: str, event: NotificationEvent) -> str:
+    """投递前仅核对撤销后的下载字段；重建仍回到唯一生命周期生产者。"""
+    prefix = "download:"
+    if not str(thread_key).startswith(prefix):
+        return ""
+    raw_id = str(thread_key)[len(prefix):]
+    if not raw_id.isascii() or not raw_id.isdigit() or len(raw_id) > 19:
+        return ""
+    if not 0 < int(raw_id) < 2**63:
+        return ""
+    row = db.get_download_request(int(raw_id))
+    # 历史纯通知未必绑定请求，不凭记录缺失推断其业务已撤销。
+    if row is None or _status(_value(row, "qb_status")) != "cancelled":
+        return ""
+    if _status(_value(row, "status")) in {"cancelled", "resubmitted"}:
+        return "cancelled"
+    if _previous_field(event, "下载") == _download_label(row):
+        return ""
+    from app.repositories.download_requests import request_download_notification_refresh
+
+    request_download_notification_refresh(int(raw_id))
+    return "stale"
+
+
 def publish_download_lifecycle(
     request_id: int,
     *,

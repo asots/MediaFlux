@@ -225,12 +225,17 @@ class ProviderGateway:
             profile_ref=profile_ref,
             operation=operation,
             data=payload.data,
+            max_items=spec.max_items,
         )
         public_data["artifact_ref"] = artifact_ref
         return ToolResult(
             ok=True,
             status=payload.status,
-            summary=payload.summary,
+            summary=(
+                payload.summary + "；展示内容已截断，请勿据此判断清单完整"
+                if public_data.get("projection_truncated")
+                else payload.summary
+            ),
             data=public_data,
             evidence=[
                 Evidence(

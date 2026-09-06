@@ -1181,6 +1181,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             patch("app.database.get_organize_log", return_value=row),
             patch("app.database.list_organize_log_items", return_value=items),
             patch("app.database.list_organize_operation_steps", return_value=[]),
+            patch("app.database.list_organize_delete_audits", return_value=[]),
         ):
             detail = service.detail(5)
         self.assertTrue(detail["allowed_actions"]["search"])
@@ -4117,6 +4118,7 @@ class SecurityTests(InitializedWebTestCase):
             patch("app.database.get_organize_log", return_value=legacy),
             patch("app.database.list_organize_log_items", return_value=[]),
             patch("app.database.list_organize_operation_steps", return_value=[]),
+            patch("app.database.list_organize_delete_audits", return_value=[]),
         ):
             detail = self.client.get("/api/logs/organize/9", headers=headers)
             reverted = self.client.post(
@@ -6076,7 +6078,9 @@ class SecurityTests(InitializedWebTestCase):
         self.assertEqual(result["succeeded"], ["guangya"])
         self.assertEqual(result["failed"], ["qb"])
         self.assertIn("qB unavailable", result["error"])
-        self.assertEqual(finalize.call_args.kwargs["status"], "submitted")
+        # 根状态由真实仓储在事务中归并，执行器不再传入另一份推导结果。
+        self.assertNotIn("status", finalize.call_args.kwargs)
+        self.assertEqual(finalize.call_args.kwargs["gy_status"], "submitted")
         self.assertEqual(finalize.call_args.kwargs["qb_status"], "failed")
         self.assertEqual(add_log.call_count, 2)
 

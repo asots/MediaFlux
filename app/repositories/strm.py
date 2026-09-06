@@ -515,6 +515,25 @@ def enqueue_strm_refresh_paths(
         )
 
 
+def resolve_strm_failure_with_refresh(
+    failure_id: int, paths: object, *, allow_emby: bool = True,
+    expected_status: str = "retrying",
+) -> bool:
+    """失败恢复的 ACK 与刷新意图同事务；入队失败不得丢失可重试台账。"""
+    database = _database()
+    stamp = database.now()
+    with database.get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE strm_failures SET status='resolved',updated_at=?,resolved_at=? "
+            "WHERE id=? AND status=?",
+            (stamp, stamp, int(failure_id), str(expected_status)),
+        )
+        if cur.rowcount != 1:
+            return False
+        _enqueue_strm_refresh_paths(conn, paths, stamp=stamp, allow_emby=allow_emby)
+        return True
+
+
 def list_strm_refresh_entries(*, limit: int = 5000) -> list[dict[str, object]]:
     """读取未被统一队列接管的事件快照，保留 provider 边界和条件 ACK 令牌。"""
     safe_limit = max(1, min(int(limit or 5000), 20000))
