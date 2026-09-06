@@ -212,7 +212,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
         self.assertEqual(progress.mode, "edit")
         self.assertEqual(bot.rich_drafts, [])
         self.assertEqual(bot.text_drafts, [])
-        self.assertEqual(bot.messages[-1][2]["reply_to_message_id"], 18)
+        self.assertEqual(bot.messages[-1][2]["reply_parameters"].message_id, 18)
         self.assertTrue(progress.update("<b>正在输出</b>"))
         self.assertTrue(progress.finish("<b>回答完成</b>"))
         self.assertEqual(bot.edits[-1][2], "<b>回答完成</b>")
@@ -246,6 +246,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
             ["<b>第二段</b>", "<b>第三段</b>"],
         )
         self.assertNotIn("reply_to_message_id", bot.messages[1][2])
+        self.assertNotIn("reply_parameters", bot.messages[1][2])
 
     def test_rich_terminal_preserves_report_spacing_and_quote_block(self):
         bot = _RichBot()
@@ -363,7 +364,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
         )
         progress.begin("整理中")
 
-        self.assertEqual(bot.messages[-1][2]["reply_to_message_id"], 8)
+        self.assertEqual(bot.messages[-1][2]["reply_parameters"].message_id, 8)
         self.assertTrue(progress.dismiss_source_message())
         self.assertEqual(bot.deleted, [("100", 8)])
         self.assertIsNone(progress.source_message)
