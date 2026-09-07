@@ -4,17 +4,23 @@
 
 ## [Unreleased]
 
-## [0.1.12] - 2026-09-05
+## [0.1.12] - 2026-09-07
 
 ### Added
 - Agent 新增动态能力发现、元数据队列控制与光鸭 SDK 管理能力，继续通过明确确认后执行写操作（[`6ee901c`](https://github.com/li88iioo/MediaFlux/commit/6ee901c5b1f3f03ae862e12a4284b01f6e3c1be3)、[`1bca74e`](https://github.com/li88iioo/MediaFlux/commit/1bca74ea5b04aa8488ed6ae8fb411eadc77afcb8)）。
 - 补齐媒体发现、媒体库识别与可信详情链接，以及播放活动、偏好和媒体自动化流程（[`ae47eae`](https://github.com/li88iioo/MediaFlux/commit/ae47eaef4df0cc87ad888456da83f61df30961e9)、[`72459a4`](https://github.com/li88iioo/MediaFlux/commit/72459a411d7f7eee8203d5feeb99259d2d9b30b5)、[`8e9bc79`](https://github.com/li88iioo/MediaFlux/commit/8e9bc7944dae32a69ebc64a14800b1566d545bc1)）。
 - 新增 Agent 辅助整理识别复核；光鸭敏感内容净标题复核为可选功能，默认关闭（[`1bb1a23`](https://github.com/li88iioo/MediaFlux/commit/1bb1a232a80f172b790f017350f1e21872139352)、[`4077240`](https://github.com/li88iioo/MediaFlux/commit/4077240eb71b6755ead0eab63e83613d0c45b051)）。
 
+- Agent 增加草稿保留、候选预览和会话操作，并统一 Web 与 Telegram 的资源批量选择与确认（[`6122fba`](https://github.com/li88iioo/MediaFlux/commit/6122fba78a2dfa83ec1543d5aac03c15813211d2)、[`2389e0c`](https://github.com/li88iioo/MediaFlux/commit/2389e0c57a5d4dc53669ecaed85cc932f0499932)）。
+- 新增下载隔离目录对账与整理后的空目录清理生命周期；活动任务、永久来源、归档根及无法核验的删除状态继续保留，不凭目录名称推断清理授权（[`99ba542`](https://github.com/li88iioo/MediaFlux/commit/99ba5424979a9bb37f9eb00af4b6de8786b9ac3b)）。
+
 ### Changed
 - Agent 控制面统一为模型驱动的事件式 Kernel，Web 与 Telegram 共用会话、私有工具引用、确认和可信结果合同；移除退役的旧控制面执行入口（[`d0000fa`](https://github.com/li88iioo/MediaFlux/commit/d0000fa439bfb7760e18861cbd04068a3c526a42)、[`4848e8f`](https://github.com/li88iioo/MediaFlux/commit/4848e8f86b1d2352f1525e38f84a26fd208e58b1)、[`f2c3884`](https://github.com/li88iioo/MediaFlux/commit/f2c3884bef78f084d8615b8ee69cd67d35eb54a2)、[`c127cf3`](https://github.com/li88iioo/MediaFlux/commit/c127cf3a82f147772c680b501e7b14e68d15b8c1)、[`e6a49c4`](https://github.com/li88iioo/MediaFlux/commit/e6a49c451d0076647cee4e47b1e0e8364383c440)）。
 - 收敛数据库与整理职责、操作历史仓储和云端补偿实现；优化独立目录刷新、长季冲突预演、STRM 重复读取及备份资源占用（[`8929644`](https://github.com/li88iioo/MediaFlux/commit/89296443e86cd5409e6726b858f0817ed10f1588)、[`a0310b7`](https://github.com/li88iioo/MediaFlux/commit/a0310b777bf1a21269cfe3fe034362ef9de1e876)、[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)）。
 - 调整 Agent 输入区提示和移动端控件对齐，保持桌面与移动端交互布局一致（[`bead475`](https://github.com/li88iioo/MediaFlux/commit/bead475688050efaa4a72d416a8752d67da36f42)、[`75e9f82`](https://github.com/li88iioo/MediaFlux/commit/75e9f82d1a5714f1b2ebdf7a75001671da3eebf3)）。
+
+- 统一媒体库存、播放、RSS 和本地绑定的批量读取快照；活动检索保持全局排序，展示分页不再截断成员及关联任务的完整状态汇总（[`fce3ba9`](https://github.com/li88iioo/MediaFlux/commit/fce3ba98781df0c2b45e4d09c4f4dd156c5f624c)、[`0a42208`](https://github.com/li88iioo/MediaFlux/commit/0a42208c91b078c9e47721c0588bd8facf144fa3)、[`5524165`](https://github.com/li88iioo/MediaFlux/commit/552416500b13573dba10751c0924d988be170c8f)、[`79c3dc3`](https://github.com/li88iioo/MediaFlux/commit/79c3dc36576f21204facab455e3044106b9fa488)、[`d2563be`](https://github.com/li88iioo/MediaFlux/commit/d2563be91b23b42c731c4b377ebb4b8d2d5b6d04)、[`35514e1`](https://github.com/li88iioo/MediaFlux/commit/35514e1b459c142be6a093370bc2ea1f6b7ac079)）。
+- 将发布检查要求归并到正式部署与开发指南，持续保留运行时锁定、真实浏览器和逐架构镜像验收门禁（[`7397a80`](https://github.com/li88iioo/MediaFlux/commit/7397a807b633464a31618ef0ac34879ee5fe8c6e)）。
 
 ### Fixed
 - 修复 qBittorrent 重提任务时的身份保持、本地路径映射推导，以及下载完成到整理/媒体刷新之间的交接竞态（[`071a425`](https://github.com/li88iioo/MediaFlux/commit/071a4255a8b9d7444c1701b02ec291c576bccd05)、[`e6a0b26`](https://github.com/li88iioo/MediaFlux/commit/e6a0b260bf6da6d4849d7326aa4c8ea4d56f5413)、[`53c84cf`](https://github.com/li88iioo/MediaFlux/commit/53c84cf28bf76666897d64e6f7aba374eec0882f)）。
@@ -25,11 +31,17 @@
 - 修复光鸭 Token 更换后的刮削服务恢复，收敛确认、客户端、线程和跨事件循环运行时的生命周期边界（[`1136404`](https://github.com/li88iioo/MediaFlux/commit/11364048c7263ef6324e5b01861c4f04d5a8cb3b)、[`613ee7f`](https://github.com/li88iioo/MediaFlux/commit/613ee7f29f13b705f9618dea8aa64ef81e0f91a8)、[`2893b56`](https://github.com/li88iioo/MediaFlux/commit/2893b56cd18cc713bfa6ee925151e14a1ed1cee6)）。
 - Telegram 投递异常不再覆盖已经受理的下载或已确认业务结果；旧票据的取消和终态回写不再清除较新的待确认计划（[`20dee8d`](https://github.com/li88iioo/MediaFlux/commit/20dee8d4b2c20f177b0b67e3d926a1a6efa9a264)、[`a0310b7`](https://github.com/li88iioo/MediaFlux/commit/a0310b777bf1a21269cfe3fe034362ef9de1e876)）。
 
+- 修复 Agent 页面恢复时的对话布局跳动与整理规则锚点页签刷新闪现；适配 Telegram 消息选项并隔离进度投递失败（[`92f6e76`](https://github.com/li88iioo/MediaFlux/commit/92f6e76d4c54e1e54f876d4ca4072b49f24f346f)、[`778cc8a`](https://github.com/li88iioo/MediaFlux/commit/778cc8a53c72a28bdf2219617a549d95fec413e5)、[`f5f0f9a`](https://github.com/li88iioo/MediaFlux/commit/f5f0f9a850a4bbf39e32243c0c83bc418cb19406)）。
+- 修复光鸭单文件 BT 清单、磁力任务恢复和 qBittorrent 移除意图丢失；收敛云端读写校验、任务分发、下载状态与混合发布标题处理（[`5acb84e`](https://github.com/li88iioo/MediaFlux/commit/5acb84e5faf9c106b23d58c78de609d4e8968630)、[`580e359`](https://github.com/li88iioo/MediaFlux/commit/580e3597e9d236e7c97e85761a4c01efa6507f58)、[`437f688`](https://github.com/li88iioo/MediaFlux/commit/437f68836b37da4403acd33f8911d0baac3ca1b5)、[`7068c54`](https://github.com/li88iioo/MediaFlux/commit/7068c54f6736a84ef07fca3131c20aed08441ca4)、[`0ab30fd`](https://github.com/li88iioo/MediaFlux/commit/0ab30fd412f6f1a7d140927c439931402dcc0739)）。
+- 修复任务重试、索引器启动、RSS 公平调度与退出交接中的恢复缺口；保留已确认的重试意图，隔离单项读取和通知失败，不让旧执行者覆盖新一代结果（[`f098013`](https://github.com/li88iioo/MediaFlux/commit/f09801353948a897b905eb66e0bde7dbb201f459)、[`2325b25`](https://github.com/li88iioo/MediaFlux/commit/2325b255c2f7399ffa8426830ddc0eab2a487d2b)、[`ddbdb69`](https://github.com/li88iioo/MediaFlux/commit/ddbdb69d79adcba28231935c83e434a5bf25ce1b)、[`fce3ba9`](https://github.com/li88iioo/MediaFlux/commit/fce3ba98781df0c2b45e4d09c4f4dd156c5f624c)、[`0a42208`](https://github.com/li88iioo/MediaFlux/commit/0a42208c91b078c9e47721c0588bd8facf144fa3)、[`07de969`](https://github.com/li88iioo/MediaFlux/commit/07de969eda211f05300bfb6552b90ec59b34794f)）。
+- 修复媒体刷新启停交接、GCID 清单校验与重试持久化、通知规则重新确认及异常自动化规则阻塞；播放和活动读取保持一致快照，完整传播关联任务状态（[`5524165`](https://github.com/li88iioo/MediaFlux/commit/552416500b13573dba10751c0924d988be170c8f)、[`aa5931c`](https://github.com/li88iioo/MediaFlux/commit/aa5931c9a8293c400b22acd26ba13536b4aea77f)、[`79c3dc3`](https://github.com/li88iioo/MediaFlux/commit/79c3dc36576f21204facab455e3044106b9fa488)、[`d2563be`](https://github.com/li88iioo/MediaFlux/commit/d2563be91b23b42c731c4b377ebb4b8d2d5b6d04)、[`35514e1`](https://github.com/li88iioo/MediaFlux/commit/35514e1b459c142be6a093370bc2ea1f6b7ac079)）。
+- 修复首次发布附件上传中断后无法安全续传的问题：先准备并校验同候选草稿附件，再提升镜像标签和公开 Release；已公开且完整的同候选版本幂等保留，未知或不一致的发布状态拒绝接管（[`790f939`](https://github.com/li88iioo/MediaFlux/commit/790f939c3369754e7697dc5f2564e998060bfe90)）。
+
 ### 升级说明
-- 从 v0.1.11 升级的完整数据库跨度为 **schema20→27**，不是仅 26→27。首次启动会先创建迁移前备份，再连续迁移；升级前仍应保留完整数据目录和可用备份。
+- 从 v0.1.11 升级的完整数据库跨度为 **schema20→28**，不是仅 27→28。首次启动会先创建迁移前备份，再连续迁移；升级前仍应保留完整数据目录和可用备份。
 - Agent 已切换到新的 Kernel：旧 Agent 对话不会自动出现在新历史列表中，旧 Agent 待确认操作请重新发起并确认。旧表或备份保留不代表旧会话可在新界面续接，系统不会自动执行旧待确认操作；这不等于所有传统 Telegram 确认票据统一失效。
 - 旧整理操作没有业务前像时，只能明确回退已知文件位置与名称，历史媒体身份需人工核验。云端状态不可读或补偿无法确认时停止自动写入，不猜测成功。
-- 回退旧版本前必须停止服务，并按离线恢复流程恢复升级前数据库；不要直接让 schema20 程序打开 schema27 数据库。
+- 回退旧版本前必须停止服务，并按离线恢复流程恢复升级前数据库；不要直接让 schema20 程序打开 schema28 数据库。
 
 ## [0.1.11] - 2026-09-03
 
