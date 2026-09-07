@@ -216,7 +216,8 @@ class JellyfinClient(MediaServerClient):
         user_id = self._user_id()
         data = self._request(f"/Users/{user_id}/Views")
         libraries: list[Library] = []
-        for item in data.get("Items", []):
+        raw_items, _total = self._items_payload(data)
+        for item in raw_items:
             collection_type = item.get("CollectionType", "")
             if collection_type in {"playlists", "boxsets", "folders"}:
                 continue
@@ -315,7 +316,7 @@ class JellyfinClient(MediaServerClient):
                 "EnableTotalRecordCount": "false",
             },
         )
-        raw_items = (data.get("Items") or []) if isinstance(data, dict) else (data or [])
+        raw_items, _total = self._items_payload(data)
         raw_items = sorted(
             raw_items,
             key=lambda raw: str(raw.get("DateCreated") or ""),
@@ -356,14 +357,7 @@ class JellyfinClient(MediaServerClient):
                 "SortOrder": "Ascending",
             },
         )
-        if isinstance(data, list):
-            raw_items = data
-        elif isinstance(data, dict):
-            raw_items = data.get("Items") or []
-        else:
-            raise ValueError("媒体服务器响应格式无效")
-        if not isinstance(raw_items, list):
-            raise ValueError("媒体服务器条目格式无效")
+        raw_items, _total = self._items_payload(data)
         return [self._media_item(item) for item in raw_items if isinstance(item, dict)]
 
     def _recent_played_from_activity(
@@ -415,13 +409,7 @@ class JellyfinClient(MediaServerClient):
                 "EnableTotalRecordCount": "false",
             },
         )
-        raw_items = (
-            details.get("Items") or []
-            if isinstance(details, dict)
-            else (details or [])
-        )
-        if not isinstance(raw_items, list):
-            raise ValueError("Jellyfin 播放条目响应格式无效")
+        raw_items, _total = self._items_payload(details)
         by_id = {
             str(item.get("Id") or ""): item
             for item in raw_items if isinstance(item, dict) and item.get("Id")
@@ -459,12 +447,13 @@ class JellyfinClient(MediaServerClient):
                 "EnableTotalRecordCount": "false",
             },
         )
-        raw_items = (data.get("Items") or []) if isinstance(data, dict) else (data or [])
+        raw_items, _total = self._items_payload(data)
         raw_items = sorted(
             (
                 item
                 for item in raw_items
-                if (item.get("UserData") or {}).get("LastPlayedDate")
+                if isinstance(item.get("UserData"), dict)
+                and str(item["UserData"].get("LastPlayedDate") or "").strip()
             ),
             key=lambda item: str((item.get("UserData") or {}).get("LastPlayedDate") or ""),
             reverse=True,
@@ -519,7 +508,7 @@ class JellyfinClient(MediaServerClient):
                     "EnableTotalRecordCount": "false",
                 },
             )
-            raw_items = data.get("Items") or [] if isinstance(data, dict) else []
+            raw_items, _total = self._items_payload(data)
             genres_by_id = {
                 str(raw.get("Id") or ""): tuple(
                     dict.fromkeys(

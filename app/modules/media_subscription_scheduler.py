@@ -23,13 +23,17 @@ class MediaSubscriptionScheduler:
         self._thread: threading.Thread | None = None
         self._workers: dict[int, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._accepting = True
         self._last_recovery_at = 0.0
 
     def start(self) -> None:
-        with self._lock:
+        with self._lifecycle_lock, self._lock:
             thread = self._thread
-            if thread and thread.is_alive():
+            # 超时关闭后旧 worker 仍依赖同一个取消信号，不能提前清除。
+            if (thread and thread.is_alive()) or any(
+                worker.is_alive() for worker in self._workers.values()
+            ):
                 return
             self._accepting = True
             self._stop_event.clear()
@@ -44,6 +48,11 @@ class MediaSubscriptionScheduler:
         logger.info("媒体订阅调度器已启动")
 
     def stop(self, timeout: float = 30.0) -> bool:
+        """串行关闭和重启，避免等待旧线程时丢失新线程句柄。"""
+        with self._lifecycle_lock:
+            return self._stop_unlocked(timeout)
+
+    def _stop_unlocked(self, timeout: float) -> bool:
         """停止生产新检查，并等待已启动的检查在有界时间内收敛。"""
         with self._lock:
             self._accepting = False

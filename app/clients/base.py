@@ -472,10 +472,8 @@ class MediaServerClient:
                 ),
             },
         )
-        items = data.get("Items", []) if isinstance(data, dict) else []
-        if not isinstance(items, list):
-            raise ValueError("媒体服务器继续观看响应无效")
-        return [self._media_item(item) for item in items if isinstance(item, dict)]
+        items, _total = self._items_payload(data)
+        return [self._media_item(item) for item in items]
 
     def recently_played(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
         """按已经确定的上游用户读取真实播放历史；不得用 Resume 列表代替。"""
@@ -536,6 +534,20 @@ class MediaServerClient:
         except (TypeError, ValueError):
             total = len(items)
         return items, max(total, len(items))
+
+    def _inventory_page(
+        self, data: Any, seen_ids: set[str]
+    ) -> tuple[list[dict[str, Any]], int]:
+        """分页枚举不得把同一上游条目重复计为不同结果。"""
+        items, total = self._items_payload(data)
+        for item in items:
+            item_id = str(item.get("Id") or "").strip()
+            if not item_id:
+                continue
+            if item_id in seen_ids:
+                raise ValueError("媒体服务器分页包含重复条目，无法确认清单完整")
+            seen_ids.add(item_id)
+        return items, total
 
     def has_tmdb_media(
         self, tmdb_id: str, media_type: str, *, parent_id: str = ""
@@ -656,6 +668,7 @@ class MediaServerClient:
         cap = max(1, min(int(max_series or 50), 5000))
         page = max(1, min(int(page_size or 100), 100))
         offset = 0
+        seen_ids: set[str] = set()
         candidates: list[SeriesCandidate] = []
         reported_total = 0
         exhausted = False
@@ -676,7 +689,7 @@ class MediaServerClient:
                 },
                 timeout=self._remaining_timeout(deadline_at),
             )
-            items, total = self._items_payload(data)
+            items, total = self._inventory_page(data, seen_ids)
             reported_total = max(reported_total, total)
             for item in items:
                 item_id = str(item.get("Id") or "").strip()
@@ -699,7 +712,8 @@ class MediaServerClient:
         return SeriesSearchResult(
             candidates=candidates[:cap],
             total=reported_total or offset,
-            truncated=not exhausted and (reported_total > offset or len(candidates) >= cap),
+            # 提前结束分页不代表完整：上游报告的未读条目必须保留为截断态。
+            truncated=reported_total > offset or (not exhausted and len(candidates) >= cap),
         )
 
     def list_media_identity_inventory(
@@ -718,6 +732,7 @@ class MediaServerClient:
         cap = max(1, min(int(max_items or 5_000), 10_000))
         page = max(1, min(int(page_size or 200), 500))
         offset = 0
+        seen_ids: set[str] = set()
         candidates: list[MediaIdentityCandidate] = []
         reported_total = 0
         exhausted = False
@@ -739,7 +754,7 @@ class MediaServerClient:
                 },
                 timeout=self._remaining_timeout(deadline_at),
             )
-            items, total = self._items_payload(data)
+            items, total = self._inventory_page(data, seen_ids)
             reported_total = max(reported_total, total)
             for item in items:
                 name = str(item.get("Name") or "").strip()
@@ -764,7 +779,7 @@ class MediaServerClient:
         return MediaIdentityInventory(
             candidates=candidates[:cap],
             total=reported_total or offset,
-            truncated=not exhausted and (reported_total > offset or offset >= cap),
+            truncated=reported_total > offset or (not exhausted and offset >= cap),
             unmapped=unmapped,
         )
 
@@ -790,6 +805,7 @@ class MediaServerClient:
         cap = max(1, min(int(max_items or 5_000), 10_000))
         page = max(1, min(int(page_size or 200), 500))
         offset = 0
+        seen_ids: set[str] = set()
         candidates: list[MediaRecommendationCandidate] = []
         reported_total = 0
         exhausted = False
@@ -837,7 +853,7 @@ class MediaServerClient:
                 },
                 timeout=self._remaining_timeout(deadline_at),
             )
-            items, total = self._items_payload(data)
+            items, total = self._inventory_page(data, seen_ids)
             reported_total = max(reported_total, total)
             for item in items:
                 item_id = str(item.get("Id") or "").strip()
@@ -896,7 +912,7 @@ class MediaServerClient:
         return MediaRecommendationInventory(
             candidates=candidates[:cap],
             total=reported_total or offset,
-            truncated=not exhausted and (reported_total > offset or offset >= cap),
+            truncated=reported_total > offset or (not exhausted and offset >= cap),
         )
 
     def list_series_episode_inventory(
@@ -912,6 +928,7 @@ class MediaServerClient:
         cap = max(1, min(int(max_episodes or 2000), 2000))
         page = max(1, min(int(page_size or 200), 200))
         offset = 0
+        seen_ids: set[str] = set()
         seen: set[tuple[int, int]] = set()
         ignored_specials = 0
         ignored_unknown = 0
@@ -938,7 +955,7 @@ class MediaServerClient:
                 },
                 timeout=self._remaining_timeout(deadline_at),
             )
-            items, total = self._items_payload(data)
+            items, total = self._inventory_page(data, seen_ids)
             reported_total = max(reported_total, total)
             for item in items:
                 try:
@@ -964,7 +981,7 @@ class MediaServerClient:
         return SeriesEpisodeInventory(
             episodes=sorted(seen),
             total=reported_total or offset,
-            truncated=not exhausted and (reported_total > offset or offset >= cap),
+            truncated=reported_total > offset or (not exhausted and offset >= cap),
             ignored_specials=ignored_specials,
             ignored_unknown=ignored_unknown,
         )

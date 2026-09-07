@@ -169,7 +169,8 @@ class EmbyClient(MediaServerClient):
         uid = self._user_id()
         data = self._request(f"/Users/{uid}/Views")
         libs: list[Library] = []
-        for item in data.get("Items", []):
+        raw_items, _total = self._items_payload(data)
+        for item in raw_items:
             collection_type = str(item.get("CollectionType") or "")
             if collection_type.lower() in {"playlists", "boxsets", "folders"}:
                 continue
@@ -241,7 +242,7 @@ class EmbyClient(MediaServerClient):
                 "EnableTotalRecordCount": "false",
             },
         )
-        raw_items = data if isinstance(data, list) else (data.get("Items") or [])
+        raw_items, _total = self._items_payload(data)
         raw_items = sorted(
             raw_items,
             key=lambda raw: str(raw.get("DateCreated") or ""),
@@ -282,14 +283,7 @@ class EmbyClient(MediaServerClient):
                 "SortOrder": "Ascending",
             },
         )
-        if isinstance(data, list):
-            raw_items = data
-        elif isinstance(data, dict):
-            raw_items = data.get("Items") or []
-        else:
-            raise ValueError("媒体服务器响应格式无效")
-        if not isinstance(raw_items, list):
-            raise ValueError("媒体服务器条目格式无效")
+        raw_items, _total = self._items_payload(data)
         return [self._media_item(item) for item in raw_items if isinstance(item, dict)]
 
     def _total_items(self) -> int:
@@ -344,11 +338,7 @@ class EmbyClient(MediaServerClient):
                 "EnableTotalRecordCount": "false",
             },
         )
-        raw_items = data if isinstance(data, list) else (
-            data.get("Items") or [] if isinstance(data, dict) else []
-        )
-        if not isinstance(raw_items, list):
-            raise ValueError("媒体服务器播放历史响应无效")
+        raw_items, _total = self._items_payload(data)
         raw_items = sorted(
             (
                 item
@@ -396,9 +386,7 @@ class EmbyClient(MediaServerClient):
                     "EnableTotalRecordCount": "false",
                 },
             )
-            raw_items = data if isinstance(data, list) else (
-                data.get("Items") or [] if isinstance(data, dict) else []
-            )
+            raw_items, _total = self._items_payload(data)
             genres_by_id = {
                 str(raw.get("Id") or ""): tuple(
                     dict.fromkeys(
