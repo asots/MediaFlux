@@ -2444,6 +2444,7 @@ from app.repositories.rss import (  # noqa: E402,F401
     get_pending_rss_qb_snapshot,
     get_retryable_failed_rss_qb_snapshot,
     get_rss_diagnostic_summary,
+    get_rss_entries_by_ids,
     get_rss_entry,
     get_rss_manual_review_summary,
     get_rss_stats,

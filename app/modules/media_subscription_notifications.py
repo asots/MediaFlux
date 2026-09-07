@@ -103,40 +103,59 @@ def drain_media_subscription_notifications(*, limit: int = 20) -> bool:
 
     for item in claimed:
         generation = int(item["lease_generation"])
-        event_type = str(item.get("event_type") or "")
-        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-        missing_actionable = bool(
-            event_type == "missing" and int(payload.get("auto_submitted") or 0) <= 0
-        )
-        outcome = publish_notification_event(
-            f"media-subscription:{item['id']}:{event_type}",
-            _event(item),
-            topic=NotificationTopic.MEDIA_SUBSCRIPTION,
-            importance=(
-                NotificationImportance.ERROR
-                if event_type not in {"missing", "satisfied"}
-                else NotificationImportance.ACTION
-                if missing_actionable
-                else NotificationImportance.RESULT
-            ),
-        )
-        # 全局开关或通知等级主动抑制都属于已执行的消费策略；事务 outbox
-        # 不应把同一条被策略拒绝的结果反复移交和重试。
-        accepted = (
-            bool(outcome)
-            or str(outcome.status or "") in {"disabled", "suppressed"}
-            or not notifications_enabled()
-        )
-        if accepted:
-            if not mark_notification_sent(item["id"], lease_generation=generation):
-                delivered = False
-            continue
-        delivered = False
-        retry_notification(
-            item["id"],
-            lease_generation=generation,
-            error=str(outcome.status or "telegram_unavailable"),
-        )
+        try:
+            event_type = str(item.get("event_type") or "")
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            missing_actionable = bool(
+                event_type == "missing" and int(payload.get("auto_submitted") or 0) <= 0
+            )
+            outcome = publish_notification_event(
+                f"media-subscription:{item['id']}:{event_type}",
+                _event(item),
+                topic=NotificationTopic.MEDIA_SUBSCRIPTION,
+                importance=(
+                    NotificationImportance.ERROR
+                    if event_type not in {"missing", "satisfied"}
+                    else NotificationImportance.ACTION
+                    if missing_actionable
+                    else NotificationImportance.RESULT
+                ),
+            )
+            # 全局开关或通知等级主动抑制都属于已执行的消费策略；事务 outbox
+            # 不应把同一条被策略拒绝的结果反复移交和重试。
+            accepted = (
+                bool(outcome)
+                or str(outcome.status or "") in {"disabled", "suppressed"}
+                or not notifications_enabled()
+            )
+            if accepted:
+                if not mark_notification_sent(item["id"], lease_generation=generation):
+                    delivered = False
+                continue
+            delivered = False
+            retry_notification(
+                item["id"],
+                lease_generation=generation,
+                error=str(outcome.status or "telegram_unavailable"),
+            )
+        except Exception as exc:
+            # 单条内容、移交或 ACK 失败不能扣住同批次的其他领取项。
+            delivered = False
+            logger.warning(
+                "媒体追更通知移交失败 notification=%s type=%s",
+                item["id"], type(exc).__name__,
+            )
+            try:
+                retry_notification(
+                    item["id"], lease_generation=generation,
+                    error="telegram_exception",
+                )
+            except Exception as retry_exc:
+                # 重试状态也无法落盘时保留 sending，由既有租约恢复接管。
+                logger.warning(
+                    "媒体追更通知重试状态保存失败 notification=%s type=%s",
+                    item["id"], type(retry_exc).__name__,
+                )
     return delivered
 
 

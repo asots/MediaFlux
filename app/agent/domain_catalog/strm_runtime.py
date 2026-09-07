@@ -309,12 +309,21 @@ def _run_strm_once_state(
         else scheduler.trigger("manual")
     )
     if not bool(triggered.get("ok")):
+        reason = str(triggered.get("error") or "").strip()
+        if reason not in {
+            "STRM 同步任务正在运行", "STRM 调度器正在停止", "STRM 同步任务启动失败",
+            "STRM 变化目标持久化失败，已取消同步", "STRM 同步模式无效",
+        }:
+            reason = "STRM 同步任务未能启动，请稍后重新预检。"
+        busy = reason == "STRM 同步任务正在运行"
         return ToolResult(
             ok=False,
-            status="conflict",
-            summary="STRM 同步任务已在运行",
-            error="当前任务未重复提交。",
-            suggestions=["可询问：查看 STRM 同步进度。"],
+            status="conflict" if busy else "failed",
+            summary="STRM 同步任务已在运行" if busy else "STRM 同步任务启动失败",
+            error="当前任务未重复提交。" if busy else reason,
+            suggestions=["可询问：查看 STRM 同步进度。"] if busy else [
+                "请检查应用运行状态后重新发起预检。"
+            ],
         )
     return ToolResult(
         ok=True,

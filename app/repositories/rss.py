@@ -390,13 +390,29 @@ def recover_stale_submitting_rss_entries(stale_minutes: int = 15) -> int:
         return int(cur.rowcount or 0)
 
 
-def get_rss_entry(entry_id: int) -> sqlite3.Row | None:
+def get_rss_entries_by_ids(entry_ids: Iterable[int]) -> dict[int, sqlite3.Row]:
+    """在同一读快照中批量取得条目及下载配置；不存在的 ID 不伪造记录。"""
+    ids = list(dict.fromkeys(entry_ids))
+    if not ids:
+        return {}
+    result: dict[int, sqlite3.Row] = {}
     with get_conn() as conn:
-        return conn.execute(
-            "SELECT e.*, i.name AS sub_name, i.download_method, i.qb_save_path, "
-            "i.gy_target_dir, i.gy_target_dir_name FROM rss_entries e "
-            "LEFT JOIN rss_items i ON e.rss_item_id=i.id WHERE e.id=?", (entry_id,)
-        ).fetchone()
+        conn.execute("BEGIN")
+        for offset in range(0, len(ids), 500):
+            batch = ids[offset:offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                "SELECT e.*, i.name AS sub_name, i.download_method, i.qb_save_path, "
+                "i.gy_target_dir, i.gy_target_dir_name FROM rss_entries e "
+                "LEFT JOIN rss_items i ON e.rss_item_id=i.id "
+                f"WHERE e.id IN ({placeholders})", batch,
+            ).fetchall()
+            result.update((int(row["id"]), row) for row in rows)
+    return result
+
+
+def get_rss_entry(entry_id: int) -> sqlite3.Row | None:
+    return next(iter(get_rss_entries_by_ids((entry_id,)).values()), None)
 
 
 def get_pending_rss_qb_snapshot(

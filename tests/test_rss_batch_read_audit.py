@@ -1,0 +1,166 @@
+"""RSS 批量提交只读取一次有界快照，单项和批量使用同一下载配置投影。"""
+
+from __future__ import annotations
+
+import json
+import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
+
+from app import database as db
+from app.modules.rss import RSSEngine
+from tests.support import isolated_test_database
+
+
+class RSSBatchReadAuditTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(isolated_test_database())
+        self.sid = db.add_rss_subscription(
+            "Synthetic feed",
+            "https://synthetic.invalid/feed",
+            download_method="qb",
+            qb_save_path="/synthetic/downloads",
+            gy_target_dir="synthetic-target",
+            gy_target_dir_name="Synthetic",
+        )
+
+    def entries(self, count):
+        ids = []
+        for n in range(count):
+            entry_id = db.add_rss_entry(
+                self.sid,
+                f"Episode {n}",
+                f"audit:{n}",
+                payload=json.dumps(
+                    {"torrent_url": f"magnet:?xt=urn:btih:{n + 1:040x}"}
+                ),
+            )
+            self.assertIsNotNone(entry_id)
+            ids.append(entry_id)
+        return ids
+
+    @contextmanager
+    def reads(self):
+        original = db.get_conn
+        counts = {"connections": 0, "entry_selects": 0}
+
+        def trace(sql):
+            if (
+                sql.lstrip().upper().startswith("SELECT")
+                and "FROM RSS_ENTRIES" in sql.upper()
+            ):
+                counts["entry_selects"] += 1
+
+        @contextmanager
+        def counted():
+            counts["connections"] += 1
+            with original() as conn:
+                conn.set_trace_callback(trace)
+                yield conn
+
+        with patch.object(db, "get_conn", side_effect=counted):
+            yield counts
+
+    def test_twenty_entry_download_batch_uses_one_read_connection(self):
+        ids = self.entries(20)
+        engine = RSSEngine()
+        with (
+            self.reads() as counts,
+            patch.object(
+                engine,
+                "_download_entry",
+                return_value={"ok": True, "method": "qBittorrent"},
+            ) as submit,
+        ):
+            result = engine.download_many(ids)
+        self.assertEqual(result["success_count"], 20)
+        self.assertEqual(submit.call_count, 20)
+        self.assertEqual(counts, {"connections": 1, "entry_selects": 1})
+
+    def test_missing_ids_and_repeated_selection_keep_result_positions(self):
+        first, second = self.entries(2)
+        engine = RSSEngine()
+        missing = second + 100
+
+        def submit(entry, **_kwargs):
+            return {
+                "ok": entry is not None,
+                "method": "qBittorrent",
+                "error": "missing" if entry is None else "",
+            }
+
+        with patch.object(engine, "_download_entry", side_effect=submit):
+            result = engine.download_many([second, missing, first, second])
+        self.assertEqual(result["total"], 3)
+        self.assertEqual([row["id"] for row in result["succeeded"]], [second, first])
+        self.assertEqual(result["failed"], [{"id": missing, "error": "missing"}])
+
+    def test_bulk_projection_matches_single_read_and_uses_bounded_sql(self):
+        ids = self.entries(2)
+        expected = {entry_id: dict(db.get_rss_entry(entry_id)) for entry_id in ids}
+        requested = [ids[1], *range(1000, 1501), ids[0], ids[0]]
+        with self.reads() as counts:
+            actual = db.get_rss_entries_by_ids(iter(requested))
+        self.assertEqual(
+            {entry_id: dict(row) for entry_id, row in actual.items()}, expected
+        )
+        self.assertEqual(counts, {"connections": 1, "entry_selects": 2})
+        self.assertEqual(actual[ids[0]]["qb_save_path"], "/synthetic/downloads")
+        self.assertEqual(actual[ids[0]]["gy_target_dir"], "synthetic-target")
+        self.assertIsNone(db.get_rss_entry(999))
+
+    def test_empty_batch_does_not_open_a_connection_or_submit(self):
+        engine = RSSEngine()
+        with self.reads() as counts, patch.object(engine, "_download_entry") as submit:
+            self.assertEqual(engine.download_many([])["total"], 0)
+            self.assertEqual(db.get_rss_entries_by_ids([]), {})
+        self.assertEqual(counts, {"connections": 0, "entry_selects": 0})
+        submit.assert_not_called()
+
+    def test_chunked_read_keeps_one_snapshot_during_subscription_changes(self):
+        first, second = self.entries(2)
+        original = db.get_conn
+        changed = []
+
+        class ReadCursor:
+            def __init__(self, cursor):
+                self.cursor = cursor
+
+            def fetchall(self):
+                rows = self.cursor.fetchall()
+                if not changed:
+                    changed.append(True)
+                    with original() as writer:
+                        writer.execute(
+                            "UPDATE rss_items SET qb_save_path='/changed' WHERE id=?",
+                            (self_sid,),
+                        )
+                return rows
+
+        class ReadConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def execute(self, sql, *args):
+                cursor = self.connection.execute(sql, *args)
+                return ReadCursor(cursor) if sql.startswith("SELECT e.*") else cursor
+
+        @contextmanager
+        def reader():
+            with original() as connection:
+                yield ReadConnection(connection)
+
+        self_sid = self.sid
+        with patch.object(db, "get_conn", side_effect=reader):
+            rows = db.get_rss_entries_by_ids([first, *range(1000, 1499), second])
+        self.assertEqual(rows[first]["qb_save_path"], "/synthetic/downloads")
+        self.assertEqual(rows[second]["qb_save_path"], "/synthetic/downloads")
+        self.assertEqual(db.get_rss_entry(second)["qb_save_path"], "/changed")
+
+    def test_single_read_preserves_existing_sqlite_id_coercion(self):
+        entry_id = self.entries(1)[0]
+        for value in (entry_id, str(entry_id), float(entry_id)):
+            with self.subTest(value=value):
+                self.assertEqual(db.get_rss_entry(value)["id"], entry_id)
+        self.assertIsNone(db.get_rss_entry(None))
+        self.assertIsNone(db.get_rss_entry(-1))

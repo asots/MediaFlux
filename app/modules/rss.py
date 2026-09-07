@@ -989,7 +989,8 @@ class RSSEngine:
 
     def download_many(self, entry_ids: list[int], *, auto_guard: Callable[[], bool] | None = None) -> dict:
         ids = list(dict.fromkeys(int(item) for item in entry_ids))[:_RSS_DOWNLOAD_BATCH_SIZE]
-        entries = [db.get_rss_entry(entry_id) for entry_id in ids]
+        entries_by_id = db.get_rss_entries_by_ids(ids)
+        entries = [entries_by_id.get(entry_id) for entry_id in ids]
         succeeded: list[dict] = []
         existing: list[dict] = []
         unverified: list[dict] = []
