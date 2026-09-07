@@ -11,6 +11,8 @@ from app.agent.models import Evidence, ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import sanitize_public_text
 from app.repositories import activity
 
+MAX_ACTIVITY_SELECTION_POSITION = 21  # 当前活动 + 最多20个关联活动。
+
 _KIND_LABELS = {"download": "下载", "organize": "光鸭整理", "local_media": "本地整理"}
 _FAILED = {
     "failed",
@@ -62,9 +64,9 @@ def selection_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if (
         isinstance(position, bool)
         or not isinstance(position, int)
-        or not 1 <= position <= 20
+        or not 1 <= position <= MAX_ACTIVITY_SELECTION_POSITION
     ):
-        raise AgentToolError("活动序号应为 1–20")
+        raise AgentToolError(f"活动序号应为 1–{MAX_ACTIVITY_SELECTION_POSITION}")
     return {"activity_selection_ref": ref, "position": position}
 
 
@@ -238,6 +240,32 @@ def timeline_snapshot(target: dict) -> ToolResult:
                 )
             )
             links.append({"kind": "local_media", "id": task["id"]})
+        counts = snapshot["local_task_status_counts"]
+        total_count = sum(counts.values())
+        if total_count > len(snapshot["local_tasks"]):
+            attention_count = sum(
+                count for status, count in counts.items() if status in _FAILED
+            )
+            pending_count = sum(
+                count
+                for status, count in counts.items()
+                if status not in _DONE | _FAILED
+            )
+            stages.append(
+                _stage(
+                    "关联本地任务汇总",
+                    "partial_failed"
+                    if attention_count
+                    else ("running" if pending_count else "observed"),
+                    total_count=total_count,
+                    attention_count=attention_count,
+                    pending_count=pending_count,
+                    truncated=True,
+                )
+            )
+            gaps.append(
+                "仅展示最近20个关联本地任务；状态汇总覆盖全部同qB任务身份记录。"
+            )
         verification = snapshot["verification"]
         if verification:
             stages.append(
@@ -289,18 +317,24 @@ def timeline_snapshot(target: dict) -> ToolResult:
                 error=row.get("error"),
             )
         )
-        items = snapshot["items"]
+        counts = snapshot["item_status_counts"]
+        total_count = sum(counts.values())
+        attention_count = sum(
+            count for status, count in counts.items() if status in _FAILED
+        )
         stages.append(
             _stage(
                 "成员处理",
-                "partial_failed"
-                if any(item["status"] in _FAILED for item in items)
-                else "observed",
-                count=min(len(items), 100),
-                truncated=len(items) > 100,
+                "partial_failed" if attention_count else "observed",
+                count=min(total_count, 100),
+                truncated=total_count > 100,
+                total_count=total_count,
+                attention_count=attention_count,
             )
         )
-        gaps.append("成员处理为有界持久化快照，不代表已实时检查媒体服务器。")
+        gaps.append(
+            "成员状态按该任务全部持久记录汇总，展示数量上限100；不代表已实时检查媒体服务器。"
+        )
     # 当前日志/任务状态是权威；历史失败继续可见，但不再次发已修复的告警。
     current_stages = [stage for stage in stages if not stage.get("historical")]
     attention = [stage for stage in current_stages if stage["needs_attention"]]
@@ -308,6 +342,7 @@ def timeline_snapshot(target: dict) -> ToolResult:
         stage
         for stage in current_stages
         if stage["status"] not in _DONE | _FAILED | {"observed"}
+        or stage.get("pending_count", 0) > 0
     ]
     overall = "attention" if attention else ("in_progress" if pending else "completed")
     explanation = "；".join(

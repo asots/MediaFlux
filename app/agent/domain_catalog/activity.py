@@ -7,6 +7,7 @@ from app.agent.action_undo import (
     receipt_arguments,
 )
 from app.agent.activity_actions import (
+    MAX_ACTIVITY_SELECTION_POSITION,
     get_activity_timeline,
     search_activities,
     search_arguments,
@@ -32,7 +33,12 @@ _SELECTION = {
             "type": "string",
             "pattern": "^ref_[A-Za-z0-9_-]{16,100}$",
         },
-        "position": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1},
+        "position": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": MAX_ACTIVITY_SELECTION_POSITION,
+            "default": 1,
+        },
     },
     "additionalProperties": False,
 }
@@ -90,7 +96,11 @@ def register_specs(registry, **_kwargs):
             context_handler=inspect_undo,
             domains=("activity", "cloud"),
             related_tools=("action.undo.execute", "activity.search"),
-            examples=("撤销刚才的整理", "看看这个改名能不能回退", "把刚才移动的目录移回去"),
+            examples=(
+                "撤销刚才的整理",
+                "看看这个改名能不能回退",
+                "把刚才移动的目录移回去",
+            ),
         )
     )
     registry.register(

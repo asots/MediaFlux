@@ -12,23 +12,28 @@ _TABLES = {
 
 
 def search(*, query: str, limit: int = 10) -> list[dict]:
-    rows: list[dict] = []
+    """先按同一更新时间口径选全域窗口；单条 SQL 同时保证跨模块读快照。"""
     bounded = max(1, min(int(limit), 20))
+    selections = []
+    params: list[object] = []
+    for rank, (kind, table) in enumerate(_TABLES.items()):
+        # 表名和类型只取本模块常量；instr 保留 %/_ 的文字包含语义。
+        selections.append(
+            f"SELECT '{kind}' AS kind,{rank} AS kind_rank,"
+            f"id,title,status,created_at,updated_at FROM {table} "
+            "WHERE (?='' OR instr(lower(title),lower(?))>0)"
+        )
+        params.extend((query, query))
+    params.append(bounded + 1)
     with db.get_conn() as conn:
-        for kind, table in _TABLES.items():
-            # instr 是文字包含查询，用户的 %/_ 不具有 LIKE 通配语义。
-            matches = conn.execute(
-                f"SELECT id,title,status,created_at,updated_at FROM {table} "
-                "WHERE (?='' OR instr(lower(title),lower(?))>0) "
-                "ORDER BY id DESC LIMIT ?",
-                (query, query, bounded + 1),
-            ).fetchall()
-            rows.extend({"kind": kind, **dict(row)} for row in matches)
-    rows.sort(
-        key=lambda row: (row.get("updated_at") or row["created_at"], row["id"]),
-        reverse=True,
-    )
-    return rows[: bounded + 1]
+        rows = conn.execute(
+            "SELECT kind,id,title,status,created_at,updated_at FROM ("
+            + " UNION ALL ".join(selections)
+            + ") ORDER BY COALESCE(NULLIF(updated_at,''),created_at) DESC,"
+            "id DESC,kind_rank ASC LIMIT ?",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def snapshot(kind: str, identifier: int) -> dict | None:
@@ -74,6 +79,20 @@ def snapshot(kind: str, identifier: int) -> dict | None:
                     (row["qb_task_id"], row["qb_task_id"] or ""),
                 )
             ]
+            # 小列表已完整；达到展示上限才额外汇总，避免常见单任务路径多查一次。
+            result["local_task_status_counts"] = (
+                {
+                    str(item["status"] or ""): int(item["total"])
+                    for item in conn.execute(
+                        "SELECT status,COUNT(*) AS total FROM local_media_tasks "
+                        "WHERE qb_hash=? AND ?!='' GROUP BY status",
+                        (row["qb_task_id"], row["qb_task_id"] or ""),
+                    )
+                }
+                if len(result["local_tasks"]) == 20
+                else {}
+            )
+
         elif kind == "organize":
             result["steps"] = [
                 dict(item)
@@ -83,11 +102,12 @@ def snapshot(kind: str, identifier: int) -> dict | None:
                 )
             ]
         else:
-            result["items"] = [
-                dict(item)
+            result["item_status_counts"] = {
+                str(item["status"] or ""): int(item["total"])
                 for item in conn.execute(
-                    "SELECT role,status,error FROM local_media_task_items WHERE task_id=? ORDER BY id LIMIT 101",
+                    "SELECT status,COUNT(*) AS total FROM local_media_task_items "
+                    "WHERE task_id=? GROUP BY status",
                     (identifier,),
                 )
-            ]
+            }
     return result
