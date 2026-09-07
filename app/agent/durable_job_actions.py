@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import secrets
+import sqlite3
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any
@@ -135,7 +136,7 @@ def _fingerprint(payload: Mapping[str, Any]) -> str:
 
 def _start_context(
     arguments: Mapping[str, Any], context: ToolContext
-) -> tuple[str, object | None]:
+) -> tuple[str, sqlite3.Row | None]:
     owner = _require_owner(context)
     active = _find_active_for_request(owner=owner, arguments=arguments)
     context_hash = _fingerprint(
@@ -230,6 +231,7 @@ def start_episode_audit_confirmed(
             sort_keys=True,
         ),
         progress_total=0,
+        expected_active_job_id=(str(_active["job_id"]) if _active is not None else None),
     )
     get_agent_jobs_scheduler().wake()
     job_id = str(row["job_id"])

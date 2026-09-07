@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 from .errors import IndexerValidationError
 
+MAX_SEARCH_TEXT_LENGTH = 120
 _QUERY_WHITESPACE = re.compile(r"\s+")
 _DOWNLOAD_STATES = frozenset({"ready", "resolvable", "unavailable"})
 _DOWNLOAD_KINDS = frozenset({"magnet", "torrent"})
@@ -154,8 +155,8 @@ def _normalize_search_text(value: object, *, required: bool = False) -> str:
     normalized = _QUERY_WHITESPACE.sub(" ", unicodedata.normalize("NFKC", str(value or ""))).strip()
     if required and not normalized:
         raise IndexerValidationError("title is required")
-    if len(normalized) > 120:
-        raise IndexerValidationError("title length cannot exceed 120")
+    if len(normalized) > MAX_SEARCH_TEXT_LENGTH:
+        raise IndexerValidationError(f"title length cannot exceed {MAX_SEARCH_TEXT_LENGTH}")
     return normalized
 
 

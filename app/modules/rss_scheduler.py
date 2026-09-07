@@ -15,6 +15,7 @@ from app.notifier import NOTIFICATION_SECTION_BREAK, NotificationEvent
 logger = get_logger(__name__)
 _MAX_CONCURRENT_REFRESHES = 4
 _ALERT_KEY_PREFIX = "rss.scheduler.alert_signature."
+_ADMISSION_CURSOR_KEY = "rss.scheduler.last_admitted_id"
 
 
 class RSSScheduler:
@@ -197,8 +198,17 @@ class RSSScheduler:
             logger.warning(
                 "已将 %s 条提交结果未知的 RSS 条目转为人工核对状态", recovered
             )
+        try:
+            cursor = max(0, int(db.kv_get(_ADMISSION_CURSOR_KEY, "0") or 0))
+        except (TypeError, ValueError):
+            cursor = 0
+        due = db.list_due_rss_subscriptions()
+        # 失败刷新不应伪造 last_refreshed_at；独立记录最后一次真实准入，
+        # 让超过并发窗口的订阅也有执行机会，重启后继续而非总从最小 ID 开始。
+        ordered = [row for row in due if int(row["id"]) > cursor]
+        ordered.extend(row for row in due if int(row["id"]) <= cursor)
         count = 0
-        for row in db.list_due_rss_subscriptions():
+        for row in ordered:
             sub_id = int(row["id"])
             worker = threading.Thread(
                 target=self._execute,
@@ -226,6 +236,7 @@ class RSSScheduler:
                     self._running_ids.discard(sub_id)
                     self._workers.pop(sub_id, None)
                     raise
+                db.kv_set(_ADMISSION_CURSOR_KEY, str(sub_id))
             count += 1
         return count
 

@@ -667,7 +667,7 @@ def resubmit_download_request(
     allow_completed: bool = False,
     origin: str = "web",
 ) -> dict[str, Any]:
-    """安全重试指定目标；活动请求补投失败光鸭，其余创建历史 successor。"""
+    """安全重试指定目标；活动请求仅补投失败目标，其余创建历史 successor。"""
     if targets not in SUPPORTED_TARGETS:
         return {"ok": False, "error": "下载目标无效"}
     source_row = db.get_download_request(int(source_request_id))
@@ -685,22 +685,35 @@ def resubmit_download_request(
             "error": str(target_capability.get("reason") or "当前目标不可重新提交"),
         }
 
-    # 部分成功请求仍由 qB 跟踪，直接创建同源 successor 会被正确的防重
-    # 约束拒绝。复用已有目标级 CAS，仅认领明确失败的光鸭目标；保留 qB
-    # 状态、身份及本地导入链路，不归档仍在运行的请求。
+    # 部分成功请求仍需跟踪另一个后端，不能创建同源 successor，也不能
+    # 因两个方向的分支不同而绕过取消检查。统一复用已有目标级 CAS；
+    # 另一端即使结果未知也只保留观察，绝不随本次重试再次提交。
+    selected_prefix = "gy" if targets == "guangya" else "qb"
+    peer_prefix = "qb" if targets == "guangya" else "gy"
     if (
-        targets == "guangya"
+        targets in {"qb", "guangya"}
         and str(source_row["status"] or "") in {"submitted", "downloading"}
-        and str(source_row["gy_status"] or "") == "failed"
-        and str(source_row["qb_status"] or "") in {"submitted", "downloading", "completed"}
+        and str(source_row[f"{selected_prefix}_status"] or "") == "failed"
+        and str(source_row[f"{peer_prefix}_status"] or "") in {
+            "submitted", "downloading", "completed", "outcome_unknown",
+        }
     ):
-        result = dispatch_missing_targets(int(source_request_id), "guangya")
+        retry_kwargs: dict[str, str] = {}
+        if targets == "qb" and str(source_row["kind"] or "") == "http":
+            previous_hash = str(source_row["qb_task_id"] or "").strip().lower()
+            hint = (
+                previous_hash if _QB_TORRENT_ID_RE.fullmatch(previous_hash)
+                else http_torrent_infohash_hint(str(source_row["source_value"] or ""))
+            )
+            if hint:
+                retry_kwargs["qb_task_id_hint"] = hint
+        result = dispatch_missing_targets(int(source_request_id), targets, **retry_kwargs)
         return {
             **result,
             "source_request_id": int(source_request_id),
             "request_id": int(source_request_id),
             "created": False,
-            "targets": "guangya",
+            "targets": targets,
             "source_attention_preserved": not bool(result.get("ok")),
         }
 

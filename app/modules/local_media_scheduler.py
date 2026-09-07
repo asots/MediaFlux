@@ -21,6 +21,8 @@ from app.modules.local_media_service import (
 )
 from app.modules.local_media_candidates import discover_local_media_candidates
 from app.modules.local_media_models import (
+    MANUAL_SCAN_TOKEN_PREFIX,
+    SILENT_MANUAL_SCAN_TOKEN_PREFIX,
     canonical_local_media_content_path,
     local_media_paths_overlap,
 )
@@ -36,8 +38,6 @@ from app.modules.local_storage import LocalFilesystemAdapter, LocalStorageError
 logger = get_logger(__name__)
 
 
-MANUAL_SCAN_TOKEN_PREFIX = "manual-scan:"
-SILENT_MANUAL_SCAN_TOKEN_PREFIX = "silent-manual-scan:"
 _MAX_CAPTURED_TASK_RESULTS = 1000
 _DEFAULT_LOCAL_MEDIA_ORGANIZE_WORKERS = 2
 _MAX_LOCAL_MEDIA_ORGANIZE_WORKERS = 3

@@ -29,6 +29,7 @@ _runtime_futures: set[Future[Any]] = set()
 _standalone_lock = threading.Lock()
 _standalone_loop: asyncio.AbstractEventLoop | None = None
 _standalone_thread: threading.Thread | None = None
+_STANDALONE_STARTUP_TIMEOUT_SECONDS = 5.0
 
 
 def _close_awaitable(awaitable: Awaitable[Any]) -> None:
@@ -52,22 +53,36 @@ def _forget_runtime_future(future: Future[Any]) -> None:
 
 def _standalone_loop_main(
     ready: threading.Event,
-    holder: dict[str, asyncio.AbstractEventLoop],
+    holder: dict[str, Any],
+    cancelled: threading.Event,
 ) -> None:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    holder["loop"] = loop
-    ready.set()
+    loop: asyncio.AbstractEventLoop | None = None
     try:
-        loop.run_forever()
+        try:
+            loop = asyncio.new_event_loop()
+            holder["loop"] = loop
+            asyncio.set_event_loop(loop)
+            if cancelled.is_set():
+                return
+            # 创建了 loop 不等于已经运行；由首轮循环回调发布真正的就绪状态。
+            loop.call_soon(ready.set)
+            loop.run_forever()
+        finally:
+            if loop is not None:
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                finally:
+                    loop.close()
+            asyncio.set_event_loop(None)
+    except BaseException as exc:
+        holder["error"] = exc
     finally:
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.close()
-        asyncio.set_event_loop(None)
+        # 创建/初始化失败也唤醒调用者，不能伪装成等满启动预算的超时。
+        ready.set()
 
 
 def _ensure_standalone_runtime() -> asyncio.AbstractEventLoop:
@@ -76,32 +91,51 @@ def _ensure_standalone_runtime() -> asyncio.AbstractEventLoop:
     with _standalone_lock:
         loop = _standalone_loop
         thread = _standalone_thread
-        if loop is not None and thread is not None and thread.is_alive() and loop.is_running():
-            return loop
+        if thread is not None and thread.is_alive():
+            if loop is not None and loop.is_running():
+                return loop
+            raise RuntimeError("上一次索引器独立事件循环启动尚未退出，请稍后重试")
         ready = threading.Event()
-        holder: dict[str, asyncio.AbstractEventLoop] = {}
+        cancelled = threading.Event()
+        holder: dict[str, Any] = {}
         thread = threading.Thread(
             target=_standalone_loop_main,
-            args=(ready, holder),
+            args=(ready, holder, cancelled),
             name="indexer-standalone-loop",
             daemon=True,
         )
-        thread.start()
-        if not ready.wait(timeout=5.0):
-            raise RuntimeError("索引器独立事件循环启动超时")
-        loop = holder.get("loop")
-        if loop is None or not loop.is_running():
-            raise RuntimeError("索引器独立事件循环启动失败")
-        with _runtime_loop_lock:
-            if _runtime_loop is not None and _runtime_loop is not loop:
-                loop.call_soon_threadsafe(loop.stop)
-                thread.join(timeout=5.0)
-                raise RuntimeError("索引器运行时已绑定其他事件循环")
-            _standalone_loop = loop
-            _standalone_thread = thread
-            _runtime_loop = loop
-            _runtime_stopping = False
-        return loop
+        # 即使 loop 创建暂时阻塞，失败后仍须有句柄阻止重试生成第二个线程。
+        _standalone_thread = thread
+        try:
+            thread.start()
+            if not ready.wait(timeout=_STANDALONE_STARTUP_TIMEOUT_SECONDS):
+                raise RuntimeError("索引器独立事件循环启动超时")
+            loop = holder.get("loop")
+            if "error" in holder:
+                raise RuntimeError("索引器独立事件循环启动失败") from holder["error"]
+            if loop is None or not loop.is_running():
+                raise RuntimeError("索引器独立事件循环启动失败")
+            with _runtime_loop_lock:
+                if _runtime_loop is not None and _runtime_loop is not loop:
+                    raise RuntimeError("索引器运行时已绑定其他事件循环")
+                _standalone_loop = loop
+                _runtime_loop = loop
+                _runtime_stopping = False
+            return loop
+        except BaseException:
+            # 先撤销启动，再处理已经创建的 loop；稍后才创建的 loop 由线程自行关闭。
+            cancelled.set()
+            loop = holder.get("loop")
+            if loop is not None and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(loop.stop)
+                except RuntimeError:
+                    pass
+            if thread.ident is not None:
+                thread.join(timeout=_STANDALONE_STARTUP_TIMEOUT_SECONDS)
+            if not thread.is_alive():
+                _standalone_thread = None
+            raise
 
 
 def _stop_standalone_runtime(timeout_seconds: float = 10.0) -> bool:
@@ -110,7 +144,16 @@ def _stop_standalone_runtime(timeout_seconds: float = 10.0) -> bool:
     with _standalone_lock:
         loop = _standalone_loop
         thread = _standalone_thread
-        if loop is None or thread is None:
+        if thread is None:
+            return True
+        if loop is None:
+            # 启动失败但创建线程尚未退出：取消已由启动方发布，只能有界等待，
+            # 不可宣称关闭成功或丢弃其句柄后允许另一次启动。
+            if thread is not threading.current_thread():
+                thread.join(timeout=max(0.1, float(timeout_seconds)))
+            if thread.is_alive():
+                return False
+            _standalone_thread = None
             return True
         with _runtime_loop_lock:
             if _runtime_loop is loop:
@@ -273,7 +316,11 @@ def run_indexer_awaitable_sync(
         owner_loop = None
 
     if owner_loop is None and current_loop is None:
-        owner_loop = _ensure_standalone_runtime()
+        try:
+            owner_loop = _ensure_standalone_runtime()
+        except BaseException:
+            _close_awaitable(awaitable)
+            raise
 
     if owner_loop is not None:
         if current_loop is owner_loop:
@@ -316,7 +363,11 @@ async def run_indexer_awaitable(
         owner_loop = None
 
     if owner_loop is None:
-        owner_loop = _ensure_standalone_runtime()
+        try:
+            owner_loop = _ensure_standalone_runtime()
+        except BaseException:
+            _close_awaitable(awaitable)
+            raise
     if current_loop is owner_loop:
         if timeout_seconds is None:
             return await awaitable

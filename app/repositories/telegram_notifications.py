@@ -114,20 +114,23 @@ def upsert_notification(
                 return dict(conn.execute(
                     "SELECT * FROM telegram_notification_outbox WHERE event_key=?", (key,)
                 ).fetchone())
+            # SQLite 同一 UPDATE 的 CASE 读取旧列值。使用合并后的已知消息身份，
+            # 让回调确认收到的候选卡安全转入编辑，而不是仍困在未知首次发送态。
+            keep_unknown = str(row["status"] or "") == "outcome_unknown" and message_id <= 0
             conn.execute(
                 "UPDATE telegram_notification_outbox SET thread_key=?,topic=?,importance=?,"
                 "chat_id=?,event_json=?,message_id=?,revision=revision+1,"
                 "status=CASE "
                 "WHEN status='sending' THEN 'sending' "
-                "WHEN status='outcome_unknown' AND COALESCE(message_id,0)=0 "
+                "WHEN ? "
                 "THEN 'outcome_unknown' ELSE 'pending' END,"
                 "attempts=CASE "
                 "WHEN status='sending' OR "
-                "(status='outcome_unknown' AND COALESCE(message_id,0)=0) "
+                "? "
                 "THEN attempts ELSE 0 END,"
                 "next_attempt_at=?,"
                 "last_error=CASE "
-                "WHEN status='outcome_unknown' AND COALESCE(message_id,0)=0 "
+                "WHEN ? "
                 "THEN last_error ELSE '' END,updated_at=? WHERE event_key=?",
                 (
                     str(thread_key or ""),
@@ -136,7 +139,10 @@ def upsert_notification(
                     str(chat_id or ""),
                     payload,
                     message_id or None,
+                    int(keep_unknown),
+                    int(keep_unknown),
                     stamp,
+                    int(keep_unknown),
                     stamp,
                     key,
                 ),

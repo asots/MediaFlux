@@ -61,7 +61,7 @@ def _active_local_media_task_for_path(
     from app.modules.local_media_models import local_media_paths_overlap
 
     rows = conn.execute(
-        "SELECT id,source_id,qb_hash,content_path,trigger,status,operation_token "
+        "SELECT id,source_id,qb_hash,content_path,trigger,status,operation_token,error "
         "FROM local_media_tasks "
         "WHERE owner=? AND status NOT IN ('completed','failed') "
         "ORDER BY id",
@@ -133,7 +133,7 @@ def _latest_terminal_local_media_task_for_path(
 ) -> sqlite3.Row | None:
     """返回同来源同规范路径最近的终态任务，供显式重试复用。"""
     with closing(conn.execute(
-        "SELECT id,source_id,qb_hash,content_path,trigger,status,operation_token "
+        "SELECT id,source_id,qb_hash,content_path,trigger,status,operation_token,error "
         "FROM local_media_tasks WHERE source_id=? AND owner=? "
         "AND status IN ('completed','failed') ORDER BY id DESC",
         (int(source_id), owner),
@@ -1167,7 +1167,7 @@ def prepare_manual_local_media_task(
     numbering_mode: str = "auto",
 ) -> int:
     """原子创建或重置可重试的手动任务；活动任务绝不被改回等待态。"""
-    import uuid
+    from app.modules.local_media_models import renew_local_media_operation_token
 
     safe_owner = _local_media_owner(owner)
     safe_path = _canonical_local_media_content_path(content_path)
@@ -1197,7 +1197,7 @@ def prepare_manual_local_media_task(
     if normalized_type == "movie":
         normalized_numbering_mode = "auto"
     timestamp = now()
-    token = uuid.uuid4().hex
+    token = renew_local_media_operation_token()
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         source = conn.execute(
@@ -1221,6 +1221,9 @@ def prepare_manual_local_media_task(
             content_path=safe_path,
         )
         if existing and existing["status"] in {"failed", "requires_manual"}:
+            if is_interrupted_local_media_write_error(existing["error"]):
+                raise ValueError("上次本地整理在写入期间中断，请先核验文件并通过任务重试确认")
+            token = renew_local_media_operation_token(existing["operation_token"])
             task_id = int(existing["id"])
             cur = conn.execute(
                 "UPDATE local_media_tasks SET content_path=?,status='waiting_stable',"
@@ -1649,7 +1652,7 @@ def reset_local_media_task(
     expected_status: str | None = None,
 ) -> bool:
     """统一重试事务；Web 显式核验与 Agent 版本条件共用同一状态重置。"""
-    import uuid
+    from app.modules.local_media_models import renew_local_media_operation_token
 
     safe_status = None if expected_status is None else str(expected_status).strip().lower()
     if safe_status is not None and safe_status not in {"failed", "requires_manual"}:
@@ -1705,7 +1708,7 @@ def reset_local_media_task(
         "version=version+1",
         "updated_at=?",
     ]
-    params: list[object] = [uuid.uuid4().hex, now()]
+    params: list[object] = ["", now()]
     if tmdb_id is not None:
         assignments.append("tmdb_id=?")
         params.append(str(tmdb_id or "").strip())
@@ -1728,7 +1731,7 @@ def reset_local_media_task(
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
-            "SELECT status,error,version FROM local_media_tasks WHERE id=? AND owner=?",
+            "SELECT status,error,version,operation_token FROM local_media_tasks WHERE id=? AND owner=?",
             (int(task_id), safe_owner),
         ).fetchone()
         if current is None or str(current["status"] or "") not in {
@@ -1744,6 +1747,7 @@ def reset_local_media_task(
             confirm_interrupted_write
         ):
             return False
+        params[0] = renew_local_media_operation_token(current["operation_token"])
         cur = conn.execute(
             f"UPDATE local_media_tasks SET {', '.join(assignments)} "
             "WHERE id=? AND owner=? AND status IN ('failed','requires_manual')",

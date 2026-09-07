@@ -131,6 +131,7 @@ def create_agent_job(
     progress_total: int = 0,
     max_attempts: int = 3,
     job_id: str | None = None,
+    expected_active_job_id: str | None = None,
 ) -> tuple[sqlite3.Row, bool]:
     """幂等创建 owner 内唯一的活动任务。"""
     owner_digest = agent_job_owner_digest(owner)
@@ -143,6 +144,9 @@ def create_agent_job(
     safe_max_attempts = max(1, min(int(max_attempts), 10))
     generated_id = job_id or f"job_{secrets.token_urlsafe(18)}"
     safe_id = _safe_job_id(generated_id)
+    expected_id = (
+        _safe_job_id(expected_active_job_id) if expected_active_job_id is not None else None
+    )
     timestamp = now()
 
     with get_conn() as conn:
@@ -153,6 +157,11 @@ def create_agent_job(
             "ORDER BY created_at DESC,job_id DESC LIMIT 1",
             (owner_digest, safe_type, safe_dedupe),
         ).fetchone()
+        if expected_id is not None and (
+            existing is None or str(existing["job_id"]) != expected_id
+        ):
+            # 预检承诺复用具体任务，等待写锁期间其完成/取消也不能扩大为新建。
+            raise AgentToolError("后台任务状态已变化，请重新确认", code="confirmation_stale")
         if existing is not None:
             return existing, False
         try:

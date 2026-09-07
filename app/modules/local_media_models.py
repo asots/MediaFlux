@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -48,6 +49,20 @@ LOCAL_MEDIA_CATEGORIES: frozenset[str] = frozenset(
     {"default", "movie", "tv", "anime", "documentary", "variety", "concert", "kids"}
 )
 LOCAL_MEDIA_TRIGGERS: frozenset[str] = frozenset({"qb_completed", "scan", "manual"})
+
+
+MANUAL_SCAN_TOKEN_PREFIX = "manual-scan:"
+SILENT_MANUAL_SCAN_TOKEN_PREFIX = "silent-manual-scan:"
+
+
+def renew_local_media_operation_token(previous: str = "") -> str:
+    """更换 attempt 身份但保留显式手动扫描的准入和静默语义。"""
+    token = str(previous or "")
+    prefix = next((
+        value for value in (MANUAL_SCAN_TOKEN_PREFIX, SILENT_MANUAL_SCAN_TOKEN_PREFIX)
+        if token.startswith(value)
+    ), "")
+    return prefix + uuid.uuid4().hex
 
 
 def canonical_local_media_content_path(value: str | Path) -> str:

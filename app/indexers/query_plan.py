@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-from .models import IndexerMediaSearchRequest
+from .models import MAX_SEARCH_TEXT_LENGTH, IndexerMediaSearchRequest
 
 _HAN = re.compile(r"[\u3400-\u9fff]")
 _JAPANESE_KANA = re.compile(r"[\u3040-\u30ff]")
@@ -51,12 +51,18 @@ def _position_suffix(request: IndexerMediaSearchRequest) -> str:
     return ""
 
 
+def _append_position_suffix(title: str, suffix: str) -> str:
+    # 请求标题与排名证据保持原样；只为站点查询的季集后缀预留共享长度预算。
+    prefix = title[:MAX_SEARCH_TEXT_LENGTH - len(suffix) - 1].rstrip()
+    return f"{prefix} {suffix}"
+
+
 def _with_position(title: str, request: IndexerMediaSearchRequest) -> str:
     normalized = " ".join(str(title or "").split())
     suffix = _position_suffix(request)
     if not normalized or not suffix or _POSITION_MARKER.search(normalized):
         return normalized
-    return f"{normalized} {suffix}"
+    return _append_position_suffix(normalized, suffix)
 
 
 def _with_chinese_episode(title: str, request: IndexerMediaSearchRequest) -> str:
@@ -64,8 +70,8 @@ def _with_chinese_episode(title: str, request: IndexerMediaSearchRequest) -> str
     if not normalized or request.episode is None or _POSITION_MARKER.search(normalized):
         return normalized
     if request.season is not None:
-        return f"{normalized} 第{request.season}季 第{request.episode}集"
-    return f"{normalized} 第{request.episode}集"
+        return _append_position_suffix(normalized, f"第{request.season}季 第{request.episode}集")
+    return _append_position_suffix(normalized, f"第{request.episode}集")
 
 
 def build_site_queries(site_id: str, request: IndexerMediaSearchRequest) -> tuple[str, ...]:
