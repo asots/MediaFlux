@@ -580,6 +580,162 @@ jobs:
             docker rm "$container" >/dev/null
           done
 
+      - name: Prepare GitHub Release
+        id: release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_REF: ${{ steps.context.outputs.version_ref }}
+          EXPECTED_SHA: ${{ steps.context.outputs.source_sha }}
+          SOURCE_DATE_EPOCH: ${{ steps.context.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          git fetch --force --no-tags origin \
+            "+refs/tags/$VERSION_REF:refs/tags/$VERSION_REF"
+          test "$(git rev-list -n 1 "$VERSION_REF")" = "$EXPECTED_SHA"
+          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main
+
+          RELEASE_ASSETS="$RUNNER_TEMP/release-assets"
+          mkdir -p "$RELEASE_ASSETS"
+          cp "$RUNNER_TEMP/BUILD-INFO.json" "$RELEASE_ASSETS/BUILD-INFO.json"
+          export RELEASE_ASSETS
+          python - <<'PY'
+          import importlib.util, os
+          from pathlib import Path
+          p = Path('packaging/scripts/generate_build_info.py')
+          s = importlib.util.spec_from_file_location('g', p)
+          m = importlib.util.module_from_spec(s)
+          import sys
+          sys.modules[s.name] = m
+          s.loader.exec_module(m)
+          m.generate_release_notes(
+              os.environ['VERSION_REF'],
+              os.environ['GITHUB_REPOSITORY'],
+              Path('CHANGELOG.md'),
+              Path(os.environ['RELEASE_ASSETS']) / 'RELEASE-NOTES.txt',
+          )
+          PY
+          python packaging/scripts/generate_sbom.py requirements-release-runtime.lock \
+            --output "$RELEASE_ASSETS/PYTHON-DEPENDENCIES.spdx.json" \
+            --namespace "https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION_REF"
+          python packaging/scripts/generate_checksums.py "$RELEASE_ASSETS"
+
+          # 同一个校验器用于上传前的既有附件、上传后下载及最终公开前复核。
+          # SHA256SUMS 只允许三个固定文件名，不能由远端清单指定本机任意路径。
+          cat > "$RUNNER_TEMP/verify-release-assets.py" <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import sys
+          from datetime import datetime
+
+          directory = Path(sys.argv[1])
+          expected = json.loads((Path(os.environ["RUNNER_TEMP"]) / "BUILD-INFO.json").read_text())
+          manifest = json.loads((directory / "BUILD-INFO.json").read_text())
+          fields = ("name", "version", "commit", "platform", "arch", "package", "artifact_name", "prerelease")
+          if not isinstance(manifest, dict) or any(
+              type(manifest.get(key)) is not type(expected[key]) or manifest.get(key) != expected[key]
+              for key in fields
+          ):
+              raise SystemExit("Invalid or different-source BUILD-INFO.json; refusing asset overwrite")
+          if datetime.fromisoformat(manifest["build_time"]).utcoffset() is None:
+              raise SystemExit("BUILD-INFO.json requires a timezone-aware build_time")
+          if sys.argv[2:] == ["--manifest-only"]:
+              raise SystemExit(0)
+          required = {"BUILD-INFO.json", "RELEASE-NOTES.txt", "PYTHON-DEPENDENCIES.spdx.json"}
+          seen = set()
+          for line in (directory / "SHA256SUMS").read_text().splitlines():
+              match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+              if not match or match[2] not in required or match[2] in seen:
+                  raise SystemExit("Invalid or unexpected SHA256SUMS entry")
+              seen.add(match[2])
+              actual = hashlib.sha256((directory / match[2]).read_bytes()).hexdigest()
+              if actual != match[1]:
+                  raise SystemExit(f"Release asset SHA-256 mismatch: {match[2]}")
+          if seen != required:
+              raise SystemExit("Incomplete release SHA256SUMS")
+          sbom = json.loads((directory / "PYTHON-DEPENDENCIES.spdx.json").read_text())
+          if not isinstance(sbom, dict) or sbom.get("spdxVersion") != "SPDX-2.3":
+              raise SystemExit("Invalid Python dependency SBOM")
+          PY
+
+          RELEASE_MARKER="<!-- mediaflux-release:v1 version=$VERSION_REF commit=$EXPECTED_SHA -->"
+          RELEASE_VIEW="$RUNNER_TEMP/release-view.json"
+          VERIFIED_ASSETS="$RUNNER_TEMP/verified-release-assets"
+          mkdir -p "$VERIFIED_ASSETS"
+          if gh release view "$VERSION_REF" \
+            --json isDraft,body,tagName,targetCommitish,assets > "$RELEASE_VIEW"; then
+            jq -e --arg tag "$VERSION_REF" '
+              .tagName == $tag and (.isDraft | type) == "boolean" and (.assets | type) == "array"
+            ' "$RELEASE_VIEW" >/dev/null
+            if jq -e '.isDraft == true' "$RELEASE_VIEW" >/dev/null; then
+              if ! jq -e --arg sha "$EXPECTED_SHA" --arg marker "$RELEASE_MARKER" '
+                .targetCommitish == $sha and (.body | split("\n") | index($marker)) != null
+              ' "$RELEASE_VIEW" >/dev/null; then
+                echo "Unknown or different-source draft $VERSION_REF; refusing asset overwrite" >&2
+                exit 1
+              fi
+            fi
+            if jq -e 'any(.assets[]; .name == "BUILD-INFO.json")' "$RELEASE_VIEW" >/dev/null; then
+              mkdir -p "$RUNNER_TEMP/existing-release-manifest"
+              gh release download "$VERSION_REF" \
+                --pattern BUILD-INFO.json --dir "$RUNNER_TEMP/existing-release-manifest"
+              python "$RUNNER_TEMP/verify-release-assets.py" \
+                "$RUNNER_TEMP/existing-release-manifest" --manifest-only
+            elif jq -e '.isDraft == false' "$RELEASE_VIEW" >/dev/null; then
+              echo "Published release $VERSION_REF has no verifiable BUILD-INFO.json; refusing overwrite" >&2
+              exit 1
+            fi
+            if jq -e '
+              [.assets[].name] as $names
+              | ["BUILD-INFO.json", "RELEASE-NOTES.txt", "PYTHON-DEPENDENCIES.spdx.json", "SHA256SUMS"]
+              | all(.[]; . as $name | ($names | index($name)) != null)
+            ' "$RELEASE_VIEW" >/dev/null; then
+              gh release download "$VERSION_REF" \
+                -p BUILD-INFO.json -p RELEASE-NOTES.txt \
+                -p PYTHON-DEPENDENCIES.spdx.json -p SHA256SUMS --dir "$VERIFIED_ASSETS"
+              python "$RUNNER_TEMP/verify-release-assets.py" "$VERIFIED_ASSETS"
+              if jq -e '.isDraft == false' "$RELEASE_VIEW" >/dev/null; then
+                # 同 SHA 重建的 digest 可能变化；已完整公开时附件和镜像都保持不动。
+                echo "Verified published release $VERSION_REF; skip assets and image promotion"
+                echo "ready_draft=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "ready_draft=true" >> "$GITHUB_OUTPUT"
+              fi
+              exit 0
+            elif jq -e '.isDraft == false' "$RELEASE_VIEW" >/dev/null; then
+              echo "Published release $VERSION_REF has incomplete assets; refusing overwrite" >&2
+              exit 1
+            fi
+          else
+            # create 是排他的：view 的网络/权限故障不能授权覆盖任何既有 Release。
+            # --verify-tag 阻止在 tag 复核后被删除时由 gh 隐式创建新 tag。
+            DRAFT_NOTES="$RUNNER_TEMP/draft-release-notes.txt"
+            cp "$RELEASE_ASSETS/RELEASE-NOTES.txt" "$DRAFT_NOTES"
+            printf '\n%s\n' "$RELEASE_MARKER" >> "$DRAFT_NOTES"
+            PRERELEASE=()
+            if jq -e '.prerelease == true' "$RUNNER_TEMP/BUILD-INFO.json" >/dev/null; then
+              PRERELEASE=(--prerelease)
+            fi
+            gh release create "$VERSION_REF" --draft --verify-tag --target "$EXPECTED_SHA" \
+              --title "MediaFlux $VERSION_REF" --notes-file "$DRAFT_NOTES" "${PRERELEASE[@]}"
+          fi
+          # 只对本候选拥有的 draft 续传；任何已有但损坏/不同 SHA 的 manifest 均已拒绝。
+          gh release upload "$VERSION_REF" --clobber \
+            "$RELEASE_ASSETS/BUILD-INFO.json" \
+            "$RELEASE_ASSETS/RELEASE-NOTES.txt" \
+            "$RELEASE_ASSETS/PYTHON-DEPENDENCIES.spdx.json" \
+            "$RELEASE_ASSETS/SHA256SUMS"
+          gh release download "$VERSION_REF" \
+            -p BUILD-INFO.json -p RELEASE-NOTES.txt \
+            -p PYTHON-DEPENDENCIES.spdx.json -p SHA256SUMS --dir "$VERIFIED_ASSETS"
+          python "$RUNNER_TEMP/verify-release-assets.py" "$VERIFIED_ASSETS"
+          echo "ready_draft=true" >> "$GITHUB_OUTPUT"
+
       - name: Re-verify release tag before promotion
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -592,7 +748,7 @@ jobs:
           test "$(git rev-list -n 1 "$VERSION_REF")" = "$EXPECTED_SHA"
 
       - name: Promote verified image tags
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && steps.release.outputs.ready_draft == 'true'
         env:
           IMAGE_REPOSITORY: ${{ steps.context.outputs.image_repository }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -704,72 +860,29 @@ jobs:
           done
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && steps.release.outputs.ready_draft == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION_REF: ${{ steps.context.outputs.version_ref }}
-          SOURCE_DATE_EPOCH: ${{ steps.context.outputs.source_date_epoch }}
+          EXPECTED_SHA: ${{ steps.context.outputs.source_sha }}
         run: |
           set -euo pipefail
-          RELEASE_ASSETS="$RUNNER_TEMP/release-assets"
-          mkdir -p "$RELEASE_ASSETS"
-          cp "$RUNNER_TEMP/BUILD-INFO.json" "$RELEASE_ASSETS/BUILD-INFO.json"
-          export RELEASE_ASSETS
-          python - <<'PY'
-          import importlib.util, os
-          from pathlib import Path
-          p = Path('packaging/scripts/generate_build_info.py')
-          s = importlib.util.spec_from_file_location('g', p)
-          m = importlib.util.module_from_spec(s)
-          import sys
-          sys.modules[s.name] = m
-          s.loader.exec_module(m)
-          m.generate_release_notes(
-              os.environ['VERSION_REF'],
-              os.environ['GITHUB_REPOSITORY'],
-              Path('CHANGELOG.md'),
-              Path(os.environ['RELEASE_ASSETS']) / 'RELEASE-NOTES.txt',
-          )
-          PY
-          python packaging/scripts/generate_sbom.py requirements-release-runtime.lock \
-            --output "$RELEASE_ASSETS/PYTHON-DEPENDENCIES.spdx.json" \
-            --namespace "https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION_REF"
-          python packaging/scripts/generate_checksums.py "$RELEASE_ASSETS"
           git fetch --force --no-tags origin \
             "+refs/heads/main:refs/remotes/origin/main"
           git fetch --force --no-tags origin \
             "+refs/tags/$VERSION_REF:refs/tags/$VERSION_REF"
-          EXPECTED_SHA=$(jq -r '.commit' "$RUNNER_TEMP/BUILD-INFO.json")
           test "$(git rev-list -n 1 "$VERSION_REF")" = "$EXPECTED_SHA"
           git merge-base --is-ancestor "$EXPECTED_SHA" origin/main
-
-          PRERELEASE=()
-          if jq -e '.prerelease == true' "$RUNNER_TEMP/BUILD-INFO.json" >/dev/null; then
-            PRERELEASE=(--prerelease)
-          fi
-          if gh release view "$VERSION_REF" >/dev/null 2>&1; then
-            EXISTING_RELEASE="$RUNNER_TEMP/existing-release"
-            rm -rf "$EXISTING_RELEASE"
-            mkdir -p "$EXISTING_RELEASE"
-            if ! gh release download "$VERSION_REF" \
-              --pattern BUILD-INFO.json --dir "$EXISTING_RELEASE"; then
-              echo "Existing release $VERSION_REF has no verifiable BUILD-INFO.json; refusing overwrite" >&2
-              exit 1
-            fi
-            EXISTING_RELEASE_SHA=$(jq -r '.commit // empty' \
-              "$EXISTING_RELEASE/BUILD-INFO.json")
-            if [[ "$EXISTING_RELEASE_SHA" != "$EXPECTED_SHA" ]]; then
-              echo "Existing release $VERSION_REF belongs to $EXISTING_RELEASE_SHA, not $EXPECTED_SHA; refusing asset overwrite" >&2
-              exit 1
-            fi
-          else
-            gh release create "$VERSION_REF" \
-              --title "MediaFlux $VERSION_REF" \
-              --notes-file "$RELEASE_ASSETS/RELEASE-NOTES.txt" \
-              "${PRERELEASE[@]}"
-          fi
-          gh release upload "$VERSION_REF" --clobber \
-            "$RELEASE_ASSETS/BUILD-INFO.json" \
-            "$RELEASE_ASSETS/RELEASE-NOTES.txt" \
-            "$RELEASE_ASSETS/PYTHON-DEPENDENCIES.spdx.json" \
-            "$RELEASE_ASSETS/SHA256SUMS"
+          RELEASE_MARKER="<!-- mediaflux-release:v1 version=$VERSION_REF commit=$EXPECTED_SHA -->"
+          gh release view "$VERSION_REF" --json isDraft,body,tagName,targetCommitish,assets \
+            > "$RUNNER_TEMP/publish-release-view.json"
+          jq -e --arg tag "$VERSION_REF" --arg sha "$EXPECTED_SHA" --arg marker "$RELEASE_MARKER" '
+            .isDraft == true and .tagName == $tag and .targetCommitish == $sha
+            and (.body | split("\n") | index($marker)) != null
+          ' "$RUNNER_TEMP/publish-release-view.json" >/dev/null
+          mkdir -p "$RUNNER_TEMP/publish-verified-assets"
+          gh release download "$VERSION_REF" \
+            -p BUILD-INFO.json -p RELEASE-NOTES.txt \
+            -p PYTHON-DEPENDENCIES.spdx.json -p SHA256SUMS --dir "$RUNNER_TEMP/publish-verified-assets"
+          python "$RUNNER_TEMP/verify-release-assets.py" "$RUNNER_TEMP/publish-verified-assets"
+          gh release edit "$VERSION_REF" --draft=false

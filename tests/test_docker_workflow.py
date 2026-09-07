@@ -68,7 +68,7 @@ class DockerWorkflowTests(unittest.TestCase):
             3,
         )
         self.assertNotIn(
-            "test \"$(docker inspect --format '{{.State.ExitCode}}' mediaflux-smoke)\" = \"0\"",
+            'test "$(docker inspect --format \'{{.State.ExitCode}}\' mediaflux-smoke)" = "0"',
             self.text,
         )
 
@@ -80,7 +80,9 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn("/static/js/app.js", self.text)
         self.assertIn("source_app_js_bytes=$(wc -c < app/static/js/app.js)", self.text)
         self.assertIn("image_app_js_bytes=$(docker exec mediaflux-smoke", self.text)
-        self.assertIn('test "$image_app_js_bytes" -lt "$source_app_js_bytes"', self.text)
+        self.assertIn(
+            'test "$image_app_js_bytes" -lt "$source_app_js_bytes"', self.text
+        )
         self.assertIn("! command -v node", self.text)
 
     def test_smoke_upgrades_a_persisted_v014_database_without_losing_data(self) -> None:
@@ -107,7 +109,9 @@ class DockerWorkflowTests(unittest.TestCase):
             "ruff check app packaging tests --select F,E9",
             test_job,
         )
-        self.assertLess(test_job.index("npm ci"), test_job.index("python -m pytest tests"))
+        self.assertLess(
+            test_job.index("npm ci"), test_job.index("python -m pytest tests")
+        )
         self.assertLess(
             test_job.index("requirements-release-runtime.lock"),
             test_job.index("python -m pytest tests"),
@@ -121,7 +125,9 @@ class DockerWorkflowTests(unittest.TestCase):
             test_job.index("python -m pytest tests"),
         )
 
-    def test_confirmation_boundary_browser_cases_are_in_required_browser_job(self) -> None:
+    def test_confirmation_boundary_browser_cases_are_in_required_browser_job(
+        self,
+    ) -> None:
         browser_job = self.text.split("  browser:", 1)[1].split("  smoke:", 1)[0]
         self.assertIn('python -m pip install "playwright==1.62.0"', browser_job)
         self.assertIn('"tests.test_node_fixes_agent_feedback",', browser_job)
@@ -140,9 +146,14 @@ class DockerWorkflowTests(unittest.TestCase):
     def test_full_test_job_has_dependency_free_source_syntax_gate(self) -> None:
         test_job = self.text.split("  test:", 1)[1].split("  smoke:", 1)[0]
         self.assertIn("python -m compileall -q app packaging tests", test_job)
-        self.assertIn("find app/static/js -type f -name '*.js' ! -name '*.min.js' -print0", test_job)
+        self.assertIn(
+            "find app/static/js -type f -name '*.js' ! -name '*.min.js' -print0",
+            test_job,
+        )
         self.assertIn('node --check "$file"', test_job)
-        self.assertLess(test_job.index("compileall"), test_job.index("python -m pytest tests"))
+        self.assertLess(
+            test_job.index("compileall"), test_job.index("python -m pytest tests")
+        )
 
     def test_expected_readiness_retries_are_quiet_until_terminal_failure(self) -> None:
         smoke_job = self.text.split("  smoke:", 1)[1].split("  build:", 1)[0]
@@ -162,7 +173,9 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn("actions/setup-node@v6", test_job)
         self.assertIn('node-version: "24"', test_job)
 
-    def test_candidate_manifest_and_arm64_runtime_are_verified_before_promotion(self) -> None:
+    def test_candidate_manifest_and_arm64_runtime_are_verified_before_promotion(
+        self,
+    ) -> None:
         manifest = self.text.index("Verify candidate multi-architecture manifest")
         candidate_smoke = self.text.index("Smoke test candidate images")
         promote = self.text.index("Promote verified image tags")
@@ -176,22 +189,24 @@ class DockerWorkflowTests(unittest.TestCase):
             self.text,
         )
         self.assertIn('docker run --rm --platform "$platform"', self.text)
-        self.assertIn('output="$RUNNER_TEMP/docker-$safe_platform-version.json"', self.text)
-        self.assertIn('.arch == $arch', self.text)
-        self.assertIn('platform_digest=$(jq -r', self.text)
-        self.assertIn('$IMAGE_REPOSITORY@$platform_digest', self.text)
+        self.assertIn(
+            'output="$RUNNER_TEMP/docker-$safe_platform-version.json"', self.text
+        )
+        self.assertIn(".arch == $arch", self.text)
+        self.assertIn("platform_digest=$(jq -r", self.text)
+        self.assertIn("$IMAGE_REPOSITORY@$platform_digest", self.text)
         self.assertIn('container="mediaflux-${safe_platform}-startup"', self.text)
         self.assertIn('docker run --detach --platform "$platform"', self.text)
         self.assertIn("http://127.0.0.1:1258/readyz", self.text)
         self.assertIn('docker pull --quiet --platform "$platform"', self.text)
         self.assertIn("candidate exited before readiness", self.text)
-        self.assertIn('>/dev/null 2>&1; then', self.text)
+        self.assertIn(">/dev/null 2>&1; then", self.text)
         self.assertIn('docker stop --timeout 60 "$container"', self.text)
         self.assertNotIn("docker stop --time ", self.text)
-        candidate_smoke = self.text.split("      - name: Smoke test candidate images", 1)[1].split(
-            "      - name: Re-verify release tag before promotion", 1
-        )[0]
-        self.assertNotIn('$IMAGE_REPOSITORY@$IMAGE_DIGEST', candidate_smoke)
+        candidate_smoke = self.text.split(
+            "      - name: Smoke test candidate images", 1
+        )[1].split("      - name: Re-verify release tag before promotion", 1)[0]
+        self.assertNotIn("$IMAGE_REPOSITORY@$IMAGE_DIGEST", candidate_smoke)
 
     def test_registry_existence_checks_fail_closed_before_promotion(self) -> None:
         promote = self.text.split("      - name: Promote verified image tags", 1)[1]
@@ -265,7 +280,10 @@ esac
         self.assertIn('existing_digest" != "$IMAGE_DIGEST', promote)
         self.assertIn('if [[ "$STABLE" == "true" ]]', promote)
         self.assertIn("check_version_promotion.py", promote)
-        self.assertIn('for mutable_tag in "$IMAGE_REPOSITORY:$SERIES" "$IMAGE_REPOSITORY:latest"', promote)
+        self.assertIn(
+            'for mutable_tag in "$IMAGE_REPOSITORY:$SERIES" "$IMAGE_REPOSITORY:latest"',
+            promote,
+        )
         self.assertIn('tags+=("$mutable_tag")', promote)
         self.assertIn("Keep $mutable_tag on newer version", promote)
         self.assertIn("imagetools create --tag", promote)
@@ -275,12 +293,10 @@ esac
         self.assertIn("exists but cannot be verified; refusing overwrite", promote)
         self.assertGreaterEqual(promote.count("exit 1"), 2)
         self.assertIn("existing-exact-manifest.json", promote)
-        self.assertIn(
-            '"$IMAGE_REPOSITORY@$existing_digest" --raw', promote
-        )
+        self.assertIn('"$IMAGE_REPOSITORY@$existing_digest" --raw', promote)
         self.assertNotIn('imagetools inspect "$exact" --raw', promote)
-        self.assertIn('platform_digest=$(jq -r', promote)
-        self.assertIn('$IMAGE_REPOSITORY@$platform_digest', promote)
+        self.assertIn("platform_digest=$(jq -r", promote)
+        self.assertIn("$IMAGE_REPOSITORY@$platform_digest", promote)
         self.assertNotIn('"$exact" mediaflux.py version --json', promote)
         self.assertIn(
             '"$IMAGE_REPOSITORY@$mutable_digest" mediaflux.py version --json',
@@ -327,25 +343,73 @@ esac
         self.assertNotIn("--package runtime", context)
         self.assertIn("VERSION_REF=${{ steps.context.outputs.version_ref }}", self.text)
         self.assertIn("GIT_SHA=${{ steps.context.outputs.source_sha }}", self.text)
-        self.assertIn("SOURCE_DATE_EPOCH=${{ steps.context.outputs.source_date_epoch }}", self.text)
-        self.assertIn("ARG SOURCE_DATE_EPOCH", Path("Dockerfile").read_text(encoding="utf-8"))
+        self.assertIn(
+            "SOURCE_DATE_EPOCH=${{ steps.context.outputs.source_date_epoch }}",
+            self.text,
+        )
+        self.assertIn(
+            "ARG SOURCE_DATE_EPOCH", Path("Dockerfile").read_text(encoding="utf-8")
+        )
+
+    def test_release_draft_is_verified_before_promotion_and_published_last(
+        self,
+    ) -> None:
+        workflow = yaml.safe_load(self.text)
+        steps = workflow["jobs"]["build"]["steps"]
+        names = [step.get("name", "") for step in steps]
+        prepare = names.index("Prepare GitHub Release")
+        reverify = names.index("Re-verify release tag before promotion")
+        promote = names.index("Promote verified image tags")
+        publish = names.index("Publish GitHub Release")
+        self.assertLess(names.index("Smoke test candidate images"), prepare)
+        self.assertLess(prepare, reverify)
+        self.assertLess(reverify, promote)
+        self.assertLess(promote, publish)
+        self.assertEqual(steps[prepare]["id"], "release")
+        draft_condition = (
+            "startsWith(github.ref, 'refs/tags/v') && "
+            "steps.release.outputs.ready_draft == 'true'"
+        )
+        self.assertEqual(steps[promote]["if"], draft_condition)
+        self.assertEqual(steps[publish]["if"], draft_condition)
+        self.assertIn(
+            '--draft --verify-tag --target "$EXPECTED_SHA"', steps[prepare]["run"]
+        )
+        self.assertIn(
+            'gh release edit "$VERSION_REF" --draft=false', steps[publish]["run"]
+        )
+        self.assertNotIn("gh release upload", steps[publish]["run"])
+        for stage in (prepare, publish):
+            self.assertIn(
+                'git merge-base --is-ancestor "$EXPECTED_SHA" origin/main',
+                steps[stage]["run"],
+            )
+            self.assertIn("verify-release-assets.py", steps[stage]["run"])
 
     def test_existing_release_assets_are_only_replaced_for_same_commit(self) -> None:
-        publish = self.text.split("      - name: Publish GitHub Release", 1)[1]
-        self.assertIn('gh release download "$VERSION_REF"', publish)
-        self.assertIn("--pattern BUILD-INFO.json", publish)
-        self.assertIn("EXISTING_RELEASE_SHA=$(jq -r '.commit // empty'", publish)
-        self.assertIn('"$EXISTING_RELEASE_SHA" != "$EXPECTED_SHA"', publish)
-        self.assertIn("refusing asset overwrite", publish)
-        self.assertIn("has no verifiable BUILD-INFO.json; refusing overwrite", publish)
+        prepare = self.text.split("      - name: Prepare GitHub Release", 1)[1].split(
+            "      - name: Re-verify release tag before promotion", 1
+        )[0]
+        self.assertIn("--json isDraft,body,tagName,targetCommitish,assets", prepare)
+        self.assertIn(
+            "mediaflux-release:v1 version=$VERSION_REF commit=$EXPECTED_SHA", prepare
+        )
+        self.assertIn('gh release download "$VERSION_REF"', prepare)
+        self.assertIn("--pattern BUILD-INFO.json", prepare)
+        self.assertIn("refusing asset overwrite", prepare)
+        self.assertIn("has no verifiable BUILD-INFO.json; refusing overwrite", prepare)
+        self.assertIn("ready_draft=false", prepare)
+        self.assertIn("Release asset SHA-256 mismatch", prepare)
 
     def test_release_assets_reuse_commit_epoch_for_annotated_tags(self) -> None:
-        publish = self.text.split("      - name: Publish GitHub Release", 1)[1]
+        prepare = self.text.split("      - name: Prepare GitHub Release", 1)[1].split(
+            "      - name: Re-verify release tag before promotion", 1
+        )[0]
         self.assertIn(
             "SOURCE_DATE_EPOCH: ${{ steps.context.outputs.source_date_epoch }}",
-            publish,
+            prepare,
         )
-        self.assertNotIn('git show -s --format=%ct "$VERSION_REF"', publish)
+        self.assertNotIn('git show -s --format=%ct "$VERSION_REF"', prepare)
 
 
 if __name__ == "__main__":
