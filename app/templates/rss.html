@@ -381,7 +381,6 @@ async function loadSubs({preserve=true}={}){
     const requestId=++rssSubsRequestId;
     const list=document.getElementById('subList');
     const sel=document.getElementById('filterSub');
-    const selectedValue=sel.value;
     const hadContent=list.childElementCount>0;
     let skeletonTimer=null;
     if(!hadContent||!preserve){
@@ -400,6 +399,8 @@ async function loadSubs({preserve=true}={}){
         subscriptions=rows;
         rssSubsLoaded=true;
         const releaseHeight=preserve&&hadContent?lockRssListHeight(list):()=>{};
+        // 取提交DOM时的最新筛选，不能用请求发起时的旧值覆盖用户中途选择。
+        const selectedValue=sel.value;
         sel.replaceChildren(new Option('全部订阅源',''));
         rows.forEach(s=>sel.appendChild(new Option(s.name||`订阅源 #${s.id}`,String(s.id))));
         if([...sel.options].some(option=>option.value===selectedValue))sel.value=selectedValue;

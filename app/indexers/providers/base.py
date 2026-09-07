@@ -40,6 +40,21 @@ class IndexerAdapter(ABC):
     async def resolve(self, stored_result: IndexerItem) -> ResolvedDownload:
         raise NotImplementedError
 
+    def _join_known_host(self, candidate: str, *, relative_base_url: str | None = None) -> str:
+        """同一注册站点及其镜像共用相对地址解析，避免各适配器复制策略。"""
+        bases = getattr(self, "_host_bases", (self.base_url,))
+        if relative_base_url is not None:
+            bases = tuple(dict.fromkeys((relative_base_url, *bases)))
+        last_error: IndexerSecurityError | None = None
+        for base_url in bases:
+            try:
+                return fixed_host_join(base_url, candidate)
+            except IndexerSecurityError as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
+
     def iter_http_clients(self) -> tuple[object, ...]:
         client = getattr(self, "http", None)
         return (client,) if client is not None else ()

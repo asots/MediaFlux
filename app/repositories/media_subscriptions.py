@@ -448,17 +448,6 @@ def list_due_media_subscriptions(limit: int = 20) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def claim_media_subscription_check(subscription_id: int) -> bool:
-    stamp = now()
-    with get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE media_subscriptions SET status='checking',updated_at=? "
-            "WHERE id=? AND enabled=1 AND status!='checking'",
-            (stamp, int(subscription_id)),
-        )
-        return cur.rowcount == 1
-
-
 def claim_media_subscription_check_run(
     subscription_id: int, trigger_type: str = "manual"
 ) -> int | None:
@@ -826,19 +815,33 @@ def list_media_subscription_runs(
         ).fetchall()
 
 
-def expire_media_subscription_candidates(subscription_id: int | None = None) -> int:
+def _expire_media_subscription_candidates_conn(
+    conn: sqlite3.Connection,
+    *,
+    subscription_id: int | None = None,
+    candidate_id: int | None = None,
+) -> int:
+    """统一到期SQL；查询和清理共用事务，不为每个候选再打开全局维护连接。"""
     params: list[Any] = [now()]
     clause = ""
     if subscription_id is not None:
-        clause = " AND subscription_id=?"
+        clause += " AND subscription_id=?"
         params.append(int(subscription_id))
+    if candidate_id is not None:
+        clause += " AND id=?"
+        params.append(int(candidate_id))
+    cur = conn.execute(
+        "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
+        "WHERE status='available' AND datetime(expires_at)<=datetime('now','localtime')" + clause,
+        params,
+    )
+    return int(cur.rowcount or 0)
+
+
+def expire_media_subscription_candidates(subscription_id: int | None = None) -> int:
+    """显式全量或按订阅执行到期维护，保持既有调用合同。"""
     with get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
-            "WHERE status='available' AND datetime(expires_at)<=datetime('now','localtime')" + clause,
-            params,
-        )
-        return int(cur.rowcount or 0)
+        return _expire_media_subscription_candidates_conn(conn, subscription_id=subscription_id)
 
 
 def replace_media_subscription_candidates(
@@ -914,8 +917,8 @@ def list_media_subscription_candidates_by_ids(
 
 
 def get_media_subscription_candidate(candidate_id: int) -> sqlite3.Row | None:
-    expire_media_subscription_candidates()
     with get_conn() as conn:
+        _expire_media_subscription_candidates_conn(conn, candidate_id=candidate_id)
         return conn.execute(
             "SELECT * FROM media_subscription_candidates WHERE id=?", (int(candidate_id),)
         ).fetchone()

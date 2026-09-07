@@ -29,6 +29,7 @@ from app import database as db
 from app.config import get, get_many
 from app.indexers.providers.base import magnet_infohash
 from app.logger import get_logger
+from app.modules import media_identity
 from app.modules.media_identity import build_media_key, parse_episode_label
 
 logger = get_logger(__name__)
@@ -440,27 +441,7 @@ class RSSEngine:
             detail.get("original_name"),
         ]
 
-        def append_collection(collection: object) -> None:
-            if isinstance(collection, dict):
-                collection = (
-                    collection.get("titles")
-                    or collection.get("results")
-                    or collection.get("translations")
-                    or []
-                )
-            for item in collection if isinstance(collection, list) else []:
-                if isinstance(item, dict):
-                    data = item.get("data") if isinstance(item.get("data"), dict) else {}
-                    values.extend((
-                        item.get("title"), item.get("name"),
-                        data.get("title"), data.get("name"), data.get("english_name"),
-                    ))
-                else:
-                    values.append(item)
-
-        append_collection(detail.get("aliases") or [])
-        append_collection(detail.get("alternative_titles") or [])
-        append_collection(detail.get("translations") or [])
+        values.extend(media_identity.tmdb_alias_values(detail))
         return list(dict.fromkeys(
             str(value).strip() for value in values if str(value or "").strip()
         ))

@@ -251,6 +251,7 @@ class STRMMetadataWorker:
                     expected_revision=revision,
                     expected_owner=self._owner,
                     refresh_path=str(result.get("path") or ""),
+                    refresh_paths=result.get("refresh_paths") or (),
                 )
             finally:
                 STRM_OPERATION_LOCK.release()
@@ -282,6 +283,15 @@ class STRMMetadataWorker:
                 error_type=error_type,
                 error=exc,
             )
+            if state not in {"retry_wait", "failed"}:
+                # 准备下载时不持有 STRM 写锁，期间可能更新快照、取消来源或
+                # 接管租约。队列已判定旧结果失效时，不能再发布旧文件的重试
+                # 入口，也不能把正常的版本交接累计进下载失败熔断。
+                logger.debug(
+                    "忽略已失效的 STRM 元数据下载结果 job=%s state=%s",
+                    job_id, state,
+                )
+                return True
             db.record_strm_failure(
                 source_id=str(job.get("source_id") or ""),
                 source_name=str(job.get("source_name") or ""),

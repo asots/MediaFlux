@@ -181,6 +181,9 @@ class AgentLibraryPatrolScheduler:
         cursor = str(job["cycle_cursor_tmdb_id"] or "")
         if cursor:
             arguments["after_tmdb_id"] = cursor
+        previous = load_patrol_progress(
+            job["cycle_accumulator_json"], as_of=as_of, resumed=bool(cursor)
+        )
         result, _elapsed_ms = self._audit_executor(arguments)
         if not agent_runtime_generation_is_current(runtime_generation):
             db.cancel_agent_library_patrol_lease(
@@ -189,7 +192,6 @@ class AgentLibraryPatrolScheduler:
             )
             return
         _batch_json, batch_projection = serialize_patrol_projection(result)
-        previous = load_patrol_progress(job["cycle_accumulator_json"], as_of=as_of)
         merged = merge_patrol_progress(previous, batch_projection)
         continuation = bool(
             isinstance(result.data, dict)

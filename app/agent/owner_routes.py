@@ -37,6 +37,18 @@ def parse_telegram_owner_route(value: object) -> TelegramOwnerRoute | None:
     return TelegramOwnerRoute(owner=owner, chat_id=chat_id, user_id=user_id)
 
 
+def configured_telegram_user_ids() -> set[str]:
+    """TG 输入、Kernel 与历史回执共用的实时白名单语法。"""
+    return {
+        part
+        for part in re.split(
+            r"[,;，；\s]+",
+            str(config.get("TG_AGENT_ALLOWED_USER_IDS", "") or "").strip(),
+        )
+        if re.fullmatch(r"[1-9][0-9]*", part)
+    }
+
+
 def telegram_owner_route_is_currently_authorized(
     value: object,
     *,
@@ -59,12 +71,4 @@ def telegram_owner_route_is_currently_authorized(
         return False
     if str(config.get("TG_CHAT_ID", "") or "").strip() != route.chat_id:
         return False
-    allowed_users = {
-        part
-        for part in re.split(
-            r"[,;\s]+",
-            str(config.get("TG_AGENT_ALLOWED_USER_IDS", "") or "").strip(),
-        )
-        if re.fullmatch(r"[1-9][0-9]*", part)
-    }
-    return route.user_id in allowed_users
+    return route.user_id in configured_telegram_user_ids()

@@ -1229,6 +1229,14 @@ def _prepare_strm_metadata_job_with_client(
         ):
             raise RuntimeError("远端元数据快照已变化，等待下轮扫描更新队列")
     rel_dir = str(job.get("rel_dir") or "")
+    expected = _metadata_target(remote, rel_dir, strm_root)
+    current = next((row for row in db.list_strm_installation_rows(
+        f"guangya-meta:{job.get('source_id') or ''}", file_id, str(expected)
+    ) if str(row["file_id"]) == file_id), None)
+    if current and _metadata_state_matches(current, remote, expected):
+        # 安装成功而 ACK 前中断时，复用同一索引/指纹判定补交接，不重新
+        # 获取直链和下载。这里不持写锁；commit 仍必须再次确认本地文件。
+        return {"file": remote, "rel_dir": rel_dir, "prepared": None}
     url = str(runtime_client.get_download_url(file_id) or "")
     if not url:
         raise RuntimeError("无法获取元数据下载直链")
@@ -1268,8 +1276,8 @@ def commit_strm_metadata_job(
     source_id = str(job.get("source_id") or "")
     remote = prepared_job.get("file")
     prepared = prepared_job.get("prepared")
-    if not isinstance(remote, GuangYaFile) or not isinstance(
-        prepared, PreparedMetadataDownload
+    if not isinstance(remote, GuangYaFile) or (
+        prepared is not None and not isinstance(prepared, PreparedMetadataDownload)
     ):
         raise ValueError("元数据准备结果无效")
     rel_dir = str(prepared_job.get("rel_dir") or job.get("rel_dir") or "")
@@ -1284,19 +1292,26 @@ def commit_strm_metadata_job(
     )
     if current and _metadata_state_matches(current, remote, expected):
         db.resolve_strm_failure_for_item(source_id, file_id, "metadata")
-        prepared.temp.unlink(missing_ok=True)
+        if prepared is not None:
+            prepared.temp.unlink(missing_ok=True)
         return {
             "status": "skipped", "file_id": file_id,
             "path": str(expected), "cleaned": 0,
         }
+    if prepared is None:
+        raise RuntimeError("已安装元数据在准备后发生变化，等待重新下载")
     cleaned = _install_metadata_candidate(
         remote, rel_dir, expected, strm_root, metadata_source_key,
         existing_rows, "", should_stop=should_stop, prepared=prepared,
     )
     db.resolve_strm_failure_for_item(source_id, file_id, "metadata")
+    refresh_paths = [str(expected)]
+    if cleaned and current:
+        refresh_paths.append(str(current["strm_path"]))
     return {
         "status": "completed", "file_id": file_id,
         "path": str(expected), "cleaned": int(cleaned or 0),
+        "refresh_paths": refresh_paths,
     }
 
 

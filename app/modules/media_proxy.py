@@ -7,6 +7,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import re
 import secrets
@@ -600,21 +601,28 @@ class SignedUrlCache:
         """解析常见签名 URL 的绝对到期时间；不保存或输出 URL。"""
         try:
             query = {key.lower(): value for key, value in parse_qsl(urlsplit(url).query)}
+            # OSS/S3 V4的 expires 是相对签发时间的秒数，必须先处理日期对，
+            # 不能把3600秒当成1970年的绝对到期时间而禁用有效直链缓存。
+            for prefix in ("x-oss", "x-amz"):
+                issued_text = query.get(f"{prefix}-date")
+                ttl_text = query.get(f"{prefix}-expires")
+                if issued_text and ttl_text:
+                    issued = datetime.strptime(issued_text, "%Y%m%dT%H%M%SZ").replace(
+                        tzinfo=timezone.utc
+                    ).timestamp()
+                    ttl = float(ttl_text)
+                    if math.isfinite(ttl):
+                        return issued + ttl
             for key in (
                 "expires", "x-oss-expires", "oss-expires", "expiry", "exp", "ts",
             ):
                 value = query.get(key)
                 if value:
                     parsed = float(value)
-                    if parsed > self._wall_clock():
+                    # 到期时间已经过去也必须交给缓存判定；忽略它会错误回退
+                    # 为默认TTL，把上游过期直链连续复用整整一个缓存周期。
+                    if math.isfinite(parsed):
                         return parsed
-            amz_date = query.get("x-amz-date")
-            amz_ttl = query.get("x-amz-expires")
-            if amz_date and amz_ttl:
-                issued = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(
-                    tzinfo=timezone.utc
-                ).timestamp()
-                return issued + float(amz_ttl)
         except (TypeError, ValueError, OverflowError):
             return None
         return None

@@ -133,7 +133,9 @@ class AgentJobsScheduler:
             job["checkpoint_json"], as_of=arguments["as_of"]
         )
         previous = load_patrol_progress(
-            job["projection_json"], as_of=arguments["as_of"]
+            job["projection_json"],
+            as_of=arguments["as_of"],
+            resumed=bool(checkpoint["cursor"]),
         )
         with self._lease_heartbeat(job_id, generation):
             result = self._audit_executor({

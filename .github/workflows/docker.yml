@@ -114,6 +114,7 @@ jobs:
           modules = (
               "tests.test_agent_kernel_browser",
               "tests.test_node_fixes_agent_feedback",
+              "tests.test_deep_audit_rss_browser",
               "tests.test_agent_ux_browser",
               "tests.test_agent_ux_shell_browser",
               "tests.test_agent_restore_browser",

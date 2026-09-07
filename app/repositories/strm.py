@@ -435,8 +435,9 @@ def complete_strm_metadata_job(
     expected_revision: int,
     expected_owner: str = "",
     refresh_path: str = "",
+    refresh_paths: object = (),
 ) -> str:
-    """提交成功结果；运行中快照已变化时自动重新排队最新版本。"""
+    """提交成功结果与全部变化路径；快照已变化时重新排队最新版本。"""
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
@@ -467,10 +468,12 @@ def complete_strm_metadata_job(
         )
         if cur.rowcount != 1:
             return "stale"
-        normalized_path = str(refresh_path or "").strip()
-        if status == "completed" and normalized_path:
+        # 单路径参数只是旧 API 的薄适配；新旧落盘目录统一进入同一 outbox
+        # 事务，不能只刷新新文件而遗漏已删除的历史元数据目录。
+        normalized_paths = _normalize_refresh_paths((refresh_path, *(refresh_paths or ())))
+        if status == "completed" and normalized_paths:
             _enqueue_strm_refresh_paths(
-                conn, (normalized_path,), stamp=stamp, allow_emby=True
+                conn, normalized_paths, stamp=stamp, allow_emby=True
             )
         return status
 

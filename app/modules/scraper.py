@@ -42,6 +42,7 @@ from app.config import get, get_bool
 from app.discovery.models import ProviderRateLimited, ProviderTimeout, ProviderUnavailable
 from app.logger import get_logger, redact_sensitive_text
 from app.sensitive_data import contains_sensitive_credential
+from app.modules import media_identity
 from app.modules.ai_recognition_governance import provider_fingerprint
 from app.modules.recognition.models import (
     ReleaseParseEvidence,
@@ -2472,30 +2473,7 @@ def generate_search_only_query_variants(
 
 
 def _candidate_aliases(candidate: dict) -> list[str]:
-    values: list[object] = []
-
-    def append_collection(collection: object) -> None:
-        if isinstance(collection, dict):
-            collection = (
-                collection.get("titles")
-                or collection.get("results")
-                or collection.get("translations")
-                or []
-            )
-        for item in collection if isinstance(collection, list) else []:
-            if isinstance(item, dict):
-                data = item.get("data") if isinstance(item.get("data"), dict) else {}
-                values.extend((
-                    item.get("title"), item.get("name"),
-                    data.get("title"), data.get("name"), data.get("english_name"),
-                ))
-            else:
-                values.append(item)
-
-    append_collection(candidate.get("aliases") or [])
-    append_collection(candidate.get("alternative_titles") or [])
-    append_collection(candidate.get("translations") or [])
-    return _unique_text(values)
+    return _unique_text(media_identity.tmdb_alias_values(candidate))
 
 
 _GENERIC_TMDB_SEASON_NAME = re.compile(

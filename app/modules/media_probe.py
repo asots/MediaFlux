@@ -562,6 +562,12 @@ def _write_failure_cache(file, reason: str, ttl_seconds: int = 600) -> None:
         )
 
 
+def _probe_budget_exhausted(budget: ProbeBudget | None) -> bool:
+    """本地与云端共用预算截止判定；批次超时不是文件级探测失败。"""
+    remaining = budget.remaining_seconds() if budget is not None else None
+    return remaining is not None and remaining <= _BUDGET_EXHAUSTED_EPSILON_SECONDS
+
+
 def _probe_should_abort(
     budget: ProbeBudget | None,
     cancel_event: threading.Event | None,
@@ -736,11 +742,8 @@ def probe_media_profile(
                 budget.record_timeout()
             if cancel_event is not None and cancel_event.is_set():
                 return None
-            if budget is not None:
-                remaining_seconds = budget.remaining_seconds()
-                if remaining_seconds is not None and remaining_seconds <= _BUDGET_EXHAUSTED_EPSILON_SECONDS:
-                    # 整理任务的总探测预算耗尽不是文件故障，不污染失败缓存。
-                    return None
+            if _probe_budget_exhausted(budget):
+                return None
             last_reason = "timeout"
             last_detail = f"超过 {probe_timeout:.1f} 秒"
             break
@@ -749,11 +752,8 @@ def probe_media_profile(
                 budget.record_timeout()
             if cancel_event is not None and cancel_event.is_set():
                 return None
-            if budget is not None:
-                remaining_seconds = budget.remaining_seconds()
-                if remaining_seconds is not None and remaining_seconds <= _BUDGET_EXHAUSTED_EPSILON_SECONDS:
-                    # 总预算耗尽不写文件级失败缓存；由批次预算负责收敛。
-                    return None
+            if _probe_budget_exhausted(budget):
+                return None
             last_reason = "timeout"
             last_detail = _sanitize_probe_error(exc)
             break
@@ -979,6 +979,8 @@ def probe_local_media_profile(
     except subprocess.TimeoutExpired:
         if budget is not None:
             budget.record_timeout()
+        if _probe_budget_exhausted(budget):
+            return None
         reason = "timeout"
     except FileNotFoundError:
         reason = "ffprobe_missing"

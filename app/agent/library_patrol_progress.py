@@ -21,8 +21,10 @@ def empty_patrol_projection(*, as_of: str) -> dict[str, Any]:
     }
 
 
-def load_patrol_progress(raw: object, *, as_of: str) -> dict[str, Any]:
-    """只接受经过白名单校验且属于同一截止日期的进度。"""
+def load_patrol_progress(
+    raw: object, *, as_of: str, resumed: bool = False,
+) -> dict[str, Any]:
+    """续跑必须携带同日有效进度；不能保留游标却把历史计数清零。"""
     try:
         value = json.loads(str(raw or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -30,6 +32,8 @@ def load_patrol_progress(raw: object, *, as_of: str) -> dict[str, Any]:
     validated = validate_persisted_patrol_projection(value)
     if validated is not None and validated["as_of"] == as_of:
         return validated
+    if resumed:
+        raise ValueError("InvalidPatrolProgress")
     return empty_patrol_projection(as_of=as_of)
 
 

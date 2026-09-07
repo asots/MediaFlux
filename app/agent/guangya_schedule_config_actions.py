@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import secrets
 from datetime import datetime
 from typing import Any
 
 from app import config
 from app.agent.errors import AgentToolError
+from app.agent.policy_confirmation import capture_policy_state, policy_state_fingerprint
 from app.agent.models import Evidence, ToolResult
 from app.clients.guangya import GuangYaClient, close_guangya_client
 from app.logger import get_logger
@@ -259,44 +258,11 @@ def summarize_guangya_organize_schedule_policy(
 
 
 def _capture(arguments: dict[str, Any]) -> dict[str, Any]:
-    snapshot, values = config.read_env_snapshot(config.ENV_FILE)
-    current = _current_policy()
-    requested = dict(current)
-    requested.update(arguments)
-    requested_keys = tuple(name for name in _TARGETS if name in arguments)
-    return {
-        "snapshot": snapshot,
-        "snapshot_present": snapshot is not None,
-        "snapshot_sha256": hashlib.sha256(snapshot or b"").hexdigest(),
-        "persisted": {key: values.get(key, "<unset>") for key in _TARGET_KEYS},
-        "current": current,
-        "requested": requested,
-        "requested_keys": requested_keys,
-        "changed_keys": tuple(
-            name for name in requested_keys if current[name] != requested[name]
-        ),
-        "external_overrides": tuple(
-            name
-            for name in requested_keys
-            if config.has_external_override(_TARGETS[name][0])
-        ),
-    }
+    return capture_policy_state(arguments, targets=_TARGETS, current_policy=_current_policy)
 
 
 def _fingerprint(state: dict[str, Any]) -> str:
-    payload = {
-        "snapshot_present": state["snapshot_present"],
-        "snapshot_sha256": state["snapshot_sha256"],
-        "persisted": state["persisted"],
-        "current": _public_policy(state["current"]),
-        "requested": _public_policy(state["requested"]),
-        "requested_keys": list(state["requested_keys"]),
-        "changed_keys": list(state["changed_keys"]),
-        "external_overrides": list(state["external_overrides"]),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return policy_state_fingerprint(state, public_policy=_public_policy)
 
 
 def _precondition_failure(state: dict[str, Any]) -> ToolResult | None:

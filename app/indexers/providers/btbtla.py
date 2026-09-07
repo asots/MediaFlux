@@ -409,18 +409,6 @@ class BTBtlaAdapter(IndexerAdapter):
         if not stored_result.detail_url:
             raise IndexerInvalidResponse("result detail URL is missing")
 
-    def _join_known_host(self, candidate: str, *, relative_base_url: str | None = None) -> str:
-        bases = self._host_bases
-        if relative_base_url is not None:
-            bases = tuple(dict.fromkeys((relative_base_url, *bases)))
-        last_error: IndexerSecurityError | None = None
-        for base_url in bases:
-            try:
-                return fixed_host_join(base_url, candidate)
-            except IndexerSecurityError as exc:
-                last_error = exc
-        assert last_error is not None
-        raise last_error
 
     def _base_for_url(self, candidate: str) -> str:
         safe_url = self._join_known_host(candidate)

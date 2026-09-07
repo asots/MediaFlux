@@ -453,9 +453,29 @@ class MediaServerClient:
         """返回最近入库媒体，供独立媒体中心页面使用。"""
         return self._recent_added(limit=max(1, min(int(limit or 60), 200)))
 
-    def continue_watching(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
-        """按已经确定的上游用户读取继续观看。"""
+    def _media_item(self, item: dict) -> MediaItem:
+        """由具体服务器适配其资源字段，不能强行合并不同响应投影。"""
         raise NotImplementedError
+
+    def continue_watching(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
+        """共用 Emby/Jellyfin Resume 合同，条目投影仍由各服务器适配器负责。"""
+        selected = normalize_explicit_media_user_id(user_id)
+        normalized_limit = max(1, min(int(limit or 12), 20))
+        data = self._request(
+            f"/Users/{selected}/Items/Resume",
+            params={
+                "Limit": normalized_limit,
+                "MediaTypes": "Video",
+                "Fields": (
+                    "DateCreated,Overview,SeriesId,SeriesName,IndexNumber,"
+                    "ParentIndexNumber,ImageTags,ProductionYear,RunTimeTicks,Genres,UserData"
+                ),
+            },
+        )
+        items = data.get("Items", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            raise ValueError("媒体服务器继续观看响应无效")
+        return [self._media_item(item) for item in items if isinstance(item, dict)]
 
     def recently_played(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
         """按已经确定的上游用户读取真实播放历史；不得用 Resume 列表代替。"""

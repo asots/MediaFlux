@@ -906,7 +906,9 @@ def set_and_save(updates: dict[str, str]) -> None:
                 "目标配置由运行环境覆盖: " + ", ".join(externally_managed[:5])
             )
         expected, _current = read_env_snapshot(ENV_FILE)
-        update_runtime_env_file(ENV_FILE, normalized, expected=expected)
+    # 发布固定先取跨进程snapshot锁、再取_lock；不能持_lock反向等待。
+    # 释放快照读取锁后若有并发写入，仍由同一CAS拒绝覆盖，运行时也不发布旧值。
+    update_runtime_env_file(ENV_FILE, normalized, expected=expected)
 
 
 def all_items() -> dict[str, str]:

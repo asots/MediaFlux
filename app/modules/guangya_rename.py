@@ -15,13 +15,15 @@ import tempfile
 import time
 import uuid
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
 from app.config import PATHS
+from app.modules.process_lock import CrossProcessLock
 from app.modules.web_secret import get_web_secret
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
@@ -76,6 +78,18 @@ def _now_iso() -> str:
 
 def _plan_directory() -> Path:
     return Path(PATHS.data_dir) / "agent-guangya-rename"
+
+
+@contextmanager
+def _plan_state_lock() -> Iterator[None]:
+    """确认、执行状态与预览淘汰共用文件锁，防止读后状态变化造成误删。"""
+    lock = CrossProcessLock("guangya-rename-state", directory=_plan_directory())
+    if not lock.acquire():
+        raise GuangYaRenamePlanError("重命名计划正在被其他进程更新")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -247,18 +261,21 @@ def confirm_rename_plan(
     owner: str,
     expected_fingerprint: str,
 ) -> dict[str, Any]:
-    payload = load_rename_plan(
-        plan_id,
-        owner=owner,
-        expected_fingerprint=expected_fingerprint,
-    )
-    current = time.time()
-    payload["confirmed_at"] = _now_iso()
-    payload["confirmed_at_epoch"] = current
-    payload["execute_until_epoch"] = current + _CONFIRMED_TTL_SECONDS
-    payload["status"] = "confirmed"
-    _atomic_write_plan(_plan_path(plan_id), payload)
-    return payload
+    with _plan_state_lock():
+        payload = load_rename_plan(
+            plan_id,
+            owner=owner,
+            expected_fingerprint=expected_fingerprint,
+        )
+        if str(payload.get("status") or "") not in {"preview", "confirmed"}:
+            raise GuangYaRenamePlanStale("重命名计划已进入执行阶段，请重新预览")
+        current = time.time()
+        payload["confirmed_at"] = _now_iso()
+        payload["confirmed_at_epoch"] = current
+        payload["execute_until_epoch"] = current + _CONFIRMED_TTL_SECONDS
+        payload["status"] = "confirmed"
+        _atomic_write_plan(_plan_path(plan_id), payload)
+        return payload
 
 
 def update_rename_plan_execution(
@@ -267,23 +284,37 @@ def update_rename_plan_execution(
     status: str,
     execution: dict[str, Any],
 ) -> None:
-    payload = _read_plan(plan_id)
-    payload["status"] = str(status or "unknown")[:40]
-    payload["execution"] = dict(execution)
-    payload["updated_at"] = _now_iso()
-    _atomic_write_plan(_plan_path(plan_id), payload)
+    with _plan_state_lock():
+        payload = _read_plan(plan_id)
+        payload["status"] = str(status or "unknown")[:40]
+        payload["execution"] = dict(execution)
+        payload["updated_at"] = _now_iso()
+        _atomic_write_plan(_plan_path(plan_id), payload)
 
 
-def discard_rename_plan(plan_id: str) -> None:
-    """删除尚未执行或已被新预览取代的私有计划与日志。"""
+def _discard_rename_plan_unlocked(plan_id: str) -> bool:
+    removed = False
     for path in (_plan_path(plan_id), _journal_path(plan_id)):
         try:
             if path.is_file() and not path.is_symlink():
                 path.unlink()
-        except FileNotFoundError:
-            continue
+                removed = True
         except OSError:
             continue
+    return removed
+
+
+def discard_rename_plan(plan_id: str, *, preview_only: bool = False) -> bool:
+    """预览替换只能原子淘汰preview；已确认任务的执行凭据必须保留。"""
+    try:
+        with _plan_state_lock():
+            if preview_only:
+                payload = _read_plan(plan_id)
+                if str(payload.get("status") or "") != "preview":
+                    return False
+            return _discard_rename_plan_unlocked(plan_id)
+    except (OSError, GuangYaRenamePlanError):
+        return False
 
 
 def _normalize_path(value: object) -> str:
@@ -433,7 +464,16 @@ def _fingerprint(payload: dict[str, Any]) -> str:
 
 
 def maintain_rename_plans() -> dict[str, int]:
-    """主动清理过期/超额私有计划，只淘汰不会再执行的终态计划。"""
+    """主动清理过期/超额计划；快照检查与删除必须和确认串行。"""
+    directory = _plan_directory()
+    if not directory.exists() or directory.is_symlink():
+        return {"removed": 0, "remaining": 0, "active": 0, "bytes": 0}
+    with _plan_state_lock():
+        return _maintain_rename_plans_unlocked()
+
+
+def _maintain_rename_plans_unlocked() -> dict[str, int]:
+    """调用方已持有计划状态锁，禁止在内部重复取得非重入文件锁。"""
     directory = _plan_directory()
     if not directory.exists() or directory.is_symlink():
         return {"removed": 0, "remaining": 0, "active": 0, "bytes": 0}
@@ -482,7 +522,7 @@ def maintain_rename_plans() -> dict[str, int]:
             elif not status and updated_epoch <= current - _TERMINAL_RETENTION_SECONDS:
                 remove = True
             if remove:
-                discard_rename_plan(path.stem)
+                _discard_rename_plan_unlocked(path.stem)
                 plan_ids.discard(path.stem)
                 removed += 1
             else:
@@ -509,7 +549,7 @@ def maintain_rename_plans() -> dict[str, int]:
         len(terminal) > _MAX_TERMINAL_PLANS or total_bytes > _MAX_PLAN_STORAGE_BYTES
     ):
         _updated, plan_id, stored_size = terminal.pop(0)
-        discard_rename_plan(plan_id)
+        _discard_rename_plan_unlocked(plan_id)
         total_bytes = max(0, total_bytes - stored_size)
         removed += 1
     remaining = sum(
@@ -639,14 +679,15 @@ def _finalize_rename_plan(
         },
     }
     payload["fingerprint"] = _fingerprint(payload)
-    _atomic_write_plan(_plan_path(plan_id), payload)
-    capacity = maintain_rename_plans()
-    if (
-        int(capacity.get("active") or 0) > _MAX_ACTIVE_PLANS
-        or int(capacity.get("bytes") or 0) > _MAX_PLAN_STORAGE_BYTES
-    ):
-        discard_rename_plan(plan_id)
-        raise GuangYaRenamePlanError("私有重命名计划空间已满，请稍后重试")
+    with _plan_state_lock():
+        _atomic_write_plan(_plan_path(plan_id), payload)
+        capacity = _maintain_rename_plans_unlocked()
+        if (
+            int(capacity.get("active") or 0) > _MAX_ACTIVE_PLANS
+            or int(capacity.get("bytes") or 0) > _MAX_PLAN_STORAGE_BYTES
+        ):
+            _discard_rename_plan_unlocked(plan_id)
+            raise GuangYaRenamePlanError("私有重命名计划空间已满，请稍后重试")
     return payload
 
 

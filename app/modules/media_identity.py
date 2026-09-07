@@ -64,3 +64,27 @@ def normalize_media_number(value: object) -> int | None:
         if number >= 0:
             return number
     return None
+
+
+def tmdb_alias_values(candidate: dict) -> list[object]:
+    """共享 TMDB 别名/翻译遍历；调用方保留各自的去重和标题比较语义。"""
+    values: list[object] = []
+    for key in ("aliases", "alternative_titles", "translations"):
+        collection = candidate.get(key) or []
+        if isinstance(collection, dict):
+            collection = (
+                collection.get("titles")
+                or collection.get("results")
+                or collection.get("translations")
+                or []
+            )
+        for item in collection if isinstance(collection, list) else []:
+            if isinstance(item, dict):
+                data = item.get("data") if isinstance(item.get("data"), dict) else {}
+                values.extend((
+                    item.get("title"), item.get("name"),
+                    data.get("title"), data.get("name"), data.get("english_name"),
+                ))
+            else:
+                values.append(item)
+    return values

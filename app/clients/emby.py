@@ -424,24 +424,6 @@ class EmbyClient(MediaServerClient):
     def _recent_played(self, limit: int = 12) -> list[MediaItem]:
         return self.recently_played(self._user_id(), limit=limit)
 
-    def continue_watching(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
-        selected = normalize_explicit_media_user_id(user_id)
-        normalized_limit = max(1, min(int(limit or 12), 20))
-        data = self._request(
-            f"/Users/{selected}/Items/Resume",
-            params={
-                "Limit": normalized_limit,
-                "MediaTypes": "Video",
-                "Fields": (
-                    "DateCreated,Overview,SeriesId,SeriesName,IndexNumber,"
-                    "ParentIndexNumber,ImageTags,ProductionYear,RunTimeTicks,Genres,UserData"
-                ),
-            },
-        )
-        items = data.get("Items", []) if isinstance(data, dict) else []
-        if not isinstance(items, list):
-            raise ValueError("媒体服务器继续观看响应无效")
-        return [self._media_item(item) for item in items if isinstance(item, dict)]
 
     def _total_plays(self) -> int:
         uid = self._user_id()

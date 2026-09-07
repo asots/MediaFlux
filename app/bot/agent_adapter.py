@@ -30,6 +30,7 @@ from app.agent.kernel.events import AgentEvent, AgentEventType
 from app.agent.kernel.public_view import format_public_result
 from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import EffectEnvelope, QueryEnvelope
+from app.agent.owner_routes import configured_telegram_user_ids
 from app.agent.public_safety import public_tool_label
 from app.agent.rate_limit import agent_rate_limiter
 from app.bot.progress import TelegramProgress, send_typing
@@ -89,12 +90,7 @@ def _enabled(value: object) -> bool:
 
 
 def _allowed_user_ids() -> set[str]:
-    raw = str(config.get("TG_AGENT_ALLOWED_USER_IDS", "") or "")
-    return {
-        item
-        for item in re.split(r"[,;，；\s]+", raw.strip())
-        if _ALLOWED_USER_RE.fullmatch(item)
-    }
+    return configured_telegram_user_ids()
 
 
 def telegram_user_is_allowed(user_id: object) -> bool:

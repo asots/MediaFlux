@@ -51,12 +51,6 @@ def _decode_payload(payload: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _is_failure_payload(payload: str) -> bool:
-    """失败缓存只属于具体文件版本，不能跨 file_id 扩散。"""
-    data = _decode_payload(payload)
-    return bool(data and data.get("_media_probe_cache") == "failure")
-
-
 def _is_success_payload(payload: str) -> bool:
     """识别可由 MediaProfile 恢复的成功缓存，避免把损坏数据当作成功。"""
     data = _decode_payload(payload)
@@ -70,34 +64,11 @@ def _is_success_payload(payload: str) -> bool:
 def get_media_probe_cache(
     file_id: str, etag: str, size: int, *, allow_fingerprint_fallback: bool = False
 ) -> str:
-    """按文件版本读取；云盘调用方可显式复用相同内容指纹的成功缓存。"""
-    normalized_file_id = str(file_id)
-    normalized_etag = str(etag or "")
-    normalized_size = int(size or 0)
-    with _database().get_conn() as conn:
-        row = conn.execute(
-            "SELECT payload FROM media_probe_cache WHERE file_id=? AND etag=? AND size=?",
-            (normalized_file_id, normalized_etag, normalized_size),
-        ).fetchone()
-        exact_payload = str(row["payload"] or "") if row else ""
-        if exact_payload and (
-            not allow_fingerprint_fallback
-            or not normalized_etag
-            or not _is_failure_payload(exact_payload)
-        ):
-            return exact_payload
-        if not allow_fingerprint_fallback or not normalized_etag:
-            return exact_payload
-        rows = conn.execute(
-            "SELECT payload FROM media_probe_cache WHERE etag=? AND size=? "
-            "ORDER BY updated_at DESC, file_id DESC",
-            (normalized_etag, normalized_size),
-        ).fetchall()
-        for candidate in rows:
-            payload = str(candidate["payload"] or "")
-            if payload and not _is_failure_payload(payload):
-                return payload
-        return exact_payload
+    """单条 API 是批量读取器的薄适配，统一历史缓存与内容指纹判定。"""
+    key = (str(file_id), str(etag or ""), int(size or 0))
+    return get_media_probe_cache_many(
+        [key], allow_fingerprint_fallback=allow_fingerprint_fallback,
+    ).get(key, "")
 
 
 def get_media_probe_cache_many(
@@ -116,7 +87,7 @@ def get_media_probe_cache_many(
 
     file_ids = sorted({item[0] for item in requested})
     result: dict[tuple[str, str, int], str] = {}
-    exact_failures: dict[tuple[str, str, int], str] = {}
+    exact_fallbacks: dict[tuple[str, str, int], str] = {}
     with _database().get_conn() as conn:
         # SQLite 默认变量上限在不同发行版间存在差异，保守分块避免超限。
         for offset in range(0, len(file_ids), 400):
@@ -135,8 +106,8 @@ def get_media_probe_cache_many(
                 )
                 payload = str(row["payload"] or "")
                 if key in requested and payload:
-                    if allow_fingerprint_fallback and _is_failure_payload(payload):
-                        exact_failures[key] = payload
+                    if allow_fingerprint_fallback and key[1] and not _is_success_payload(payload):
+                        exact_fallbacks[key] = payload
                     else:
                         result[key] = payload
 
@@ -153,18 +124,21 @@ def get_media_probe_cache_many(
                 "SELECT payload FROM media_probe_cache WHERE etag=? AND size=? "
                 "ORDER BY updated_at DESC, file_id DESC",
                 (etag, size),
-            ).fetchall()
-            for row in rows:
-                payload = str(row["payload"] or "")
-                if payload and not _is_failure_payload(payload):
-                    fallback_payloads[(etag, size)] = payload
-                    break
+            )
+            try:
+                for row in rows:
+                    payload = str(row["payload"] or "")
+                    if _is_success_payload(payload):
+                        fallback_payloads[(etag, size)] = payload
+                        break
+            finally:
+                rows.close()
         for key in unresolved:
             payload = fallback_payloads.get((key[1], key[2]), "")
             if payload:
                 result[key] = payload
-            elif key in exact_failures:
-                result[key] = exact_failures[key]
+            elif key in exact_fallbacks:
+                result[key] = exact_fallbacks[key]
     return result
 
 

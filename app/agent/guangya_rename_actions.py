@@ -201,7 +201,7 @@ def _begin_flow_update(
 
 def _discard_replaced_plan(previous: _Flow | None, plan_id: str) -> None:
     if previous is not None and previous.plan_id != plan_id:
-        discard_rename_plan(previous.plan_id)
+        discard_rename_plan(previous.plan_id, preview_only=True)
 
 
 def _save(flow: _Flow) -> bool:
@@ -490,7 +490,7 @@ def preview_guangya_rename(
         revision=guard.revision,
     )
     if not _save(flow):
-        discard_rename_plan(flow.plan_id)
+        discard_rename_plan(flow.plan_id, preview_only=True)
         raise AgentToolError(
             "重命名预览已被更新请求取代，请重新生成", code="precondition_failed"
         )
@@ -552,7 +552,7 @@ def preview_guangya_media_hygiene(
         revision=guard.revision,
     )
     if not _save(flow):
-        discard_rename_plan(flow.plan_id)
+        discard_rename_plan(flow.plan_id, preview_only=True)
         raise AgentToolError(
             "名称清理预览已被更新请求取代，请重新生成", code="precondition_failed"
         )
