@@ -248,7 +248,7 @@ def digest_set_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_rule(rule: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "rule_id": rule["id"],
         "kind": rule["kind"],
         "enabled": rule["enabled"],
@@ -260,19 +260,19 @@ def _public_rule(rule: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
+    if rule.get("settings_error"):
+        result["settings_error"] = rule["settings_error"]
+    return result
+
 
 def list_digest_rules(arguments: dict[str, Any], context: ToolContext) -> ToolResult:
     digest_list_arguments(arguments)
-    rows = rules.list_rules(agent_job_owner_digest(context.owner))
+    rows = rules.list_rules(agent_job_owner_digest(context.owner), kind="daily_summary")
     return ToolResult(
         True,
         "completed",
         "已读取主动摘要规则",
-        data={
-            "items": [
-                _public_rule(row) for row in rows if row["kind"] == "daily_summary"
-            ]
-        },
+        data={"items": [_public_rule(row) for row in rows]},
     )
 
 

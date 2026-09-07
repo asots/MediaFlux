@@ -63,7 +63,7 @@ def _digest(value: dict[str, Any]) -> str:
 
 def _public(rule: dict[str, Any]) -> dict[str, Any]:
     settings = rule["settings"]
-    return {
+    result = {
         "rule_id": rule["id"],
         "enabled": rule["enabled"],
         "title": sanitize_public_text(settings.get("title"), limit=120),
@@ -71,13 +71,18 @@ def _public(rule: dict[str, Any]) -> dict[str, Any]:
         "next_check_at": rule["next_run_at"],
     }
 
+    if rule.get("settings_error"):
+        result["settings_error"] = rule["settings_error"]
+    return result
+
 
 def list_follows(arguments: dict[str, Any], context: ToolContext) -> ToolResult:
     list_arguments(arguments)
     items = [
         _public(row)
-        for row in rules.list_rules(agent_job_owner_digest(context.owner))
-        if row["kind"] == "activity_follow"
+        for row in rules.list_rules(
+            agent_job_owner_digest(context.owner), kind="activity_follow"
+        )
     ]
     return ToolResult(
         True, "completed", f"已读取 {len(items)} 条活动跟踪规则", data={"items": items}
@@ -95,15 +100,7 @@ def _prepare(
     if not timeline.ok:
         raise AgentToolError("活动记录已不存在", code="precondition_failed")
     owner = agent_job_owner_digest(context.owner)
-    current = next(
-        (
-            row
-            for row in rules.list_rules(owner)
-            if row["kind"] == "activity_follow"
-            and row["settings"].get("target") == target
-        ),
-        None,
-    )
+    current = rules.find_activity_follow_rule(owner, target)
     frozen = {
         "owner": owner,
         "session": context.session_id,

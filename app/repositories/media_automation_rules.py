@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -26,22 +27,83 @@ def publication_guard():
         _PUBLICATION_LOCK.release()
 
 
+def _finite_json_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("主动规则设置含非有限数值")
+    return number
+
+
+def _decode_settings(value: object) -> dict[str, Any] | None:
+    """读取和领取共用有界解码；坏历史值可查看修复，但不能成为可执行默认值。"""
+    if not isinstance(value, str) or len(value) > 16_384:
+        return None
+    try:
+        if len(value.encode("utf-8")) > 16_384:
+            return None
+        settings = json.loads(
+            value, parse_float=_finite_json_number, parse_constant=_finite_json_number
+        )
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
 def _row(row: Any) -> dict[str, Any] | None:
     if row is None:
         return None
     item = dict(row)
-    item["settings"] = json.loads(item.pop("settings_json"))
+    settings = _decode_settings(item.pop("settings_json"))
+    item["settings"] = settings if settings is not None else {}
+    if settings is None:
+        item["settings_error"] = "主动规则设置已损坏，请编辑或删除该规则"
     item["enabled"] = bool(item["enabled"])
     return item
 
 
-def list_rules(owner_digest: str) -> list[dict[str, Any]]:
+def list_rules(owner_digest: str, *, kind: str = "") -> list[dict[str, Any]]:
+    if kind and kind not in KINDS:
+        raise ValueError("主动规则类型无效")
+    where = "owner_digest=?"
+    params = [owner_digest]
+    if kind:
+        where += " AND kind=?"
+        params.append(kind)
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM media_automation_rules WHERE owner_digest=? ORDER BY created_at,id LIMIT 100",
-            (owner_digest,),
+            f"SELECT * FROM media_automation_rules WHERE {where} ORDER BY created_at,id LIMIT 100",
+            params,
         ).fetchall()
     return [_row(row) for row in rows]
+
+
+def _find_activity_follow_rule(conn, owner_digest: str, target: dict[str, Any]):
+    """同一身份查找用于预检和事务内去重，不受展示窗口限制。"""
+
+    def matches(value):
+        settings = _decode_settings(value)
+        return settings is not None and settings.get("target") == target
+
+    conn.create_function(
+        "mediaflux_rule_target_matches", 1, matches, deterministic=True
+    )
+    return _row(
+        conn.execute(
+            "SELECT * FROM media_automation_rules WHERE owner_digest=? "
+            "AND kind='activity_follow' AND mediaflux_rule_target_matches(settings_json)=1 "
+            "ORDER BY created_at,id LIMIT 1",
+            (owner_digest,),
+        ).fetchone()
+    )
+
+
+def find_activity_follow_rule(
+    owner_digest: str, target: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not isinstance(target, dict):
+        raise ValueError("活动跟踪身份无效")
+    with db.get_conn() as conn:
+        return _find_activity_follow_rule(conn, owner_digest, target)
 
 
 def _read_rule(conn, owner_digest: str, rule_id: str) -> dict[str, Any] | None:
@@ -74,7 +136,11 @@ def save_rule(
     if not isinstance(enabled, bool):
         raise TypeError("enabled 必须是布尔值")
     encoded = json.dumps(
-        settings, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        settings,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
     if len(encoded.encode()) > 16_384:
         raise ValueError("主动规则设置过大")
@@ -84,6 +150,14 @@ def save_rule(
         conn.execute("BEGIN IMMEDIATE")
         if not rule_id:
             if expected_revision:
+                return None
+            if (
+                kind == "activity_follow"
+                and isinstance(settings.get("target"), dict)
+                and _find_activity_follow_rule(conn, owner_digest, settings["target"])
+                is not None
+            ):
+                # 两个确认可能都预检到不存在；写锁内再次核对，后来的确认不能新建副本。
                 return None
             rule_id = "auto_" + secrets.token_urlsafe(18)
             conn.execute(
@@ -153,10 +227,19 @@ def claim_due_rules(
     claimed = []
     with publication_guard(), db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        conn.create_function("mediaflux_rule_time", 1, _schedule_time_key, deterministic=True)
+        conn.create_function(
+            "mediaflux_rule_time", 1, _schedule_time_key, deterministic=True
+        )
+        conn.create_function(
+            "mediaflux_rule_settings_valid",
+            1,
+            lambda value: _decode_settings(value) is not None,
+            deterministic=True,
+        )
         rows = conn.execute(
             "SELECT * FROM media_automation_rules WHERE enabled=1 AND mediaflux_rule_time(next_run_at)<=? "
             "AND (lease_until='' OR mediaflux_rule_time(lease_until)<=?) "
+            "AND mediaflux_rule_settings_valid(settings_json)=1 "
             "ORDER BY mediaflux_rule_time(next_run_at),id LIMIT ?",
             (stamp, stamp, max(1, min(int(limit), 100))),
         ).fetchall()

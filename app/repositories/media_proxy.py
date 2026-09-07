@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -494,6 +495,16 @@ def _playback_filter_clauses(*, instance_id: int | None, status: str,
     return clauses, params
 
 
+@contextmanager
+def _playback_read_snapshot():
+    """清理与多查询投影共用事务，维护跳过时也不混入后续播放写入。"""
+    with get_conn() as conn:
+        _prune_media_proxy_playback_records(conn)
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
+        yield conn
+
+
 def list_media_proxy_playback_records(*, instance_id: int | None = None,
                                       session_id: int | None = None,
                                       unlinked: bool = False,
@@ -516,8 +527,7 @@ def list_media_proxy_playback_records(*, instance_id: int | None = None,
     normalized_page = max(1, int(page or 1))
     normalized_size = max(1, min(int(page_size or 50), 200))
     where = " AND ".join(clauses)
-    with get_conn() as conn:
-        _prune_media_proxy_playback_records(conn)
+    with _playback_read_snapshot() as conn:
         total = int(conn.execute(
             f"SELECT COUNT(*) AS count FROM media_proxy_playback_records WHERE {where}",
             params,
@@ -566,8 +576,7 @@ def list_media_proxy_playback_sessions(*, instance_id: int | None = None,
     )
     legacy_clauses.append("session_id IS NULL")
     legacy_where = " AND ".join(legacy_clauses)
-    with get_conn() as conn:
-        _prune_media_proxy_playback_records(conn)
+    with _playback_read_snapshot() as conn:
         total = int(conn.execute(
             f"SELECT COUNT(*) AS count FROM media_proxy_playback_sessions WHERE {where}",
             params,
@@ -667,8 +676,7 @@ def get_media_proxy_playback_failure_summary(
         clauses.append("instance_id=?")
         params.append(int(instance_id))
     where = " AND ".join(clauses)
-    with get_conn() as conn:
-        _prune_media_proxy_playback_records(conn)
+    with _playback_read_snapshot() as conn:
         totals = conn.execute(
             "SELECT COUNT(*) AS total,"
             "SUM(CASE WHEN status_code=0 OR status_code>=400 THEN 1 ELSE 0 END) AS failed,"
