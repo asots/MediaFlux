@@ -155,37 +155,52 @@ def clear_media_preferences(
     return bool(cur.rowcount)
 
 
-def get_notification_rule(subscription_id: int) -> dict[str, Any] | None:
-    with db.get_conn() as conn:
-        subscription = conn.execute(
-            "SELECT id,title,revision,enabled,status FROM media_subscriptions "
-            "WHERE id=? AND deleted_at IS NULL",
-            (int(subscription_id),),
-        ).fetchone()
-        if subscription is None:
-            return None
-        row = conn.execute(
-            "SELECT enabled,notify_on_missing,notify_on_satisfied,notify_on_error,"
-            "revision FROM media_subscription_notification_rules "
-            "WHERE subscription_id=?",
-            (int(subscription_id),),
-        ).fetchone()
-    rule = dict(_DEFAULT_RULE)
-    rule_revision = 0
-    explicit = row is not None
-    if row is not None:
-        rule.update({key: _bool(row[key]) for key in _DEFAULT_RULE})
-        rule_revision = int(row["revision"])
+def _read_notification_rule(conn, subscription_id: int) -> dict[str, Any] | None:
+    """同一查询投影订阅与规则；写回执也在提交前复用这一快照。"""
+    row = conn.execute(
+        "SELECT s.id,s.title,s.revision AS subscription_revision,"
+        "s.enabled AS subscription_enabled,s.status AS subscription_status,"
+        "r.enabled,r.notify_on_missing,r.notify_on_satisfied,r.notify_on_error,"
+        "r.revision AS rule_revision FROM media_subscriptions AS s "
+        "LEFT JOIN media_subscription_notification_rules AS r ON r.subscription_id=s.id "
+        "WHERE s.id=? AND s.deleted_at IS NULL",
+        (int(subscription_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    explicit = row["rule_revision"] is not None
+    rule = {key: _bool(row[key]) for key in _DEFAULT_RULE} if explicit else dict(_DEFAULT_RULE)
     return {
-        "subscription_number": int(subscription["id"]),
-        "title": str(subscription["title"]),
-        "subscription_revision": int(subscription["revision"]),
-        "subscription_enabled": _bool(subscription["enabled"]),
-        "subscription_status": str(subscription["status"]),
+        "subscription_number": int(row["id"]),
+        "title": str(row["title"]),
+        "subscription_revision": int(row["subscription_revision"]),
+        "subscription_enabled": _bool(row["subscription_enabled"]),
+        "subscription_status": str(row["subscription_status"]),
         **rule,
-        "revision": rule_revision,
+        "revision": int(row["rule_revision"]) if explicit else 0,
         "explicit": explicit,
     }
+
+
+def get_notification_rule(subscription_id: int) -> dict[str, Any] | None:
+    with db.get_conn() as conn:
+        return _read_notification_rule(conn, subscription_id)
+
+
+def _read_rule_for_update(
+    conn, subscription_id: int, *, expected_rule_revision: int,
+    expected_subscription_revision: int, expected_rule: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    current = _read_notification_rule(conn, subscription_id)
+    if (
+        current is None
+        or current["subscription_revision"] != int(expected_subscription_revision)
+        or current["revision"] != int(expected_rule_revision)
+        # reset 后整数版本可复用；确认链路同时核对实际预检的完整业务状态。
+        or (expected_rule is not None and current != expected_rule)
+    ):
+        return None
+    return current
 
 
 def set_notification_rule(
@@ -194,33 +209,19 @@ def set_notification_rule(
     expected_rule_revision: int,
     expected_subscription_revision: int,
     updates: dict[str, bool],
+    expected_rule: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     stamp = db.now()
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        subscription = conn.execute(
-            "SELECT revision FROM media_subscriptions WHERE id=? AND deleted_at IS NULL",
-            (int(subscription_id),),
-        ).fetchone()
-        if (
-            subscription is None
-            or int(subscription["revision"]) != int(expected_subscription_revision)
-        ):
+        current = _read_rule_for_update(
+            conn, subscription_id, expected_rule_revision=expected_rule_revision,
+            expected_subscription_revision=expected_subscription_revision, expected_rule=expected_rule,
+        )
+        if current is None:
             return None
-        row = conn.execute(
-            "SELECT enabled,notify_on_missing,notify_on_satisfied,notify_on_error,"
-            "revision FROM media_subscription_notification_rules "
-            "WHERE subscription_id=?",
-            (int(subscription_id),),
-        ).fetchone()
-        actual_revision = int(row["revision"]) if row is not None else 0
-        if actual_revision != int(expected_rule_revision):
-            return None
-        current = dict(_DEFAULT_RULE) if row is None else {
-            key: _bool(row[key]) for key in _DEFAULT_RULE
-        }
         merged = {key: bool(updates.get(key, current[key])) for key in _DEFAULT_RULE}
-        if row is None:
+        if not current["explicit"]:
             conn.execute(
                 "INSERT INTO media_subscription_notification_rules("
                 "subscription_id,enabled,notify_on_missing,notify_on_satisfied,"
@@ -247,22 +248,21 @@ def set_notification_rule(
             )
             if cur.rowcount != 1:
                 return None
-    return get_notification_rule(subscription_id)
+        committed = _read_notification_rule(conn, subscription_id)
+    return committed
 
 
 def reset_notification_rule(
-    subscription_id: int, *, expected_rule_revision: int, expected_subscription_revision: int
+    subscription_id: int, *, expected_rule_revision: int, expected_subscription_revision: int,
+    expected_rule: dict[str, Any] | None = None,
 ) -> bool:
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        subscription = conn.execute(
-            "SELECT revision FROM media_subscriptions WHERE id=? AND deleted_at IS NULL",
-            (int(subscription_id),),
-        ).fetchone()
-        if (
-            subscription is None
-            or int(subscription["revision"]) != int(expected_subscription_revision)
-        ):
+        current = _read_rule_for_update(
+            conn, subscription_id, expected_rule_revision=expected_rule_revision,
+            expected_subscription_revision=expected_subscription_revision, expected_rule=expected_rule,
+        )
+        if current is None or not current["explicit"]:
             return False
         cur = conn.execute(
             "DELETE FROM media_subscription_notification_rules "
@@ -401,64 +401,60 @@ def list_notification_outbox(*, limit: int = 50) -> list[sqlite3.Row]:
 def today_content_summary() -> dict[str, Any]:
     local_now = datetime.now().astimezone()
     day = local_now.strftime("%Y-%m-%d")
-    pattern = f"{day}%"
-    with db.get_conn() as conn:
-        runs = conn.execute(
-            "SELECT r.status,s.title FROM media_subscription_runs r "
-            "JOIN media_subscriptions s ON s.id=r.subscription_id "
-            "WHERE r.finished_at LIKE ? ORDER BY r.id DESC LIMIT 50",
-            (pattern,),
-        ).fetchall()
-        local_tasks = conn.execute(
-            "SELECT status,title FROM local_media_tasks WHERE completed_at LIKE ? "
-            "ORDER BY id DESC LIMIT 50", (pattern,),
-        ).fetchall()
-        rss = conn.execute(
-            "SELECT status,title FROM rss_entries WHERE COALESCE(processed_at,submitted_at,created_at) "
-            "LIKE ? ORDER BY id DESC LIMIT 50", (pattern,),
-        ).fetchall()
-        downloads = conn.execute(
-            "SELECT status,title FROM download_log WHERE COALESCE(completed_at,updated_at,created_at) "
-            "LIKE ? ORDER BY id DESC LIMIT 50", (pattern,),
-        ).fetchall()
-    def counts(rows: list[Any], categories: dict[str, str]) -> dict[str, int]:
-        result: dict[str, int] = {}
-        for row in rows:
-            raw_status = str(row["status"] or "unknown")
-            status = categories.get(raw_status, "processing")
-            result[status] = result.get(status, 0) + 1
-        return result
+    next_day = (local_now.date() + timedelta(days=1)).isoformat()
+    # 全量计数与有界标题分离；这些 SQL 片段均为固定业务来源，不接收外部输入。
+    sources = (
+        ("subscription_runs", "media_subscription_runs r JOIN media_subscriptions s ON s.id=r.subscription_id",
+         "r.finished_at", "s.title", {
+             "missing": "missing", "satisfied": "satisfied", "failed": "failed",
+             "inconclusive": "attention", "cancelled": "cancelled",
+         }),
+        ("local_media_tasks", "local_media_tasks r", "r.completed_at", "r.title", {
+            "completed": "completed", "failed": "failed", "requires_manual": "attention",
+        }),
+        ("rss_entries", "rss_entries r",
+         "COALESCE(NULLIF(r.processed_at,''),NULLIF(r.submitted_at,''),r.created_at)", "r.title", {
+             "downloaded": "downloaded", "skipped": "skipped", "failed": "failed", "pending": "pending",
+         }),
+        ("downloads", "download_log r",
+         "COALESCE(NULLIF(r.completed_at,''),NULLIF(r.updated_at,''),r.created_at)", "r.title", {
+             "success": "success", "failed": "failed", "submitted": "submitted",
+         }),
+    )
+    totals: dict[str, dict[str, int]] = {}
     titles: list[str] = []
-    for rows in (runs, local_tasks, rss, downloads):
-        for row in rows:
-            title = str(row["title"] or "").strip()
-            if title and title not in titles:
-                titles.append(title)
+    with db.get_conn() as conn:
+        # 四类事件与标题必须属于同一时点，不能把后续提交混入半份摘要。
+        conn.execute("BEGIN")
+        for key, table, timestamp, title, categories in sources:
+            where = f"{timestamp}>=? AND {timestamp}<?"
+            case = "CASE r.status " + " ".join("WHEN ? THEN ?" for _ in categories) + " ELSE 'processing' END"
+            parameters = [value for pair in categories.items() for value in pair]
+            rows = conn.execute(
+                f"SELECT {case} AS category,COUNT(*) AS count FROM {table} "
+                f"WHERE {where} GROUP BY category",
+                (*parameters, day, next_day),
+            ).fetchall()
+            totals[key] = {str(row["category"]): int(row["count"]) for row in rows}
             if len(titles) >= 8:
-                break
-        if len(titles) >= 8:
-            break
+                continue
+            # 展示仍取各来源最近50条；按需迭代并保留 Python strip/去重语义。
+            samples = conn.execute(
+                f"SELECT {title} AS title FROM {table} WHERE {where} ORDER BY r.id DESC LIMIT 50",
+                (day, next_day),
+            )
+            for row in samples:
+                candidate = str(row["title"] or "").strip()
+                if candidate and candidate not in titles:
+                    titles.append(candidate)
+                if len(titles) >= 8:
+                    break
+            samples.close()
     return {
         "local_date": day,
         "timezone": str(local_now.tzinfo or "local"),
         "as_of": local_now.isoformat(timespec="seconds"),
-        "subscription_runs": counts(list(runs), {
-            "missing": "missing", "satisfied": "satisfied",
-            "failed": "failed", "inconclusive": "attention",
-            "cancelled": "cancelled",
-        }),
-        "local_media_tasks": counts(list(local_tasks), {
-            "completed": "completed", "failed": "failed",
-            "requires_manual": "attention",
-        }),
-        "rss_entries": counts(list(rss), {
-            "downloaded": "downloaded", "skipped": "skipped",
-            "failed": "failed", "pending": "pending",
-        }),
-        "downloads": counts(list(downloads), {
-            "success": "success", "failed": "failed",
-            "submitted": "submitted",
-        }),
+        **totals,
         "content_titles": titles,
-        "event_count": len(runs) + len(local_tasks) + len(rss) + len(downloads),
+        "event_count": sum(sum(counts.values()) for counts in totals.values()),
     }

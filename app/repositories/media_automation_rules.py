@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app import database as db
@@ -44,14 +44,18 @@ def list_rules(owner_digest: str) -> list[dict[str, Any]]:
     return [_row(row) for row in rows]
 
 
+def _read_rule(conn, owner_digest: str, rule_id: str) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            "SELECT * FROM media_automation_rules WHERE owner_digest=? AND id=?",
+            (owner_digest, rule_id),
+        ).fetchone()
+    )
+
+
 def get_rule(owner_digest: str, rule_id: str) -> dict[str, Any] | None:
     with db.get_conn() as conn:
-        return _row(
-            conn.execute(
-                "SELECT * FROM media_automation_rules WHERE owner_digest=? AND id=?",
-                (owner_digest, rule_id),
-            ).fetchone()
-        )
+        return _read_rule(conn, owner_digest, rule_id)
 
 
 def save_rule(
@@ -114,7 +118,8 @@ def save_rule(
             ).rowcount
             if changed != 1:
                 return None
-    return get_rule(owner_digest, rule_id)
+        committed = _read_rule(conn, owner_digest, rule_id)
+    return committed
 
 
 def delete_rule(owner_digest: str, rule_id: str, *, expected_revision: int) -> bool:
@@ -128,18 +133,31 @@ def delete_rule(owner_digest: str, rule_id: str, *, expected_revision: int) -> b
         )
 
 
+def _schedule_time_key(value: object) -> str | None:
+    """ISO 历史格式按同一瞬间比较；保留微秒，坏日期不执行也不覆写。"""
+    try:
+        instant = datetime.fromisoformat(str(value))
+        return instant.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def claim_due_rules(
     now: datetime | None = None, *, limit: int = 20
 ) -> list[dict[str, Any]]:
     clock = now or datetime.now().astimezone()
-    stamp = clock.isoformat(timespec="seconds")
-    until = (clock + timedelta(minutes=5)).isoformat(timespec="seconds")
+    stamp = _schedule_time_key(clock.isoformat())
+    if stamp is None:
+        raise ValueError("主动规则领取时间无效")
+    until = (clock + timedelta(minutes=5)).isoformat()
     claimed = []
     with publication_guard(), db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        conn.create_function("mediaflux_rule_time", 1, _schedule_time_key, deterministic=True)
         rows = conn.execute(
-            "SELECT * FROM media_automation_rules WHERE enabled=1 AND next_run_at<=? "
-            "AND (lease_until='' OR lease_until<=?) ORDER BY next_run_at LIMIT ?",
+            "SELECT * FROM media_automation_rules WHERE enabled=1 AND mediaflux_rule_time(next_run_at)<=? "
+            "AND (lease_until='' OR mediaflux_rule_time(lease_until)<=?) "
+            "ORDER BY mediaflux_rule_time(next_run_at),id LIMIT ?",
             (stamp, stamp, max(1, min(int(limit), 100))),
         ).fetchall()
         for row in rows:

@@ -451,6 +451,7 @@ def set_subscription_notification_rule_confirmed(
     updated = set_notification_rule(
         number,
         expected_rule_revision=int(current["revision"]),
+        expected_rule=current,
         expected_subscription_revision=int(current["subscription_revision"]),
         updates={key: bool(arguments[key]) for key in _RULE_FIELDS if key in arguments},
     )
@@ -505,6 +506,7 @@ def reset_subscription_notification_rule_confirmed(
     if not reset_notification_rule(
         number,
         expected_rule_revision=int(current["revision"]),
+        expected_rule=current,
         expected_subscription_revision=int(current["subscription_revision"]),
     ):
         raise AgentToolError(

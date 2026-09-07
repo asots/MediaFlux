@@ -164,7 +164,7 @@ def _daily_summary(rule: dict[str, Any], now: datetime) -> RuleDelivery:
         event = NotificationEvent(
             "⚠️ 今日媒体异常摘要" if errors_only else "📋 今日媒体动态",
             fields=tuple(fields),
-            footer="按本地日期汇总近期记录（每类最多 50 条）；详细进展仍由原任务通知更新。"
+            footer="计数覆盖本地当日全部记录，相关作品按近期记录抽样；详细进展仍由原任务通知更新。"
             if total
             else "今天暂时没有符合条件的媒体动态。",
         )
