@@ -777,12 +777,41 @@ class CliRuntimeTests(unittest.TestCase):
                 "MEDIAFLUX_PACKAGE": "appimage",
             },
             clear=False,
-        ), patch("app.version.EMBEDDED_PACKAGE_TYPE", "system"):
+        ), patch("app.version.EMBEDDED_PACKAGE_TYPE", "system"), patch(
+            # 本例只测缺少 JSON manifest 时的回退；隔离镜像内真实构建信息。
+            "app.version._embedded_build_info", return_value={}
+        ):
             info = BuildInfo.current()
         self.assertEqual(info.commit, "abc123")
         self.assertEqual(info.build_time, "2026-07-28T00:00:00Z")
         self.assertEqual(info.package, "system")
         self.assertEqual(info.arch, platform.machine())
+
+    def test_build_info_manifest_wins_over_fallback_environment(self) -> None:
+        embedded = {
+            "version": "1.2.3",
+            "commit": "embedded-commit",
+            "build_time": "2026-07-28T00:00:00Z",
+            "package": "docker",
+            "arch": "aarch64",
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MEDIAFLUX_BUILD_COMMIT": "spoofed-commit",
+                    "MEDIAFLUX_BUILD_TIME": "spoofed-time",
+                    "MEDIAFLUX_PACKAGE": "appimage",
+                },
+                clear=False,
+            ),
+            patch("app.version.EMBEDDED_PACKAGE_TYPE", "source"),
+            patch("app.version._embedded_build_info", return_value=embedded),
+        ):
+            info = BuildInfo.current()
+        for field, expected in embedded.items():
+            with self.subTest(field=field):
+                self.assertEqual(getattr(info, field), expected)
 
     def test_entrypoints_propagate_cli_exit_codes(self) -> None:
         cases = ((self.PROJECT_ROOT / "mediaflux.py", None),)
