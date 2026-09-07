@@ -123,6 +123,8 @@ class MediaRefreshCoordinator:
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._state_lock = threading.RLock()
+        # 启停串行；join 不持有 worker 更新状态时使用的状态锁。
+        self._lifecycle_lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._worker_lock = CrossProcessLock("media-refresh-coordinator")
         self._owner = f"media-refresh-{uuid.uuid4().hex[:12]}"
@@ -132,33 +134,35 @@ class MediaRefreshCoordinator:
         self._failed_session = 0
 
     def start(self) -> None:
-        with self._state_lock:
-            if self._thread and self._thread.is_alive():
-                return
-            self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._loop,
-                name="media-refresh-coordinator",
-                daemon=True,
-            )
-            self._thread.start()
-        self._wake_event.set()
-        logger.info("媒体库刷新合并器已启动")
+        with self._lifecycle_lock:
+            with self._state_lock:
+                if self._thread and self._thread.is_alive():
+                    return
+                self._stop_event.clear()
+                self._thread = threading.Thread(
+                    target=self._loop,
+                    name="media-refresh-coordinator",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._wake_event.set()
+            logger.info("媒体库刷新合并器已启动")
 
     def stop(self, timeout: float = 30.0) -> bool:
-        self._stop_event.set()
-        self._wake_event.set()
-        thread = self._thread
-        if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=max(0.1, float(timeout or 0.1)))
-        stopped = not thread or not thread.is_alive()
-        if stopped:
-            with self._state_lock:
-                if self._thread is thread:
-                    self._thread = None
-        else:
-            logger.warning("媒体库刷新合并器未能在关闭超时内结束；持久队列将在重启后恢复")
-        return stopped
+        with self._lifecycle_lock:
+            self._stop_event.set()
+            self._wake_event.set()
+            thread = self._thread
+            if thread and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=max(0.1, float(timeout or 0.1)))
+            stopped = not thread or not thread.is_alive()
+            if stopped:
+                with self._state_lock:
+                    if self._thread is thread:
+                        self._thread = None
+            else:
+                logger.warning("媒体库刷新合并器未能在关闭超时内结束；持久队列将在重启后恢复")
+            return stopped
 
     def wake(self) -> None:
         self._wake_event.set()

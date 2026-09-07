@@ -141,21 +141,20 @@ def _local_sources() -> list[dict[str, Any]]:
 
 
 def _local_bindings() -> list[dict[str, Any]]:
-    bindings: list[dict[str, Any]] = []
-    for source in db.list_local_media_sources(owner=_OWNER):
-        for target in db.list_local_library_targets(source.id, owner=_OWNER):
-            bindings.append({
-                "source_id": int(source.id),
-                "source_name": source.name,
-                "category": target.category,
-                "category_label": _CATEGORY_LABELS.get(target.category, target.category),
-                "local_path": target.path,
-                "provider": target.provider,
-                "library_id": target.library_id,
-                "library_name": target.library_name,
-                "server_path": str(getattr(target, "server_path", "") or ""),
-            })
-    return bindings
+    return [
+        {
+            "source_id": int(row["source_id"]),
+            "source_name": str(row["source_name"]),
+            "category": str(row["category"]),
+            "category_label": _CATEGORY_LABELS.get(row["category"], row["category"]),
+            "local_path": str(row["local_path"]),
+            "provider": str(row["provider"] or ""),
+            "library_id": str(row["library_id"] or ""),
+            "library_name": str(row["library_name"] or ""),
+            "server_path": str(row["server_path"] or ""),
+        }
+        for row in db.list_local_library_bindings(owner=_OWNER)
+    ]
 
 
 def _strm_directory_options(

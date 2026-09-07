@@ -307,14 +307,9 @@ class MediaServerClient:
     @staticmethod
     def _normalize_virtual_folders(data: Any) -> list[dict[str, Any]]:
         """兼容 Jellyfin 裸数组与 Emby QueryResult 两种响应形状。"""
-        if isinstance(data, dict):
-            data = data.get("Items")
-        if not isinstance(data, list):
-            return []
+        items, _total = MediaServerClient._items_payload(data)
         folders: list[dict[str, Any]] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
+        for item in items:
             library_id = str(item.get("ItemId") or "").strip()
             name = str(item.get("Name") or "").strip()
             if not library_id or not name:

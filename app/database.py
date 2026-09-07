@@ -4709,6 +4709,7 @@ from app.repositories.local_media import (  # noqa: E402,F401
     get_local_media_source,
     list_local_media_sources,
     upsert_local_library_target,
+    list_local_library_bindings,
     list_local_library_targets,
     replace_local_library_targets,
     create_local_media_task,

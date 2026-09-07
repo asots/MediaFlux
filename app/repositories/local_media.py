@@ -538,6 +538,19 @@ def list_local_library_targets(source_id: int, *, owner: str = "admin"):
     return [LocalLibraryTarget.from_row(row) for row in rows]
 
 
+def list_local_library_bindings(*, owner: str = "admin") -> list[sqlite3.Row]:
+    """在同一读快照中投影全部来源与归档绑定，避免逐来源 N+1 查询。"""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT t.source_id,s.name AS source_name,t.category,t.path AS local_path,"
+            "t.provider,t.library_id,t.library_name,t.server_path "
+            "FROM local_library_targets t JOIN local_media_sources s "
+            "ON s.id=t.source_id AND s.owner=t.owner WHERE t.owner=? "
+            "ORDER BY s.id,t.category,t.id",
+            (_local_media_owner(owner),),
+        ).fetchall()
+
+
 def replace_local_library_targets(
     bindings: list[dict[str, object]],
     *,
