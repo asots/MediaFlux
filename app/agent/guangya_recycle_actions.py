@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Any
@@ -11,7 +12,12 @@ from app.agent.confirmation import confirmation_context_fingerprint
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import sanitize_untrusted_filename
-from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
+from app.clients.guangya import (
+    GuangYaClient,
+    GuangYaFile,
+    GuangYaWriteRejected,
+    close_guangya_client,
+)
 
 logger = logging.getLogger(__name__)
 _MAX_RECYCLE_ITEMS = 20_000
@@ -105,7 +111,7 @@ def list_guangya_recycle(
         raise _public_error(exc, fallback="光鸭回收站当前不可用") from exc
     finally:
         if client is not None:
-            client.close()
+            close_guangya_client(client)
 
     page = int(arguments["page"])
     page_size = int(arguments["page_size"])
@@ -238,7 +244,7 @@ def _restore_snapshot(
                 )
     finally:
         if client is not None:
-            client.close()
+            close_guangya_client(client)
     safe = {
         "count": len(selected),
         "total_size": sum(_bounded_int(item.get("size")) for item in selected),
@@ -298,24 +304,35 @@ def execute_restore_guangya_recycle(
                 "回收站恢复计划已变化，请重新预检",
                 code="confirmation_stale",
             )
-        _collection, selected = _selected_recycle_snapshots(arguments)
+        collection, selected = _selected_recycle_snapshots(arguments)
         client = _open_client()
         try:
+            if int(client.credential_generation) != _bounded_int(
+                collection.get("credential_generation")
+            ):
+                raise AgentToolError(
+                    "光鸭登录凭据已变化，请重新查询回收站",
+                    code="confirmation_stale",
+                )
             task_id = client.restore_from_recycle(
                 [str(item.get("file_id") or "") for item in selected]
             )
             remaining = {str(item.get("file_id") or "") for item in selected}
             for _attempt in range(20):
-                current_ids = {
-                    str(item.file_id)
-                    for item in client.list_recycle(max_items=_MAX_RECYCLE_ITEMS)
-                }
+                try:
+                    current_ids = {
+                        str(item.file_id)
+                        for item in client.list_recycle(max_items=_MAX_RECYCLE_ITEMS)
+                    }
+                except Exception as exc:  # noqa: BLE001 -- 写已受理，复核失败不可声称未执行
+                    logger.warning("光鸭恢复后复核暂不可用 type=%s", type(exc).__name__)
+                    break
                 remaining &= current_ids
                 if not remaining:
                     break
                 time.sleep(0.5)
         finally:
-            client.close()
+            close_guangya_client(client)
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭回收站恢复失败") from exc
 
@@ -369,7 +386,7 @@ def _clear_snapshot(*, verify_nonempty: bool = True) -> tuple[dict[str, Any], st
         generation = int(client.credential_generation)
     finally:
         if client is not None:
-            client.close()
+            close_guangya_client(client)
     if verify_nonempty and not items:
         raise AgentToolError("光鸭回收站已经为空", code="precondition_failed")
     # Provider 未承诺回收站列表顺序稳定。冻结“集合”而不是当前返回顺序，
@@ -384,6 +401,8 @@ def _clear_snapshot(*, verify_nonempty: bool = True) -> tuple[dict[str, Any], st
             for item in ordered[:6]
         ],
         "irreversible": True,
+        # 只用于最终写客户端校验；公开预览会移除该内部字段。
+        "credential_generation": generation,
     }
     fingerprint = confirmation_context_fingerprint(
         {"credential_generation": generation, "items": snapshots},
@@ -397,6 +416,7 @@ def prepare_clear_guangya_recycle(
 ) -> tuple[ToolResult, str]:
     try:
         safe, fingerprint = _clear_snapshot()
+        safe.pop("credential_generation")
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭回收站清空预检失败") from exc
     return ToolResult(
@@ -406,9 +426,9 @@ def prepare_clear_guangya_recycle(
         data={
             **safe,
             "effects": [
-                "操作范围是确认时仍与当前快照完全一致的整个回收站。",
-                "回收站任一对象发生变化都会让确认票据失效。",
-                "清空后无法通过 MediaFlux 或光鸭回收站恢复。",
+                "操作范围是整个账号的回收站，不支持只清空当前选中项。",
+                "执行前复核发现快照变化会拒绝执行；请先暂停其他删除操作。",
+                "Provider 全局清空期间新进入回收站的对象也可能被删除，无法通过 MediaFlux 或光鸭回收站恢复。",
             ],
         },
         evidence=[
@@ -433,15 +453,24 @@ def execute_clear_guangya_recycle(
             )
         client = _open_client()
         try:
+            if int(client.credential_generation) != safe["credential_generation"]:
+                raise AgentToolError(
+                    "光鸭登录凭据已变化，请重新查询回收站",
+                    code="confirmation_stale",
+                )
             task_id = client.clear_recycle_bin()
             remaining = safe["count"]
             for _attempt in range(20):
-                remaining = len(client.list_recycle(max_items=_MAX_RECYCLE_ITEMS))
+                try:
+                    remaining = len(client.list_recycle(max_items=_MAX_RECYCLE_ITEMS))
+                except Exception as exc:  # noqa: BLE001 -- 写已受理，保留 verification_pending
+                    logger.warning("光鸭清空后复核暂不可用 type=%s", type(exc).__name__)
+                    break
                 if remaining == 0:
                     break
                 time.sleep(0.5)
         finally:
-            client.close()
+            close_guangya_client(client)
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭回收站清空失败") from exc
 
@@ -510,31 +539,42 @@ def query_guangya_task_status(
         raise _public_error(exc, fallback="光鸭任务状态当前不可用") from exc
     finally:
         if client is not None:
-            client.close()
+            close_guangya_client(client)
 
     payload = raw.get("data") if isinstance(raw.get("data"), dict) else raw
-    status = str(
-        payload.get("status")
-        or payload.get("taskStatus")
-        or payload.get("state")
-        or "unknown"
-    ).strip().casefold()
+    status = str(next((
+        payload[key] for key in ("status", "taskStatus", "state")
+        if payload.get(key) is not None
+    ), "unknown")).strip().casefold()
     progress = payload.get("progress")
     if progress is None:
         progress = payload.get("percent")
     try:
         progress_value = float(progress or 0)
+        if isinstance(progress, bool) or not math.isfinite(progress_value):
+            progress_value = 0.0
         if progress_value > 1:
             progress_value /= 100
     except (TypeError, ValueError, OverflowError):
         progress_value = 0.0
     completed = status in {"2", "done", "completed", "success", "succeeded", "finished"}
     failed = status in {"3", "failed", "error", "cancelled", "canceled"}
-    public_status = "completed" if completed else "failed" if failed else "running"
+    detail = payload.get("detail")
+    # 官网轮询同时检查终态 detail.code；status=2 也可能携带具体失败。
+    if (completed or failed) and isinstance(detail, dict) and detail.get("code") is not None:
+        failed = failed or str(detail["code"]).strip() != "0"
+    running = status in {"0", "1", "running", "pending", "queued", "processing", "accepted"}
+    public_status = "failed" if failed else "completed" if completed else "running" if running else "unknown"
+    summary = {
+        "completed": "光鸭任务已完成", "failed": "光鸭任务执行失败",
+        "running": "光鸭任务仍在处理中", "unknown": "光鸭任务状态暂时无法确认，不能判断为正在运行或已完成",
+    }[public_status]
+    if public_status == "completed":
+        progress_value = 1.0
     return ToolResult(
-        not failed,
+        public_status in {"completed", "running"},
         public_status,
-        "光鸭任务已完成" if completed else "光鸭任务执行失败" if failed else "光鸭任务仍在处理中",
+        summary,
         data={
             "operation": str(task.get("operation") or "operation"),
             "status": public_status,

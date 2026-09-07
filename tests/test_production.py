@@ -6306,6 +6306,7 @@ class SecurityTests(InitializedWebTestCase):
         raw_class.share_files_list.side_effect = [
             {
                 "data": {
+                    "total": 3,
                     "list": [
                         {"fileId": "a", "fileName": "A", "resType": 1, "fileSize": 1},
                         {"fileId": "b", "fileName": "B", "resType": 1, "fileSize": 2},
@@ -6314,6 +6315,7 @@ class SecurityTests(InitializedWebTestCase):
             },
             {
                 "data": {
+                    "total": 3,
                     "list": [
                         {"fileId": "b", "fileName": "B", "resType": 1, "fileSize": 2},
                         {"fileId": "c", "fileName": "C", "resType": 2, "fileSize": 0},
@@ -6326,6 +6328,7 @@ class SecurityTests(InitializedWebTestCase):
                 "https://www.guangyapan.com/s/demo", page_size=2, max_pages=2
             )
         self.assertEqual([item["id"] for item in result["files"]], ["a", "b", "c"])
+        self.assertFalse(result["has_more"])
         self.assertNotIn("access_token", result)
         self.assertNotIn("_access_token", result)
         self.assertEqual(raw_class.share_files_list.call_count, 2)

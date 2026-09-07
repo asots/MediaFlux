@@ -1129,6 +1129,9 @@ def _verify_after(
             for row in client.list_dir(target_id)
         )
     if op == "copy":
+        # 复制必须保留冻结的源对象，不能把源消失、目标同名当作复制成功。
+        if not _snapshot_matches(_find_current(client, source), source):
+            return False
         target_id = _target_id(item, created_targets)
         target_name = str(source.get("name") or "")
         for row in client.list_dir(target_id):
@@ -1351,10 +1354,12 @@ def execute_fs_change_plan(
                     created_id,
                     created_targets=created_targets,
                 )
-                if op == "copy" and not verified:
-                    # Provider 的复制接口可能先返回异步任务；持久任务在线程中
-                    # 等待短暂可见性窗口，避免立即把已受理复制误判为失败。
+                if not verified:
+                    # 真盘 move 和 copy 均可能先受理、后更新目录索引。
+                    # 只重读冻结后置条件，绝不再次提交写入；其他写操作同样适用。
                     for _attempt in range(20):
+                        if cancel_check is not None:
+                            cancel_check()
                         time.sleep(0.5)
                         if _verify_after(
                             client,
@@ -1410,9 +1415,9 @@ def execute_fs_change_plan(
                         persistence_uncertain = True
                 else:
                     stats["failed"] += 1
-                    if op in {"relocate", "copy"} and provider_write_started:
-                        # relocate 是两次 Provider 写入，copy 则可能异步完成；
-                        # 二者在传输/可见性异常后都不能安全盲重试。
+                    if provider_write_started:
+                        # 任何写入都可能已被 Provider 接受；传输/回读失败不能
+                        # 证明未执行，统一交人工核查，禁止按普通失败盲重试。
                         persistence_uncertain = True
                     status = "failed"
             try:

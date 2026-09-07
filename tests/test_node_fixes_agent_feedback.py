@@ -60,6 +60,16 @@ class AgentFailureProjectionTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+class AgentBrowserDependencyTests(unittest.TestCase):
+    def test_browser_skip_matches_playwright_availability(self):
+        # 无依赖时不得进入setUpClass；有依赖时也不得把真实浏览器断言整体跳过。
+        self.assertEqual(
+            bool(getattr(AgentConfirmationBoundaryBrowserTests, '__unittest_skip__', False)),
+            browser_tests.sync_playwright is None,
+        )
+
+
+@unittest.skipIf(browser_tests.sync_playwright is None, '系统环境未安装 Playwright')
 class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
     # 复用已有浏览器夹具而不继承其测试，避免重复计算回归数量。
     setUpClass = classmethod(browser_tests.AgentKernelBrowserTests.setUpClass.__func__)

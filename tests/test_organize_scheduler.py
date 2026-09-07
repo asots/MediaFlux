@@ -312,6 +312,7 @@ class OrganizeSchedulerTests(unittest.TestCase):
 
         strm = MagicMock()
         rss = MagicMock()
+        subscriptions = MagicMock()
         organize = MagicMock()
         downloads = MagicMock()
         verification = MagicMock()
@@ -322,6 +323,9 @@ class OrganizeSchedulerTests(unittest.TestCase):
         media_refresh.stop.return_value = True
         with patch("app.modules.scheduler.get_scheduler", return_value=strm), patch(
             "app.modules.rss_scheduler.get_rss_scheduler", return_value=rss
+        ), patch(
+            "app.modules.media_subscription_scheduler.get_media_subscription_scheduler",
+            return_value=subscriptions,
         ), patch(
             "app.modules.organize_scheduler.get_organize_scheduler", return_value=organize
         ), patch(
@@ -346,9 +350,17 @@ class OrganizeSchedulerTests(unittest.TestCase):
             "app.modules.organize_confirmations.start_confirmation_dispatcher"
         ) as confirmation_start, patch(
             "app.modules.organize_confirmations.stop_confirmation_dispatcher"
-        ) as confirmation_stop, patch("app.bot.stop_bot"):
+        ) as confirmation_stop, patch(
+            "app.modules.telegram_notification_center.start_telegram_notification_dispatcher"
+        ) as notification_start, patch(
+            "app.modules.telegram_notification_center.stop_telegram_notification_dispatcher",
+            return_value=True,
+        ) as notification_stop, patch(
+            "app.database.get_conn",
+            side_effect=AssertionError("生命周期装配单测不得访问真实数据库"),
+        ), patch("app.bot.stop_bot"):
             main.start_background_services()
-            main.stop_background_services()
+            self.assertTrue(main.stop_background_services())
 
         organize.start.assert_called_once_with()
         organize.stop.assert_called_once_with()
@@ -364,6 +376,11 @@ class OrganizeSchedulerTests(unittest.TestCase):
         jobs.stop.assert_called_once_with()
         confirmation_start.assert_called_once_with()
         confirmation_stop.assert_called_once_with()
+
+        subscriptions.start.assert_called_once_with()
+        subscriptions.stop.assert_called_once_with()
+        notification_start.assert_called_once_with()
+        notification_stop.assert_called_once_with(timeout=3.0)
 
     def test_application_shutdown_reports_undrained_organize_worker(self):
         from app import main

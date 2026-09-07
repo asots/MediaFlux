@@ -8,6 +8,8 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
+import httpx
+
 from app.agent import guangya_account_actions as account_actions
 from app.agent import guangya_recycle_actions as recycle_actions
 from app.agent import guangya_share_actions as share_actions
@@ -55,14 +57,18 @@ class _RawSdk:
         self.calls.append(("task", task_id))
         return {"data": {"status": "completed", "progress": 100}}
 
-    def user_info(self):
-        return {
-            "data": {
-                "nickname": "测试用户",
-                "phone": "13800138000",
-                "storage": {"totalSpace": 1000, "usedSpace": 250},
-            }
-        }
+    def _account_headers(self):
+        return {"x-client-id": "test-client"}
+
+    def request(self, url, method="GET", **kwargs):
+        self.calls.append(("request", url, method, kwargs))
+        if url == "https://account.guangyapan.com/v1/user/me":
+            data = {"nickname": "测试用户"}
+        elif url == "https://api.guangyapan.com/assets/v1/get_assets":
+            data = {"totalSpaceSize": 1000, "usedSpaceSize": 250}
+        else:
+            raise AssertionError("unexpected account endpoint")
+        return httpx.Response(200, json={"code": 0, "data": data})
 
     def share_user_list(self, page=0, page_size=50, **_kwargs):
         self.calls.append(("share_list", page, page_size))
@@ -116,6 +122,7 @@ class GuangYaSdkClientTests(unittest.TestCase):
         self.assertEqual(client.clear_recycle_bin(), "clear-task")
         self.assertEqual(client.task_status("restore-task")["data"]["status"], "completed")
         self.assertEqual(client.account_info()["data"]["nickname"], "测试用户")
+        self.assertEqual(client.account_storage_info()["data"]["totalSpaceSize"], 1000)
 
     def test_p2_share_and_upload_wrappers_do_not_expose_raw_client(self) -> None:
         raw = _RawSdk()
@@ -252,12 +259,13 @@ class _AccountClient:
                 "nickname": "Alice",
                 "phone": "13800138000",
                 "email": "alice@example.com",
-                "totalSpace": 1000,
-                "usedSpace": 250,
                 "token": "must-not-leak",
                 "userId": "must-not-leak",
             }
         }
+
+    def account_storage_info(self):
+        return {"code": 0, "data": {"totalSpaceSize": 1000, "usedSpaceSize": 250}}
 
     def close(self):
         return True

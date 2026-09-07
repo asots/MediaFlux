@@ -14,7 +14,12 @@ from app.agent.errors import AgentToolError
 from app.agent.guangya_workspace_actions import latest_guangya_observation_ref
 from app.agent.models import Evidence, ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import sanitize_public_text, sanitize_untrusted_filename
-from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
+from app.clients.guangya import (
+    GuangYaClient,
+    GuangYaFile,
+    GuangYaWriteRejected,
+    close_guangya_client,
+)
 from app.modules.guangya_workspace import (
     GuangYaWorkspaceError,
     GuangYaWorkspaceStale,
@@ -121,7 +126,9 @@ def _load_share_snapshots(client: GuangYaClient) -> list[dict[str, Any]]:
         for item in client.list_user_shares(max_items=_MAX_SHARES)
         if isinstance(item, dict)
     ]
-    return [item for item in snapshots if item["share_id"]]
+    if any(not item["share_id"] for item in snapshots):
+        raise AgentToolError("光鸭分享列表缺少对象标识，无法确认完整快照", code="unavailable")
+    return snapshots
 
 
 def guangya_share_list_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -148,7 +155,7 @@ def list_guangya_user_shares(
         raise _public_error(exc, fallback="光鸭分享列表当前不可用") from exc
     finally:
         if client is not None:
-            client.close()
+            close_guangya_client(client)
 
     page = int(arguments["page"])
     page_size = int(arguments["page_size"])
@@ -296,7 +303,7 @@ def _workspace_selection(
                     )
     finally:
         if client is not None:
-            client.close()
+            close_guangya_client(client)
     return observation, selected, {
         "observation_ref": observation_ref,
         "credential_generation": _bounded_int(observation.get("credential_generation")),
@@ -330,6 +337,8 @@ def _create_snapshot(
             title = f"{title} 等 {len(selected)} 项"
     title = sanitize_untrusted_filename(title, limit=180) or "MediaFlux 分享"
     safe = {
+        # 只用于实际写客户端校验；公开预览和结果会移除该内部字段。
+        "credential_generation": identity["credential_generation"],
         "count": len(selected),
         "title": title,
         "expires_days": int(arguments.get("expires_days") or 0),
@@ -386,6 +395,7 @@ def prepare_create_guangya_share(
         safe, fingerprint, _selected = _create_snapshot(
             arguments, owner=context.owner, verify_live=True
         )
+        safe.pop("credential_generation")
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭分享创建预检失败") from exc
     return ToolResult(
@@ -465,8 +475,14 @@ def execute_create_guangya_share(
         )
         if fingerprint != str(expected_context or ""):
             raise AgentToolError("光鸭分享计划已变化，请重新预检", code="confirmation_stale")
+        expected_generation = safe.pop("credential_generation")
         client = _open_client()
         try:
+            if int(client.credential_generation) != expected_generation:
+                raise AgentToolError(
+                    "光鸭登录凭据已变化，请重新读取目录",
+                    code="confirmation_stale",
+                )
             raw = client.create_user_share(
                 [str(item.get("file_id") or "") for item in selected],
                 title=safe["title"],
@@ -478,7 +494,7 @@ def execute_create_guangya_share(
             )
             created = _extract_created_share(raw)
         finally:
-            client.close()
+            close_guangya_client(client)
     except Exception as exc:
         raise _public_error(exc, fallback="创建光鸭分享失败") from exc
 
@@ -604,8 +620,10 @@ def _revoke_snapshot(
                     )
     finally:
         if client is not None:
-            client.close()
+            close_guangya_client(client)
     safe = {
+        # 来自已复核的会话私有引用，不接受模型提供的世代覆盖。
+        "credential_generation": _bounded_int(collection.get("credential_generation")),
         "count": len(selected),
         "samples": [
             sanitize_public_text(item.get("title"), limit=160) or "未命名分享"
@@ -629,6 +647,7 @@ def prepare_revoke_guangya_shares(
 ) -> tuple[ToolResult, str]:
     try:
         safe, fingerprint, _selected = _revoke_snapshot(arguments, verify_live=True)
+        safe.pop("credential_generation")
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭分享撤销预检失败") from exc
     return ToolResult(
@@ -660,20 +679,30 @@ def execute_revoke_guangya_shares(
         safe, fingerprint, selected = _revoke_snapshot(arguments, verify_live=True)
         if fingerprint != str(expected_context or ""):
             raise AgentToolError("光鸭分享撤销计划已变化，请重新预检", code="confirmation_stale")
+        expected_generation = safe.pop("credential_generation")
         client = _open_client()
         try:
+            if int(client.credential_generation) != expected_generation:
+                raise AgentToolError(
+                    "光鸭登录凭据已变化，请重新查询分享列表",
+                    code="confirmation_stale",
+                )
             client.delete_user_shares(
                 [str(item.get("share_id") or "") for item in selected]
             )
             remaining = {str(item.get("share_id") or "") for item in selected}
             for _attempt in range(20):
-                current = {item["share_id"] for item in _load_share_snapshots(client)}
+                try:
+                    current = {item["share_id"] for item in _load_share_snapshots(client)}
+                except Exception as exc:  # noqa: BLE001 -- 撤销已受理，复核失败不能丢失受理结果
+                    logger.warning("光鸭撤销分享后复核暂不可用 type=%s", type(exc).__name__)
+                    break
                 remaining &= current
                 if not remaining:
                     break
                 time.sleep(0.5)
         finally:
-            client.close()
+            close_guangya_client(client)
     except Exception as exc:
         raise _public_error(exc, fallback="撤销光鸭分享失败") from exc
 

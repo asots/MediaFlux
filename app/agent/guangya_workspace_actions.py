@@ -553,6 +553,9 @@ def query_guangya_filesystem(
             {
                 "ref": item["object_ref"],
                 "name": item["object_name"],
+                "kind": item["kind"],
+                "size": item["size"],
+                "extension": item["extension"],
                 "at": compact_location(item.get("location")),
             }
             for item in page["entries"]

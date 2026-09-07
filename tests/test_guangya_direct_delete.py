@@ -14,11 +14,13 @@ from app.config import web_credentials
 from app.main import create_app
 from app.modules.directory_scrape_errors import DirectoryScrapePublicError
 from app.modules.organize import OrganizeRules
-from tests.support import InitializedWebTestCase
+from tests.support import InitializedWebTestCase, isolated_test_database
 
 
 class GuangYaDirectDeleteApiTests(InitializedWebTestCase):
     def setUp(self):
+        # TestClient不启动应用lifespan，审计写入必须显式使用已初始化的隔离库。
+        self.enterContext(isolated_test_database("guangya-direct-delete.db"))
         self.provider = Mock()
         self.provider.logged_in = True
         self.provider.list_dir.return_value = [

@@ -324,6 +324,51 @@ class GuangYaWriteRejected(RuntimeError):
         super().__init__(f"光鸭写操作被拒绝 operation={self.operation}{detail}")
 
 
+def _validate_read_response(response: object) -> None:
+    """HTTP 成功不等于读取成功；错误响应不得用于判断空目录或对象已消失。"""
+    if isinstance(response, list):
+        return
+    if not isinstance(response, dict) or not response:
+        raise RuntimeError("光鸭读取返回无效响应")
+    payloads = [response]
+    if isinstance(response.get("data"), dict):
+        payloads.append(response["data"])
+    for payload in payloads:
+        if payload.get("error") or payload.get("errors"):
+            raise RuntimeError("光鸭接口拒绝读取")
+        if "success" in payload and payload["success"] is not True:
+            raise RuntimeError("光鸭接口拒绝读取")
+        for key in ("code", "error_code"):
+            if key in payload and (
+                isinstance(payload[key], bool)
+                or str(payload[key]).strip() not in {"0", "200"}
+            ):
+                raise RuntimeError("光鸭接口拒绝读取")
+
+
+def _read_success_acknowledged(response: dict) -> bool:
+    return (
+        "code" in response or response.get("success") is True
+        or str(response.get("msg") or response.get("message") or "").strip().lower()
+        in {"success", "ok", "成功"}
+    )
+
+
+def _read_page_has_more(response: object, *, count: int, seen: int, page_size: int) -> bool:
+    """优先采用服务端分页证据，不能仅因服务端限流缩页就认为已读完。"""
+    payload = response.get("data", response) if isinstance(response, dict) else {}
+    if not isinstance(payload, dict):
+        return count >= page_size
+    total = payload.get("total")
+    if isinstance(total, int) and not isinstance(total, bool) and total > seen:
+        return True
+    if isinstance(payload.get("hasMore"), bool):
+        return payload["hasMore"]
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        return False
+    return count >= page_size
+
+
 def _validate_write_response(response, *, operation: str) -> None:
     """识别光鸭在 HTTP 200 中返回的业务失败。
 
@@ -1646,10 +1691,11 @@ class GuangYaClient:
                 yield item
                 yielded += 1
                 new_count += 1
-            if len(items) < page_size:
-                return
-            if new_count == 0:
+            has_more = _read_page_has_more(res, count=len(items), seen=yielded, page_size=page_size)
+            if new_count == 0 and (items or has_more):
                 raise RuntimeError("光鸭目录分页未推进，已停止读取以避免返回不完整目录")
+            if not has_more:
+                return
             page += 1
 
     def list_dir(self, parent_id: str = "0") -> list[GuangYaFile]:
@@ -1687,10 +1733,17 @@ class GuangYaClient:
 
     def file_info(self, file_id: str) -> Optional[GuangYaFile]:
         res = self._call_read("file_info", lambda: self.raw.fs_detail(file_id))
+        _validate_read_response(res)
         payload = _detail_file_payload(res)
         if not payload:
-            logger.debug("光鸭文件详情缺少有效 fileInfo file=%s", file_id)
-            return None
+            data = res.get("data") if isinstance(res, dict) else None
+            if isinstance(res, dict) and _read_success_acknowledged(res) and (
+                data == {} or isinstance(data, dict) and any(
+                    key in data and data[key] in (None, {}) for key in ("fileInfo", "file_info")
+                )
+            ):
+                return None
+            raise RuntimeError("光鸭文件详情响应不完整，无法确认对象不存在")
         return _to_file(payload)
 
     def move(self, file_ids: list[str], parent_id: str) -> bool:
@@ -1764,10 +1817,11 @@ class GuangYaClient:
                 yielded += 1
                 new_count += 1
                 yield item
-            if len(items) < safe_page_size:
-                return
-            if new_count == 0:
+            has_more = _read_page_has_more(response, count=len(items), seen=yielded, page_size=safe_page_size)
+            if new_count == 0 and (items or has_more):
                 raise RuntimeError("光鸭回收站分页未推进，已停止读取")
+            if not has_more:
+                return
             page += 1
 
     def list_recycle(self, *, max_items: int = 20_000) -> list[GuangYaFile]:
@@ -1795,7 +1849,10 @@ class GuangYaClient:
         response = self._call_read(
             "task_status", lambda: self.raw.get_task_status(normalized)
         )
-        return response if isinstance(response, dict) else {}
+        _validate_read_response(response)
+        if not isinstance(response, dict):
+            raise RuntimeError("光鸭任务状态返回无效响应")
+        return response
 
     @property
     def supports_atomic_empty_directory_delete(self) -> bool:
@@ -1904,11 +1961,12 @@ class GuangYaClient:
 
     # ===== 链接转存 =====
     def inspect_share(self, share_url: str, page_size: int = 200) -> dict:
-        """解析分享链接并返回可选择的顶层文件，不执行转存。"""
+        """解析分享链接并返回单页可选顶层文件，不执行转存；has_more 标记截断。"""
         inspected, access_token = self._read_share_files(
             share_url,
             page_size=page_size,
             max_pages=1,
+            require_complete=False,
         )
         return {**inspected, "access_token": access_token}
 
@@ -1923,8 +1981,8 @@ class GuangYaClient:
         return inspected
 
     def _read_share_files(self, share_url: str, page_size: int,
-                          max_pages: int) -> tuple[dict, str]:
-        """建立临时分享会话并读取文件；令牌仅返回给内部转存预览。"""
+                          max_pages: int, *, require_complete: bool = True) -> tuple[dict, str]:
+        """默认要求完整列表；单页转存预览可有界截断，令牌仅供内部使用。"""
         share_id, code = self._parse_share(share_url)
         if not share_id:
             raise ValueError("无法识别光鸭分享 ID")
@@ -1937,27 +1995,45 @@ class GuangYaClient:
             raise RuntimeError(self._extract_message(token_resp) or "分享链接无效或提取码错误")
         files: list[dict] = []
         seen: set[str] = set()
+        cursor = ""
+        has_more = False
         for page in range(1, max_pages + 1):
-            response = Raw.share_files_list(
-                access_token,
-                page=page,
-                page_size=page_size,
+            response = Raw._public_post(
+                "https://api.guangyapan.com/nd.bizuserres.s/v1/get_share_page_files_list",
+                {"accessToken": access_token, "parentId": "", "cursor": cursor,
+                 "pageSize": page_size, "orderBy": 0, "sortType": 0},
+            ) if cursor else Raw.share_files_list(
+                access_token, page=page, page_size=page_size,
             )
             raw_files = self._extract_list(response)
-            if not raw_files:
-                break
+            new_count = 0
             for raw in raw_files:
                 item = self._to_share_file(raw)
-                if item["id"] and item["id"] not in seen:
+                if not item["id"]:
+                    raise RuntimeError("光鸭分享文件缺少标识，无法建立完整快照")
+                if item["id"] not in seen:
                     seen.add(item["id"])
                     files.append(item)
-            if len(raw_files) < page_size:
+                    new_count += 1
+            has_more = _read_page_has_more(response, count=len(raw_files), seen=len(files), page_size=page_size)
+            if new_count == 0 and (raw_files or has_more):
+                raise RuntimeError("光鸭分享文件分页未推进，列表不完整")
+            if not has_more:
                 break
+            payload = response.get("data") if isinstance(response, dict) else None
+            next_cursor = str(payload.get("cursor") or "") if isinstance(payload, dict) else ""
+            if cursor and (not next_cursor or next_cursor == cursor):
+                raise RuntimeError("光鸭分享文件游标未推进，列表不完整")
+            cursor = next_cursor
+        else:
+            if require_complete:
+                raise RuntimeError("光鸭分享文件达到安全分页上限，未返回不完整快照")
         return ({
             "share_id": share_id,
             "code_required": bool(code),
             "files": files,
             "count": len(files),
+            "has_more": has_more,
         }, access_token)
 
     def restore_share(self, access_token: str, file_ids: list[str],
@@ -1998,10 +2074,60 @@ class GuangYaClient:
             "count": 0,
         }
 
+    @staticmethod
+    def _validate_account_read_response(response: object, *, storage: bool = False) -> dict:
+        """账号/容量读取不能把 HTTP 200 中的业务错误当作成功资料。"""
+        if not isinstance(response, dict) or not response:
+            raise RuntimeError("光鸭账号接口返回无效响应")
+        payloads = [response]
+        if "data" in response:
+            if not isinstance(response["data"], dict):
+                raise RuntimeError("光鸭账号接口返回无效数据")
+            payloads.append(response["data"])
+        elif storage:
+            raise RuntimeError("光鸭容量接口未返回资料")
+        _validate_read_response(response)
+        acknowledged = "code" in response or response.get("success") is True
+        if storage and not acknowledged:
+            raise RuntimeError("光鸭容量接口未确认读取成功")
+        identity_keys = (
+            "sub", "userId", "user_id", "nickname", "nickName", "username",
+            "userName", "name", "phone_number", "phone", "email",
+        )
+        has_identity = any(
+            isinstance(payload.get(key), str) and payload[key].strip()
+            for payload in payloads for key in identity_keys
+        )
+        if not storage and not acknowledged and not has_identity:
+            raise RuntimeError("光鸭账号接口未返回资料")
+        return response
+
     def account_info(self) -> dict:
-        """读取账号资料；调用方必须对白名单字段做公开投影。"""
-        response = self._call_read("account_info", lambda: self.raw.user_info())
-        return response if isinstance(response, dict) else {}
+        """读取账号资料；使用受控请求，纠正 SDK user_info 使用 POST 并丢弃 HTTP 状态。"""
+        def fetch():
+            raw = self.raw
+            response = raw.request(
+                "https://account.guangyapan.com/v1/user/me",
+                method="GET",
+                headers=raw._account_headers(),
+                timeout=15,
+            )
+            return self._validate_account_read_response(response.json())
+
+        return self._call_read("account_info", fetch)
+
+    def account_storage_info(self) -> dict:
+        """读取官网同源容量接口；totalSpaceSize/usedSpaceSize 原单位为字节。"""
+        def fetch():
+            response = self.raw.request(
+                "https://api.guangyapan.com/assets/v1/get_assets",
+                method="POST",
+                json={},
+                timeout=15,
+            )
+            return self._validate_account_read_response(response.json(), storage=True)
+
+        return self._call_read("account_storage_info", fetch)
 
     def list_user_shares(self, *, max_items: int = 2_000) -> list[dict]:
         """完整读取当前账号创建的分享，保留原始结构供领域层私有解析。"""
@@ -2050,10 +2176,11 @@ class GuangYaClient:
                 seen.add(identity)
                 result.append(dict(item))
                 new_count += 1
-            if len(items) < page_size:
-                return result
-            if new_count == 0:
+            has_more = _read_page_has_more(response, count=len(items), seen=len(result), page_size=page_size)
+            if new_count == 0 and (items or has_more):
                 raise RuntimeError("光鸭分享分页未推进，已停止读取")
+            if not has_more:
+                return result
             page += 1
 
     def create_user_share(
@@ -2278,10 +2405,17 @@ class GuangYaClient:
         tasks: list[dict] = []
         seen_ids: set[str] = set()
         seen_pages: set[tuple[str, ...]] = set()
+        cursor = ""
         for page in range(max_pages):
             res = self._call_read(
                 "list_offline_tasks",
-                lambda page=page: self.raw.cloud_task_list(
+                # 新接口忽略 page，需要沿服务端 cursor 翻页；没有 cursor 的旧响应保留页码协议。
+                lambda page=page, cursor=cursor: self.raw.request(
+                    "https://api.guangyapan.com/nd.bizcloudcollection.s/v1/list_task",
+                    method="POST",
+                    json={"cursor": cursor, "pageSize": page_size, "status": status_filter},
+                    timeout=15,
+                ).json() if cursor else self.raw.cloud_task_list(
                     page=page, page_size=page_size, status=status_filter,
                 ),
             )
@@ -2301,13 +2435,19 @@ class GuangYaClient:
                 tasks.append(normalized)
                 new_count += 1
             signature = tuple(page_keys)
-            if len(items) < page_size:
-                break
-            if not items or signature in seen_pages or new_count == 0:
+            has_more = _read_page_has_more(res, count=len(items), seen=len(tasks), page_size=page_size)
+            if (not items and has_more) or (items and (signature in seen_pages or new_count == 0)):
                 raise IncompleteOfflineTaskListError(
                     "光鸭离线任务分页未推进，列表不完整"
                 )
             seen_pages.add(signature)
+            if not has_more:
+                break
+            payload = res.get("data") if isinstance(res, dict) else None
+            next_cursor = str(payload.get("cursor") or "") if isinstance(payload, dict) else ""
+            if cursor and (not next_cursor or next_cursor == cursor):
+                raise IncompleteOfflineTaskListError("光鸭离线任务游标未推进，列表不完整")
+            cursor = next_cursor
         else:
             raise IncompleteOfflineTaskListError(
                 "光鸭离线任务达到安全分页上限，列表不完整"
@@ -2483,19 +2623,38 @@ class GuangYaClient:
 
     @staticmethod
     def _extract_list(res) -> list[dict]:
-        """从光鸭返回中稳健提取文件列表。"""
+        """区分真实空列表与失败/未知结构，统一嵌套字段的解析规则。"""
+        _validate_read_response(res)
         if isinstance(res, list):
-            return res
-        if isinstance(res, dict):
-            for key in ("file_list", "fileList", "files", "data", "list", "res_list"):
-                v = res.get(key)
-                if isinstance(v, list):
-                    return v
-                if isinstance(v, dict):
-                    inner = v.get("file_list") or v.get("list") or v.get("files")
-                    if isinstance(inner, list):
-                        return inner
-        return []
+            items = res
+        else:
+            keys = ("file_list", "fileList", "files", "list", "res_list", "data")
+            containers = [res]
+            items = None
+            for container in containers:
+                for key in keys:
+                    if key not in container:
+                        continue
+                    value = container[key]
+                    if isinstance(value, list):
+                        items = value
+                        break
+                    if isinstance(value, dict) and len(containers) < 8:
+                        containers.append(value)
+                if items is not None:
+                    break
+            if items is None:
+                # 官网自有分享为空时实测返回 {msg:"success",data:{}}。
+                data = res.get("data")
+                if isinstance(data, dict) and _read_success_acknowledged(res):
+                    # 离线游标末页实测省略 list/hasMore，只保留 total、cursor、statusCounts。
+                    # 是否真的到末尾仍由分页器核对累计数量；不能仅凭空页宣称读完。
+                    if not data or set(data) <= {"total", "cursor", "hasMore", "statusCounts"}:
+                        return []
+                raise RuntimeError("光鸭列表响应不完整，无法确认列表为空")
+        if any(not isinstance(item, dict) for item in items):
+            raise RuntimeError("光鸭列表包含无效对象，无法确认完整快照")
+        return items
 
     @staticmethod
     def _parse_share(share_url: str) -> tuple[str, str]:

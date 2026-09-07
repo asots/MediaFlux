@@ -10,14 +10,13 @@ from pathlib import Path
 from unittest import mock
 
 from app import database as db
-from tests.support import isolated_test_database
-
 from app.agent import guangya_fs_change_actions as change_actions
 from app.agent import guangya_workspace_actions as workspace_actions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
 from app.modules import guangya_fs_change, guangya_workspace
+from tests.support import isolated_test_database
 
 
 class FakeGatewayClient:
@@ -566,6 +565,71 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(
             [item.name for item in client.directories["target"]], ["Move.mp4"]
         )
+
+    def test_move_waits_for_directory_visibility_without_repeating_write(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(client, {
+            "op": "move", "source_name": "Move.mp4", "target_path": "/target",
+        })
+        original_list = client.list_dir
+        original_move = client.move
+        pending = []
+        reads = 0
+
+        def accept_move(ids, parent):
+            pending.append((ids, parent))
+            return True
+
+        def delayed_list(parent_id="0"):
+            nonlocal reads
+            if pending and parent_id == "target":
+                reads += 1
+                if reads == 3:
+                    original_move(*pending[0])
+            return original_list(parent_id)
+
+        with mock.patch.object(client, "move", side_effect=accept_move) as write, \
+                mock.patch.object(client, "list_dir", side_effect=delayed_list), \
+                mock.patch.object(guangya_fs_change.time, "sleep"):
+            result = guangya_fs_change.execute_fs_change_plan(
+                self._queued_payload(plan), client_factory=lambda: client
+            )
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["moved"], 1)
+        write.assert_called_once()
+        self.assertGreaterEqual(reads, 3)
+
+    def test_copy_target_does_not_prove_source_was_retained(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(client, {
+            "op": "copy", "source_name": "Move.mp4", "target_path": "/target",
+        })
+        client.copy(["move"], "target")
+        client.delete(["move"])
+        self.assertFalse(guangya_fs_change._verify_after(
+            client, plan["operations"][0], ""
+        ))
+
+    def test_rename_unknown_write_outcome_requires_manual_review(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(client, {
+            "op": "rename", "source_name": "广告-ABC.mp4", "new_name": "ABC.mp4",
+        })
+        original_rename = client.rename
+
+        def disconnected(fid, name):
+            original_rename(fid, name)
+            raise TimeoutError("response lost after accepted write")
+
+        with mock.patch.object(client, "rename", side_effect=disconnected) as write, \
+                mock.patch.object(guangya_fs_change, "_verify_after", side_effect=OSError("readback unavailable")):
+            result = guangya_fs_change.execute_fs_change_plan(
+                self._queued_payload(plan), client_factory=lambda: client
+            )
+        self.assertTrue(result["partial"])
+        self.assertTrue(result["requires_manual"])
+        self.assertEqual(guangya_fs_change._read(plan["plan_id"])["status"], "manual_review")
+        write.assert_called_once()
 
     def test_execution_rejects_stale_snapshot_before_any_write(self):
         client = FakeGatewayClient()
