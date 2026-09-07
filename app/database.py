@@ -4281,7 +4281,9 @@ def list_gcid_import_tasks(limit: int = 30) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def list_gcid_import_items(task_id: int, status: str = "") -> list[sqlite3.Row]:
+def list_gcid_import_items(
+    task_id: int, status: str = "", *, limit: int | None = None
+) -> list[sqlite3.Row]:
     sql = "SELECT * FROM gcid_import_items WHERE task_id=?"
     params: list = [int(task_id)]
     if status:
@@ -4290,6 +4292,9 @@ def list_gcid_import_items(task_id: int, status: str = "") -> list[sqlite3.Row]:
         sql += " AND status=?"
         params.append(status)
     sql += " ORDER BY id"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(max(0, int(limit)))
     with get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 

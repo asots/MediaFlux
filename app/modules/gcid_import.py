@@ -1,6 +1,7 @@
 """GCID v2 导入预览、私有 importer 注入边界与任务编排。"""
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import threading
@@ -140,7 +141,7 @@ class GCIDImportPreviewStore:
 
 _preview_store = GCIDImportPreviewStore()
 _operation_lock = threading.RLock()
-_retry_replays: OrderedDict[tuple[int, str], None] = OrderedDict()
+_RETRY_REPLAY_KEY = "gcid_import.retry_replays:v1"
 _RETRY_REPLAY_LIMIT = 512
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
 _GENERIC_ITEM_ERROR = "私有 GCID 导入失败"
@@ -148,11 +149,10 @@ _CAPABILITY_REASON = "光鸭私有 GCID 导入能力不可用：尚未配置经�
 
 
 def reset_runtime_state() -> None:
-    """测试隔离用：清空进程内 preview/replay 状态，不影响数据库。"""
+    """清空进程内预览；重试凭据随数据库持久保存，不随运行时重建丢失。"""
     global _preview_store
     with _operation_lock:
         _preview_store = GCIDImportPreviewStore()
-        _retry_replays.clear()
 
 
 def get_private_importer() -> PrivateGCIDImporter | None:
@@ -264,15 +264,82 @@ def _task_by_operation_token(operation_token: str):
         ).fetchone()
 
 
-def _claim_task_for_run(task_id: int) -> bool:
-    """跨进程原子领取 previewed 任务，只有领取者可以调用私有 importer。"""
+def _read_retry_replays(conn) -> OrderedDict[tuple[int, str], None]:
+    row = conn.execute(
+        "SELECT value FROM settings_kv WHERE key=?", (_RETRY_REPLAY_KEY,)
+    ).fetchone()
+    if row is None:
+        return OrderedDict()
+    try:
+        values = json.loads(row["value"])
+        if not isinstance(values, list) or len(values) > _RETRY_REPLAY_LIMIT:
+            raise ValueError("invalid replay list")
+        if any(
+            not isinstance(item, list)
+            or len(item) != 2
+            or type(item[0]) is not int
+            or item[0] <= 0
+            or not isinstance(item[1], str)
+            or not item[1]
+            or len(item[1]) > 256
+            for item in values
+        ):
+            raise ValueError("invalid replay entry")
+        return OrderedDict(((item[0], item[1]), None) for item in values)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("GCID 重试凭据损坏，已拒绝覆盖，请先恢复历史数据") from exc
+
+
+def _write_retry_replays(conn, replays: OrderedDict[tuple[int, str], None]) -> None:
+    while len(replays) > _RETRY_REPLAY_LIMIT:
+        replays.popitem(last=False)
+    conn.execute(
+        "INSERT INTO settings_kv(key,value,updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        (
+            _RETRY_REPLAY_KEY,
+            json.dumps(list(replays), ensure_ascii=False, separators=(",", ":")),
+            db.now(),
+        ),
+    )
+
+
+def _retry_was_recorded(task_id: int, token: str) -> bool:
     with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        replays = _read_retry_replays(conn)
+        key = (task_id, token)
+        if key not in replays:
+            return False
+        replays.move_to_end(key)
+        _write_retry_replays(conn, replays)
+        return True
+
+
+def _claim_task_for_run(task_id: int, *, retry_token: str = "") -> bool:
+    """初次执行与重试共享任务 CAS；重试凭据必须先于私有写入持久化。"""
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        replays = _read_retry_replays(conn) if retry_token else OrderedDict()
+        key = (int(task_id), retry_token)
+        if retry_token and key in replays:
+            return False
+        condition = (
+            "status IN ('failed','partial_success') AND EXISTS "
+            "(SELECT 1 FROM gcid_import_items WHERE task_id=gcid_import_tasks.id AND status='failed')"
+            if retry_token else "status='previewed'"
+        )
         cursor = conn.execute(
             "UPDATE gcid_import_tasks SET status='running',updated_at=? "
-            "WHERE id=? AND status='previewed'",
+            f"WHERE id=? AND {condition}",
             (db.now(), int(task_id)),
         )
-        return cursor.rowcount == 1
+        if cursor.rowcount != 1:
+            return False
+        if retry_token:
+            replays[key] = None
+            _write_retry_replays(conn, replays)
+        return True
 
 
 def _update_item(
@@ -301,7 +368,7 @@ def _set_items_running(item_ids: list[int]) -> None:
 def _failed_samples(task_id: int, limit: int = 3) -> list[dict[str, Any]]:
     return [
         {"id": int(row["id"]), "path": row["path"], "error": row["error"]}
-        for row in db.list_gcid_import_items(task_id, "failed")[: max(0, limit)]
+        for row in db.list_gcid_import_items(task_id, "failed", limit=max(0, limit))
     ]
 
 
@@ -319,7 +386,10 @@ def serialize_task(row) -> dict[str, Any]:
         "error": row["error"] or "",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
-        "can_retry": int(row["failed_count"] or 0) > 0,
+        "can_retry": (
+            int(row["failed_count"] or 0) > 0
+            and row["status"] in {"failed", "partial_success"}
+        ),
         "failed_samples": _failed_samples(task_id),
     }
 
@@ -329,10 +399,15 @@ def list_tasks(limit: int = 30) -> list[dict[str, Any]]:
 
 
 def _finish_task(task_id: int) -> dict[str, Any]:
-    items = db.list_gcid_import_items(task_id)
-    success_count = sum(row["status"] == "success" for row in items)
-    failed_count = sum(row["status"] == "failed" for row in items)
-    if items and success_count == len(items):
+    with db.get_conn() as conn:
+        counts = conn.execute(
+            "SELECT COUNT(*) AS total,SUM(status='success') AS succeeded,"
+            "SUM(status='failed') AS failed FROM gcid_import_items WHERE task_id=?",
+            (int(task_id),),
+        ).fetchone()
+    success_count = int(counts["succeeded"] or 0)
+    failed_count = int(counts["failed"] or 0)
+    if counts["total"] and success_count == counts["total"]:
         status = "success"
         error = ""
     elif success_count:
@@ -476,18 +551,25 @@ def retry_task(
 ) -> tuple[dict[str, Any], bool]:
     token = _validate_operation_token(operation_token)
     normalized_task_id = int(task_id)
-    replay_key = (normalized_task_id, token)
     with _operation_lock:
         row = db.get_gcid_import_task(normalized_task_id)
         if row is None:
             raise ImportTaskNotFound("GCID 导入任务不存在")
-        if replay_key in _retry_replays:
-            _retry_replays.move_to_end(replay_key)
-            return serialize_task(row), True
-        failed = db.list_gcid_import_items(normalized_task_id, "failed")
-        if not failed:
+        if _retry_was_recorded(normalized_task_id, token) or row["status"] == "running":
+            current = db.get_gcid_import_task(normalized_task_id)
+            if current is None:
+                raise ImportTaskNotFound("GCID 导入任务不存在")
+            return serialize_task(current), True
+        if not db.list_gcid_import_items(normalized_task_id, "failed", limit=1):
             raise ValueError("任务没有可重试的失败项")
         importer = require_private_importer()
+        if not _claim_task_for_run(normalized_task_id, retry_token=token):
+            current = db.get_gcid_import_task(normalized_task_id)
+            if current is None:
+                raise ImportTaskNotFound("GCID 导入任务不存在")
+            return serialize_task(current), True
+        # 领取后重读，不能使用另一个执行者完成前的失败项快照。
+        failed = db.list_gcid_import_items(normalized_task_id, "failed")
         task = _execute_items(
             normalized_task_id,
             failed,
@@ -495,8 +577,4 @@ def retry_task(
             target_dir_id=row["target_dir_id"],
             retry=True,
         )
-        _retry_replays[replay_key] = None
-        _retry_replays.move_to_end(replay_key)
-        while len(_retry_replays) > _RETRY_REPLAY_LIMIT:
-            _retry_replays.popitem(last=False)
         return task, False

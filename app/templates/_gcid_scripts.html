@@ -67,7 +67,10 @@
         try{const result=await jsonRequest('/api/tools/gcid/import/tasks');renderHistory(result.tasks||[]);state.historyLoaded=true;indicator.textContent=`已更新 · ${(result.tasks||[]).length} 条`;if((result.tasks||[]).some(task=>task.status==='running'))window.setTimeout(()=>loadHistory({initial:false}),5000);}catch(error){indicator.textContent=`刷新失败 · ${error.message}`;if(!state.historyLoaded){const host=byId('gcidImportHistory');clearNode(host);appendText(host,'div',error.message,'gcid-empty-state is-error');}}finally{setBusy(refresh,false,'');}
     }
     async function retryTask(task,button){let token=state.retryTokens.get(task.id);if(!token){token=operationToken();state.retryTokens.set(task.id,token);}setBusy(button,true,'重试中…');renderProgress(`任务 #${task.id} 重试中`,'仅重新提交失败项，已成功 item 保持不变','running');
-        try{const result=await jsonRequest(`/api/tools/gcid/import/${task.id}/retry`,{method:'POST',body:JSON.stringify({confirm:'GCID',operation_token:token})});const current=result.task;renderProgress(statusLabel(current.status),`成功 ${current.success_count} · 失败 ${current.failed_count}`,current.status);await loadHistory({initial:false});}catch(error){renderProgress('重试受阻',error.message,'failed');}finally{setBusy(button,false,'');}
+        try{const result=await jsonRequest(`/api/tools/gcid/import/${task.id}/retry`,{method:'POST',body:JSON.stringify({confirm:'GCID',operation_token:token})});const current=result.task;
+            // 明确终态允许下一次主动重试；网络错误或在途结果仍复用原 token。
+            if(['success','partial_success','failed'].includes(current.status))state.retryTokens.delete(task.id);
+            renderProgress(statusLabel(current.status),`成功 ${current.success_count} · 失败 ${current.failed_count}`,current.status);await loadHistory({initial:false});}catch(error){renderProgress('重试受阻',error.message,'failed');}finally{setBusy(button,false,'');}
     }
     byId('gcidImportRefresh').addEventListener('click',()=>loadHistory({initial:false}));
     jsonRequest('/api/tools/gcid/capabilities').then(result=>{

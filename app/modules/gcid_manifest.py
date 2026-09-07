@@ -183,6 +183,14 @@ def normalize_manifest_v2(payload: Any) -> GCIDManifest:
             gcid=_normalize_gcid(item.get("gcid"), index),
         ))
 
+    # 路径虽不重复，文件仍不能同时成为另一个文件的父目录。
+    for path in seen:
+        parent = path.rpartition("/")[0]
+        while parent:
+            if parent in seen:
+                raise ManifestValidationError(f"文件与目录路径冲突: {parent}")
+            parent = parent.rpartition("/")[0]
+
     if isinstance(payload.get("file_count"), bool) or payload.get("file_count") != len(normalized_files):
         raise ManifestValidationError("file_count 与 files 数量不一致")
     total_size = sum(item.size for item in normalized_files)
@@ -276,7 +284,7 @@ def export_manifest(
         "files": entries,
     }
     payload["integrity"] = {"algorithm": "sha256", "digest": _digest(payload)}
-    return payload
+    return normalize_manifest_v2(payload).to_dict()
 
 
 def validate_manifest(manifest: Any) -> dict[str, Any]:
