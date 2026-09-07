@@ -310,13 +310,20 @@ class QBittorrentClient:
                 task_ids.append(normalized)
         return tuple(task_ids)
 
+    def _get_list(self, path: str, params: Optional[dict] = None) -> list[dict]:
+        """列表型读取共用响应合同；无效载荷不能伪装成真实的空结果。"""
+        data = self._get(path, params=params).json()
+        if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+            raise ValueError("qBittorrent 列表响应格式无效")
+        return data
+
     def list_torrents(self, category: str = "") -> list[TorrentTask]:
         if not self.api_key:
             self.login()
         params = {}
         if category:
             params["category"] = category
-        resp = self._get("/torrents/info", params=params).json()
+        resp = self._get_list("/torrents/info", params=params)
         return [
             TorrentTask(
                 hash=t["hash"],
@@ -341,7 +348,7 @@ class QBittorrentClient:
         """读取 torrent 文件清单，供完成后的本地入库精确定位。"""
         if not self.api_key:
             self.login()
-        data = self._get("/torrents/files", params={"hash": torrent_hash}).json()
+        data = self._get_list("/torrents/files", params={"hash": torrent_hash})
         return [
             TorrentFile(
                 index=int(item.get("index", index)),
@@ -349,7 +356,7 @@ class QBittorrentClient:
                 size=int(item.get("size") or 0),
                 progress=float(item.get("progress") or 0),
             )
-            for index, item in enumerate(data if isinstance(data, list) else [])
+            for index, item in enumerate(data)
         ]
 
     def export_torrent(self, torrent_hash: str) -> bytes:
@@ -504,7 +511,7 @@ class QBittorrentClient:
         """查询任务是否完成。"""
         if not self.api_key:
             self.login()
-        resp = self._get("/torrents/info", params={"hashes": torrent_hash}).json()
+        resp = self._get_list("/torrents/info", params={"hashes": torrent_hash})
         if not resp:
             return False
         return is_qb_torrent_complete(

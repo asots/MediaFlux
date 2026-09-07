@@ -1,6 +1,8 @@
 """本地识别知识库：管理发布组与尾部制作组的可增长精确词条。"""
 from __future__ import annotations
 
+from contextlib import closing
+
 import json
 import sqlite3
 import threading
@@ -48,7 +50,12 @@ def _row_dict(row: Any) -> dict[str, Any]:
     item = dict(row)
     aliases = _decode_json(item.pop("aliases_json", "[]"), [])
     evidence = _decode_json(item.pop("evidence_json", "{}"), {})
-    item["aliases"] = [str(value) for value in aliases if str(value or "").strip()]
+    # 旧schema默认[]或损坏的JSON形状不能让标准名称失效，更不能按字符建索引。
+    aliases = aliases if isinstance(aliases, list) else []
+    item["aliases"] = list(dict.fromkeys(
+        str(value) for value in [item.get("canonical_value"), *aliases]
+        if str(value or "").strip()
+    ))
     item["evidence"] = evidence if isinstance(evidence, dict) else {}
     item["disabled"] = bool(item.get("disabled"))
     item["user_modified"] = bool(item.get("user_modified"))
@@ -286,18 +293,18 @@ def _find_by_normalized(
 ) -> dict[str, Any] | None:
     if not normalized_values:
         return None
-    rows = conn.execute(
+    with closing(conn.execute(
         "SELECT * FROM recognition_knowledge WHERE knowledge_type=? ORDER BY id ASC",
         (knowledge_type,),
-    ).fetchall()
-    for row in rows:
-        if exclude_id is not None and int(row["id"]) == int(exclude_id):
-            continue
-        item = _row_dict(row)
-        values = {normalize_value(item["canonical_value"])}
-        values.update(normalize_value(alias) for alias in item["aliases"])
-        if normalized_values & values:
-            return item
+    )) as rows:
+        for row in rows:
+            if exclude_id is not None and int(row["id"]) == int(exclude_id):
+                continue
+            item = _row_dict(row)
+            values = {normalize_value(item["canonical_value"])}
+            values.update(normalize_value(alias) for alias in item["aliases"])
+            if normalized_values & values:
+                return item
     return None
 
 

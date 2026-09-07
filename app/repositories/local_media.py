@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from contextlib import closing
+
 import sqlite3
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
@@ -130,19 +132,19 @@ def _latest_terminal_local_media_task_for_path(
     content_path: str,
 ) -> sqlite3.Row | None:
     """返回同来源同规范路径最近的终态任务，供显式重试复用。"""
-    rows = conn.execute(
+    with closing(conn.execute(
         "SELECT id,source_id,qb_hash,content_path,trigger,status,operation_token "
         "FROM local_media_tasks WHERE source_id=? AND owner=? "
         "AND status IN ('completed','failed') ORDER BY id DESC",
         (int(source_id), owner),
-    ).fetchall()
-    for row in rows:
-        try:
-            candidate_path = _canonical_local_media_content_path(row["content_path"])
-        except ValueError:
-            continue
-        if candidate_path == content_path:
-            return row
+    )) as rows:
+        for row in rows:
+            try:
+                candidate_path = _canonical_local_media_content_path(row["content_path"])
+            except ValueError:
+                continue
+            if candidate_path == content_path:
+                return row
     return None
 
 

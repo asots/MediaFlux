@@ -35,6 +35,7 @@ class PlaybackRecordWriter:
         self._task_name = task_name
         self._queue: asyncio.Queue[object] = asyncio.Queue(maxsize=self._capacity)
         self._task: asyncio.Task[None] | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._accepting = False
         self._last_drained = True
         self._counters = {
@@ -67,12 +68,14 @@ class PlaybackRecordWriter:
             self._counters["dropped_error"] += 1
 
     async def start(self) -> None:
-        if self._task is not None and not self._task.done():
+        # start/stop必须串行，不能在旧worker退出前重新开放接收。
+        async with self._lifecycle_lock:
+            if self._task is not None and not self._task.done():
+                self._accepting = True
+                return
             self._accepting = True
-            return
-        self._accepting = True
-        self._last_drained = True
-        self._task = asyncio.create_task(self._run(), name=self._task_name)
+            self._last_drained = True
+            self._task = asyncio.create_task(self._run(), name=self._task_name)
 
     def enqueue(self, payload: Mapping[str, Any]) -> bool:
         record = dict(payload)
@@ -128,6 +131,11 @@ class PlaybackRecordWriter:
                 self._queue.task_done()
 
     async def stop(self) -> bool:
+        # 多个关闭者只能发布一个STOP标记，防止下次启动立即退出。
+        async with self._lifecycle_lock:
+            return await self._stop_unlocked()
+
+    async def _stop_unlocked(self) -> bool:
         self._accepting = False
         task = self._task
         if task is None:
