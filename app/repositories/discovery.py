@@ -216,22 +216,28 @@ def _watchlist_key(provider: str, external_id: str, media_type: str) -> str:
 
 
 def list_media_watchlist_keys(identities: list[tuple[str, str, str]]) -> set[str]:
-    normalized = [(str(p), str(e), str(m)) for p, e, m in identities]
+    """先去重再有界分批；一个读事务保持整页收藏状态的一致快照。"""
+    normalized = list(dict.fromkeys((str(p), str(e), str(m)) for p, e, m in identities))
     if not normalized:
         return set()
-    clauses = " OR ".join(
-        "(provider=? AND external_id=? AND media_type=?)" for _ in normalized
-    )
-    params = [value for identity in normalized for value in identity]
+    watched: set[str] = set()
     with _database().get_conn() as conn:
-        rows = conn.execute(
-            f"SELECT provider,external_id,media_type FROM media_watchlist WHERE {clauses}",
-            params,
-        ).fetchall()
-    return {
-        _watchlist_key(row["provider"], row["external_id"], row["media_type"])
-        for row in rows
-    }
+        conn.execute("BEGIN")
+        for offset in range(0, len(normalized), 300):
+            chunk = normalized[offset:offset + 300]
+            clauses = " OR ".join(
+                "(provider=? AND external_id=? AND media_type=?)" for _ in chunk
+            )
+            params = [value for identity in chunk for value in identity]
+            rows = conn.execute(
+                f"SELECT provider,external_id,media_type FROM media_watchlist WHERE {clauses}",
+                params,
+            )
+            watched.update(
+                _watchlist_key(row["provider"], row["external_id"], row["media_type"])
+                for row in rows
+            )
+    return watched
 
 
 def add_media_watchlist(

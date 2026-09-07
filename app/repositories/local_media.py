@@ -1630,9 +1630,19 @@ def reset_local_media_task(
     episode_override: int | None = None,
     numbering_mode: str | None = None,
     confirm_interrupted_write: bool = False,
+    expected_version: int | None = None,
+    expected_status: str | None = None,
 ) -> bool:
+    """统一重试事务；Web 显式核验与 Agent 版本条件共用同一状态重置。"""
     import uuid
 
+    safe_status = None if expected_status is None else str(expected_status).strip().lower()
+    if safe_status is not None and safe_status not in {"failed", "requires_manual"}:
+        return False
+    if expected_version is not None and (
+        isinstance(expected_version, bool) or int(expected_version) < 1
+    ):
+        return False
     normalized_type = (
         None if media_type is None else str(media_type or "").strip().lower()
     )
@@ -1703,13 +1713,17 @@ def reset_local_media_task(
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
-            "SELECT status,error FROM local_media_tasks WHERE id=? AND owner=?",
+            "SELECT status,error,version FROM local_media_tasks WHERE id=? AND owner=?",
             (int(task_id), safe_owner),
         ).fetchone()
         if current is None or str(current["status"] or "") not in {
             "failed",
             "requires_manual",
         }:
+            return False
+        if (
+            expected_version is not None and int(current["version"]) != int(expected_version)
+        ) or (safe_status is not None and current["status"] != safe_status):
             return False
         if is_interrupted_local_media_write_error(current["error"]) and not bool(
             confirm_interrupted_write
@@ -1736,40 +1750,16 @@ def reset_local_media_task_if_current(
     owner: str = "admin",
     expected_version: int,
     expected_status: str,
+    confirm_interrupted_write: bool = False,
 ) -> bool:
-    """按任务版本与可重试终态原子重新排队，并切换新的操作幂等标识。"""
-    import uuid
-
-    safe_status = str(expected_status or "").strip().lower()
-    if safe_status not in {"failed", "requires_manual"}:
-        return False
-    if isinstance(expected_version, bool) or int(expected_version) < 1:
-        return False
-    stamp = now()
-    with get_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        cur = conn.execute(
-            "UPDATE local_media_tasks SET status='waiting_stable',stable_since='',"
-            "snapshot_digest='',recognition_summary='',title='',year='',operation_token=?,"
-            "error='',warning='',completed_at=NULL,"
-            "version=version+1,updated_at=? WHERE id=? AND owner=? AND version=? AND status=?",
-            (
-                uuid.uuid4().hex,
-                stamp,
-                int(task_id),
-                _local_media_owner(owner),
-                int(expected_version),
-                safe_status,
-            ),
-        )
-        if cur.rowcount == 1:
-            # 旧 attempt 的目标路径不可参与新 attempt 的精准刷新或可见性核验。
-            conn.execute(
-                "DELETE FROM local_media_task_items WHERE task_id=?",
-                (int(task_id),),
-            )
-            return True
-        return False
+    """版本化入口只委托统一重试事务，不再维护另一套重置 SQL。"""
+    return reset_local_media_task(
+        task_id,
+        owner=owner,
+        expected_version=0 if expected_version is None else expected_version,
+        expected_status=str(expected_status or ""),
+        confirm_interrupted_write=confirm_interrupted_write,
+    )
 
 
 def delete_local_library_target(

@@ -24,6 +24,7 @@ from typing import Any
 from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
 from app.config import PATHS
 from app.modules.process_lock import CrossProcessLock
+from app.modules.guangya_journal import append_guangya_journal
 from app.modules.web_secret import get_web_secret
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
@@ -170,24 +171,7 @@ def _atomic_write_plan(path: Path, payload: dict[str, Any]) -> None:
 def _append_journal(plan_id: str, event: dict[str, Any]) -> None:
     path = _journal_path(plan_id)
     _ensure_private_directory(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
-    try:
-        with os.fdopen(fd, "a", encoding="utf-8") as stream:
-            stream.write(
-                json.dumps(
-                    {"at": _now_iso(), **event},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
-            stream.flush()
-            os.fsync(stream.fileno())
-    finally:
-        protect_private_file(path)
+    append_guangya_journal(path, {"at": _now_iso(), **event})
 
 
 def _read_plan(plan_id: str) -> dict[str, Any]:

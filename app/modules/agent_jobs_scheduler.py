@@ -85,7 +85,7 @@ class AgentJobsScheduler:
     def run_once(self) -> int:
         from app.agent.feature_gate import is_agent_enabled
 
-        if not is_agent_enabled():
+        if self._stop_event.is_set() or not is_agent_enabled():
             return 0
         runtime_generation = current_agent_runtime_generation()
         current = self._now()
@@ -98,6 +98,14 @@ class AgentJobsScheduler:
             stale_before=stale_before,
         )
         if job is None:
+            return 0
+        # 关闭可能与 SQLite claim 交错；未开始的批次无损还回持久队列。
+        if self._stop_event.is_set() or not agent_runtime_generation_is_current(runtime_generation):
+            db.release_agent_job_lease(
+                str(job["job_id"]),
+                expected_lease_generation=int(job["lease_generation"]),
+                next_run_at=current,
+            )
             return 0
         try:
             self._process(

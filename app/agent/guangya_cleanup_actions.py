@@ -566,9 +566,9 @@ def _freeze_empty_only_plan(
             decisions=decisions,
         )
     except Exception:
-        discard_cleanup_plan(original_plan_id)
+        discard_cleanup_plan(original_plan_id, preview_only=True)
         raise
-    discard_cleanup_plan(original_plan_id)
+    discard_cleanup_plan(original_plan_id, preview_only=True)
     return revised
 
 
@@ -625,12 +625,12 @@ def preview_guangya_cleanup(
         revision=guard.revision,
     )
     if not _save(flow):
-        discard_cleanup_plan(flow.plan_id)
+        discard_cleanup_plan(flow.plan_id, preview_only=True)
         raise AgentToolError(
             "残留清理预览已被更新请求取代，请重新生成", code="precondition_failed"
         )
     if previous is not None and previous.plan_id != flow.plan_id:
-        discard_cleanup_plan(previous.plan_id)
+        discard_cleanup_plan(previous.plan_id, preview_only=True)
     empty_count = int(preview["empty_dir_count"])
     candidate_count = int(preview["candidate_count"])
     total = empty_count + candidate_count
@@ -741,12 +741,12 @@ def classify_guangya_cleanup_candidates(
         revision=guard.revision,
     )
     if not _save(flow):
-        discard_cleanup_plan(flow.plan_id)
+        discard_cleanup_plan(flow.plan_id, preview_only=True)
         raise AgentToolError(
             "候选复核已被更新请求取代，请重新检查", code="precondition_failed"
         )
     if previous.plan_id != flow.plan_id:
-        discard_cleanup_plan(previous.plan_id)
+        discard_cleanup_plan(previous.plan_id, preview_only=True)
     undecided = int(preview.get("undecided_count") or 0)
     selected = int(preview.get("selected_count") or 0)
     kept = int(preview.get("kept_count") or 0)

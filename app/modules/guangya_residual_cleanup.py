@@ -12,7 +12,8 @@ import time
 import unicodedata
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +23,9 @@ from app.clients.guangya import GuangYaClient, GuangYaFile
 from app.config import PATHS
 from app.modules.guangya_rename import GuangYaRenamePlanError, GuangYaRenamePlanStale
 from app.modules.organize import DEFAULT_ORGANIZE_VIDEO_EXTS
+from app.modules.guangya_journal import append_guangya_journal
 from app.modules.web_secret import get_web_secret
+from app.modules.process_lock import CrossProcessLock
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
 
@@ -121,6 +124,18 @@ def _plan_directory() -> Path:
     return Path(PATHS.data_dir) / "agent-guangya-cleanup"
 
 
+@contextmanager
+def _plan_state_lock() -> Iterator[None]:
+    """确认、GC、预览淘汰与执行凭据更新共用目录内锁，不持有网络/SQLite锁。"""
+    lock = CrossProcessLock("guangya-cleanup-state", directory=_plan_directory())
+    if not lock.acquire():
+        raise GuangYaCleanupPlanError("残留清理计划正在被其他进程更新")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def _ensure_private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.is_symlink() or not path.is_dir():
@@ -217,23 +232,7 @@ def _read(plan_id: str) -> dict[str, Any]:
 def _append_journal(plan_id: str, event: dict[str, Any]) -> None:
     path = _journal_path(plan_id)
     _ensure_private_directory(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
-    try:
-        with os.fdopen(fd, "a", encoding="utf-8") as stream:
-            stream.write(
-                json.dumps(
-                    {"at": _now_iso(), **event},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
-            stream.flush()
-            os.fsync(stream.fileno())
-    finally:
-        protect_private_file(path)
+    append_guangya_journal(path, {"at": _now_iso(), **event})
 
 
 def _owner_digest(owner: str) -> str:
@@ -243,16 +242,30 @@ def _owner_digest(owner: str) -> str:
     return organize_operation_owner_digest(value)
 
 
-def discard_cleanup_plan(plan_id: str) -> None:
+def _discard_cleanup_plan_unlocked(plan_id: str) -> bool:
+    removed = False
     for path in (_plan_path(plan_id), _journal_path(plan_id)):
         try:
             if path.is_file() and not path.is_symlink():
                 path.unlink()
-        except (FileNotFoundError, OSError):
+                removed = True
+        except OSError:
             continue
+    return removed
 
 
-def maintain_cleanup_plans() -> dict[str, int]:
+def discard_cleanup_plan(plan_id: str, *, preview_only: bool = False) -> bool:
+    """预览替换只能淘汰未确认计划；保留已接纳任务和历史执行凭据。"""
+    try:
+        with _plan_state_lock():
+            if preview_only and str(_read(plan_id).get("status") or "") != "preview":
+                return False
+            return _discard_cleanup_plan_unlocked(plan_id)
+    except (OSError, GuangYaCleanupPlanError):
+        return False
+
+
+def _maintain_cleanup_plans_unlocked() -> dict[str, int]:
     directory = _plan_directory()
     if not directory.exists() or directory.is_symlink():
         return {"removed": 0, "remaining": 0, "active": 0, "bytes": 0}
@@ -297,7 +310,7 @@ def maintain_cleanup_plans() -> dict[str, int]:
             elif not status and updated <= current - _TERMINAL_RETENTION_SECONDS:
                 remove = True
             if remove:
-                discard_cleanup_plan(path.stem)
+                _discard_cleanup_plan_unlocked(path.stem)
                 plan_ids.discard(path.stem)
                 removed += 1
             else:
@@ -323,7 +336,7 @@ def maintain_cleanup_plans() -> dict[str, int]:
         len(terminal) > _MAX_TERMINAL_PLANS or total_bytes > _MAX_STORAGE_BYTES
     ):
         _updated, plan_id, size = terminal.pop(0)
-        discard_cleanup_plan(plan_id)
+        _discard_cleanup_plan_unlocked(plan_id)
         total_bytes = max(0, total_bytes - size)
         removed += 1
     remaining = sum(
@@ -337,6 +350,24 @@ def maintain_cleanup_plans() -> dict[str, int]:
         "active": active,
         "bytes": total_bytes,
     }
+
+
+def maintain_cleanup_plans() -> dict[str, int]:
+    with _plan_state_lock():
+        return _maintain_cleanup_plans_unlocked()
+
+
+def _store_cleanup_preview(payload: dict[str, Any], *, replacing: bool = False) -> None:
+    """新预览与修订版共用容量事务；修订允许短暂共存一个旧预览。"""
+    with _plan_state_lock():
+        _atomic_write(payload)
+        capacity = _maintain_cleanup_plans_unlocked()
+        if (
+            int(capacity.get("active") or 0) > _MAX_ACTIVE_PLANS + int(replacing)
+            or int(capacity.get("bytes") or 0) > _MAX_STORAGE_BYTES + (_MAX_PLAN_BYTES if replacing else 0)
+        ):
+            _discard_cleanup_plan_unlocked(str(payload["plan_id"]))
+            raise GuangYaCleanupPlanError("私有残留清理计划空间已满，请稍后重试")
 
 
 def load_cleanup_plan(
@@ -370,36 +401,38 @@ def load_cleanup_plan(
 def confirm_cleanup_plan(
     plan_id: str, *, owner: str, expected_fingerprint: str
 ) -> dict[str, Any]:
-    payload = load_cleanup_plan(
-        plan_id, owner=owner, expected_fingerprint=expected_fingerprint
-    )
-    stats = dict(payload.get("stats") or {})
-    if max(0, int(stats.get("undecided_count") or 0)) > 0:
-        raise GuangYaCleanupPlanError("仍有候选尚未逐项复核，不能确认执行")
-    if not list(payload.get("residuals") or []) and not list(
-        payload.get("empties") or []
-    ):
-        raise GuangYaCleanupPlanError("当前冻结计划没有需要执行的清理对象")
-    current = time.time()
-    payload.update(
-        {
-            "status": "confirmed",
-            "confirmed_at": _now_iso(),
-            "confirmed_at_epoch": current,
-            "execute_until_epoch": current + _CONFIRMED_TTL_SECONDS,
-        }
-    )
-    _atomic_write(payload)
-    return payload
-
+    with _plan_state_lock():
+        payload = load_cleanup_plan(
+            plan_id, owner=owner, expected_fingerprint=expected_fingerprint
+        )
+        if str(payload.get("status") or "") not in {"preview", "confirmed"}:
+            raise GuangYaCleanupPlanStale("残留清理计划已进入执行阶段，请重新预览")
+        stats = dict(payload.get("stats") or {})
+        if max(0, int(stats.get("undecided_count") or 0)) > 0:
+            raise GuangYaCleanupPlanError("仍有候选尚未逐项复核，不能确认执行")
+        if not list(payload.get("residuals") or []) and not list(
+            payload.get("empties") or []
+        ):
+            raise GuangYaCleanupPlanError("当前冻结计划没有需要执行的清理对象")
+        current = time.time()
+        payload.update(
+            {
+                "status": "confirmed",
+                "confirmed_at": _now_iso(),
+                "confirmed_at_epoch": current,
+                "execute_until_epoch": current + _CONFIRMED_TTL_SECONDS,
+            }
+        )
+        _atomic_write(payload)
+        return payload
 
 def _update_execution(plan_id: str, status: str, execution: dict[str, Any]) -> None:
-    payload = _read(plan_id)
-    payload["status"] = status
-    payload["execution"] = dict(execution)
-    payload["updated_at"] = _now_iso()
-    _atomic_write(payload)
-
+    with _plan_state_lock():
+        payload = _read(plan_id)
+        payload["status"] = status
+        payload["execution"] = dict(execution)
+        payload["updated_at"] = _now_iso()
+        _atomic_write(payload)
 
 def _extension(item: GuangYaFile) -> str:
     declared = str(item.extension or "").strip().lower().lstrip(".")
@@ -711,14 +744,7 @@ def build_cleanup_plan(
         "residuals": [],
         "empties": empties,
     }
-    _atomic_write(payload)
-    capacity = maintain_cleanup_plans()
-    if (
-        int(capacity.get("active") or 0) > _MAX_ACTIVE_PLANS
-        or int(capacity.get("bytes") or 0) > _MAX_STORAGE_BYTES
-    ):
-        discard_cleanup_plan(plan_id)
-        raise GuangYaCleanupPlanError("私有残留清理计划空间已满，请稍后重试")
+    _store_cleanup_preview(payload)
     return payload
 
 
@@ -873,14 +899,7 @@ def revise_cleanup_plan(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    _atomic_write(revised)
-    capacity = maintain_cleanup_plans()
-    if (
-        int(capacity.get("active") or 0) > _MAX_ACTIVE_PLANS + 1
-        or int(capacity.get("bytes") or 0) > _MAX_STORAGE_BYTES + _MAX_PLAN_BYTES
-    ):
-        discard_cleanup_plan(new_plan_id)
-        raise GuangYaCleanupPlanError("私有残留清理计划空间已满，请稍后重试")
+    _store_cleanup_preview(revised, replacing=True)
     return revised
 
 

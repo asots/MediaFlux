@@ -1169,6 +1169,7 @@ def _task_snapshot(owner: str, task_number: int) -> tuple[dict[str, Any], Any]:
         "source_id": int(task.source_id),
         "snapshot_digest": str(task.snapshot_digest or ""),
         "updated_at": str(task.updated_at or ""),
+        "interrupted_write": db.is_interrupted_local_media_write_error(task.error),
     }, task
 
 
@@ -1198,7 +1199,12 @@ def prepare_retry_local_media_task(
             "task_number": task_number,
             "current_status": str(task.status),
             "title": _safe_title(task.title),
+            "interrupted_write": snapshot["interrupted_write"],
             "effects": [
+                *([
+                    "上次任务在文件写入期间中断：请先核验文件及 qB 状态；"
+                    "继续确认表示已完成核验，允许清除旧计划后重新处理。",
+                ] if snapshot["interrupted_write"] else []),
                 "任务会回到等待执行阶段，并由调度器立即重新检查和处理。",
                 "会生成新的操作幂等标识；不会复用上一次中断的文件步骤。",
                 "本次确认不会直接移动、覆盖或删除媒体文件。",
@@ -1230,6 +1236,7 @@ def retry_local_media_task_confirmed(
         owner=_WORKSPACE_OWNER,
         expected_version=task.version,
         expected_status=task.status,
+        confirm_interrupted_write=snapshot["interrupted_write"],
     ):
         raise AgentToolError("任务状态已变化，请重新预检", code="confirmation_stale")
     get_local_media_scheduler().reload()

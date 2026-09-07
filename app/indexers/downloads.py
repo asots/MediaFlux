@@ -42,7 +42,11 @@ INDEXER_RESUBMITTABLE_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "manual_review"}
 )
 _DOWNLOAD_LIMIT = 3
-_DOWNLOAD_LIMITERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+# Semaphore 在发生等待后会强持有事件循环；缓存值也必须弱引用，
+# 否则弱 key 被自己的 value 反向保活，反复 asyncio.run 会泄漏已关闭循环。
+_DOWNLOAD_LIMITERS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, weakref.ReferenceType[asyncio.Semaphore]
+] = (
     weakref.WeakKeyDictionary()
 )
 _DOWNLOAD_LIMITERS_LOCK = threading.Lock()
@@ -59,10 +63,11 @@ class DownloadRequestCreationError(RuntimeError):
 def _download_limiter() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     with _DOWNLOAD_LIMITERS_LOCK:
-        limiter = _DOWNLOAD_LIMITERS.get(loop)
+        reference = _DOWNLOAD_LIMITERS.get(loop)
+        limiter = reference() if reference is not None else None
         if limiter is None:
             limiter = asyncio.Semaphore(_DOWNLOAD_LIMIT)
-            _DOWNLOAD_LIMITERS[loop] = limiter
+            _DOWNLOAD_LIMITERS[loop] = weakref.ref(limiter)
         return limiter
 
 
