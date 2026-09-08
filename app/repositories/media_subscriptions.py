@@ -1028,33 +1028,41 @@ def _download_request_admission_projection(
     return status, error, completed_at
 
 
-def _sync_media_download_admission_for_request_conn(
+def _sync_media_download_admissions_conn(
     conn: sqlite3.Connection,
-    request_id: int,
+    request_id: int | None,
     stamp: str,
 ) -> int:
-    """使用调用方连接投影请求状态，供 tracker 的原子写路径复用。"""
+    """在同一写事务中读取并发布准入；None 表示启动时的全部活跃绑定。"""
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    scope = " AND a.request_id=?" if request_id is not None else ""
+    params = (int(request_id),) if request_id is not None else ()
     try:
-        request = conn.execute(
-            "SELECT status,error,organize_started,organize_status,organize_error,"
-            "strm_status,strm_error,local_import_status,local_import_error "
-            "FROM download_requests WHERE id=?", (int(request_id),)
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT a.id,r.status,r.error,r.organize_started,r.organize_status,r.organize_error,"
+            "r.strm_status,r.strm_error,r.local_import_status,r.local_import_error "
+            "FROM media_download_admissions a JOIN download_requests r ON r.id=a.request_id "
+            "WHERE a.status IN ('claimed','dispatching','submitted','downloading','processing')"
+            + scope,
+            params,
+        ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
             return 0
         raise
-    if request is None:
+    updates = []
+    for row in rows:
+        projection = _download_request_admission_projection(row, stamp)
+        if projection is not None:
+            status, error, completed_at = projection
+            updates.append((status, error, completed_at, stamp, int(row["id"])))
+    if not updates:
         return 0
-    projection = _download_request_admission_projection(request, stamp)
-    if projection is None:
-        return 0
-    status, error, completed_at = projection
-    cur = conn.execute(
+    cur = conn.executemany(
         "UPDATE media_download_admissions SET status=?,error=?,completed_at=?,updated_at=? "
-        "WHERE request_id=? AND status IN "
-        "('claimed','dispatching','submitted','downloading','processing')",
-        (status, error, completed_at, stamp, int(request_id)),
+        "WHERE id=? AND status IN ('claimed','dispatching','submitted','downloading','processing')",
+        updates,
     )
     return int(cur.rowcount or 0)
 
@@ -1064,7 +1072,7 @@ def sync_media_download_admission_for_request(request_id: int) -> int:
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
-        return _sync_media_download_admission_for_request_conn(
+        return _sync_media_download_admissions_conn(
             conn, int(request_id), stamp
         )
 
@@ -1087,34 +1095,27 @@ def reconcile_startup_media_download_admissions(
     released = 0
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        projected = _sync_media_download_admissions_conn(conn, None, stamp)
+
         try:
-            request_rows = conn.execute(
-                "SELECT DISTINCT request_id FROM media_download_admissions "
-                "WHERE request_id IS NOT NULL AND status IN "
-                "('claimed','dispatching','submitted','downloading','processing')"
-            ).fetchall()
+            stale = conn.execute(
+                "UPDATE media_download_admissions SET status='released',error=?,"
+                "completed_at=?,updated_at=? WHERE status IN ('claimed','dispatching') "
+                "AND (request_id IS NULL OR EXISTS ("
+                "SELECT 1 FROM download_requests r WHERE r.id=media_download_admissions.request_id "
+                "AND r.status='pending'))",
+                (
+                    "启动恢复：下载尚未提交到后端，可安全重试",
+                    stamp,
+                    stamp,
+                ),
+            )
+            released = int(stale.rowcount or 0)
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return 0, 0
             raise
-        for row in request_rows:
-            projected += _sync_media_download_admission_for_request_conn(
-                conn, int(row["request_id"]), stamp
-            )
 
-        stale = conn.execute(
-            "UPDATE media_download_admissions SET status='released',error=?,"
-            "completed_at=?,updated_at=? WHERE status IN ('claimed','dispatching') "
-            "AND (request_id IS NULL OR EXISTS ("
-            "SELECT 1 FROM download_requests r WHERE r.id=media_download_admissions.request_id "
-            "AND r.status='pending'))",
-            (
-                "启动恢复：下载尚未提交到后端，可安全重试",
-                stamp,
-                stamp,
-            ),
-        )
-        released = int(stale.rowcount or 0)
     return projected, released
 
 
@@ -1130,6 +1131,9 @@ def reconcile_media_download_admissions(
     stamp = database.now()
     updated = 0
     with database.get_conn() as conn:
+        # status/revision CAS 不保护同状态下的新错误和后处理字段；
+        # 读取请求快照到准入发布必须共享同一个 SQLite writer 顺序。
+        conn.execute("BEGIN IMMEDIATE")
         revision_clause = ""
         query_params: list[Any] = [int(subscription_id)]
         if expected_revision is not None:

@@ -332,7 +332,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.repositories.media_subscriptions._sync_media_download_admission_for_request_conn",
+                "app.repositories.media_subscriptions._sync_media_download_admissions_conn",
                 side_effect=RuntimeError("isolated projection failure"),
             ),
             self.assertRaisesRegex(RuntimeError, "isolated projection failure"),

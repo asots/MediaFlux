@@ -1063,10 +1063,10 @@ def update_download_request_and_sync_media_admission(request_id: int, **fields) 
         if not _update_download_request_conn(conn, request_id, fields, timestamp):
             return 0
         from app.repositories.media_subscriptions import (  # 局部导入避免仓储循环加载
-            _sync_media_download_admission_for_request_conn,
+            _sync_media_download_admissions_conn,
         )
 
-        return _sync_media_download_admission_for_request_conn(
+        return _sync_media_download_admissions_conn(
             conn, int(request_id), timestamp
         )
 
@@ -1161,9 +1161,9 @@ def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
                 "AND status NOT IN ('success','completed','failed','cancelled','resubmitted')",
                 (timestamp, timestamp, note, note, request_id),
             )
-            from app.repositories.media_subscriptions import _sync_media_download_admission_for_request_conn
+            from app.repositories.media_subscriptions import _sync_media_download_admissions_conn
 
-            _sync_media_download_admission_for_request_conn(conn, request_id, timestamp)
+            _sync_media_download_admissions_conn(conn, request_id, timestamp)
             changed.append(request_id)
     return changed
 
@@ -1195,10 +1195,10 @@ def apply_download_tracker_update(
             fields["status"] = "resubmitted"
         if _update_download_request_conn(conn, request_id, fields, timestamp):
             from app.repositories.media_subscriptions import (
-                _sync_media_download_admission_for_request_conn,
+                _sync_media_download_admissions_conn,
             )
 
-            _sync_media_download_admission_for_request_conn(conn, request_id, timestamp)
+            _sync_media_download_admissions_conn(conn, request_id, timestamp)
         return conn.execute(
             "SELECT * FROM download_requests WHERE id=?", (request_id,)
         ).fetchone()
@@ -1266,10 +1266,10 @@ def _finalize_download_request_submission_conn(
         return None
 
     from app.repositories.media_subscriptions import (  # 局部导入避免仓储循环加载
-        _sync_media_download_admission_for_request_conn,
+        _sync_media_download_admissions_conn,
     )
 
-    _sync_media_download_admission_for_request_conn(
+    _sync_media_download_admissions_conn(
         conn, int(request_id), timestamp
     )
     return root_status
