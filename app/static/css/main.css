@@ -7232,6 +7232,11 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
     #rssTargetModal .settings-dir-head .icon-btn { min-width: 44px; }
     #rssTargetModal .settings-dir-footer > .text-muted { flex: 0 0 auto; }
     #subModal .form-input, #subModal .form-select, #subModal .form-textarea { font-size: 16px; }
+    #mediaSubModal .form-input, #mediaSubModal .form-select, #mediaSubModal .form-textarea { font-size: 16px; min-height: 44px; }
+    #mediaSubModal .rss-btn { min-height: 44px; }
+    /* 固定两行反馈空间；长提示内部滚动，不把移动端保存按钮推离当前位置。 */
+    #mediaSubModal .subscription-form-status { height: 28px; line-height: 14px; overflow-y: auto; }
+    #mediaSubModal .rss-modal-header .icon-btn { min-width: 44px; min-height: 44px; }
 }
 
 /* 保存过程禁用/恢复按钮时不随 hover 位移，保持编辑窗操作区稳定。 */

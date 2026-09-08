@@ -512,6 +512,42 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
         self.release_reply("old-save")
         self.assert_editor(1, "same-object-new-draft")
 
+    def test_media_mobile_controls_keep_touch_size_and_busy_geometry(self):
+        page = self.make_page("rss", 390)
+        self.edit(1)
+        controls = page.locator("#mediaSubModal .form-input, #mediaSubModal .form-select")
+        metrics = controls.evaluate_all("""elements => elements.map(el => ({
+            font: parseFloat(getComputedStyle(el).fontSize),
+            height: el.getBoundingClientRect().height,
+        }))""")
+        self.assertTrue(metrics)
+        self.assertTrue(all(item["font"] >= 16 and item["height"] >= 44 for item in metrics), metrics)
+        close = page.locator("#mediaSubModal .rss-modal-header .icon-btn").bounding_box()
+        self.assertGreaterEqual(close["width"], 44)
+        self.assertGreaterEqual(close["height"], 44)
+        save = page.locator("#mediaSubSaveBtn")
+        save.scroll_into_view_if_needed()
+        before = save.bounding_box()
+        self.assertGreaterEqual(before["height"], 44)
+        self.assertLessEqual(before["y"] + before["height"], page.viewport_size["height"])
+        self.save_held(1, payload={"error": "当前保存失败"}, status=500)
+        self.assertEqual(before, save.bounding_box())
+        self.release_reply("old-save")
+        self.assertTrue(save.is_enabled())
+        self.assertEqual(before, save.bounding_box())
+        self.save_held(1, "long-error", payload={"error": "较长的失败说明" * 60}, status=500)
+        self.assertEqual(before, save.bounding_box())
+        self.release_reply("long-error")
+        self.assertEqual(before, save.bounding_box())
+        self.assertTrue(page.locator("#mediaSubFormStatus").evaluate("el => el.scrollHeight > el.clientHeight"))
+        self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= innerWidth"))
+
+    def test_media_desktop_control_metrics_are_not_enlarged_by_mobile_rules(self):
+        page = self.make_page("rss", 1280)
+        self.edit(1)
+        self.assertEqual(page.locator("#ms_sites").evaluate("el => getComputedStyle(el).fontSize"), "14px")
+        self.assertEqual(page.locator("#mediaSubSaveBtn").bounding_box()["height"], 42)
+
     def test_media_current_failure_keeps_input_and_can_retry_successfully(self):
         page = self.make_page("rss")
         self.edit(1)
