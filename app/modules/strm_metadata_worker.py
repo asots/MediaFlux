@@ -199,6 +199,7 @@ class STRMMetadataWorker:
         )
         heartbeat.start()
         prepared_job = None
+        metadata_committed = False
         try:
             extension = str(job.get("filename") or "").rsplit(".", 1)[-1].lower()
             configured = {
@@ -245,6 +246,7 @@ class STRMMetadataWorker:
                     job, prepared_job, root_text,
                     should_stop=self._stop_event.is_set,
                 )
+                metadata_committed = True
                 settled = db.complete_strm_metadata_job(
                     job_id,
                     expected_lease_generation=lease_generation,
@@ -282,6 +284,7 @@ class STRMMetadataWorker:
                 expected_owner=self._owner,
                 error_type=error_type,
                 error=exc,
+                handoff_only=metadata_committed,
             )
             if state not in {"retry_wait", "failed"}:
                 # 准备下载时不持有 STRM 写锁，期间可能更新快照、取消来源或
@@ -290,6 +293,14 @@ class STRMMetadataWorker:
                 logger.debug(
                     "忽略已失效的 STRM 元数据下载结果 job=%s state=%s",
                     job_id, state,
+                )
+                return True
+            if metadata_committed:
+                # 文件/索引已确认；只重试完成记录和刷新交接。不能把 SQL 故障
+                # 记为下载失败、耗尽重试或触发下载熔断；重试会复核并复用文件。
+                logger.warning(
+                    "STRM 元数据已安装，完成交接待重试 job=%s state=%s type=%s",
+                    job_id, state, error_type,
                 )
                 return True
             db.record_strm_failure(

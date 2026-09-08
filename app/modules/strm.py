@@ -1291,7 +1291,6 @@ def commit_strm_metadata_job(
         (row for row in existing_rows if str(row["file_id"]) == file_id), None
     )
     if current and _metadata_state_matches(current, remote, expected):
-        db.resolve_strm_failure_for_item(source_id, file_id, "metadata")
         if prepared is not None:
             prepared.temp.unlink(missing_ok=True)
         return {
@@ -1304,7 +1303,8 @@ def commit_strm_metadata_job(
         remote, rel_dir, expected, strm_root, metadata_source_key,
         existing_rows, "", should_stop=should_stop, prepared=prepared,
     )
-    db.resolve_strm_failure_for_item(source_id, file_id, "metadata")
+    # 失败台账与任务 ACK/刷新交接由 complete_strm_metadata_job 同事务确认；
+    # 安装器只返回已验证的落盘事实，不能提前关闭尚未交接的旧失败项。
     refresh_paths = [str(expected)]
     if cleaned and current:
         refresh_paths.append(str(current["strm_path"]))
@@ -2444,9 +2444,11 @@ def _sync_strm_impl(
     if metadata:
         progress.emit("metadata", 0, metadata_progress_total, "同步元数据")
         existing_metadata_rows = db.list_strm_index(metadata_source_key)
-        metadata_rows_by_id = {
-            str(row["file_id"]): row for row in existing_metadata_rows
-        }
+        metadata_rows_by_id: dict[str, object] = {}
+        metadata_rows_by_path: dict[str, list[object]] = {}
+        for row in existing_metadata_rows:
+            metadata_rows_by_id[str(row["file_id"])] = row
+            metadata_rows_by_path.setdefault(str(row["strm_path"] or ""), []).append(row)
         planned_metadata_targets = {
             target_text: str(candidate[0].file_id)
             for target_text, candidate in metadata_candidates.items()
@@ -2521,10 +2523,7 @@ def _sync_strm_impl(
                     )
                 else:
                     try:
-                        target_owners = [
-                            row for row in existing_metadata_rows
-                            if str(row["strm_path"] or "") == str(expected)
-                        ]
+                        target_owners = metadata_rows_by_path.get(str(expected), [])
                         _require_owned_file(expected, target_owners, "排队元数据覆盖")
                         if previous_path and previous_path != expected:
                             _require_owned_file(

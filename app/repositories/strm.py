@@ -469,7 +469,7 @@ def complete_strm_metadata_job(
         # 之间写入 dirty/revision 后又被迟到的 completed 覆盖。
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT status,dirty,revision,lease_owner,lease_generation "
+            "SELECT status,dirty,revision,lease_owner,lease_generation,source_id,file_id "
             "FROM strm_metadata_queue WHERE id=?",
             (int(job_id),),
         ).fetchone()
@@ -495,9 +495,13 @@ def complete_strm_metadata_job(
         # 单路径参数只是旧 API 的薄适配；新旧落盘目录统一进入同一 outbox
         # 事务，不能只刷新新文件而遗漏已删除的历史元数据目录。
         normalized_paths = _normalize_refresh_paths((refresh_path, *(refresh_paths or ())))
-        if status == "completed" and normalized_paths:
-            _enqueue_strm_refresh_paths(
-                conn, normalized_paths, stamp=stamp, allow_emby=True
+        if status == "completed":
+            if normalized_paths:
+                _enqueue_strm_refresh_paths(
+                    conn, normalized_paths, stamp=stamp, allow_emby=True
+                )
+            database._resolve_strm_failure_for_item_conn(
+                conn, str(row["source_id"]), str(row["file_id"]), "metadata", timestamp=stamp,
             )
         return status
 
@@ -632,8 +636,13 @@ def fail_or_retry_strm_metadata_job(
     error: object,
     base_backoff_seconds: int = 30,
     max_backoff_seconds: int = 3600,
+    handoff_only: bool = False,
 ) -> str:
-    """失败后指数退避；快照已变化时优先处理最新版本，不污染其尝试次数。"""
+    """失败后退避；已确认安装后的交接重试不消耗下载次数，也不因上限终止。
+
+    handoff_only 仅由安装器明确返回已落盘结果后使用；两类重试共用同一
+    lease/revision 判定，旧快照不能污染新任务。
+    """
     database = _database()
     stamp = database.now()
     with database.get_conn() as conn:
@@ -658,8 +667,8 @@ def fail_or_retry_strm_metadata_job(
                 (stamp, stamp, int(job_id), int(expected_lease_generation)),
             )
             return "queued"
-        attempts = int(row["attempts"] or 0) + 1
-        exhausted = attempts >= max(1, int(row["max_attempts"] or 1))
+        attempts = int(row["attempts"] or 0) + (0 if handoff_only else 1)
+        exhausted = not handoff_only and attempts >= max(1, int(row["max_attempts"] or 1))
         status = "failed" if exhausted else "retry_wait"
         delay = 0 if exhausted else min(
             max(1, int(max_backoff_seconds or 1)),

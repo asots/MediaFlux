@@ -2972,15 +2972,24 @@ def resolve_strm_failure(failure_id: int, *, expected_status: str = "retrying") 
         return cur.rowcount == 1
 
 
+def _resolve_strm_failure_for_item_conn(
+    conn: sqlite3.Connection, source_id: str, file_id: str, action: str, *, timestamp: str,
+) -> int:
+    """独立恢复与元数据完成事务共用同一失败项确认，不单独提交外层事务。"""
+    cur = conn.execute(
+        "UPDATE strm_failures SET status='resolved',updated_at=?,resolved_at=? "
+        "WHERE source_id=? AND file_id=? AND action=? AND status='open'",
+        (timestamp, timestamp, str(source_id), str(file_id), str(action)),
+    )
+    return cur.rowcount
+
+
 def resolve_strm_failure_for_item(source_id: str, file_id: str, action: str) -> int:
     timestamp = now()
     with get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE strm_failures SET status='resolved',updated_at=?,resolved_at=? "
-            "WHERE source_id=? AND file_id=? AND action=? AND status='open'",
-            (timestamp, timestamp, str(source_id), str(file_id), str(action)),
+        return _resolve_strm_failure_for_item_conn(
+            conn, source_id, file_id, action, timestamp=timestamp,
         )
-        return cur.rowcount
 
 
 def resolve_strm_failures_for_items(
