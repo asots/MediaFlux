@@ -173,6 +173,46 @@ def _request_rows_for_keys(
     ).fetchall()
 
 
+def _content_request_keys(conn, request_id: int, source_alias_key: str) -> set[str]:
+    return {
+        str(row[0]) for row in conn.execute(
+            "SELECT request_key FROM download_request_keys WHERE request_id=?",
+            (int(request_id),),
+        ) if str(row[0]) != source_alias_key
+    }
+
+
+def _compatible_request_keys(conn, keys: tuple[str, ...], source_alias_key: str) -> tuple[str, ...]:
+    """URL仅是兼容别名，不能跨已知BT内容合并请求或转移对方的内容key。"""
+    content_keys = set(keys) - {source_alias_key}
+    if source_alias_key not in keys or not content_keys:
+        return keys
+    for owner in _request_rows_for_keys(conn, (source_alias_key,), columns="id"):
+        previous = _content_request_keys(conn, int(owner["id"]), source_alias_key)
+        if previous and not previous.intersection(content_keys):
+            return tuple(key for key in keys if key != source_alias_key)
+    return keys
+
+
+def _check_torrent_identity_conn(conn, request_id: int, keys, source_alias_key: str) -> None:
+    previous = _content_request_keys(conn, request_id, source_alias_key)
+    if previous and not previous.intersection(set(keys) - {source_alias_key}):
+        raise ValueError("下载来源的BT内容身份已变化，未继续提交")
+
+
+def check_download_request_torrent_identity(
+    request_id: int, keys: tuple[str, ...], *, source_alias_key: str,
+) -> None:
+    """显式重试必须在归档旧身份前核实重新读取的种子，不能把重试A变成下载B。"""
+    with get_conn() as conn:
+        conn.execute("BEGIN")
+        if not conn.execute(
+            "SELECT 1 FROM download_request_keys WHERE request_id=? LIMIT 1", (int(request_id),),
+        ).fetchone():
+            raise ValueError("原下载请求已被接管，未重新提交")
+        _check_torrent_identity_conn(conn, request_id, keys, source_alias_key)
+
+
 def _register_request_keys(
     conn: sqlite3.Connection,
     request_id: int,
@@ -222,7 +262,7 @@ def _bind_media_download_admission_conn(
 
 def bind_verified_torrent_identity(
     request_id: int, source_value: str, torrent_data: bytes, keys: tuple[str, ...],
-    *, pending_only: bool = False,
+    *, pending_only: bool = False, source_alias_key: str = "",
 ) -> int:
     """HTTP请求在云盘写入前原子绑定经校验的BT身份，返回唯一归属请求。"""
     timestamp = now()
@@ -244,6 +284,8 @@ def bind_verified_torrent_identity(
             raise ValueError("下载请求状态已变化，未提交种子")
         if row["torrent_data"] is not None and bytes(row["torrent_data"]) != torrent_data:
             raise ValueError("下载请求种子已变化，未继续提交")
+        _check_torrent_identity_conn(conn, request_id, keys, source_alias_key)
+        keys = _compatible_request_keys(conn, keys, source_alias_key)
         owners = _request_rows_for_keys(conn, keys, columns="id,status,request_key")
         blockers = [r for r in owners if int(r["id"]) != int(request_id)
                     and r["status"] not in {"failed", "cancelled", "resubmitted"}]
@@ -270,6 +312,7 @@ def create_download_request(request_key: str, kind: str, title: str = "",
                             origin: str = "telegram", *,
                             supersede_request_id: int | None = None,
                             alternate_request_keys: Iterable[str] | None = None,
+                            source_alias_key: str = "",
                             admission_id: int | None = None,
                             content_type: str = "",
                             initial_targets: str = "") -> tuple[int, bool]:
@@ -299,6 +342,7 @@ def create_download_request(request_key: str, kind: str, title: str = "",
 
         # 串行化“检查所有等价 key → 归档历史 → 新建 canonical 请求”。
         conn.execute("BEGIN IMMEDIATE")
+        keys = _compatible_request_keys(conn, keys, source_alias_key)
         rows = _request_rows_for_keys(
             conn,
             keys,
@@ -697,10 +741,14 @@ def get_download_request_by_request_key(request_key: str):
     return rows[0] if rows else None
 
 
-def get_download_request_by_request_keys(request_keys: Iterable[str]):
+def get_download_request_by_request_keys(
+    request_keys: Iterable[str], *, source_alias_key: str = "",
+):
     """按同一内容的规范协议身份查找活动请求。"""
     keys = _normalized_request_keys("", request_keys)
     with get_conn() as conn:
+        conn.execute("BEGIN")
+        keys = _compatible_request_keys(conn, keys, source_alias_key)
         rows = _request_rows_for_keys(conn, keys)
     if not rows:
         return None

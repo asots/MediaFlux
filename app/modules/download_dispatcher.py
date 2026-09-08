@@ -324,6 +324,11 @@ def request_keys(item: DownloadInput) -> tuple[str, ...]:
     return tuple(dict.fromkeys(_hash_request_identity(value) for value in identities))
 
 
+def request_source_alias_key(item: DownloadInput) -> str:
+    """保留HTTP来源用于历史兼容；它不是BT内容的等价证明。"""
+    return _hash_request_identity(f"http:{item.source_value.strip()}") if item.kind == "http" else ""
+
+
 def request_key(item: DownloadInput) -> str:
     return request_keys(item)[0]
 
@@ -345,6 +350,7 @@ def create_request(
         chat_id=str(chat_id), user_id=str(user_id), message_id=str(message_id), origin=origin,
         supersede_request_id=supersede_request_id,
         alternate_request_keys=keys[1:],
+        source_alias_key=request_source_alias_key(item),
         admission_id=admission_id,
     )
     row = db.get_download_request(req_id)
@@ -814,6 +820,23 @@ def resubmit_download_request(
         identity_hint=f"btih:{qb_task_id_hint}" if qb_task_id_hint else "",
         content_type=_request_content_type(source_row),
     )
+    if source_kind == "http" and (
+        item.torrent_data or item.content_type.split(";", 1)[0].strip().lower() == "application/x-bittorrent"
+    ):
+        from app.repositories.download_requests import check_download_request_torrent_identity
+
+        try:
+            # 已验证HTTP种子即使重试qB，也必须先恢复原内容；普通qB直链不受影响。
+            item = prepare_download_input(item, "guangya")
+            check_download_request_torrent_identity(
+                int(source_request_id), request_keys(item),
+                source_alias_key=request_source_alias_key(item),
+            )
+        except ValueError:
+            return {
+                "ok": False, "source_attention_preserved": True,
+                "error": "原种子读取失败或内容身份已变化，未重新提交，请核对下载来源",
+            }
     source_status = str(source_row["status"] or "").strip().lower()
     created = create_request(
         item,
@@ -1427,6 +1450,7 @@ def _submit_guangya(row, *, target_dir_id: str = "", target_dir_name: str = "") 
 
             owner = bind_verified_torrent_identity(
                 int(row["id"]), item.source_value, torrent_data, request_keys(item),
+                source_alias_key=request_source_alias_key(item),
             )
             if owner != int(row["id"]):
                 return {
