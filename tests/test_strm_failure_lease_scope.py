@@ -113,6 +113,163 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertEqual((row["strm_status"], row["strm_error"]), ("failed", error))
         self.assertEqual(self.fixture.admission(admission)["status"], "failed")
 
+    def fail_recovered(self, error):
+        scheduler = self.fixture.scheduler()
+        with patch(
+            "app.modules.scheduler.sync_strm_incremental", side_effect=OSError(error)
+        ):
+            result = self.fixture.execute(
+                scheduler, self.fixture.recovered_options(scheduler)
+            )
+        self.assertFalse(result["ok"], result)
+
+    def failure_receipts(self, request):
+        with db.get_conn() as conn:
+            return {
+                row["rel_dir"]: row["failed_lease_generation"]
+                for row in conn.execute(
+                    "SELECT q.rel_dir,w.failed_lease_generation FROM strm_request_work w "
+                    "JOIN strm_change_queue q ON q.id=w.work_key "
+                    "WHERE w.request_id=? AND w.kind='change'", (request,),
+                )
+            }
+
+    def fail_first_and_park(self):
+        request, admission, changes = self.queue_two_targets()
+        db.reschedule_strm_change_targets([changes[1]], not_before_seconds=3600)
+        self.fail_recovered("target A failure")
+        db.reschedule_strm_change_targets([changes[0]], not_before_seconds=3600)
+        return request, admission, changes
+
+    def test_interleaved_failures_preserve_second_target_until_its_new_lease_succeeds(self):
+        """A 先失败、B 后独立耗尽，不能由 A 的成功隐藏仍失败的 B。"""
+        request, admission, changes = self.fail_first_and_park()
+        failed_request = dict(db.get_download_request(request))
+        failed_admission = self.fixture.admission(admission)
+        for _ in range(5):
+            db.reschedule_strm_change_targets([changes[1]], not_before_seconds=0)
+            self.fail_recovered("target B failure")
+            # 只合并失败凭据，不替换 A 的父错误、完成时间或准入状态。
+            self.assertEqual(dict(db.get_download_request(request)), failed_request)
+            self.assertEqual(self.fixture.admission(admission), failed_admission)
+        with db.get_conn() as conn:
+            second = dict(conn.execute(
+                "SELECT * FROM strm_change_queue WHERE rel_dir='B'"
+            ).fetchone())
+        self.assertEqual((second["state"], second["attempts"]), ("failed", 5))
+
+        db.reschedule_strm_change_targets([changes[0]], not_before_seconds=0)
+        result = self.execute_recovered()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["stats"]["generated"], 1)
+        self.assertEqual(db.get_download_request(request)["strm_status"], "failed")
+        self.assertEqual(dict(db.get_download_request(request)), failed_request)
+        self.assertEqual(self.fixture.admission(admission), failed_admission)
+        self.assertEqual(self.failure_receipts(request), {"B": second["lease_generation"]})
+        self.assertEqual(db.count_pending_strm_change_targets(), 0)
+        self.assertEqual(len(list(self.fixture.root.rglob("*.strm"))), 1)
+
+        # 已耗尽 B 通过既有变化入队恢复；不传 request_ids、不重新 trigger，
+        # 不能先生成新 request generation 来掩盖原归属凭据的收口缺陷。
+        self.assertEqual(db.enqueue_strm_change_targets([changes[1]]), 1)
+        self.assertEqual(dict(db.get_download_request(request)), failed_request)
+        self.assertEqual(self.failure_receipts(request), {"B": second["lease_generation"]})
+        last = self.execute_recovered()
+        self.assertTrue(last["ok"], last)
+        self.assertEqual(last["stats"]["generated"], 1)
+        with db.get_conn() as conn:
+            recovered = conn.execute(
+                "SELECT state,lease_generation FROM strm_change_queue WHERE id=?",
+                (second["id"],),
+            ).fetchone()
+        self.assertEqual(recovered["state"], "completed")
+        self.assertGreater(recovered["lease_generation"], second["lease_generation"])
+        row = db.get_download_request(request)
+        self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
+        self.assertGreater(row["strm_generation"], failed_request["strm_generation"])
+        self.assertEqual(self.failure_receipts(request), {})
+        self.assertEqual(self.fixture.admission(admission)["status"], "processing")
+        self.assertEqual(len(list(self.fixture.root.rglob("*.strm"))), 2)
+
+    def test_independent_revocation_blocks_running_worker_from_rearming_same_text_failure(self):
+        """真实 B worker 仍持有有效 lease，也不能重授被通用写入撤销的凭据。"""
+        request, admission, changes = self.fail_first_and_park()
+        error = db.get_download_request(request)["strm_error"]
+        db.reschedule_strm_change_targets([changes[1]], not_before_seconds=0)
+        independent = {}
+
+        def revoke_while_worker_holds_lease(**_kwargs):
+            with db.get_conn() as conn:
+                running = [dict(row) for row in conn.execute(
+                    "SELECT rel_dir,lease_owner,lease_generation FROM strm_change_queue "
+                    "WHERE state='running'"
+                )]
+            self.assertEqual([row["rel_dir"] for row in running], ["B"])
+            self.assertTrue(running[0]["lease_owner"])
+            self.assertGreater(running[0]["lease_generation"], 0)
+            self.assertGreater(self.failure_receipts(request)["A"], 0)
+            # 同文本、同 request generation；不能靠错误文案判定恢复权限。
+            db.update_download_request(request, strm_status="failed", strm_error=error)
+            self.assertEqual(self.failure_receipts(request), {"A": -1, "B": -1})
+            independent["request"] = dict(db.get_download_request(request))
+            independent["admission"] = self.fixture.admission(admission)
+            raise OSError(error)
+
+        scheduler = self.fixture.scheduler()
+        with patch(
+            "app.modules.scheduler.sync_strm_incremental",
+            side_effect=revoke_while_worker_holds_lease,
+        ):
+            failed = self.fixture.execute(
+                scheduler, self.fixture.recovered_options(scheduler)
+            )
+        self.assertFalse(failed["ok"], failed)
+        self.assertEqual(self.failure_receipts(request), {"A": -1, "B": -1})
+        self.assertEqual(dict(db.get_download_request(request)), independent["request"])
+        self.assertEqual(self.fixture.admission(admission), independent["admission"])
+
+        # 后续真实新 lease 即使完成文件写入/ACK，也不能清除独立失败或重开准入。
+        db.reschedule_strm_change_targets(changes, not_before_seconds=0)
+        result = self.execute_recovered()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["stats"]["generated"], 2)
+        self.assertEqual(self.failure_receipts(request), {})
+        self.assertEqual(dict(db.get_download_request(request)), independent["request"])
+        self.assertEqual(self.fixture.admission(admission), independent["admission"])
+        self.assertEqual(db.count_pending_strm_change_targets(), 0)
+
+    def test_failed_parent_merges_only_current_dirty_lease_without_mutating_parent(self):
+        request, admission, changes = self.fail_first_and_park()
+        db.reschedule_strm_change_targets([changes[1]], not_before_seconds=0)
+        claimed = db.claim_strm_change_targets(owner="current-worker", limit=1)[0]
+        owner = db.current_strm_request_owners([request])[0]
+        before = dict(db.get_download_request(request))
+        before_admission = self.fixture.admission(admission)
+        receipts = self.failure_receipts(request)
+        for invalid_owner, invalid_claims in (
+            ({**owner, "generation": owner["generation"] - 1}, [claimed]),
+            ({**owner, "organize_task_id": "other-task"}, [claimed]),
+            (owner, [{**claimed, "lease_owner": "other-worker"}]),
+            (owner, [{**claimed, "lease_generation": claimed["lease_generation"] + 1}]),
+            (owner, []),
+        ):
+            with self.subTest(owner=invalid_owner, claims=invalid_claims):
+                self.assertFalse(db.update_strm_request_state(
+                    invalid_owner, claimed_targets=invalid_claims,
+                    strm_status="failed", strm_error="target B failure",
+                ))
+                self.assertEqual(self.failure_receipts(request), receipts)
+        db.enqueue_strm_change_targets([changes[1]])  # 本轮仍有 lease 的 dirty target。
+        self.assertTrue(db.update_strm_request_state(
+            owner, claimed_targets=[claimed],
+            strm_status="failed", strm_error="target B failure",
+        ))
+        self.assertEqual(self.failure_receipts(request), {
+            "A": receipts["A"], "B": claimed["lease_generation"],
+        })
+        self.assertEqual(dict(db.get_download_request(request)), before)
+        self.assertEqual(self.fixture.admission(admission), before_admission)
+
     def test_split_failed_targets_recover_after_each_actual_target_succeeds(self):
         """保留其它目标错误不能阻断合法分批重试；最后一个失败目标可正常恢复。"""
         request, admission, changes = self.queue_two_targets()

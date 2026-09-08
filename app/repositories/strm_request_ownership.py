@@ -266,7 +266,31 @@ def _update_strm_owner_state(
         is not None
     )
     if row["strm_status"] == "failed" and not (interrupted or resume_failure):
-        return False  # 不能用旧成功/旧恢复覆盖后来真实发生的失败。
+        # 父状态继续失败，但另一个目标本轮新发生的失败仍需入账。
+        # 只有同归属尚有未撤销的正数队列失败 proof 才允许合并；通用独立
+        # 失败已撤销全部 proof 时，即便旧 worker 仍持有 lease，也不能重新授权。
+        if fields.get("strm_status") != "failed" or set(fields) - {
+            "strm_status", "strm_error", "strm_finished_at", "strm_run_id"
+        }:
+            return False
+        scope = (owner["request_id"], owner["generation"], owner["organize_task_id"])
+        if conn.execute(
+            "SELECT 1 FROM strm_request_work WHERE request_id=? AND generation=? "
+            "AND organize_task_id=? AND kind='change' AND failed_lease_generation>0 LIMIT 1",
+            scope,
+        ).fetchone() is None:
+            return False
+        claims = _claimed_change_leases(conn, claimed_targets, include_dirty=True)
+        recorded = 0
+        for key, lease in claims.items():
+            recorded += conn.execute(
+                "UPDATE strm_request_work SET failed_lease_generation=? "
+                "WHERE request_id=? AND generation=? AND organize_task_id=? "
+                "AND kind='change' AND work_key=?",
+                (lease, *scope, key),
+            ).rowcount
+        # 不调用通用父状态更新（它会撤销其它 proof），也不重写父错误/准入。
+        return recorded > 0
     if (
         int(owner["generation"]) > 0
         and fields.get("strm_status") == "partial"
