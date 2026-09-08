@@ -7206,3 +7206,30 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
     .strm-metadata-queue-actions { align-items: stretch; flex-direction: column; }
     #cancelStrmMetadataBacklogBtn { align-self: flex-end; min-height: 44px; }
 }
+
+/* RSS 编辑窗归共享 modal 栈管理，避免旧订阅弹窗的 inline-display 键盘监听。 */
+#subModal:not([hidden])[aria-hidden="false"] { display: flex; }
+/* 仅 RSS 目录选择器：固定可用布局，目录数量/慢加载/错误不改变操作区位置。 */
+#rssTargetModal [hidden] { display: none; }
+#rssTargetModal .dir-browser-up,
+#rssTargetModal .settings-dir-current { transform: none; }
+#rssTargetModal .settings-dir-dialog { height: min(560px, calc(100vh - 28px)); height: min(560px, calc(100dvh - 28px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))); min-width: 0; }
+#rssTargetModal .settings-dir-head,
+#rssTargetModal .dir-browser-toolbar,
+#rssTargetModal .settings-dir-footer { flex-shrink: 0; min-width: 0; }
+#rssTargetModal .settings-dir-head strong { min-width: 0; overflow-wrap: anywhere; }
+#rssTargetModal .settings-dir-head .icon-btn { flex-shrink: 0; }
+#rssTargetModal .settings-dir-list { flex: 1 1 0; min-height: 0; overflow-x: hidden; scrollbar-gutter: stable; }
+#rssTargetModal .settings-dir-list[aria-busy="true"] { opacity: .65; cursor: progress; }
+#rssTargetModal .dir-breadcrumb { flex: 1 1 0; }
+#rssTargetModal .settings-dir-footer > .text-muted { flex: 1 1 0; }
+@media (max-width: 620px) {
+    #rssTargetModal .settings-dir-head .icon-btn,
+    #rssTargetModal .dir-browser-up,
+    #rssTargetModal .settings-dir-open,
+    #rssTargetModal .settings-dir-select,
+    #rssTargetModal .settings-dir-current { min-height: 44px; }
+    #rssTargetModal .settings-dir-head .icon-btn { min-width: 44px; }
+    #rssTargetModal .settings-dir-footer > .text-muted { flex: 0 0 auto; }
+    #subModal .form-input, #subModal .form-select, #subModal .form-textarea { font-size: 16px; }
+}

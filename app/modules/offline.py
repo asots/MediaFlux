@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -346,10 +346,51 @@ class OfflineDecision:
         }
 
 
+def _is_http_torrent_url(url: str) -> bool:
+    """HTTP 是种子的传输载体，不是交给云盘保存的媒体文件协议。"""
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    if unquote(parsed.path).lower().endswith(".torrent"):
+        return True
+    query = parse_qs(parsed.query)
+    return any(
+        unquote(value).lower().endswith(".torrent")
+        for key in ("filename", "file", "name") for value in query.get(key, ())
+    )
+
+
+def _prepare_offline_resource(
+    url: str, torrent_data: bytes | None = None,
+) -> tuple[str, bytes | None]:
+    """三个离线入口共用种子载体转换；失败不能降级成普通 HTTP 文件下载。"""
+    if not _is_http_torrent_url(url):
+        return url, torrent_data
+    from app.modules.download_dispatcher import (
+        http_torrent_infohash_hint, parse_torrent_metadata, torrent_download_input,
+    )
+    from app.modules.rss import _fetch_rss_payload
+
+    # 复用 RSS 已有的公网地址校验、逐跳固定解析、有界响应和总时间预算，
+    # 不再另写一套无限流式 HTTP 下载；原始 tracker/passkey 保留在种子内。
+    if torrent_data is None:
+        torrent_data, _headers = _fetch_rss_payload(
+            url, user_agent="MediaFlux/1.0", timeout_seconds=20,
+        )
+    item = torrent_download_input("resource.torrent", torrent_data)
+    expected_hash = http_torrent_infohash_hint(url)
+    if expected_hash and parse_torrent_metadata(torrent_data)[1].lower() != expected_hash:
+        raise ValueError("种子内容与链接中的 BT 身份不一致")
+    return item.source_value, torrent_data
+
+
 def analyze_offline_url(url: str, title: str = "", rules: OfflineRules | None = None) -> OfflineDecision:
     rules = rules or OfflineRules.from_config()
     cleaned = (url or "").strip()
-    protocol = detect_protocol(cleaned)
+    protocol = "magnet" if _is_http_torrent_url(cleaned) else detect_protocol(cleaned)
     if not cleaned:
         return OfflineDecision(False, "unknown", rules.target_dir_id, rules.target_dir_name, "链接不能为空")
     enabled = {
@@ -491,6 +532,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
             return {"ok": False, "decision": decision.as_dict(), "error": "光鸭未登录"}
 
         try:
+            url, torrent_data = _prepare_offline_resource(url, torrent_data)
             resolution = _resolve_offline_manifest(
                 client,
                 url,
@@ -733,7 +775,10 @@ def preview_offline_selection(url: str, title: str = "", client: GuangYaClient |
             result["error"] = "光鸭未登录"
             return result
         try:
-            resolution = _resolve_offline_manifest(client, url, decision.protocol)
+            url, torrent_data = _prepare_offline_resource(url)
+            resolution = _resolve_offline_manifest(
+                client, url, decision.protocol, torrent_data=torrent_data,
+            )
             choices = build_offline_file_choices(resolution.files, rules)
         except Exception as exc:
             result.update(_manifest_failure(exc))
@@ -778,7 +823,10 @@ def submit_offline_selection(url: str, selected_indexes: list[int] | None,
         if not client.logged_in:
             return {**base, "error": "光鸭未登录"}
         try:
-            resolution = _resolve_offline_manifest(client, url, decision.protocol)
+            url, torrent_data = _prepare_offline_resource(url)
+            resolution = _resolve_offline_manifest(
+                client, url, decision.protocol, torrent_data=torrent_data,
+            )
             files = resolution.files
         except Exception as exc:
             return {**base, **_manifest_failure(exc)}

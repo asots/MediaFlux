@@ -403,6 +403,9 @@
         let instance = null;
         let lastItems = [];
         let lastState = {path: [], isRoot: true};
+        const stableLoading = options.preserveWhileLoading === true;
+        if (stableLoading) currentLabel.textContent = `当前：${options.rootName || '根目录'}`;
+        let isLoading = false;
         function close({restoreFocus = true} = {}) {
             if (closed) return;
             closed = true;
@@ -438,7 +441,7 @@
             const current = currentNode();
             const isVirtual = isVirtualRootId(current.id);
             const isDisallowedRoot = !allowRoot && String(current.id) === String(options.rootId || '0');
-            const disabled = isVirtual || isDisallowedRoot;
+            const disabled = isVirtual || isDisallowedRoot || (stableLoading && isLoading);
             selectCurrent.disabled = disabled;
             if (isVirtual) {
                 selectCurrent.title = '虚拟根入口不可选，请进入具体驱动器或目录';
@@ -473,6 +476,7 @@
             if (accepted !== false) close();
         }
         function selectNode(node) {
+            if (closed || (stableLoading && isLoading)) return;
             const value = normalizedNode(node);
             if (isVirtualRootId(value.id)) return;
             if (!allowRoot && value.id === String(options.rootId || '0')) return;
@@ -549,9 +553,21 @@
                 return data;
             }),
             onLoading: () => {
+                if (stableLoading) {
+                    isLoading = true;
+                    list.setAttribute('aria-busy', 'true');
+                    // 浏览已有目录时保留内容与滚动位置，但不允许误选旧路径。
+                    if (list.contains(document.activeElement)) {
+                        (upButton.disabled ? modal.querySelector('[data-dir-close]') : upButton).focus({preventScroll: true});
+                    }
+                    list.inert = true;
+                    updateSelectionControls();
+                    if (list.childElementCount) return;
+                }
                 list.replaceChildren();
                 const loading = document.createElement('div');
                 loading.className = 'empty-state';
+                loading.setAttribute('role', 'status');
                 const text = document.createElement('p');
                 text.textContent = '加载中...';
                 loading.appendChild(text);
@@ -563,8 +579,21 @@
                 currentLabel.textContent = `当前：${state.path.length ? state.path[state.path.length - 1].name : (options.rootName || '根目录')}`;
                 updateSelectionControls();
             },
-            onLoaded: renderItems,
+            onLoaded: (items, state) => {
+                if (stableLoading) {
+                    isLoading = false;
+                    list.inert = false;
+                    list.setAttribute('aria-busy', 'false');
+                }
+                renderItems(items, state);
+            },
             onError: (error) => {
+                if (stableLoading) {
+                    isLoading = false;
+                    list.inert = false;
+                    list.setAttribute('aria-busy', 'false');
+                    updateSelectionControls();
+                }
                 list.replaceChildren();
                 const empty = document.createElement('div');
                 empty.className = 'empty-state';
@@ -861,11 +890,27 @@
 
     function syncModalOpenState() {
         document.body.classList.toggle('modal-open', modalStack.length > 0);
+        let previousZIndex = -Infinity;
+        modalStack.forEach((layer, index) => {
+            // 保留各窗口原有 CSS 层级，仅在嵌套时高于前一层一个单位。
+            const zIndex = Math.max(layer.baseZIndex, previousZIndex + 1);
+            if (layer.modal.style) layer.modal.style.zIndex = zIndex > layer.baseZIndex ? String(zIndex) : layer.originalZIndex;
+            layer.modal.inert = index < modalStack.length - 1 || layer.originalInert;
+            previousZIndex = zIndex;
+        });
+    }
+
+    function restoreModalLayerState(layer) {
+        if (layer.modal.style) layer.modal.style.zIndex = layer.originalZIndex;
+        layer.modal.inert = layer.originalInert;
     }
 
     function pruneModalStack() {
         for (let index = modalStack.length - 1; index >= 0; index -= 1) {
-            if (modalStack[index].modal.hidden) modalStack.splice(index, 1);
+            if (modalStack[index].modal.hidden || modalStack[index].modal.isConnected === false) {
+                restoreModalLayerState(modalStack[index]);
+                modalStack.splice(index, 1);
+            }
         }
         syncModalOpenState();
     }
@@ -873,13 +918,21 @@
     function registerModalLayer(layer) {
         const existing = modalStack.indexOf(layer);
         if (existing >= 0) modalStack.splice(existing, 1);
+        else {
+            layer.originalZIndex = layer.modal.style?.zIndex || '';
+            layer.originalInert = Boolean(layer.modal.inert);
+            layer.baseZIndex = Number.parseInt(window.getComputedStyle?.(layer.modal)?.zIndex || layer.originalZIndex, 10) || 0;
+        }
         modalStack.push(layer);
         syncModalOpenState();
     }
 
     function unregisterModalLayer(layer) {
         const index = modalStack.indexOf(layer);
-        if (index >= 0) modalStack.splice(index, 1);
+        if (index >= 0) {
+            restoreModalLayerState(layer);
+            modalStack.splice(index, 1);
+        }
         syncModalOpenState();
     }
 
@@ -957,6 +1010,8 @@
             registerModalLayer(layer);
             requestAnimationFrame(() => {
                 if (generation !== focusGeneration || modal.hidden || topModalLayer() !== layer) return;
+                // 打开到下一帧之间，用户可能已切换输入框，不能抢走其焦点。
+                if (dialog?.contains(document.activeElement)) return;
                 resolveInitialFocus(initialFocus)?.focus?.({preventScroll: true});
             });
             return true;

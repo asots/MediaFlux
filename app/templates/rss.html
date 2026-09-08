@@ -125,7 +125,7 @@
 </div>
 
 <!-- 新建/编辑订阅弹窗 -->
-<div id="subModal" class="rss-sub-modal subscription-modal subscription-source-modal" aria-hidden="true">
+<div id="subModal" class="rss-sub-modal subscription-modal subscription-source-modal" aria-hidden="true" hidden>
     <div class="rss-sub-modal-card subscription-modal-card subscription-source-modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
         <div class="rss-modal-header">
             <div><span class="subscription-eyebrow">RSS SOURCE</span><h3 id="modalTitle">新建订阅源</h3><p>配置订阅地址、刷新周期与自动下载策略。</p></div>
@@ -464,6 +464,9 @@ async function loadSubs({preserve=true}={}){
 }
 
 function openSubForm(id,trigger){
+    rssSubFormGeneration+=1;
+    rssTargetPicker?.close({restoreFocus:false});
+    rssTargetPicker=null;
     editingId = id||null;
     document.getElementById('modalTitle').textContent = id?'编辑订阅源':'新建订阅源';
     document.getElementById('f_name').value='';
@@ -491,13 +494,16 @@ function openSubForm(id,trigger){
     }
     updateTargetRows();
     const modal=document.getElementById('subModal');
-    if(window.openSubscriptionModal)window.openSubscriptionModal(modal,trigger||document.activeElement);
-    else{modal.style.display='flex';modal.setAttribute('aria-hidden','false');document.body.classList.add('subscription-modal-open');}
+    modal.setAttribute('aria-hidden','false');
+    rssSubModalLifecycle.open(trigger||document.activeElement,{initialFocus:'#f_name'});
 }
 function closeSubForm(){
     const modal=document.getElementById('subModal');
-    if(window.closeSubscriptionModal)window.closeSubscriptionModal(modal);
-    else{modal.style.display='none';modal.setAttribute('aria-hidden','true');document.body.classList.remove('subscription-modal-open');}
+    rssSubFormGeneration+=1;
+    rssTargetPicker?.close({restoreFocus:false});
+    rssTargetPicker=null;
+    rssSubModalLifecycle.close();
+    modal.setAttribute('aria-hidden','true');
 }
 
 function editSub(id,trigger){ openSubForm(id,trigger); }
@@ -766,7 +772,17 @@ async function dlEntry(id,trigger){
 }
 
 document.getElementById('f_method').addEventListener('change',updateTargetRows);
-document.getElementById('pickRssTargetBtn').addEventListener('click',()=>openGuangYaDirectoryPicker({modalId:'rssTargetModal',title:'选择 RSS 光鸭目标目录',onSelect:dir=>renderRssTarget(dir.id,dir.name)}));
+document.getElementById('pickRssTargetBtn').addEventListener('click',event=>{
+    const generation=rssSubFormGeneration;
+    rssTargetPicker=openGuangYaDirectoryPicker({
+        modalId:'rssTargetModal',title:'选择 RSS 光鸭目标目录',trigger:event.currentTarget,
+        preserveWhileLoading:true,
+        onSelect:dir=>{
+            if(generation!==rssSubFormGeneration||subModal.hidden)return false;
+            renderRssTarget(dir.id,dir.name);
+        },
+    });
+});
 document.getElementById('entryCheckAll').addEventListener('change',event=>{
     if(event.target.checked)entries.forEach(e=>selectedEntries.add(e.id));else selectedEntries.clear();
     rssSelectionRevision+=1;
@@ -777,8 +793,10 @@ document.getElementById('batchProcessedBtn').addEventListener('click',event=>bat
 document.getElementById('batchPendingBtn').addEventListener('click',event=>batchMark(false,event.currentTarget));
 
 const subModal=document.getElementById('subModal');
-if(subModal&&subModal.parentElement!==document.body)document.body.appendChild(subModal);
-subModal?.addEventListener('click',event=>{if(event.target===subModal)closeSubForm();});
+// RSS 父子窗口使用同一个栈；不再交给订阅中心的 inline-display 弹窗监听。
+let rssTargetPicker=null;
+let rssSubFormGeneration=0;
+const rssSubModalLifecycle=window.createAppModal(subModal,{onRequestClose:()=>closeSubForm()});
 
 window.ensureRssPanelLoaded=()=>{
     if(rssSubsLoaded&&rssEntriesLoaded)return Promise.resolve();
