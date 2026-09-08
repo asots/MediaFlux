@@ -1494,6 +1494,36 @@ def _migrate_postprocessing_recovery_v28(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_download_resource_and_strm_ownership_v29(conn: sqlite3.Connection) -> None:
+    """保留下载资源类型及新STRM任务归属；不猜测旧队列关联。"""
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(download_requests)")}
+    if columns and "strm_generation" not in columns:
+        conn.execute(
+            "ALTER TABLE download_requests ADD COLUMN "
+            "strm_generation INTEGER NOT NULL DEFAULT 0"
+        )
+    if columns and "content_type" not in columns:
+        conn.execute(
+            "ALTER TABLE download_requests ADD COLUMN content_type TEXT NOT NULL DEFAULT ''"
+        )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS strm_request_work (
+            request_id INTEGER NOT NULL,
+            generation INTEGER NOT NULL,
+            organize_task_id TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL CHECK(kind IN ('change','refresh')),
+            work_key TEXT NOT NULL,
+            failed_lease_generation INTEGER NOT NULL DEFAULT -1,
+            PRIMARY KEY(request_id,kind,work_key),
+            FOREIGN KEY(request_id) REFERENCES download_requests(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strm_request_work_key "
+        "ON strm_request_work(kind,work_key)"
+    )
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1523,4 +1553,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     25: _migrate_strm_path_cleanup_v26,
     26: _migrate_organize_business_snapshot_v27,
     27: _migrate_postprocessing_recovery_v28,
+    28: _migrate_download_resource_and_strm_ownership_v29,
 }

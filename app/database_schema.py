@@ -248,6 +248,7 @@ CREATE TABLE IF NOT EXISTS download_requests (
     title TEXT,
     source_value TEXT,
     torrent_data BLOB,
+    content_type TEXT NOT NULL DEFAULT '',
     targets TEXT DEFAULT '',         -- qb / guangya / both
     status TEXT NOT NULL DEFAULT 'pending',
     qb_task_id TEXT,
@@ -281,6 +282,7 @@ CREATE TABLE IF NOT EXISTS download_requests (
     organize_error TEXT DEFAULT '',
     organize_finished_at TEXT,
     strm_run_id INTEGER,
+    strm_generation INTEGER NOT NULL DEFAULT 0,
     strm_status TEXT DEFAULT '',
     strm_error TEXT DEFAULT '',
     strm_finished_at TEXT,
@@ -986,6 +988,20 @@ CREATE INDEX IF NOT EXISTS idx_strm_metadata_queue_lease
     ON strm_metadata_queue(provider, status, lease_until, id);
 CREATE INDEX IF NOT EXISTS idx_strm_metadata_queue_diagnostics
     ON strm_metadata_queue(status, source_id, updated_at DESC, id DESC);
+
+-- STRM 现有变化队列/刷新outbox的请求归属及代次围栏，不构成第二套任务队列。
+CREATE TABLE IF NOT EXISTS strm_request_work (
+    request_id INTEGER NOT NULL,
+    generation INTEGER NOT NULL,
+    organize_task_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL CHECK(kind IN ('change','refresh')),
+    work_key TEXT NOT NULL,
+    failed_lease_generation INTEGER NOT NULL DEFAULT -1,
+    PRIMARY KEY(request_id,kind,work_key),
+    FOREIGN KEY(request_id) REFERENCES download_requests(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_strm_request_work_key
+    ON strm_request_work(kind,work_key);
 
 -- STRM 文件或伴随元数据已经落盘、但尚未由统一媒体库刷新队列接管的持久
 -- outbox。allow_emby 保存本轮明确的 provider 边界，重试不会扩大刷新范围。

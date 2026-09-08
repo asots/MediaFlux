@@ -18,6 +18,7 @@
         statsController: null,
         candidateController: null,
         editingId: null,
+        mediaEditVersion: 0,
         watchlistContext: null,
         candidateSubscriptionId: null,
         loaded: {media: false, watchlist: false, runs: false},
@@ -697,16 +698,31 @@
 
     function openModal(modal, trigger) {
         if (!modal) return;
+        if (modal === elements.mediaModal) {
+            state.mediaEditVersion += 1;
+            buttonBusy(elements.mediaSave, false);
+        }
+        const version = state.mediaEditVersion;
         modalReturnFocus.set(modal, trigger instanceof HTMLElement ? trigger : document.activeElement);
         modal.style.display = 'flex';
         modal.setAttribute('aria-hidden', 'false');
         document.body.classList.add('subscription-modal-open');
-        window.requestAnimationFrame(() => modal.querySelector('input:not([type="hidden"]),select,button')?.focus?.({preventScroll: true}));
+        window.requestAnimationFrame(() => {
+            if (modal.getAttribute('aria-hidden') === 'true') return;
+            if (modal === elements.mediaModal && version !== state.mediaEditVersion) return;
+            if (modal.contains(document.activeElement)) return;
+            modal.querySelector('input:not([type="hidden"]),select,button')?.focus?.({preventScroll: true});
+        });
         renderIcons(modal);
     }
 
     function closeModal(modal) {
         if (!modal) return;
+        if (modal === elements.mediaModal) {
+            // 保存可能已在服务端完成；只取消此编辑会话对后续 UI 的接管。
+            state.mediaEditVersion += 1;
+            buttonBusy(elements.mediaSave, false);
+        }
         modal.style.display = 'none';
         modal.setAttribute('aria-hidden', 'true');
         const hasVisibleModal = [...document.querySelectorAll('.rss-sub-modal')].some((item) => item.style.display === 'flex' && item.getAttribute('aria-hidden') !== 'true');
@@ -908,6 +924,9 @@
 
     async function saveMediaSubscription(event) {
         event.preventDefault();
+        if (elements.mediaSave.disabled) return;
+        const version = state.mediaEditVersion;
+        const isCurrent = () => version === state.mediaEditVersion;
         elements.mediaFormStatus.textContent = '';
         let seasons;
         try { seasons = parseIntegerList(fields.seasons.value); } catch (error) { elements.mediaFormStatus.textContent = error.message; fields.seasons.focus(); return; }
@@ -956,10 +975,14 @@
         buttonBusy(elements.mediaSave, true, '保存中');
         try {
             const result = await apiJSON(path, {method, body: JSON.stringify(payload)});
-            closeModal(elements.mediaModal);
+            const ownsEditor = isCurrent();
+            if (ownsEditor) closeModal(elements.mediaModal);
+            const closedVersion = state.mediaEditVersion;
             await Promise.all([loadMedia({preserve: true}), loadStats(), loadWatchlist({preserve: true})]);
+            if (!ownsEditor || closedVersion !== state.mediaEditVersion) return;
             appAlert?.({type: 'success', title: result.created ? '媒体订阅已创建' : '媒体订阅已更新', message: '系统将按检查周期核对媒体库，并避免重复下载。'});
         } catch (error) {
+            if (!isCurrent()) return;
             const candidates = Array.isArray(error.payload?.candidates) ? error.payload.candidates : [];
             if (error.payload?.code === 'mapping_required' && candidates.length) {
                 renderMappingCandidates(candidates);
@@ -970,7 +993,7 @@
                 elements.mediaFormStatus.textContent = error.message;
             }
         } finally {
-            buttonBusy(elements.mediaSave, false);
+            if (isCurrent()) buttonBusy(elements.mediaSave, false);
         }
     }
 

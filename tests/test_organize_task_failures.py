@@ -574,7 +574,11 @@ class OrganizeTaskFailureTests(unittest.TestCase):
             "app.modules.organize_tasks.db.finish_task_run"
         ) as finish, patch(
             "app.modules.organize_tasks.db.update_download_request"
+        ), patch(
+            "app.modules.organize_tasks.db.update_download_request_and_sync_media_admission"
         ) as update_request, patch(
+            "app.modules.organize_tasks.db.get_download_request", return_value=None
+        ), patch(
             "app.modules.organize_tasks.Organizer.trigger_post_actions"
         ), patch(
             "app.modules.organize_tasks.Organizer.notify_task_results", return_value=False

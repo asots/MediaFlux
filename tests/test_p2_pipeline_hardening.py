@@ -356,6 +356,9 @@ class P2RecoveryAndRaceTests(IsolatedDatabaseTestCase):
     def test_queued_strm_request_is_persisted_before_waiter_start(self) -> None:
         scheduler = STRMScheduler()
         observed = {"started": False}
+        request_id, _ = db.create_download_request(
+            f"strm-before-waiter-{uuid.uuid4().hex}", "http", title="排队测试",
+        )
 
         class Thread:
             def __init__(self, *args, **kwargs):
@@ -366,18 +369,11 @@ class P2RecoveryAndRaceTests(IsolatedDatabaseTestCase):
 
             def start(self):
                 observed["started"] = True
-                assert any(
-                    call.args[0] == 42
-                    and call.kwargs.get("strm_status") == "queued"
-                    for call in update.call_args_list
-                )
+                # 检查真实SQLite提交，而不是绑定旧的无围栏更新函数。
+                assert db.get_download_request(request_id)["strm_status"] == "queued"
 
-        with patch(
-            "app.modules.scheduler.db.update_download_request"
-        ) as update, patch(
-            "app.modules.scheduler.threading.Thread", Thread
-        ):
-            result = scheduler._queue_organize_trigger({"download_request_ids": [42]})
+        with patch("app.modules.scheduler.threading.Thread", Thread):
+            result = scheduler._queue_organize_trigger({"download_request_ids": [request_id]})
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["queued"])
@@ -433,13 +429,17 @@ class P2RecoveryAndRaceTests(IsolatedDatabaseTestCase):
 
     def test_pending_strm_requests_are_closed_when_scheduler_stops(self) -> None:
         scheduler = STRMScheduler()
-        scheduler._pending_organize_options = {"download_request_ids": [41, 42]}
+        request_ids = [db.create_download_request(
+            f"strm-stop-{uuid.uuid4().hex}", "http", title="关停测试",
+        )[0] for _ in range(2)]
+        scheduler._pending_organize_options = {"download_request_ids": request_ids}
         scheduler._stop_event.set()
-        with patch("app.modules.scheduler.db.update_download_request") as update:
-            scheduler._wait_and_run_pending_organize()
+        scheduler._wait_and_run_pending_organize()
 
-        self.assertEqual(update.call_count, 2)
-        self.assertTrue(all(call.kwargs["strm_status"] == "stopped" for call in update.call_args_list))
+        self.assertEqual(
+            [db.get_download_request(request_id)["strm_status"] for request_id in request_ids],
+            ["stopped", "stopped"],
+        )
 
     def test_legacy_unfingerprinted_strm_is_fail_closed_on_retirement(self) -> None:
         source_id = f"legacy-{uuid.uuid4().hex}"

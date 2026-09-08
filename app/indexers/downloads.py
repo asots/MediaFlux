@@ -30,6 +30,7 @@ from app.modules.download_dispatcher import (
     download_resubmit_capabilities,
     normalize_download_url,
     public_dispatch_summary,
+    prepare_download_input,
     request_keys,
     resubmit_download_request,
     torrent_download_input,
@@ -259,10 +260,21 @@ def _persist_and_dispatch(
     if log_path is not None:
         dispatch_kwargs["log_path"] = log_path
 
+    item = prepare_download_input(item, target)
     keys = request_keys(item)
     existing = db.get_download_request_by_request_key(keys[0])
     if existing is None and len(keys) > 1:
         existing = db.get_download_request_by_request_keys(keys[1:])
+    if (existing is not None and existing["status"] == "pending"
+            and item.kind == existing["kind"] == "http" and item.torrent_data
+            and item.source_value == existing["source_value"]):
+        from app.repositories.download_requests import bind_verified_torrent_identity
+
+        # 复用历史HTTP请求时也要保留本次已验证的bytes，不能丢失动态URL的MIME语义。
+        owner = bind_verified_torrent_identity(
+            int(existing["id"]), item.source_value, item.torrent_data, keys, pending_only=True,
+        )
+        existing = db.get_download_request(owner)
     dispatch_target = target
     created: dict[str, Any] | None = None
     request_id = 0

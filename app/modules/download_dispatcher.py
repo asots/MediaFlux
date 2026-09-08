@@ -7,7 +7,7 @@ import ipaddress
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -63,6 +63,8 @@ class DownloadInput:
     # HTTP .torrent 地址的入口使用。格式必须是 btih:<40hex> 或
     # btmh:<64hex>；request_keys 会再次校验，非法提示不会参与幂等。
     identity_hint: str = ""
+    # RSS enclosure 的类型仅作为读取种子的线索；身份仍必须从真实bytes校验。
+    content_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +256,24 @@ def _magnet_request_identity(source_value: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def prepare_download_input(item: DownloadInput, target: str) -> DownloadInput:
+    """在统一防重前校验HTTP种子内容；qB单通道仍可直接接受原链接。"""
+    if target not in {"guangya", "both"} or item.kind != "http":
+        return item
+    from app.modules.offline import _is_http_torrent_url, _prepare_offline_resource
+
+    if not item.torrent_data and not _is_http_torrent_url(item.source_value, item.content_type):
+        return item
+    try:
+        _url, payload = _prepare_offline_resource(
+            item.source_value, item.torrent_data, content_type=item.content_type,
+        )
+    except Exception as exc:
+        # 传输错误可能带认证URL；只对外暴露稳定安全的错误，不回退HTTP。
+        raise ValueError("种子读取或校验失败，请核对资源后重试") from exc
+    return replace(item, torrent_data=payload, identity_hint="", content_type="application/x-bittorrent")
+
+
 def request_keys(item: DownloadInput) -> tuple[str, ...]:
     """返回内容协议身份对应的规范请求 key。
 
@@ -266,7 +286,7 @@ def request_keys(item: DownloadInput) -> tuple[str, ...]:
     namespace = ""
     identity = ""
     verified_btmh_identity = ""
-    if kind == "torrent" and item.torrent_data:
+    if kind in {"torrent", "http"} and item.torrent_data:
         _name, torrent_id, magnet_xt, v2_hash = _torrent_metadata(item.torrent_data)
         if magnet_xt.lower().startswith("urn:btmh:1220"):
             namespace = "btmh"
@@ -282,7 +302,7 @@ def request_keys(item: DownloadInput) -> tuple[str, ...]:
 
     identities: list[str] = []
     identity_hint = str(getattr(item, "identity_hint", "") or "").strip().lower()
-    if kind == "http" and (
+    if kind == "http" and not item.torrent_data and (
         re.fullmatch(r"btih:[0-9a-f]{40}", identity_hint)
         or re.fullmatch(r"btmh:[0-9a-f]{64}", identity_hint)
     ):
@@ -298,6 +318,9 @@ def request_keys(item: DownloadInput) -> tuple[str, ...]:
     else:
         identities.append(f"{kind}:{source_value}")
 
+    if kind == "http" and namespace:
+        # 原URL也是兼容别名，保留历史条目与来源；canonical使用已校验BT内容。
+        identities.append(f"http:{source_value}")
     return tuple(dict.fromkeys(_hash_request_identity(value) for value in identities))
 
 
@@ -318,7 +341,7 @@ def create_request(
     keys = request_keys(item)
     req_id, created = db.create_download_request(
         keys[0], item.kind, title=item.title,
-        source_value=item.source_value, torrent_data=item.torrent_data,
+        source_value=item.source_value, torrent_data=item.torrent_data, content_type=item.content_type,
         chat_id=str(chat_id), user_id=str(user_id), message_id=str(message_id), origin=origin,
         supersede_request_id=supersede_request_id,
         alternate_request_keys=keys[1:],
@@ -557,6 +580,16 @@ def _recover_guangya_magnet_torrent(row) -> bytes | None:
     return payload
 
 
+def _request_content_type(row) -> str:
+    # 兼容旧请求和调用方的旧字段快照；有缓存时仍由实际bytes校验BT身份。
+    if row["kind"] == "http" and row["torrent_data"]:
+        return "application/x-bittorrent"
+    try:
+        return str(row["content_type"] or "")
+    except (KeyError, IndexError):
+        return ""
+
+
 def download_resubmit_capabilities(
     row,
     *,
@@ -625,7 +658,9 @@ def download_resubmit_capabilities(
     gy_enabled = False
     gy_reason = "此请求无法重新提交到光鸭"
     if retryable and source_value:
-        decision = analyze_offline_url(source_value, title=str(row["title"] or ""))
+        decision = analyze_offline_url(
+            source_value, title=str(row["title"] or ""), content_type=_request_content_type(row),
+        )
         gy_enabled = bool(decision.allowed)
         gy_reason = "" if gy_enabled else str(decision.reason or "当前规则不允许提交")
     elif retryable:
@@ -777,6 +812,7 @@ def resubmit_download_request(
         source_value=str(source_row["source_value"] or ""),
         torrent_data=item_torrent_data,
         identity_hint=f"btih:{qb_task_id_hint}" if qb_task_id_hint else "",
+        content_type=_request_content_type(source_row),
     )
     source_status = str(source_row["status"] or "").strip().lower()
     created = create_request(
@@ -1335,7 +1371,7 @@ def _submit_qb(
     resolved_save_path = str(
         save_path if save_path is not None else default_save_path or ""
     )
-    torrents = row["torrent_data"] if row["kind"] == "torrent" else None
+    torrents = row["torrent_data"] if row["kind"] in {"torrent", "http"} else None
     urls = "" if torrents else str(row["source_value"] or "")
     try:
         result = client.add_torrent_detailed(
@@ -1375,9 +1411,28 @@ def _submit_qb(
 
 def _submit_guangya(row, *, target_dir_id: str = "", target_dir_name: str = "") -> dict[str, Any]:
     torrent_data = (
-        row["torrent_data"] if row["kind"] == "torrent"
+        row["torrent_data"] if row["kind"] in {"torrent", "http"}
         else _recover_guangya_magnet_torrent(row)
     )
+    if row["kind"] == "http":
+        # Telegram历史待提交请求可能先于选后端建立；在任何云盘副作用前补齐身份。
+        item = prepare_download_input(DownloadInput(
+            kind="http", title=str(row["title"] or ""),
+            source_value=str(row["source_value"] or ""), torrent_data=torrent_data,
+            content_type=_request_content_type(row),
+        ), "guangya")
+        torrent_data = item.torrent_data
+        if torrent_data is not None:
+            from app.repositories.download_requests import bind_verified_torrent_identity
+
+            owner = bind_verified_torrent_identity(
+                int(row["id"]), item.source_value, torrent_data, request_keys(item),
+            )
+            if owner != int(row["id"]):
+                return {
+                    "ok": False, "duplicate": True, "existing_request_id": owner,
+                    "error": f"相同BT内容已由请求 #{owner} 处理，未重复提交",
+                }
 
     def persist_staging(snapshot: dict) -> None:
         parent_name = str(snapshot.get("parent_name") or target_dir_name or "指定目标目录")
@@ -1407,7 +1462,7 @@ def _submit_guangya(row, *, target_dir_id: str = "", target_dir_name: str = "") 
 
 def torrent_identity(row) -> str:
     try:
-        if row["kind"] == "torrent" and row["torrent_data"]:
+        if row["kind"] in {"torrent", "http"} and row["torrent_data"]:
             return parse_torrent_metadata(row["torrent_data"])[1]
         if row["kind"] == "magnet":
             return magnet_infohash(str(row["source_value"] or "")) or ""

@@ -44,6 +44,8 @@
         menuReturnFocus: null,
         menuOpenedAt: 0,
         requestVersion: 0,
+        manualVersion: 0,
+        manualInspection: null,
         searchController: null,
         previewController: null,
         externalController: null,
@@ -257,7 +259,18 @@
         modalLifecycle.open(state.activeAction, {initialFocus: elements.query});
     }
 
+    function invalidateManualInspection() {
+        state.manualVersion += 1;
+        const pending = state.manualInspection;
+        state.manualInspection = null;
+        if (pending) {
+            pending.controller.abort();
+            setRowState(pending.row, pending.action, 'idle');
+        }
+    }
+
     function closeModal() {
+        invalidateManualInspection();
         state.requestVersion += 1;
         state.searchController?.abort();
         state.previewController?.abort();
@@ -419,14 +432,15 @@
         );
     }
 
-    async function inspectDirectory(item, row, action) {
+    async function inspectDirectory(item, row, action, {signal, isCurrent = () => true} = {}) {
         setRowState(row, action, 'loading', '正在检查所选媒体');
         const payload = item.is_dir
             ? {directory_id: item.file_id}
             : {file_id: item.file_id};
         try {
-            return await api('/inspect', payload);
+            return await api('/inspect', payload, {signal});
         } catch (error) {
+            if (error.name === 'AbortError' || !isCurrent()) throw error;
             setRowState(row, action, 'error', error.message);
             window.appAlert?.({
                 type: 'error',
@@ -989,7 +1003,21 @@
     }
 
     async function openManual(directory, row, action, inspection = null, candidates = null) {
-        const resolved = inspection || await inspectDirectory(directory, row, action);
+        invalidateManualInspection();
+        const version = state.manualVersion;
+        const isCurrent = () => version === state.manualVersion;
+        const pending = {controller: new AbortController(), row, action};
+        state.manualInspection = pending;
+        let resolved;
+        try {
+            resolved = inspection || await inspectDirectory(directory, row, action, {
+                signal: pending.controller.signal, isCurrent,
+            });
+        } finally {
+            if (state.manualInspection === pending) state.manualInspection = null;
+        }
+        // 响应可能已读取而 continuation 尚未运行；abort 不替代会话校验。
+        if (!isCurrent()) return;
         state.activeDirectory = directory;
         state.activeRow = row;
         state.activeAction = action;
@@ -1001,7 +1029,7 @@
         } else {
             await searchCandidates();
         }
-        setRowState(row, action, 'idle');
+        if (isCurrent()) setRowState(row, action, 'idle');
     }
 
     const TASK_POLL_INTERVAL_MS = 1000;
@@ -1240,6 +1268,7 @@
         scheduleTaskPoll(0);
     });
     window.addEventListener('pagehide', (event) => {
+        invalidateManualInspection();
         taskPollingDisposed = true;
         taskPollGeneration += 1;
         clearTaskPollTimer();

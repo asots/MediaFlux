@@ -520,7 +520,9 @@ def _enqueue_strm_refresh_paths(
     *,
     stamp: str,
     allow_emby: bool,
+    request_owners: object = None,
 ) -> list[dict[str, object]]:
+    from app.repositories.strm_request_ownership import _attach_request_work, refresh_work_key
     entries: list[dict[str, object]] = []
     for path in _normalize_refresh_paths(paths):
         token = uuid.uuid4().hex
@@ -531,18 +533,21 @@ def _enqueue_strm_refresh_paths(
             "event_token=excluded.event_token,updated_at=excluded.updated_at",
             (path, 1 if allow_emby else 0, token, stamp, stamp),
         )
+        _attach_request_work(conn, request_owners, "refresh", refresh_work_key(path, allow_emby))
         entries.append({"path": path, "allow_emby": allow_emby, "event_token": token})
     return entries
 
 
 def enqueue_strm_refresh_paths(
-    paths: object, *, allow_emby: bool = True
+    paths: object, *, allow_emby: bool = True, request_owners: object = None,
 ) -> list[dict[str, object]]:
     """持久登记变化，返回本次写入的事件快照；交接只允许确认该快照。"""
     database = _database()
     with database.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         return _enqueue_strm_refresh_paths(
-            conn, paths, stamp=database.now(), allow_emby=bool(allow_emby)
+            conn, paths, stamp=database.now(), allow_emby=bool(allow_emby),
+            request_owners=request_owners,
         )
 
 
@@ -597,12 +602,20 @@ def acknowledge_strm_refresh_paths(entries: list[dict[str, object]]) -> int:
         params.append((path, int(bool(entry["allow_emby"])), token))
     if not params:
         return 0
+    from app.repositories.strm_request_ownership import _complete_request_work, refresh_work_key
+    removed = 0
     with _database().get_conn() as conn:
-        cur = conn.executemany(
-            "DELETE FROM strm_refresh_outbox WHERE path=? AND allow_emby=? AND event_token=?",
-            params,
-        )
-        return int(cur.rowcount or 0)
+        conn.execute("BEGIN IMMEDIATE")
+        stamp = _database().now()
+        for path, allow_emby, token in params:
+            cur = conn.execute(
+                "DELETE FROM strm_refresh_outbox WHERE path=? AND allow_emby=? AND event_token=?",
+                (path, allow_emby, token),
+            )
+            if cur.rowcount == 1:
+                _complete_request_work(conn, "refresh", refresh_work_key(path, bool(allow_emby)), stamp)
+                removed += 1
+    return removed
 
 
 def strm_metadata_job_is_current(
@@ -942,7 +955,9 @@ def group_changes_by_target(changes: object) -> dict[tuple[str, str], list[dict[
 def enqueue_strm_change_targets(
     changes: object, *, provider: str = DEFAULT_STRM_PROVIDER,
     not_before_seconds: float | None = 0.0,
-) -> int:
+    download_request_ids: object = None,
+    with_owners: bool = False,
+) -> int | tuple[int, list[dict[str, Any]]]:
     """登记变化目标目录；同步进行中的目标转入 dirty，不丢事件。
 
     ``not_before_seconds`` 用于把整理静默窗口持久化到队列：
@@ -950,8 +965,8 @@ def enqueue_strm_change_targets(
     - ``None``：合并变化但保留已有最早领取时间。
     """
     grouped = group_changes_by_target(changes)
-    if not grouped:
-        return 0
+    if not grouped and not download_request_ids:
+        return (0, []) if with_owners else 0
     database = _database()
     stamp = database.now()
     if not_before_seconds is None:
@@ -968,6 +983,8 @@ def enqueue_strm_change_targets(
         # 同时读到旧快照，后提交者会覆盖另一批变化。把读取、合并和写入
         # 放进同一立即写事务，保持“不丢事件”的队列契约。
         conn.execute("BEGIN IMMEDIATE")
+        from app.repositories.strm_request_ownership import _begin_request_owners, _attach_request_work
+        owners = _begin_request_owners(conn, download_request_ids, stamp)
         for (source_id, rel_dir), items in grouped.items():
             row = conn.execute(
                 "SELECT id,state,pending_changes_json,next_attempt_at "
@@ -982,7 +999,7 @@ def enqueue_strm_change_targets(
                 ensure_ascii=False,
             )
             if row is None:
-                conn.execute(
+                created = conn.execute(
                     "INSERT INTO strm_change_queue(provider,source_id,rel_dir,state,"
                     "pending_changes_json,created_at,updated_at,next_attempt_at) "
                     "VALUES(?,?,?,'queued',?,?,?,?)",
@@ -1015,8 +1032,10 @@ def enqueue_strm_change_targets(
                     "WHERE id=?",
                     (payload, stamp, resolved_next_attempt, int(row["id"])),
                 )
+            target_id = int(created.lastrowid) if row is None else int(row["id"])
+            _attach_request_work(conn, owners, "change", str(target_id))
             written += 1
-    return written
+    return (written, owners) if with_owners else written
 
 
 def reschedule_strm_change_targets(
@@ -1165,6 +1184,9 @@ def complete_strm_change_target(
                 int(expected_lease_generation),
             ),
         )
+        if cur.rowcount == 1 and state == "completed":
+            from app.repositories.strm_request_ownership import _complete_request_work
+            _complete_request_work(conn, "change", str(target_id), stamp)
         return state if cur.rowcount == 1 else "stale"
 
 

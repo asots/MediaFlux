@@ -1,13 +1,16 @@
-"""候选版本的升级、回退与 compare 声明须对应实际源码合同。"""
+"""已发布说明保持自洽；开发迁移不得回写历史，正式tag仍须匹配当前schema。"""
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from app import __version__
 from app.database import SCHEMA_VERSION
+from app.database_migrations import _SCHEMA_MIGRATIONS
 from tests.test_release_metadata import B
 
 
@@ -22,16 +25,32 @@ class ReleaseUpgradeNotesTests(unittest.TestCase):
         self.assertIsNotNone(span, "升级说明必须声明完整 schema 跨度")
         return int(span.group(1)), int(span.group(2))
 
-    def test_candidate_upgrade_target_matches_supported_schema(self):
-        previous, target = self.upgrade_span()
-        self.assertEqual(target, SCHEMA_VERSION)
+    def assert_supported_upgrade(self, previous, target):
+        if os.environ.get("GITHUB_REF", "").startswith("refs/tags/"):
+            self.assertEqual(target, SCHEMA_VERSION, "正式tag发布说明必须覆盖当前schema")
+        else:
+            # 普通修复可以增加迁移，但项目规则禁止改写已发布CHANGELOG。
+            self.assertLessEqual(target, SCHEMA_VERSION)
+            for version in range(target, SCHEMA_VERSION):
+                self.assertIn(version, _SCHEMA_MIGRATIONS, "开发schema缺少可达升级路径")
         self.assertLessEqual(previous, target)
 
+    def test_release_upgrade_target_is_supported_by_current_code(self):
+        self.assert_supported_upgrade(*self.upgrade_span())
+
+    def test_formal_tag_still_rejects_schema_drift(self):
+        previous, target = self.upgrade_span()
+        with patch.dict(os.environ, {"GITHUB_REF": f"refs/tags/v{__version__}"}), patch(
+            f"{__name__}.SCHEMA_VERSION", target + 1,
+        ):
+            with self.assertRaisesRegex(AssertionError, "正式tag发布说明必须覆盖当前schema"):
+                self.assert_supported_upgrade(previous, target)
+
     def test_rollback_warning_names_the_actual_new_schema(self):
-        previous, _target = self.upgrade_span()
+        previous, target = self.upgrade_span()
         self.assertRegex(
             self.section,
-            rf"schema{previous}\s*程序[^\n]*schema{SCHEMA_VERSION}\s*数据库",
+            rf"schema{previous}\s*程序[^\n]*schema{target}\s*数据库",
         )
         self.assertIn("离线恢复", self.section)
         self.assertIn("停止服务", self.section)

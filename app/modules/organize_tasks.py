@@ -112,6 +112,19 @@ class _OrderedSourceWriteGate:
         self.release()
 
 
+def _unresolved_skip_count(plans: Any) -> int:
+    """只统计已结束且没有媒体身份的识别失败，保留合法去重/待确认/探测。"""
+    return sum(
+        1 for plan in (plans or ())
+        if getattr(plan, "action", "") == "skip"
+        and (match := getattr(plan, "match", None)) is not None
+        and bool(getattr(match, "error", ""))
+        and not getattr(match, "need_confirm", False)
+        and not getattr(plan, "media_probe_pending", False)
+        and not (getattr(match, "tmdb_id", "") or getattr(match, "external_id", ""))
+    )
+
+
 def _merge_source_stats(aggregate: dict[str, object], stats: dict[str, Any]) -> None:
     """稳定合并单来源统计，供串行与并行调度复用。"""
     for key, value in stats.items():
@@ -1853,6 +1866,10 @@ class OrganizeTaskManager:
                         task_runtime=task_runtime,
                         notification_context=source_notification_contexts[index],
                     )
+                    # 身份失败的 skip 与合法重复文件不同：记录在对应来源，
+                    # 不能把同批其它已完成下载一起标记失败。
+                    stats = dict(stats)
+                    stats["unresolved_skipped"] = _unresolved_skip_count(_plans)
                     cleanup_context = (
                         source_execution_gate
                         if source_execution_gate is not None else nullcontext()
@@ -1998,17 +2015,26 @@ class OrganizeTaskManager:
                 or int(aggregate.get("audit_failures", 0) or 0)
             )
             pending_downloads: dict[int, int] = {}
-            if not stopped and not partial:
+            unresolved_downloads: dict[int, tuple[int, int]] = {}
+            if not stopped:
+                stats_by_root: dict[str, dict[str, int]] = {}
+                for item in source_results:
+                    source_stats = item.get("stats") or {}
+                    root_stats = stats_by_root.setdefault(str(item.get("id") or ""), {})
+                    for key in ("need_confirm", "unresolved_skipped", "moved"):
+                        root_stats[key] = root_stats.get(key, 0) + max(0, int(source_stats.get(key) or 0))
                 for request_id in download_request_ids or []:
                     request_row = db.get_download_request(int(request_id))
                     if request_row is None:
                         continue
-                    root_id = str(request_row["gy_target_dir"] or "")
-                    pending_count = sum(
-                        max(0, int((item.get("stats") or {}).get("need_confirm") or 0))
-                        for item in source_results if str(item.get("id") or "") == root_id
-                    )
-                    if pending_count and mark_staging_waiting_confirmation(int(request_id), task_id, pending_count):
+                    source_stats = stats_by_root.get(str(request_row["gy_target_dir"] or ""), {})
+                    unresolved = max(0, int(source_stats.get("unresolved_skipped") or 0))
+                    if unresolved:
+                        unresolved_downloads[int(request_id)] = (
+                            unresolved, max(0, int(source_stats.get("moved") or 0)),
+                        )
+                    pending_count = max(0, int(source_stats.get("need_confirm") or 0))
+                    if not partial and pending_count and mark_staging_waiting_confirmation(int(request_id), task_id, pending_count):
                         pending_downloads[int(request_id)] = pending_count
             notification_sent = False
             if source_results or stopped:
@@ -2061,6 +2087,10 @@ class OrganizeTaskManager:
                     if cleanup_failures:
                         aggregate["empty_dir_cleanup_failed"] = int(aggregate.get("empty_dir_cleanup_failed") or 0) + cleanup_failures
                         partial, status, message = True, "partial", "整理已结束，下载目录清理仍需核验"
+            # 任务汇总可以是 partial，但单个下载仍按自己的来源结果收尾。
+            request_base_status = status
+            if not stopped and int(aggregate.get("unresolved_skipped") or 0):
+                status, message = "partial", "部分媒体未匹配到元数据，请核对整理日志"
             structured_result = build_organize_result(
                 aggregate,
                 status=status,
@@ -2082,7 +2112,7 @@ class OrganizeTaskManager:
                 })
             for request_id in download_request_ids or []:
                 fields = {
-                    "organize_status": "requires_manual" if request_id in pending_downloads else status,
+                    "organize_status": "requires_manual" if request_id in pending_downloads else request_base_status,
                     "organize_error": (f"仍有 {pending_downloads[request_id]} 项媒体等待人工确认"
                                        if request_id in pending_downloads else ""),
                     "organize_finished_at": None if request_id in pending_downloads else db.now(),
@@ -2094,6 +2124,16 @@ class OrganizeTaskManager:
                         "organize_error": (
                             "整理任务已停止，可能已有部分文件完成移动；"
                             "请先核对整理日志，勿直接重复执行"
+                        ),
+                    })
+                elif request_id in unresolved_downloads and request_id not in pending_downloads:
+                    unresolved, moved = unresolved_downloads[request_id]
+                    fields.update({
+                        "organize_status": "partial" if moved or partial else "failed",
+                        "organize_started": -1,
+                        "organize_error": (
+                            f"仍有 {unresolved} 项媒体未匹配到元数据，未完成入库；"
+                            "请核对整理日志后修正匹配，勿直接重复下载"
                         ),
                     })
                 elif partial:
@@ -2130,7 +2170,7 @@ class OrganizeTaskManager:
                         "strm_status": strm_status, "strm_error": strm_error[:500],
                         "strm_finished_at": db.now(),
                     })
-                db.update_download_request(request_id, **fields)
+                db.update_download_request_and_sync_media_admission(request_id, **fields)
             if download_request_ids:
                 _publish_download_lifecycles(
                     list(download_request_ids), stats=aggregate,
@@ -2139,7 +2179,7 @@ class OrganizeTaskManager:
                 try:
                     db.finish_task_run(
                         run_id,
-                        "skipped" if stopped else ("partial" if partial else "success"),
+                        "skipped" if stopped else ("partial" if status == "partial" else "success"),
                         result=json.dumps(
                             structured_result, ensure_ascii=False, default=str
                         ),

@@ -346,7 +346,7 @@ class OfflineDecision:
         }
 
 
-def _is_http_torrent_url(url: str) -> bool:
+def _is_http_torrent_url(url: str, content_type: str = "") -> bool:
     """HTTP 是种子的传输载体，不是交给云盘保存的媒体文件协议。"""
     try:
         parsed = urlparse(str(url or "").strip())
@@ -354,6 +354,10 @@ def _is_http_torrent_url(url: str) -> bool:
         return False
     if parsed.scheme.lower() not in {"http", "https"}:
         return False
+    if str(content_type or "").split(";", 1)[0].strip().lower() in {
+        "application/x-bittorrent", "application/bittorrent",
+    }:
+        return True
     if unquote(parsed.path).lower().endswith(".torrent"):
         return True
     query = parse_qs(parsed.query)
@@ -364,10 +368,12 @@ def _is_http_torrent_url(url: str) -> bool:
 
 
 def _prepare_offline_resource(
-    url: str, torrent_data: bytes | None = None,
+    url: str, torrent_data: bytes | None = None, *, content_type: str = "",
 ) -> tuple[str, bytes | None]:
     """三个离线入口共用种子载体转换；失败不能降级成普通 HTTP 文件下载。"""
-    if not _is_http_torrent_url(url):
+    if not _is_http_torrent_url(url, content_type) and not (
+        torrent_data is not None and str(url).lower().startswith(("http://", "https://"))
+    ):
         return url, torrent_data
     from app.modules.download_dispatcher import (
         http_torrent_infohash_hint, parse_torrent_metadata, torrent_download_input,
@@ -387,10 +393,12 @@ def _prepare_offline_resource(
     return item.source_value, torrent_data
 
 
-def analyze_offline_url(url: str, title: str = "", rules: OfflineRules | None = None) -> OfflineDecision:
+def analyze_offline_url(
+    url: str, title: str = "", rules: OfflineRules | None = None, *, content_type: str = "",
+) -> OfflineDecision:
     rules = rules or OfflineRules.from_config()
     cleaned = (url or "").strip()
-    protocol = "magnet" if _is_http_torrent_url(cleaned) else detect_protocol(cleaned)
+    protocol = "magnet" if _is_http_torrent_url(cleaned, content_type) else detect_protocol(cleaned)
     if not cleaned:
         return OfflineDecision(False, "unknown", rules.target_dir_id, rules.target_dir_name, "链接不能为空")
     enabled = {
@@ -516,7 +524,10 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
     在已经得到明确 fileIndexes 后创建，用于后续下载落稳与安全整理。
     """
     rules = OfflineRules.from_config()
-    decision = analyze_offline_url(url, title=title, rules=rules)
+    decision = analyze_offline_url(
+        url, title=title, rules=rules,
+        content_type="application/x-bittorrent" if torrent_data is not None else "",
+    )
     if target_dir_id and decision.allowed:
         decision = OfflineDecision(
             True, decision.protocol, str(target_dir_id),

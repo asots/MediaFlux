@@ -97,8 +97,16 @@ def _request_ids(options: dict[str, object]) -> list[int]:
 
 
 def _update_strm_requests(options: dict[str, object], **fields) -> None:
+    owners = {int(owner["request_id"]): owner for owner in (options.get("download_request_owners") or [])}
     for request_id in _request_ids(options):
-        db.update_download_request(request_id, **fields)
+        owner = owners.get(request_id)
+        if owner is None:
+            # 历史内存入口仍可使用，但不能接管已进入新围栏的请求。
+            legacy = db.current_strm_request_owners([request_id])
+            if not legacy or int(legacy[0]["generation"]) != 0:
+                continue
+            owner = legacy[0]
+        db.update_strm_request_state(owner, **fields)
 
 
 def _refresh_notification_label(refresh: dict) -> str:
@@ -662,6 +670,10 @@ class STRMScheduler:
                     pending[key] = list(dict.fromkeys([
                         *list(pending.get(key) or []), *list(value or []),
                     ]))
+                elif key == "download_request_owners":
+                    merged = {int(owner["request_id"]): owner for owner in (pending.get(key) or [])}
+                    merged.update({int(owner["request_id"]): owner for owner in value or []})
+                    pending[key] = list(merged.values())
                 elif key in {
                     "uses_default_notification_scope", "has_silent_notification_scope",
                 }:
@@ -840,11 +852,14 @@ class STRMScheduler:
                 elif has_pending_organize and not pending_is_persisted_queue:
                     # 无 debounce 的后续触发加入现有静默批次时，不得把持久截止时间提前。
                     persist_not_before = None
+            request_owners: list[dict[str, object]] = []
+            owner_kwargs = ({"download_request_ids": download_request_ids, "request_owners": request_owners}
+                            if download_request_ids else {})
             if not self._persist_change_targets(
-                options.get("organize_changes"),
-                not_before_seconds=persist_not_before,
+                options.get("organize_changes"), not_before_seconds=persist_not_before, **owner_kwargs,
             ):
                 return {"ok": False, "error": "STRM 变化目标持久化失败，已取消同步"}
+            options["download_request_owners"] = request_owners
             if trigger_type == "organize" and (
                 quiet_seconds > 0 or has_pending_organize
             ):
@@ -905,14 +920,24 @@ class STRMScheduler:
 
     def _persist_change_targets(
         self, organize_changes: object, *, not_before_seconds: float | None = 0.0,
+        download_request_ids: object = None,
+        request_owners: list[dict[str, object]] | None = None,
     ) -> bool:
         """把整理变化写入唯一权威队列；失败时必须阻断同步，避免事件只存在内存。"""
-        if not organize_changes:
+        if not organize_changes and not download_request_ids:
             return True
         try:
-            db.enqueue_strm_change_targets(
-                organize_changes, not_before_seconds=not_before_seconds,
-            )
+            if download_request_ids:
+                _count, owners = db.enqueue_strm_change_targets(
+                    organize_changes, not_before_seconds=not_before_seconds,
+                    download_request_ids=download_request_ids, with_owners=True,
+                )
+                if request_owners is not None:
+                    request_owners.extend(owners)
+            else:
+                db.enqueue_strm_change_targets(
+                    organize_changes, not_before_seconds=not_before_seconds,
+                )
             return True
         except Exception:
             logger.exception("登记 STRM 变化目标队列失败")
@@ -1267,6 +1292,7 @@ class STRMScheduler:
                 media_server_refresh_enabled=options.get("media_server_refresh_override"),
                 changed_dirs=paths,
                 persist_only=True,
+                request_owners=options.get("download_request_owners"),
             )
 
         return persist
@@ -1641,11 +1667,10 @@ class STRMScheduler:
             # 任务记录初始化也属于持锁执行阶段。数据库异常必须经过 finally
             # 释放全局 STRM 锁，否则后续 Web、Telegram 与调度请求都会永久 busy。
             run_id = db.add_task_run(TASK_NAME, trigger_type)
-            for request_id in request_ids:
-                db.update_download_request(
-                    request_id, strm_run_id=run_id, strm_status="running",
-                    strm_error="", strm_finished_at=None,
-                )
+            _update_strm_requests(
+                options, strm_run_id=run_id, strm_status="running",
+                strm_error="", strm_finished_at=None,
+            )
             error = self.validate_config(auto_only=False)
             if error:
                 raise ValueError(error)
@@ -1697,6 +1722,19 @@ class STRMScheduler:
             # 持久队列是唯一权威来源：内存清单只是本轮的快捷路径，
             # 领取结果会补齐上一次进程中断或失败重试遗留的变化目标。
             claimed_targets = self._claim_change_targets(trigger_type, requested_mode)
+            recovered_owners = db.request_owners_for_work(
+                "change", [item["id"] for item in claimed_targets if item.get("id")],
+                claimed_targets=claimed_targets,
+            )
+            if recovered_owners:
+                owners = {int(owner["request_id"]): owner for owner in (options.get("download_request_owners") or [])}
+                owners.update({int(owner["request_id"]): owner for owner in recovered_owners})
+                options["download_request_owners"] = list(owners.values())
+                options["download_request_ids"] = list(dict.fromkeys([*request_ids, *owners]))
+                request_ids = _request_ids(options)
+                with self._state_lock:
+                    self._run_options["download_request_owners"] = list(owners.values())
+                _update_strm_requests(options, strm_run_id=run_id, strm_status="running", strm_error="", strm_finished_at=None)
             if claimed_targets:
                 lease_heartbeat = _ChangeTargetLeaseHeartbeat(
                     claimed_targets, max(30, get_int("STRM_CHANGE_LEASE_SECONDS", 900))
@@ -1835,6 +1873,7 @@ class STRMScheduler:
                         changed_paths=list(aggregate.get("changed_strm_paths") or []),
                         changed_dirs=list(aggregate.get("changed_dirs") or []),
                         persist_only=True,
+                        request_owners=options.get("download_request_owners"),
                     )
                 with self._state_lock:
                     for row in self._source_runtime:
@@ -1858,12 +1897,11 @@ class STRMScheduler:
                 db.finish_task_run(
                     run_id, "skipped", result=json.dumps(result, ensure_ascii=False)
                 )
-                for request_id in request_ids:
-                    db.update_download_request(
-                        request_id, strm_status="stopped",
-                        strm_error="服务停止，STRM 同步已安全中止",
-                        strm_finished_at=db.now(),
-                    )
+                _update_strm_requests(
+                    options, strm_status="stopped",
+                    strm_error="服务停止，STRM 同步已安全中止",
+                    strm_finished_at=db.now(),
+                )
                 _publish_linked_notification_threads(
                     options,
                     strm_status="已停止",
@@ -1896,6 +1934,7 @@ class STRMScheduler:
                 changed_paths=list(stats.get("changed_strm_paths") or []),
                 changed_dirs=list(stats.get("changed_dirs") or []),
                 immediate=trigger_type in {"manual", "telegram"},
+                request_owners=options.get("download_request_owners"),
             )
             stats["refresh_elapsed_seconds"] = round(
                 max(0.0, monotonic() - refresh_started), 3
@@ -1920,8 +1959,8 @@ class STRMScheduler:
                 or stats.get("clean_skipped")
             )
             refresh_pending = any(
-                value in {False, "failed"} for value in media_refresh.values()
-            )
+                value in {False, "failed", "pending"} for value in media_refresh.values()
+            ) or db.has_pending_strm_request_refresh(options.get("download_request_owners"))
             partial = bool(strm_partial or refresh_pending)
             result["strm_partial"] = strm_partial
             result["refresh_pending"] = refresh_pending
@@ -1937,12 +1976,8 @@ class STRMScheduler:
                 run_id, "partial" if partial else "success",
                 result=json.dumps(result, ensure_ascii=False),
             )
-            for request_id in request_ids:
-                db.update_download_request(
-                    request_id, strm_status=terminal_status,
-                    strm_error=partial_error,
-                    strm_finished_at=db.now(),
-                )
+            _update_strm_requests(options, strm_status=terminal_status,
+                                  strm_error=partial_error, strm_finished_at=db.now())
             # 先结算业务状态和变化目标，再发布通知。通知 outbox 短暂故障
             # 不能把已经成功落盘的 STRM 反向改写成失败并触发重复执行。
             if lease_heartbeat:
@@ -1976,11 +2011,8 @@ class STRMScheduler:
             self._set_progress("failed", 1, 1, "同步失败")
             if run_id:
                 db.finish_task_run(run_id, "failed", error=error_text)
-            for request_id in request_ids:
-                db.update_download_request(
-                    request_id, strm_status="failed", strm_error=error_text[:500],
-                    strm_finished_at=db.now(),
-                )
+            _update_strm_requests(options, strm_status="failed", strm_error=error_text[:500],
+                                  strm_finished_at=db.now())
             logger.exception("STRM 任务失败 trigger=%s: %s", trigger_type, error_text)
             _publish_linked_notification_threads(
                 options,
@@ -2062,6 +2094,7 @@ class STRMScheduler:
         media_server_refresh_enabled: bool | None = None,
         immediate: bool = False,
         persist_only: bool = False,
+        request_owners: object = None,
     ) -> dict[str, str]:
         """统一规划并保存刷新意图；关停时仅落盘，不唤醒消费者。"""
         if not has_changes:
@@ -2095,7 +2128,8 @@ class STRMScheduler:
         allow_emby = True if emby_enabled is None else bool(emby_enabled)
         # STRM 已经落盘，媒体库刷新必须独立交接。先写 durable outbox，再尝试
         # 投递统一刷新队列；投递失败只重试刷新，绝不重新生成 STRM。
-        entries = db.enqueue_strm_refresh_paths(targets, allow_emby=allow_emby)
+        owner_kwargs = {"request_owners": request_owners} if request_owners else {}
+        entries = db.enqueue_strm_refresh_paths(targets, allow_emby=allow_emby, **owner_kwargs)
         if persist_only:
             return {"媒体库": "pending"}
         try:

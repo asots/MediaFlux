@@ -220,6 +220,41 @@ def _bind_media_download_admission_conn(
     raise DownloadAdmissionBindingError("下载准入与请求绑定失败")
 
 
+def bind_verified_torrent_identity(
+    request_id: int, source_value: str, torrent_data: bytes, keys: tuple[str, ...],
+    *, pending_only: bool = False,
+) -> int:
+    """HTTP请求在云盘写入前原子绑定经校验的BT身份，返回唯一归属请求。"""
+    timestamp = now()
+    keys = _normalized_request_keys(keys[0], keys[1:])
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT kind,source_value,status,gy_status,torrent_data FROM download_requests WHERE id=?",
+            (int(request_id),),
+        ).fetchone()
+        if row is None or row["kind"] != "http" or row["source_value"] != source_value:
+            raise ValueError("下载请求状态已变化，未提交种子")
+        if pending_only:
+            # 准备结果只能补入尚未被认领的历史请求；竞争者已认领时由调用方重读状态。
+            if row["status"] != "pending":
+                return int(request_id)
+        elif (row["status"] not in {"submitting", "submitted", "downloading", "partial", "completed"}
+                or row["gy_status"] != "submitting"):
+            raise ValueError("下载请求状态已变化，未提交种子")
+        if row["torrent_data"] is not None and bytes(row["torrent_data"]) != torrent_data:
+            raise ValueError("下载请求种子已变化，未继续提交")
+        owners = _request_rows_for_keys(conn, keys, columns="id,status,request_key")
+        blockers = [r for r in owners if int(r["id"]) != int(request_id)
+                    and r["status"] not in {"failed", "cancelled", "resubmitted"}]
+        if blockers:
+            return int(_preferred_request_row(blockers, keys[0])["id"])
+        _register_request_keys(conn, int(request_id), keys, timestamp, replace=True)
+        conn.execute("UPDATE download_requests SET torrent_data=?,content_type='application/x-bittorrent',updated_at=? WHERE id=?",
+                     (torrent_data, timestamp, int(request_id)))
+        return int(request_id)
+
+
 def bind_media_download_admission_request(admission_id: int, request_id: int) -> bool:
     """在复用既有请求时，于任何后端副作用前持久化准入关联。"""
     timestamp = now()
@@ -236,6 +271,7 @@ def create_download_request(request_key: str, kind: str, title: str = "",
                             supersede_request_id: int | None = None,
                             alternate_request_keys: Iterable[str] | None = None,
                             admission_id: int | None = None,
+                            content_type: str = "",
                             initial_targets: str = "") -> tuple[int, bool]:
     """原子创建下载请求，并把等价历史 key 纳入同一防重边界。
 
@@ -271,9 +307,9 @@ def create_download_request(request_key: str, kind: str, title: str = "",
         if not rows:
             created = conn.execute(
                 "INSERT INTO download_requests(request_key,origin,chat_id,user_id,message_id,kind,title,"
-                "source_value,torrent_data,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "source_value,torrent_data,content_type,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (primary_key, origin, chat_id, user_id, message_id, kind, title, source_value,
-                 torrent_data, "pending", timestamp, timestamp),
+                 torrent_data, str(content_type or ""), "pending", timestamp, timestamp),
             )
             request_id = int(created.lastrowid)
             _register_request_keys(conn, request_id, keys, timestamp)
@@ -351,9 +387,9 @@ def create_download_request(request_key: str, kind: str, title: str = "",
 
         created = conn.execute(
             "INSERT INTO download_requests(request_key,origin,chat_id,user_id,message_id,kind,title,"
-            "source_value,torrent_data,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "source_value,torrent_data,content_type,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (primary_key, origin, chat_id, user_id, message_id, kind, title, source_value,
-             torrent_data, "pending", timestamp, timestamp),
+             torrent_data, str(content_type or ""), "pending", timestamp, timestamp),
         )
         request_id = int(created.lastrowid)
         _register_request_keys(conn, request_id, keys, timestamp)
@@ -616,7 +652,7 @@ def purge_expired_download_request_torrent_data(
         cur = conn.execute(
             "UPDATE download_requests SET torrent_data=NULL WHERE id IN ("
             "SELECT id FROM download_requests "
-            "WHERE kind='torrent' AND torrent_data IS NOT NULL AND ("
+            "WHERE kind IN ('torrent','http') AND torrent_data IS NOT NULL AND ("
             "status IN ('completed','failed','cancelled') OR ("
             "status='resubmitted' "
             "AND COALESCE(qb_status,'') IN ('','completed','failed','cancelled','resubmitted') "
@@ -944,6 +980,12 @@ def _update_download_request_conn(
     sets.append("updated_at=?")
     values.extend([timestamp, int(request_id)])
     conn.execute(f"UPDATE download_requests SET {', '.join(sets)} WHERE id=?", values)
+    if {"strm_status", "strm_error", "strm_finished_at", "strm_run_id"}.intersection(fields):
+        # 非当前队列工作写入的新状态会撤销旧失败的重试授权，即使错误文本相同。
+        conn.execute(
+            "UPDATE strm_request_work SET failed_lease_generation=-1 "
+            "WHERE request_id=? AND failed_lease_generation>=0", (int(request_id),),
+        )
     return True
 
 

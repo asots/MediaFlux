@@ -288,6 +288,7 @@ class RSSEntry:
     release_group: str = ""        # 发布组
     resolution: str = ""           # 分辨率
     series_title: str = ""         # 解析出的作品名，仅用于识别混合 RSS
+    content_type: str = ""         # 选中的 enclosure MIME，不作为可信BT身份
 
 
 class MikanParser:
@@ -332,7 +333,7 @@ class MikanParser:
 
         entries: list[RSSEntry] = []
         for it in feed.entries:
-            torrent = self._extract_torrent(it)
+            torrent, content_type = self._extract_download(it)
             guid = it.get("id") or it.get("guid") or it.get("link") or it.get("title", "")
             pub = self._format_date(it.get("published") or it.get("updated") or "")
             title = it.get("title", "").strip()
@@ -345,6 +346,7 @@ class MikanParser:
                 guid=guid,
                 pub_date=pub,
                 torrent_url=torrent,
+                content_type=content_type,
                 episode=info.get("episode", ""),
                 release_group=info.get("release_group", ""),
                 resolution=info.get("resolution", ""),
@@ -356,12 +358,26 @@ class MikanParser:
     @staticmethod
     def _extract_torrent(entry) -> str:
         """从 feed 条目提取种子链接：优先 enclosure，回退 link。"""
-        for enc in getattr(entry, "enclosures", []) or []:
-            href = enc.get("href", "")
-            if href:
-                return href
-        link = entry.get("link", "")
-        return link
+        return MikanParser._extract_download(entry)[0]
+
+    @staticmethod
+    def _extract_download(entry) -> tuple[str, str]:
+        from app.modules.offline import _is_http_torrent_url
+
+        enclosures = [
+            (str(enc.get("href") or "").strip(), str(enc.get("type") or "").strip())
+            for enc in (getattr(entry, "enclosures", []) or []) if enc.get("href")
+        ]
+        for href, mime in enclosures:
+            if href.lower().startswith("magnet:?") or _is_http_torrent_url(href, mime):
+                return href, mime
+        # 保留普通HTTP媒体下载；图片等伴随附件不能盖过有效BT附件。
+        for href, mime in enclosures:
+            if mime.lower().startswith(("video/", "audio/")):
+                return href, mime
+        if enclosures:
+            return enclosures[0]
+        return str(entry.get("link") or ""), ""
 
     @staticmethod
     def _format_date(raw: str) -> str:
@@ -639,6 +655,7 @@ class RSSEngine:
                     payload=json.dumps({
                         "link": entry.link,
                         "torrent_url": entry.torrent_url,
+                        "content_type": entry.content_type,
                         "episode": entry.episode,
                         "release_group": entry.release_group,
                         "resolution": entry.resolution,
@@ -739,12 +756,17 @@ class RSSEngine:
             infohash = cls._torrent_infohash(torrent_url)
             if infohash:
                 identity_hint = f"btih:{infohash}"
+        try:
+            payload = json.loads(cls._entry_value(entry, "payload", "{}") or "{}")
+        except (TypeError, ValueError):
+            payload = {}
         return DownloadInput(
             kind=item.kind,
             title=title,
             source_value=item.source_value,
             torrent_data=item.torrent_data,
             identity_hint=identity_hint,
+            content_type=str(payload.get("content_type") or "") if isinstance(payload, dict) else "",
         )
 
     @staticmethod
