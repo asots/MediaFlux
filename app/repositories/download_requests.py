@@ -778,9 +778,23 @@ def bind_download_request_guangya_staging(
         return cur.rowcount == 1
 
 
+def cancel_pending_download_request(request_id: int, *, error: str = "") -> bool:
+    """将未提交请求原子取消；不以 submitting 表示已取消的用户意图。"""
+    timestamp = now()
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE download_requests SET status='cancelled',targets='cancelled',"
+            "error=?,completed_at=?,updated_at=? WHERE id=? AND status='pending'",
+            (str(error or ""), timestamp, timestamp, int(request_id)),
+        )
+        return cur.rowcount == 1
+
+
 def _claim_download_request_conn(
     conn: sqlite3.Connection, request_id: int, targets: str, timestamp: str,
 ) -> bool:
+    if targets not in {"qb", "guangya", "both"}:
+        return False
     qb_status = "submitting" if targets in {"qb", "both"} else ""
     gy_status = "submitting" if targets in {"guangya", "both"} else ""
     cur = conn.execute(
@@ -1364,6 +1378,25 @@ def update_download_request_for_local_media_task(
         return int(cur.rowcount)
 
 
+def _recover_legacy_pending_cancellations_conn(
+    conn: sqlite3.Connection, timestamp: str,
+) -> int:
+    """统一旧取消意图，包括已被旧恢复器误标 manual_review 的记录。
+
+    旧取消认领会清空全部后端状态与 ID；任一后端证据存在都不能据此取消。
+    """
+    cur = conn.execute(
+        "UPDATE download_requests SET status='cancelled',"
+        "completed_at=COALESCE(completed_at,?),updated_at=? "
+        "WHERE status IN ('submitting','manual_review') AND targets='cancelled' "
+        "AND COALESCE(qb_status,'')='' AND COALESCE(gy_status,'')='' "
+        "AND COALESCE(qb_task_id,'')='' AND COALESCE(gy_task_id,'')='' "
+        "AND COALESCE(gy_task_ids,'[]') IN ('','[]')",
+        (timestamp, timestamp),
+    )
+    return int(cur.rowcount or 0)
+
+
 def recover_stale_submitting_download_requests(stale_minutes: int = 15) -> int:
     """把超时的后端提交精确转为人工核验，不覆盖其它已确认后端。"""
     minutes = max(1, int(stale_minutes or 15))
@@ -1374,6 +1407,8 @@ def recover_stale_submitting_download_requests(stale_minutes: int = 15) -> int:
     )
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # 已知未触发后端的历史取消不计入“结果未知、需人工核验”计数。
+        _recover_legacy_pending_cancellations_conn(conn, timestamp)
         regular_cur = conn.execute(
             "UPDATE download_requests SET status='manual_review',"
             "qb_status=CASE WHEN qb_status='submitting' THEN 'manual_review' ELSE qb_status END,"

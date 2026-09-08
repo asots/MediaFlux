@@ -2138,17 +2138,12 @@ def _handle_write_confirmation_callback(bot, call, telebot) -> None:
                 )
                 return
             if action["decision"] == "cancel":
-                if not db.claim_download_request(request_id, "cancelled"):
+                if not db.cancel_pending_download_request(request_id):
                     _edit_write_confirmation_message(
                         bot, call.message, "下载请求已处理", "请勿重复操作。"
                     )
                     bot.answer_callback_query(call.id, "该请求已处理", show_alert=True)
                     return
-                db.update_download_request(
-                    request_id,
-                    status="cancelled",
-                    completed_at=db.now(),
-                )
                 bot.answer_callback_query(call.id, "下载请求已取消")
                 if callable(getattr(bot, "edit_message_text", None)):
                     bot.edit_message_text(
@@ -2162,13 +2157,9 @@ def _handle_write_confirmation_callback(bot, call, telebot) -> None:
                 from app.modules.download_dispatcher import route_download_url
 
                 if route_download_url(str(row["source_value"] or "")) == "web":
-                    if db.claim_download_request(request_id, "cancelled"):
-                        db.update_download_request(
-                            request_id,
-                            status="cancelled",
-                            error="普通网页链接未提交下载",
-                            completed_at=db.now(),
-                        )
+                    db.cancel_pending_download_request(
+                        request_id, error="普通网页链接未提交下载",
+                    )
                     _edit_write_confirmation_message(
                         bot,
                         call.message,

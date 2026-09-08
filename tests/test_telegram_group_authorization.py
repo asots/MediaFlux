@@ -247,7 +247,7 @@ class TelegramGroupWriteAuthorizationTests(unittest.TestCase):
                 return_value=row,
             ),
             patch(
-                "app.bot.handlers.db.claim_download_request",
+                "app.bot.handlers.db.cancel_pending_download_request",
                 return_value=True,
             ) as claim_request,
             patch(
@@ -260,8 +260,8 @@ class TelegramGroupWriteAuthorizationTests(unittest.TestCase):
             handlers._handle_write_confirmation_callback(bot, call, SimpleNamespace())
 
         dispatch.assert_not_called()
-        claim_request.assert_called_once_with(77, "cancelled")
-        self.assertEqual(update_request.call_args.kwargs["status"], "cancelled")
+        claim_request.assert_called_once_with(77, error="普通网页链接未提交下载")
+        update_request.assert_not_called()
         self.assertIn("普通网页不会创建下载任务", bot.answers[-1][0][1])
         self.assertIn("未提交下载", bot.edits[-1][0][0])
 

@@ -986,24 +986,10 @@ def list_active_media_download_admissions(subscription_id: int | None = None) ->
         ).fetchall()
 
 
-def _sync_media_download_admission_for_request_conn(
-    conn: sqlite3.Connection,
-    request_id: int,
-    stamp: str,
-) -> int:
-    """使用调用方连接投影请求状态，供 tracker 的原子写路径复用。"""
-    try:
-        request = conn.execute(
-            "SELECT status,error,organize_started,organize_status,organize_error,"
-            "strm_status,strm_error,local_import_status,local_import_error "
-            "FROM download_requests WHERE id=?", (int(request_id),)
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            return 0
-        raise
-    if request is None:
-        return 0
+def _download_request_admission_projection(
+    request, stamp: str,
+) -> tuple[str, str, str | None] | None:
+    """即时收尾、启动恢复和批量巡检共享的唯一请求状态投影。"""
     request_status = str(request["status"] or "")
     status = ""
     completed_at = None
@@ -1038,7 +1024,32 @@ def _sync_media_download_admission_for_request_conn(
         status = "processing"
         error = str(request["error"] or "下载任务需要人工核验")[:500]
     else:
+        return None
+    return status, error, completed_at
+
+
+def _sync_media_download_admission_for_request_conn(
+    conn: sqlite3.Connection,
+    request_id: int,
+    stamp: str,
+) -> int:
+    """使用调用方连接投影请求状态，供 tracker 的原子写路径复用。"""
+    try:
+        request = conn.execute(
+            "SELECT status,error,organize_started,organize_status,organize_error,"
+            "strm_status,strm_error,local_import_status,local_import_error "
+            "FROM download_requests WHERE id=?", (int(request_id),)
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return 0
+        raise
+    if request is None:
         return 0
+    projection = _download_request_admission_projection(request, stamp)
+    if projection is None:
+        return 0
+    status, error, completed_at = projection
     cur = conn.execute(
         "UPDATE media_download_admissions SET status=?,error=?,completed_at=?,updated_at=? "
         "WHERE request_id=? AND status IN "
@@ -1126,7 +1137,7 @@ def reconcile_media_download_admissions(
             query_params.append(int(expected_revision))
         rows = conn.execute(
             "SELECT a.id,a.media_key,a.request_id,a.status AS admission_status,"
-            "r.id AS request_exists,r.status AS request_status,r.error AS request_error,"
+            "r.id AS request_exists,r.status,r.error,"
             "r.organize_started,r.organize_status,r.organize_error,"
             "r.strm_status,r.strm_error,r.local_import_status,r.local_import_error "
             "FROM media_download_admissions a "
@@ -1155,36 +1166,12 @@ def reconcile_media_download_admissions(
                 if row["request_exists"] is None:
                     status = "failed"
                     error = "下载请求不存在"
+                    completed_at = stamp
                 else:
-                    request_status = str(row["request_status"] or "")
-                    if request_status == "failed":
-                        status = "failed"
-                        error = str(row["request_error"] or "下载请求失败")[:500]
-                    elif request_status == "completed":
-                        failed_stage = next((
-                            (label, str(row[error_key] or ""))
-                            for state_key, error_key, label in (
-                                ("organize_status", "organize_error", "自动整理"),
-                                ("local_import_status", "local_import_error", "本地入库"),
-                                ("strm_status", "strm_error", "STRM 联动"),
-                            )
-                            if str(row[state_key] or "") == "failed"
-                        ), None)
-                        if failed_stage is None and int(row["organize_started"] or 0) < 0:
-                            failed_stage = ("自动整理", str(row["organize_error"] or ""))
-                        if failed_stage is not None:
-                            label, detail = failed_stage
-                            status = "failed"
-                            completed_at = stamp
-                            error = (
-                                f"下载后处理失败（{label}）：{detail or '请在下载记录中重试'}"
-                            )[:500]
-                        else:
-                            status = "processing"
-                    elif request_status in {"submitted", "downloading"}:
-                        status = request_status
-                    else:
+                    projection = _download_request_admission_projection(row, stamp)
+                    if projection is None:
                         continue
+                    status, error, completed_at = projection
             updates.append((
                 status,
                 error,

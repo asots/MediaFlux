@@ -863,6 +863,11 @@ def init_db() -> None:
                 "WHERE strm_status IN ('pending','queued','running')",
                 (timestamp, timestamp),
             )
+            from app.repositories.download_requests import (
+                _recover_legacy_pending_cancellations_conn,
+            )
+
+            _recover_legacy_pending_cancellations_conn(conn, timestamp)
             conn.execute(
                 "UPDATE download_requests SET status='manual_review',gy_status='manual_review',"
                 "error=CASE WHEN COALESCE(error,'')='' "
@@ -2369,6 +2374,7 @@ from app.repositories.agent_library_patrol import (  # noqa: E402,F401
 
 # ===== 下载请求认领与本地入库状态 =====
 from app.repositories.download_requests import (  # noqa: E402,F401
+    cancel_pending_download_request,
     cancel_qb_download_tracking,
     claim_download_request,
     claim_download_request_notification,
