@@ -57,15 +57,12 @@ class _QBTaskIndex:
 class _GYTaskIndex:
     def __init__(self, tasks: list[dict]):
         self.by_id: dict[str, dict] = {}
-        self.last_by_id: dict[str, dict] = {}
         self.by_source: dict[str, dict] = {}
         self.by_title: dict[str, dict] = {}
         self.unique_target: dict[str, dict | None] = {}
         for task in tasks:
             task_id = str(task.get("id") or "")
             self.by_id.setdefault(task_id, task)
-            # 旧批量任务归并使用字典推导，重复 ID 取最后项；单项匹配取首项。
-            self.last_by_id[task_id] = task
             raw = task.get("raw") if isinstance(task.get("raw"), dict) else {}
             self.by_source.setdefault(str(raw.get("url") or raw.get("sourceUrl") or ""), task)
             self.by_title.setdefault(str(task.get("name") or "").strip().lower(), task)
@@ -356,7 +353,7 @@ class DownloadTracker:
         if gy_status in {"submitted", "downloading", "outcome_unknown"}:
             task_ids = self._parse_gy_task_ids(row)
             if task_ids and gy_available:
-                task_by_id = gy_tasks.last_by_id
+                task_by_id = gy_tasks.by_id
                 matched = [task_by_id[task_id] for task_id in task_ids if task_id in task_by_id]
                 expected_batches = max(len(task_ids), int(self._row_value(row, "gy_batch_count", 0) or 0))
                 states = [self._gy_task_state(task) for task in matched]

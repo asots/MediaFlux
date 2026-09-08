@@ -450,7 +450,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0], 0)
 
-    def test_pending_duplicate_returns_existing_request_without_second_cloud_write(self):
+    def test_submitting_duplicate_returns_existing_request_without_second_cloud_write(self):
         from app.modules.share_transfer import create_share_request, share_request_key
 
         key = share_request_key(
@@ -470,7 +470,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["accepted"])
         self.assertTrue(result["duplicate"])
         self.assertEqual(result["request_id"], existing_id)
-        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["status"], "submitting")
         self.assertEqual(self.client.restore_calls, [])
 
     def test_cloud_failure_does_not_persist_or_return_upstream_signed_url(self):

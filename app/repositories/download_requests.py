@@ -235,13 +235,16 @@ def create_download_request(request_key: str, kind: str, title: str = "",
                             origin: str = "telegram", *,
                             supersede_request_id: int | None = None,
                             alternate_request_keys: Iterable[str] | None = None,
-                            admission_id: int | None = None) -> tuple[int, bool]:
+                            admission_id: int | None = None,
+                            initial_targets: str = "") -> tuple[int, bool]:
     """原子创建下载请求，并把等价历史 key 纳入同一防重边界。
 
     运行中的同源请求继续幂等返回；用户再次显式提交已经完成、失败或取消的普通下载时，
     保留旧请求作为历史尝试，并创建新的 canonical 请求。``manual_review`` 仅允许
     待处理页显式传入 ``supersede_request_id`` 时创建 successor。
     """
+    if initial_targets not in {"", "qb", "guangya", "both"}:
+        raise ValueError("未知下载认领目标")
     retryable_kinds = {"magnet", "torrent", "ed2k", "http"}
     terminal_statuses = {"completed", "failed", "cancelled"}
     keys = _normalized_request_keys(request_key, alternate_request_keys)
@@ -249,6 +252,10 @@ def create_download_request(request_key: str, kind: str, title: str = "",
     timestamp = now()
     with get_conn() as conn:
         def finish(request_id: int, created: bool) -> tuple[int, bool]:
+            if created and initial_targets and not _claim_download_request_conn(
+                conn, int(request_id), initial_targets, timestamp
+            ):
+                raise RuntimeError("新下载请求未能认领")
             _bind_media_download_admission_conn(
                 conn, admission_id, int(request_id), timestamp
             )
@@ -389,6 +396,7 @@ def create_share_transfer_request(
         chat_id=chat_id,
         message_id="",
         origin=origin,
+        initial_targets="guangya",
     )
 
 
@@ -420,30 +428,36 @@ def finish_share_transfer_request(
     staging_name: str = "",
     staging_cleanup_status: str = "",
     staging_cleanup_error: str = "",
-) -> None:
+) -> bool:
     """原子落盘分享转存结果，并接入既有 tracker 所读取的请求状态。"""
     timestamp = now()
     normalized_failure = (
         failure_status if failure_status in {"failed", "manual_review"} else "failed"
     )
-    status = "completed" if success else normalized_failure
     gy_status = "completed" if success else normalized_failure
     log_status = "success" if success else "failed"
     safe_error = str(error or "")
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE download_requests SET targets='guangya',status=?,gy_status=?,"
-            "gy_target_dir=?,gy_target_name=?,gy_isolated=?,gy_staging_parent_dir=?,"
-            "gy_staging_name=?,gy_staging_cleanup_status=?,gy_staging_cleanup_error=?,"
-            "error=?,completed_at=?,updated_at=? WHERE id=?",
-            (
-                status, gy_status, str(target_dir_id or "0"),
-                str(target_dir_name or "根目录"), 1 if isolated else 0,
-                str(staging_parent_dir or ""), str(staging_name or ""),
-                str(staging_cleanup_status or ""), str(staging_cleanup_error or ""),
-                safe_error, timestamp, timestamp, request_id,
-            ),
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute(
+            "SELECT 1 FROM download_requests WHERE id=? AND kind='guangya_share'",
+            (int(request_id),),
+        ).fetchone():
+            return False
+        status = _finalize_download_request_submission_conn(
+            conn, request_id, ("guangya",),
+            targets="guangya", gy_status=gy_status,
+            gy_target_dir=str(target_dir_id or "0"),
+            gy_target_name=str(target_dir_name or "根目录"),
+            gy_isolated=1 if isolated else 0,
+            gy_staging_parent_dir=str(staging_parent_dir or ""),
+            gy_staging_name=str(staging_name or ""),
+            gy_staging_cleanup_status=str(staging_cleanup_status or ""),
+            gy_staging_cleanup_error=str(staging_cleanup_error or ""),
+            error=safe_error,
         )
+        if status is None:
+            return False
         conn.execute(
             "INSERT INTO download_log(source,title,path,status,request_id,progress,error,"
             "created_at,updated_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -453,6 +467,8 @@ def finish_share_transfer_request(
                 1.0 if success else 0.0, safe_error, timestamp, timestamp, timestamp,
             ),
         )
+
+        return True
 
 
 def get_download_request(request_id: int) -> sqlite3.Row | None:
@@ -762,24 +778,30 @@ def bind_download_request_guangya_staging(
         return cur.rowcount == 1
 
 
-def claim_download_request(request_id: int, targets: str) -> bool:
-    """原子认领待选择请求，防 callback 重放和并发重复提交。"""
+def _claim_download_request_conn(
+    conn: sqlite3.Connection, request_id: int, targets: str, timestamp: str,
+) -> bool:
     qb_status = "submitting" if targets in {"qb", "both"} else ""
     gy_status = "submitting" if targets in {"guangya", "both"} else ""
+    cur = conn.execute(
+        "UPDATE download_requests SET targets=?,status='submitting',"
+        "qb_status=?,gy_status=?,qb_task_id='',gy_task_id='',gy_task_ids='[]',gy_batch_count=0,"
+        "gy_expected_file_count=0,gy_settle_observed_file_count=0,gy_settle_attempts=0,"
+        "gy_settle_snapshot='',gy_settle_stable_count=0,gy_selection_mode='',gy_unverified_manifest=0,"
+        "organize_started=0,organize_attempts=0,organize_next_retry_at=NULL,"
+        "organize_task_id='',organize_run_id=NULL,organize_status='',organize_error='',organize_finished_at=NULL,"
+        "strm_run_id=NULL,strm_status='',strm_error='',strm_finished_at=NULL,"
+        "completed_at=NULL,error='',attention_cleared_at=NULL,attention_clear_note='',updated_at=? "
+        "WHERE id=? AND status='pending'",
+        (targets, qb_status, gy_status, timestamp, request_id),
+    )
+    return cur.rowcount > 0
+
+
+def claim_download_request(request_id: int, targets: str) -> bool:
+    """原子认领待选择请求，防 callback 重放和并发重复提交。"""
     with get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE download_requests SET targets=?,status='submitting',"
-            "qb_status=?,gy_status=?,qb_task_id='',gy_task_id='',gy_task_ids='[]',gy_batch_count=0,"
-            "gy_expected_file_count=0,gy_settle_observed_file_count=0,gy_settle_attempts=0,"
-            "gy_settle_snapshot='',gy_settle_stable_count=0,gy_selection_mode='',gy_unverified_manifest=0,"
-            "organize_started=0,organize_attempts=0,organize_next_retry_at=NULL,"
-            "organize_task_id='',organize_run_id=NULL,organize_status='',organize_error='',organize_finished_at=NULL,"
-            "strm_run_id=NULL,strm_status='',strm_error='',strm_finished_at=NULL,"
-            "completed_at=NULL,error='',attention_cleared_at=NULL,attention_clear_note='',updated_at=? "
-            "WHERE id=? AND status='pending'",
-            (targets, qb_status, gy_status, now(), request_id),
-        )
-        return cur.rowcount > 0
+        return _claim_download_request_conn(conn, request_id, targets, now())
 
 
 def claim_download_request_organize(request_id: int) -> bool:
@@ -1168,7 +1190,8 @@ def apply_download_tracker_update(
         ).fetchone()
 
 
-def finalize_download_request_submission(
+def _finalize_download_request_submission_conn(
+    conn: sqlite3.Connection,
     request_id: int,
     claimed_targets: Iterable[str],
     **fields,
@@ -1194,50 +1217,61 @@ def finalize_download_request_submission(
     if "guangya" in normalized:
         conditions.append("gy_status='submitting'")
 
+    row = conn.execute(
+        "SELECT status,qb_status,gy_status,error FROM download_requests WHERE "
+        + " AND ".join(conditions),
+        values,
+    ).fetchone()
+    if not row:
+        return None
+
+    updates = {
+        key: value for key, value in fields.items()
+        if key in _DOWNLOAD_REQUEST_UPDATE_FIELDS and key != "status"
+    }
+    effective_qb = str(updates.get("qb_status", row["qb_status"]) or "")
+    effective_gy = str(updates.get("gy_status", row["gy_status"]) or "")
+    statuses = [status for status in (effective_qb, effective_gy) if status]
+    if any(status == "manual_review" for status in statuses):
+        root_status = "manual_review"
+    elif any(
+        status in {"submitting", "submitted", "downloading", "outcome_unknown"}
+        for status in statuses
+    ):
+        root_status = "submitted"
+    elif any(status == "completed" for status in statuses):
+        root_status = "completed"
+    else:
+        root_status = "failed"
+
+    updates["status"] = root_status
+    updates["completed_at"] = (
+        timestamp if root_status in {"completed", "failed", "manual_review"} else None
+    )
+    if not _update_download_request_conn(conn, int(request_id), updates, timestamp):
+        return None
+
+    from app.repositories.media_subscriptions import (  # 局部导入避免仓储循环加载
+        _sync_media_download_admission_for_request_conn,
+    )
+
+    _sync_media_download_admission_for_request_conn(
+        conn, int(request_id), timestamp
+    )
+    return root_status
+
+
+def finalize_download_request_submission(
+    request_id: int,
+    claimed_targets: Iterable[str],
+    **fields,
+) -> str | None:
+    """按持久认领原子收尾；分享与普通下载共用同一迟到结果栅栏。"""
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT status,qb_status,gy_status,error FROM download_requests WHERE "
-            + " AND ".join(conditions),
-            values,
-        ).fetchone()
-        if not row:
-            return None
-
-        updates = {
-            key: value for key, value in fields.items()
-            if key in _DOWNLOAD_REQUEST_UPDATE_FIELDS and key != "status"
-        }
-        effective_qb = str(updates.get("qb_status", row["qb_status"]) or "")
-        effective_gy = str(updates.get("gy_status", row["gy_status"]) or "")
-        statuses = [status for status in (effective_qb, effective_gy) if status]
-        if any(status == "manual_review" for status in statuses):
-            root_status = "manual_review"
-        elif any(
-            status in {"submitting", "submitted", "downloading", "outcome_unknown"}
-            for status in statuses
-        ):
-            root_status = "submitted"
-        elif any(status == "completed" for status in statuses):
-            root_status = "completed"
-        else:
-            root_status = "failed"
-
-        updates["status"] = root_status
-        updates["completed_at"] = (
-            timestamp if root_status in {"completed", "failed", "manual_review"} else None
+        return _finalize_download_request_submission_conn(
+            conn, request_id, claimed_targets, **fields
         )
-        if not _update_download_request_conn(conn, int(request_id), updates, timestamp):
-            return None
-
-        from app.repositories.media_subscriptions import (  # 局部导入避免仓储循环加载
-            _sync_media_download_admission_for_request_conn,
-        )
-
-        _sync_media_download_admission_for_request_conn(
-            conn, int(request_id), timestamp
-        )
-        return root_status
 
 
 def link_download_request_to_local_media_task(

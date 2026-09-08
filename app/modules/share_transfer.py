@@ -10,7 +10,7 @@ import json
 import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
@@ -531,7 +531,38 @@ def create_share_request(
         else:
             return _result_from_existing(row)
 
-    with _guangya_client_scope(client) as client:
+    def current_result() -> dict[str, Any]:
+        # 超时恢复或人工操作已经接管，旧提交者不能再报告成功或触发后处理。
+        row = db.get_download_request(request_id)
+        if row is None:
+            raise RuntimeError("分享转存请求状态丢失")
+        return _result_from_existing(row)
+
+    def finish(**fields) -> dict[str, Any] | None:
+        if db.finish_share_transfer_request(request_id, **fields):
+            return None
+        return current_result()
+
+    def preparation_failed(error: str) -> dict[str, Any]:
+        stale = finish(
+            success=False, target_dir_id=snapshot.target_id,
+            target_dir_name=persisted_target_name, title=title, error=error,
+        )
+        if stale is not None:
+            return stale
+        return {
+            "success": False, "created": True, "duplicate": False,
+            "retried": retried, "request_id": request_id, "count": 0,
+            "status": "failed", "error": error,
+        }
+
+    with ExitStack() as stack:
+        try:
+            client = stack.enter_context(_guangya_client_scope(client))
+        except Exception as exc:
+            # 尚未尝试任何云写，明确失败允许既有的一次显式重试。
+            logger.warning("光鸭分享客户端初始化失败 (%s)", type(exc).__name__)
+            return preparation_failed("光鸭客户端初始化失败，请重新确认后重试")
         organize_target = str(get("GY_ORGANIZE_TARGET_DIR", "") or "").strip()
         auto_follow_up = bool(
             organize_target not in {"", "0"}
@@ -539,19 +570,7 @@ def create_share_request(
         )
         if not client.logged_in:
             error = "光鸭未登录，请先重新登录"
-            db.finish_share_transfer_request(
-                request_id,
-                success=False,
-                target_dir_id=snapshot.target_id,
-                target_dir_name=persisted_target_name,
-                title=title,
-                error=error,
-            )
-            return {
-                "success": False, "created": True, "duplicate": False,
-                "retried": retried,
-                "request_id": request_id, "count": 0, "status": "failed", "error": error,
-            }
+            return preparation_failed(error)
 
         effective_target_id = snapshot.target_id
         effective_target_name = persisted_target_name
@@ -608,37 +627,18 @@ def create_share_request(
                                 raise
                 except Exception as exc:
                     error = redact_sensitive_text(f"创建分享隔离目录失败：{exc}")
-                    db.finish_share_transfer_request(
-                        request_id, success=False, target_dir_id=snapshot.target_id,
-                        target_dir_name=persisted_target_name, title=title, error=error,
-                        failure_status="failed",
-                    )
-                    return {
-                        "success": False, "created": True, "duplicate": False,
-                        "retried": retried, "request_id": request_id, "count": 0,
-                        "status": "failed", "error": error,
-                    }
+                    return preparation_failed(error)
                 if not effective_target_id:
                     error = "创建分享隔离目录失败"
-                    db.finish_share_transfer_request(
-                        request_id, success=False, target_dir_id=snapshot.target_id,
-                        target_dir_name=persisted_target_name, title=title, error=error,
-                        failure_status="failed",
-                    )
-                    return {
-                        "success": False, "created": True, "duplicate": False,
-                        "retried": retried, "request_id": request_id, "count": 0,
-                        "status": "failed", "error": error,
-                    }
+                    return preparation_failed(error)
                 effective_target_name = f"{persisted_target_name} / {staging_name}"
                 isolated = True
-                db.update_download_request(
-                    request_id, gy_target_dir=effective_target_id,
-                    gy_target_name=effective_target_name, gy_isolated=1,
-                    gy_staging_parent_dir=staging_parent_id,
-                    gy_staging_name=staging_name, gy_staging_cleanup_status="pending",
-                    gy_staging_cleanup_error="",
-                )
+            if not db.bind_download_request_guangya_staging(
+                request_id, staging_id=effective_target_id,
+                parent_id=staging_parent_id, staging_name=staging_name,
+                target_name=effective_target_name,
+            ):
+                return current_result()
 
         try:
             result = client.restore_share(
@@ -660,8 +660,7 @@ def create_share_request(
             failure_status = "manual_review"
             error = "光鸭转存结果不确定，为避免重复转存已停止重试，请到目标目录核对"
 
-        db.finish_share_transfer_request(
-            request_id,
+        stale = finish(
             success=success,
             target_dir_id=effective_target_id,
             target_dir_name=effective_target_name,
@@ -674,6 +673,8 @@ def create_share_request(
             staging_name=staging_name,
             staging_cleanup_status="pending" if isolated else "",
         )
+        if stale is not None:
+            return stale
         if success:
             if auto_follow_up:
                 # 不直接启动整理/STRM/刷新，只唤醒既有 tracker 按现有配置决策。
