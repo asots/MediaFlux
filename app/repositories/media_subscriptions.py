@@ -994,7 +994,11 @@ def _download_request_admission_projection(
     status = ""
     completed_at = None
     error = ""
-    if request_status == "failed":
+    if request_status == "cancelled":
+        status = "cancelled"
+        completed_at = stamp
+        error = str(request["error"] or "下载请求已取消")[:500]
+    elif request_status == "failed":
         status = "failed"
         completed_at = stamp
         error = str(request["error"] or "下载请求失败")[:500]

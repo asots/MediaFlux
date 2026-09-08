@@ -1839,13 +1839,20 @@ class MediaSubscriptionService:
                 "下载提交失败", status_code=502, code="download_failed"
             ) from exc
         request_id = int(result.get("request_id") or 0)
+        request_row = db.get_download_request(request_id) if request_id else None
+        request_status = str(request_row["status"] or "") if request_row else ""
+        if request_status == "cancelled":
+            # pending 请求可在准入绑定与后端认领之间取消；duplicate 不是提交证据。
+            # 也同步取消后才绑定的准入，候选仍保持 available，允许用户重新选择。
+            db.sync_media_download_admission_for_request(request_id)
+            raise MediaSubscriptionError(
+                "下载请求已取消，可重新选择候选资源", status_code=409, code="cancelled"
+            )
         manual_review = str(result.get("status") or "") == "manual_review"
         if result.get("ok") or result.get("duplicate") or manual_review:
             db.update_media_subscription_candidate(
                 int(candidate["id"]), status="submitted", request_id=request_id or None
             )
-            request_row = db.get_download_request(request_id) if request_id else None
-            request_status = str(request_row["status"] or "") if request_row else ""
             admission_status = {
                 "downloading": "downloading",
                 "completed": "processing",
@@ -1867,13 +1874,10 @@ class MediaSubscriptionService:
         else:
             message = str(result.get("error") or "下载提交失败")[:500]
             if request_id and message in {"下载提交失败", "下载处理失败"}:
-                request_row = db.get_download_request(request_id)
                 dispatch_error = str(request_row["error"] or "").strip() if request_row else ""
                 if dispatch_error:
                     message = redact_sensitive_text(dispatch_error)[:500]
             if request_id:
-                request_row = db.get_download_request(request_id)
-                request_status = str(request_row["status"] or "") if request_row else ""
                 admission_status = {
                     "failed": "failed",
                     "submitted": "submitted",

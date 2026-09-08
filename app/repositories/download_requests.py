@@ -863,15 +863,23 @@ def bind_download_request_guangya_staging(
 
 
 def cancel_pending_download_request(request_id: int, *, error: str = "") -> bool:
-    """将未提交请求原子取消；不以 submitting 表示已取消的用户意图。"""
+    """原子取消未提交请求并释放其准入；已被后端认领的请求保持防重。"""
     timestamp = now()
     with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "UPDATE download_requests SET status='cancelled',targets='cancelled',"
             "error=?,completed_at=?,updated_at=? WHERE id=? AND status='pending'",
             (str(error or ""), timestamp, timestamp, int(request_id)),
         )
-        return cur.rowcount == 1
+        if cur.rowcount != 1:
+            return False
+        from app.repositories.media_subscriptions import (  # 局部导入避免仓储循环加载
+            _sync_media_download_admissions_conn,
+        )
+
+        _sync_media_download_admissions_conn(conn, int(request_id), timestamp)
+        return True
 
 
 def _claim_download_request_conn(
