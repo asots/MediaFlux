@@ -561,6 +561,101 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
             page.locator("#ms_sites").evaluate("el => el === document.activeElement")
         )
 
+    def prepare_manual_run(self, name):
+        self.manual(name)
+        self.wait_manual(name)
+        self.page.locator(".gy-scrape-candidate").first.click()
+        self.page.wait_for_function(
+            "!document.querySelector('#gyScrapeRunBtn').disabled"
+        )
+
+    def auto(self, name):
+        self.page.locator(f'[data-media-id="{name}"] .gy-dir-action-btn').click()
+        self.page.locator('[data-scrape-action="auto"]').click()
+
+    def test_manual_late_submission_error_cannot_release_new_submission(self):
+        page = self.make_page("guangya")
+        self.prepare_manual_run("A")
+        self.hold_reply(SCRAPE + "/run", "old-run", {"error": "old failure"}, 500)
+        page.locator("#gyScrapeRunBtn").click()
+        self.wait_reply("old-run")
+        page.locator("#gyScrapeCloseBtn").click()
+        self.prepare_manual_run("B")
+        self.hold_reply(SCRAPE + "/run", "new-run", {"error": "current failure"}, 500)
+        page.locator("#gyScrapeRunBtn").click()
+        self.wait_reply("new-run")
+        self.release_reply("old-run")
+        self.assertTrue(page.locator("#gyScrapeRunBtn").is_disabled())
+        self.assertIn("提交中", page.locator("#gyScrapeRunBtn").inner_text())
+        self.assertTrue(page.locator("#appMessageModal").is_hidden())
+        self.release_reply("new-run")
+        self.assertTrue(page.locator("#gyScrapeRunBtn").is_enabled())
+        self.assertIn("current failure", page.locator("#appMessageText").inner_text())
+
+    def test_auto_late_manual_fallback_cannot_replace_new_editor(self):
+        page = self.make_page("guangya")
+        self.hold_reply(
+            SCRAPE + "/run",
+            "auto-A",
+            {
+                "status": "requires_manual",
+                "candidates": [candidate(101)],
+                "suggested_query": "stale-A",
+                "message": "old fallback",
+            },
+        )
+        self.auto("A")
+        page.get_by_role("button", name="确认并自动刮削", exact=True).click()
+        self.wait_reply("auto-A")
+        self.manual("B")
+        self.wait_manual("B")
+        page.locator("#gyScrapeQuery").fill("draft-B")
+        self.release_reply("auto-A")
+        self.assertEqual(page.locator("#gyScrapeQuery").input_value(), "draft-B")
+        self.assertEqual(
+            page.locator("#gyScrapeDirectory").inner_text(), "B · 1 个视频"
+        )
+        self.assertTrue(page.locator("#appMessageModal").is_hidden())
+        page.locator("#gyScrapeCloseBtn").click()
+        self.settle()
+        self.assertTrue(page.locator("#gyScrapeModal").is_hidden())
+
+    def test_auto_late_inspection_does_not_open_confirmation_over_new_editor(self):
+        page = self.make_page("guangya", 390)
+        self.hold_reply(SCRAPE + "/inspect", "auto-inspect")
+        self.auto("A")
+        self.wait_reply("auto-inspect")
+        self.manual("B")
+        self.wait_manual("B")
+        self.release_reply("auto-inspect")
+        self.assertTrue(page.locator("#appConfirmModal").is_hidden())
+        self.assertEqual(
+            page.locator("#gyScrapeDirectory").inner_text(), "B · 1 个视频"
+        )
+        self.assertFalse(any(r["path"] == SCRAPE + "/run" for r in self.requests))
+
+    def test_auto_current_manual_fallback_still_opens(self):
+        page = self.make_page("guangya")
+        self.hold_reply(
+            SCRAPE + "/run",
+            "current-auto",
+            {
+                "status": "requires_manual",
+                "candidates": [candidate(101)],
+                "suggested_query": "review-A",
+                "message": "select manually",
+            },
+        )
+        self.auto("A")
+        page.get_by_role("button", name="确认并自动刮削", exact=True).click()
+        self.wait_reply("current-auto")
+        self.release_reply("current-auto")
+        self.wait_manual("A")
+        self.assertEqual(page.locator("#gyScrapeQuery").input_value(), "review-A")
+        self.assertIn(
+            "select manually", page.locator("#gyScrapePlanSummary").inner_text()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

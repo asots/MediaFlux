@@ -1030,6 +1030,7 @@
             await searchCandidates();
         }
         if (isCurrent()) setRowState(row, action, 'idle');
+        return isCurrent() ? version : null;
     }
 
     const TASK_POLL_INTERVAL_MS = 1000;
@@ -1283,7 +1284,7 @@
     });
 
     async function runManual() {
-        if (!state.preview) return;
+        if (!state.preview || elements.run.disabled) return;
         const previewId = state.preview.preview_id;
         const directory = state.activeDirectory;
         const row = state.activeRow;
@@ -1309,6 +1310,7 @@
             }
             pollTask(task.task_id, directory, row, action, parentId);
         } catch (error) {
+            if (generation !== state.requestVersion) return;
             elements.run.disabled = false;
             elements.run.querySelector('span').textContent = '确认并开始刮削';
             window.appAlert?.({type: 'error', title: '任务启动失败', message: error.message});
@@ -1317,7 +1319,21 @@
 
     async function runAuto(directory, row, action) {
         const parentId = window.gyNavigator?.state?.().id || '';
-        const inspection = await inspectDirectory(directory, row, action);
+        // 自动检查也可能打开确认/人工编辑窗，必须服从同一个编辑意图代次。
+        invalidateManualInspection();
+        const version = state.manualVersion;
+        const isCurrent = () => version === state.manualVersion;
+        const pendingInspection = {controller: new AbortController(), row, action};
+        state.manualInspection = pendingInspection;
+        let inspection;
+        try {
+            inspection = await inspectDirectory(directory, row, action, {
+                signal: pendingInspection.controller.signal, isCurrent,
+            });
+        } finally {
+            if (state.manualInspection === pendingInspection) state.manualInspection = null;
+        }
+        if (!isCurrent()) return;
         const counts = inspection.counts || {};
         const pending = Number(counts.pending_video || 0);
         const confirmed = await window.appConfirm?.({
@@ -1331,7 +1347,7 @@
             ].filter(Boolean).join('；'),
             confirmText: '确认并自动刮削',
         });
-        if (!confirmed) {
+        if (!confirmed || !isCurrent()) {
             setRowState(row, action, 'idle');
             return;
         }
@@ -1342,7 +1358,12 @@
                 inspection_id: inspection.inspection_id,
             });
             if (result.status === 'requires_manual') {
-                await openManual(directory, row, action, inspection, result.candidates || []);
+                if (!isCurrent()) {
+                    setRowState(row, action, 'idle', '自动匹配需要人工确认，请重新打开手动刮削');
+                    return;
+                }
+                const openedVersion = await openManual(directory, row, action, inspection, result.candidates || []);
+                if (openedVersion !== state.manualVersion) return;
                 elements.query.value = result.suggested_query || inspection.suggested_query;
                 elements.planSummary.textContent = result.message || '请选择候选后继续';
                 return;
@@ -1356,7 +1377,7 @@
             );
         } catch (error) {
             setRowState(row, action, 'error', error.message);
-            window.appAlert?.({type: 'error', title: '自动刮削失败', message: error.message});
+            if (isCurrent()) window.appAlert?.({type: 'error', title: '自动刮削失败', message: error.message});
         }
     }
 
