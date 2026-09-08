@@ -1191,8 +1191,9 @@ class RSSEngine:
         if not auto_guard():
             return {"refresh": refreshed, "error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True}
         rows = db.list_rss_entries(
-            sub_id=sub_id, status="pending", order="received_desc"
+            sub_id=sub_id, status="pending", order="received_desc", include_total=True,
         )
+        pending_total = int(rows[0]["total_count"]) if rows else 0
         subscription = db.get_rss_subscription(sub_id)
         exclude = self._split_keywords(
             str(subscription["exclude_keywords"] or "") if subscription else ""
@@ -1264,7 +1265,7 @@ class RSSEngine:
             "review_required": bool(result.get("review_required"))
             or outcome_unknown_count > 0,
             "filtered": filtered,
-            "deferred": max(0, len(pending_ids) - processed),
+            "deferred": max(0, pending_total - len(excluded_ids) - processed),
         }
 
     # ===== 工具 =====

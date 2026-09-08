@@ -448,20 +448,21 @@ def snapshot_digest(snapshots: Iterable[LocalFileSnapshot]) -> str:
 # 退化为原子硬链接发布。目录没有同等安全的可移植退化方式，宁可保留回收
 # 副本并让用户重试，也绝不覆盖并发新建的同名内容。
 def move_entry_no_replace_at(
-    source_name: str,
-    target_name: str,
+    source_name: str | Path,
+    target_name: str | Path,
     *,
-    source_dir_fd: int,
-    target_dir_fd: int,
-    is_directory: bool,
+    source_dir_fd: int | None = None,
+    target_dir_fd: int | None = None,
+    is_directory: bool = False,
 ) -> None:
+    """唯一的无覆盖移动实现，支持普通路径与已固定父目录的相对路径。"""
+    dir_args = {}
+    if source_dir_fd is not None:
+        dir_args["src_dir_fd"] = source_dir_fd
+    if target_dir_fd is not None:
+        dir_args["dst_dir_fd"] = target_dir_fd
     if os.name == "nt":
-        os.rename(
-            source_name,
-            target_name,
-            src_dir_fd=source_dir_fd,
-            dst_dir_fd=target_dir_fd,
-        )
+        os.rename(source_name, target_name, **dir_args)
         return
     try:
         import ctypes
@@ -476,9 +477,9 @@ def move_entry_no_replace_at(
             ]
             renameat2.restype = ctypes.c_int
             result = renameat2(
-                source_dir_fd,
+                source_dir_fd if source_dir_fd is not None else -100,  # AT_FDCWD
                 os.fsencode(source_name),
-                target_dir_fd,
+                target_dir_fd if target_dir_fd is not None else -100,
                 os.fsencode(target_name),
                 1,  # RENAME_NOREPLACE
             )
@@ -497,19 +498,28 @@ def move_entry_no_replace_at(
         pass
     if is_directory:
         raise LocalStorageError("当前文件系统不支持目录的安全无覆盖恢复")
+    def identity(name: str | Path, dir_fd: int | None) -> tuple[int, int, int, int]:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+    source_identity = identity(source_name, source_dir_fd)
     try:
-        os.link(
-            source_name,
-            target_name,
-            src_dir_fd=source_dir_fd,
-            dst_dir_fd=target_dir_fd,
-            follow_symlinks=False,
-        )
-    except TypeError:
-        os.link(
-            source_name,
-            target_name,
-            src_dir_fd=source_dir_fd,
-            dst_dir_fd=target_dir_fd,
-        )
-    os.unlink(source_name, dir_fd=source_dir_fd)
+        os.link(source_name, target_name, follow_symlinks=False, **dir_args)
+    except OSError as exc:
+        if exc.errno in {errno.EPERM, errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+            raise LocalStorageError("目标文件系统不支持安全的无覆盖发布") from exc
+        raise
+    try:
+        os.unlink(source_name, dir_fd=source_dir_fd)
+    except Exception:
+        # 只有源仍是原副本、目标仍是本次创建的别名时才撤销发布。
+        # 若源已被外部移除或替换，目标可能是唯一原始副本，必须保留。
+        try:
+            if (
+                identity(source_name, source_dir_fd) == source_identity
+                and identity(target_name, target_dir_fd) == source_identity
+            ):
+                os.unlink(target_name, dir_fd=target_dir_fd)
+        except OSError:
+            pass  # 补偿失败不掩盖原始错误，也不冒险删除无法确认的副本。
+        raise

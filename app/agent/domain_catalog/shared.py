@@ -8,7 +8,10 @@ from datetime import date, datetime
 from typing import Any
 
 from app.agent.errors import AgentToolError
-from app.agent.workspace_actions import _contains_sensitive_text
+from app.agent.workspace_actions import (
+    _contains_sensitive_text,
+    _normalize_query as _normalize_search_query,
+)
 
 
 def _now() -> str:
@@ -36,19 +39,6 @@ def guangya_organize_status_arguments(arguments: dict[str, Any]) -> dict[str, An
     if reference and not re.fullmatch(r"GY-(?:[0-9A-F]{4}-){7}[0-9A-F]{4}", reference):
         raise AgentToolError("operation_ref 不是有效的光鸭操作编号")
     return {"operation_ref": reference} if reference else {}
-
-
-def _normalize_search_query(value: str) -> str:
-    query = unicodedata.normalize("NFKC", value).strip()
-    if (
-        not query
-        or len(query) > 120
-        or any(unicodedata.category(char).startswith("C") for char in query)
-    ):
-        raise AgentToolError("搜索关键词必须为 1 到 120 个可见字符")
-    if _contains_sensitive_text(query):
-        raise AgentToolError("搜索关键词疑似包含路径、链接、凭据、哈希或业务标识")
-    return query
 
 
 def _optional_visible_text(value: Any, *, name: str, maximum: int = 80) -> str:

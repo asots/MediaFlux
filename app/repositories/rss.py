@@ -333,9 +333,12 @@ def list_rss_entries(
     limit: int = 300,
     *,
     order: str = "published_desc",
+    include_total: bool = False,
 ) -> list[sqlite3.Row]:
     filters, params = _rss_entry_filters(sub_id, status, keyword)
-    sql = ("SELECT e.*, i.name AS sub_name,COALESCE(m.media_key,'') AS media_key,"
+    # 同一次查询快照计数，LIMIT 只约束返回行数，不截断业务积压数量。
+    total_projection = "COUNT(*) OVER () AS total_count," if include_total else ""
+    sql = (f"SELECT {total_projection}e.*, i.name AS sub_name,COALESCE(m.media_key,'') AS media_key,"
            "m.season AS media_season,m.episode AS media_episode,"
            "COALESCE(m.skip_reason,'') AS skip_reason FROM rss_entries e "
            "LEFT JOIN rss_items i ON e.rss_item_id=i.id "

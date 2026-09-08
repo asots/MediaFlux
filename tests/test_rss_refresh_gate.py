@@ -142,7 +142,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             "outcome_unknown_count": 0,
             "review_required": False,
         })
-        rows = [{"id": item, "title": f"Episode {item}"} for item in range(1, 26)]
+        rows = [{"id": item, "title": f"Episode {item}", "total_count": 25} for item in range(1, 26)]
 
         with patch(
             "app.modules.rss.db.list_rss_entries", return_value=rows,
@@ -170,7 +170,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             "existing_count": 0, "unverified_count": 0, "failure_count": 0,
             "outcome_unknown_count": 0, "review_required": False,
         })
-        rows = [{"id": item, "title": f"Episode {item}"} for item in range(1, 106)]
+        rows = [{"id": item, "title": f"Episode {item}", "total_count": 105} for item in range(1, 106)]
 
         with patch(
             "app.modules.rss.db.list_rss_entries", return_value=rows,
@@ -429,7 +429,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
         with patch.object(
             engine, "refresh", return_value={"total": 1, "new": 1, "skipped": 0}
         ), patch(
-            "app.modules.rss.db.list_rss_entries", return_value=[{"id": 17, "title": "普通资源"}]
+            "app.modules.rss.db.list_rss_entries", return_value=[{"id": 17, "title": "普通资源", "total_count": 1}]
         ), patch.object(
             engine,
             "download_many",

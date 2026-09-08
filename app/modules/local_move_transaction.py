@@ -17,6 +17,8 @@ from app.modules.local_storage import (
     LocalContentChanged,
     LocalFileSnapshot,
     LocalFilesystemAdapter,
+    LocalStorageError,
+    move_entry_no_replace_at,
 )
 from app.modules.process_lock import CrossProcessLock
 
@@ -283,55 +285,10 @@ class LocalMoveTransaction:
     ) -> tuple[int, int, int, int]:
         """同文件系统原子发布且绝不覆盖已有目标。"""
         source_identity = cls._identity(source)
-        if os.name == "nt":  # Windows rename 在目标存在时失败，不覆盖。
-            os.rename(source, target)
-            return source_identity
-
-        renameat2 = None
         try:
-            import ctypes
-
-            libc = ctypes.CDLL(None, use_errno=True)
-            renameat2 = getattr(libc, "renameat2", None)
-            if renameat2 is not None:
-                renameat2.argtypes = [
-                    ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
-                ]
-                renameat2.restype = ctypes.c_int
-                result = renameat2(
-                    -100, os.fsencode(source), -100, os.fsencode(target), 1,
-                )
-                if result == 0:
-                    return source_identity
-                error_number = ctypes.get_errno()
-                if error_number == 17:  # EEXIST
-                    raise FileExistsError(error_number, os.strerror(error_number), str(target))
-                if error_number not in {22, 38, 95}:  # EINVAL/ENOSYS/EOPNOTSUPP
-                    raise OSError(error_number, os.strerror(error_number), str(target))
-        except AttributeError:
-            renameat2 = None
-
-        # 不支持 renameat2 的 POSIX 文件系统使用“硬链接 + 删除旧目录项”。
-        # link 的目标创建是原子且 no-clobber；若文件系统不支持硬链接则保守失败。
-        try:
-            os.link(source, target, follow_symlinks=False)
-        except TypeError:  # 极旧平台没有 follow_symlinks 参数。
-            os.link(source, target)
-        except OSError as exc:
-            if getattr(exc, "errno", None) in {1, 22, 38, 45, 95}:
-                raise LocalMoveError(
-                    f"目标文件系统不支持安全的无覆盖发布: {target.parent}"
-                ) from exc
-            raise
-        try:
-            os.unlink(source)
-        except Exception:
-            try:
-                if cls._identity(target) == source_identity:
-                    target.unlink()
-            except Exception:
-                pass
-            raise
+            move_entry_no_replace_at(source, target)
+        except LocalStorageError as exc:
+            raise LocalMoveError(str(exc)) from exc
         return source_identity
 
     def _record_step(self, index: int, action: str, source: Path, target: Path) -> None:
