@@ -384,7 +384,7 @@ def _prepare_offline_resource(
     # 不再另写一套无限流式 HTTP 下载；原始 tracker/passkey 保留在种子内。
     if torrent_data is None:
         torrent_data, _headers = _fetch_rss_payload(
-            url, user_agent="MediaFlux/1.0", timeout_seconds=20,
+            url, user_agent="MediaFlux/1.0", timeout_seconds=20, allow_http=True,
         )
     item = torrent_download_input("resource.torrent", torrent_data)
     expected_hash = http_torrent_infohash_hint(url)

@@ -53,19 +53,28 @@ _RSS_AUTO_DOWNLOAD_DEADLINE_SECONDS = 120.0
 
 def validate_rss_source_url(value: str, *, resolve: bool = False) -> str:
     """校验 RSS 上游边界；网络请求前必须启用公网 DNS 校验。"""
+    return _validate_rss_fetch_url(value, resolve=resolve)
+
+
+def _validate_rss_fetch_url(
+    value: str, *, resolve: bool = False, allow_http: bool = False,
+) -> str:
+    """复用公网校验；仅种子传输可启用 HTTP，订阅入口始终保持 HTTPS-only。"""
     normalized = str(value or "").strip()
     if not normalized or len(normalized) > _RSS_MAX_SOURCE_URL_LENGTH:
         raise ValueError("RSS URL 长度无效")
     parsed = urlsplit(normalized)
+    default_port = 80 if parsed.scheme.lower() == "http" else 443
     if (
-        parsed.scheme.lower() != "https"
+        parsed.scheme.lower() not in ({"http", "https"} if allow_http else {"https"})
         or not parsed.hostname
         or parsed.username
         or parsed.password
         or parsed.fragment
-        or (parsed.port or 443) != 443
+        or parsed.port not in (None, default_port)
     ):
-        raise ValueError("RSS URL 仅支持不含凭据和片段的 HTTPS 地址")
+        protocols = "HTTP(S)" if allow_http else "HTTPS"
+        raise ValueError(f"RSS URL 仅支持不含凭据和片段的 {protocols} 地址")
     host = parsed.hostname.rstrip(".").lower()
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
         raise ValueError("RSS URL 不允许访问本机或内网地址")
@@ -76,12 +85,12 @@ def validate_rss_source_url(value: str, *, resolve: bool = False) -> str:
     if literal is not None and not literal.is_global:
         raise ValueError("RSS URL 不允许访问本机或内网地址")
     if resolve:
-        _resolve_public_rss_addresses(host)
+        _resolve_public_rss_addresses(host, default_port)
     return normalized
 
 
 def _resolve_public_rss_addresses(
-    host: str,
+    host: str, port: int = 443,
 ) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """解析并返回稳定排序的公网地址；调用方必须把连接固定到返回值。"""
     try:
@@ -93,7 +102,7 @@ def _resolve_public_rss_addresses(
             literal
         } if literal is not None else {
             ipaddress.ip_address(record[4][0].split("%", 1)[0])
-            for record in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            for record in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         }
     except (OSError, socket.gaierror, IndexError, TypeError, ValueError) as exc:
         raise ValueError("RSS URL 域名解析失败") from exc
@@ -105,21 +114,25 @@ def _resolve_public_rss_addresses(
     )
 
 
-def _pinned_rss_request_target(url: str) -> tuple[str, httpx.URL, dict[str, str], dict]:
+def _pinned_rss_request_target(
+    url: str, *, allow_http: bool = False,
+) -> tuple[str, httpx.URL, dict[str, str], dict]:
     """返回逻辑 URL 与固定公网 IP 的实际请求参数，消除 DNS 重绑定窗口。"""
-    logical_url = validate_rss_source_url(url)
+    logical_url = _validate_rss_fetch_url(url, allow_http=allow_http)
     parsed = httpx.URL(logical_url)
     host = str(parsed.host or "").rstrip(".").lower()
-    address = _resolve_public_rss_addresses(host)[0]
+    port = parsed.port or (80 if parsed.scheme == "http" else 443)
+    address = _resolve_public_rss_addresses(host, port)[0]
     request_url = parsed.copy_with(host=str(address))
     return logical_url, request_url, {"Host": host}, {"sni_hostname": host}
 
 
 def _fetch_rss_payload(
     url: str, *, user_agent: str, timeout_seconds: float | None = None,
+    allow_http: bool = False,
 ) -> tuple[bytes, dict[str, str]]:
-    """通过固定地址 transport 拉取 RSS，并遵守调用方的剩余总预算。"""
-    current_url = validate_rss_source_url(url)
+    """固定地址、有界拉取 RSS/种子；HTTP 仅由种子入口显式启用。"""
+    current_url = _validate_rss_fetch_url(url, allow_http=allow_http)
     budget = max(
         0.1,
         float(timeout_seconds)
@@ -141,7 +154,7 @@ def _fetch_rss_payload(
             if remaining <= 0:
                 raise TimeoutError("RSS 刷新超过本轮时间预算")
             logical_url, request_url, request_headers, extensions = (
-                _pinned_rss_request_target(current_url)
+                _pinned_rss_request_target(current_url, allow_http=allow_http)
             )
             attempt_timeout = httpx.Timeout(
                 min(float(_RSS_READ_TIMEOUT_SECONDS), remaining),
@@ -158,9 +171,18 @@ def _fetch_rss_payload(
                     location = str(response.headers.get("Location") or "").strip()
                     if not location or redirect_count >= _RSS_MAX_REDIRECTS:
                         raise ValueError("RSS 重定向无效或超过上限")
-                    current_url = validate_rss_source_url(
-                        urljoin(logical_url, location)
+                    next_url = _validate_rss_fetch_url(
+                        urljoin(logical_url, location), allow_http=allow_http,
                     )
+                    previous, following = httpx.URL(logical_url), httpx.URL(next_url)
+                    if previous.scheme == "https" and following.scheme == "http":
+                        raise ValueError("RSS 重定向不允许从 HTTPS 降级到 HTTP")
+                    if (previous.scheme, previous.host, previous.port) != (
+                        following.scheme, following.host, following.port,
+                    ):
+                        # Cookie jar 看到的是固定 IP，不能让同 IP 的不同来源共享认证。
+                        client.cookies.clear()
+                    current_url = next_url
                     continue
                 response.raise_for_status()
                 declared_size = response.headers.get("Content-Length")
@@ -371,13 +393,17 @@ class MikanParser:
         for href, mime in enclosures:
             if href.lower().startswith("magnet:?") or _is_http_torrent_url(href, mime):
                 return href, mime
-        # 保留普通HTTP媒体下载；图片等伴随附件不能盖过有效BT附件。
+        # 保留普通 HTTP 媒体下载，影音附件仍优先于 link 回退。
         for href, mime in enclosures:
             if mime.lower().startswith(("video/", "audio/")):
                 return href, mime
+        # BT link 优先于图片等伴随附件，但不覆盖上面已识别的影音附件。
+        link = str(entry.get("link") or "").strip()
+        if link.lower().startswith("magnet:?") or _is_http_torrent_url(link):
+            return link, ""
         if enclosures:
             return enclosures[0]
-        return str(entry.get("link") or ""), ""
+        return link, ""
 
     @staticmethod
     def _format_date(raw: str) -> str:
