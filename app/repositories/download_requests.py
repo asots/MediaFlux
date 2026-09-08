@@ -1397,58 +1397,60 @@ def _recover_legacy_pending_cancellations_conn(
     return int(cur.rowcount or 0)
 
 
-def recover_stale_submitting_download_requests(stale_minutes: int = 15) -> int:
-    """把超时的后端提交精确转为人工核验，不覆盖其它已确认后端。"""
-    minutes = max(1, int(stale_minutes or 15))
-    timestamp = now()
-    message = (
-        "下载后端提交长时间未完成，远端接收结果未知；"
-        "请先核对对应下载器，勿直接重复提交"
-    )
-    with get_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        # 已知未触发后端的历史取消不计入“结果未知、需人工核验”计数。
-        _recover_legacy_pending_cancellations_conn(conn, timestamp)
-        regular_cur = conn.execute(
+def _recover_interrupted_download_submissions_conn(
+    conn: sqlite3.Connection,
+    timestamp: str,
+    *,
+    stale_minutes: int | None = None,
+) -> int:
+    """唯一恢复策略：只隔离未确认的提交，不丢弃已持久化的后端事实。"""
+    # 已知未写后端的旧取消先归位，不计入“需要核验”的数量。
+    _recover_legacy_pending_cancellations_conn(conn, timestamp)
+    age_clause = ""
+    age_params: tuple[str, ...] = ()
+    if stale_minutes is not None:
+        age_clause = (
+            " AND datetime(COALESCE(NULLIF(updated_at,''),created_at)) "
+            "< datetime('now','localtime', ?)"
+        )
+        age_params = (f"-{max(1, int(stale_minutes or 15))} minutes",)
+    recovered = 0
+    for predicate, message in (
+        (
+            "COALESCE(kind,'')<>'guangya_share' AND "
+            "(status='submitting' OR qb_status='submitting' OR gy_status='submitting')",
+            "下载后端提交未完成，远端接收结果未知；请先核对对应下载器，勿直接重复提交",
+        ),
+        (
+            "kind='guangya_share' AND status IN ('pending','submitting')",
+            "光鸭分享转存收尾未确认；若云端写入结果未知，请先核对目标目录，勿直接重试",
+        ),
+    ):
+        cur = conn.execute(
             "UPDATE download_requests SET status='manual_review',"
             "qb_status=CASE WHEN qb_status='submitting' THEN 'manual_review' ELSE qb_status END,"
-            "gy_status=CASE WHEN gy_status='submitting' THEN 'manual_review' ELSE gy_status END,"
+            "gy_status=CASE WHEN gy_status='submitting' OR "
+            "(kind='guangya_share' AND COALESCE(gy_status,'')='') "
+            "THEN 'manual_review' ELSE gy_status END,"
             "error=CASE "
             "WHEN instr(COALESCE(error,''),?)>0 THEN error "
             "WHEN COALESCE(error,'')='' THEN ? "
             "ELSE substr(error || char(10) || ?,1,1000) END,"
-            "completed_at=COALESCE(completed_at,?),updated_at=? "
-            "WHERE COALESCE(kind,'')<>'guangya_share' "
-            "AND (status='submitting' OR qb_status='submitting' OR gy_status='submitting') "
-            "AND datetime(COALESCE(NULLIF(updated_at,''),created_at)) "
-            "< datetime('now','localtime', ?)",
-            (message, message, message, timestamp, timestamp, f"-{minutes} minutes"),
+            "completed_at=COALESCE(completed_at,?),updated_at=? WHERE "
+            + predicate + age_clause,
+            (message, message, message, timestamp, timestamp, *age_params),
         )
-        share_message = (
-            "光鸭分享转存长时间未完成，云端写入结果未知；"
-            "请核对目标目录，勿直接重试"
+        recovered += int(cur.rowcount or 0)
+    return recovered
+
+
+def recover_stale_submitting_download_requests(stale_minutes: int = 15) -> int:
+    """运行期按超时门槛调用统一恢复器；启动时同一实现不等待超时。"""
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        return _recover_interrupted_download_submissions_conn(
+            conn, now(), stale_minutes=max(1, int(stale_minutes or 15)),
         )
-        share_cur = conn.execute(
-            "UPDATE download_requests SET status='manual_review',gy_status='manual_review',"
-            "error=CASE "
-            "WHEN instr(COALESCE(error,''),?)>0 THEN error "
-            "WHEN COALESCE(error,'')='' THEN ? "
-            "ELSE substr(error || char(10) || ?,1,1000) END,"
-            "completed_at=COALESCE(completed_at,?),updated_at=? "
-            "WHERE kind='guangya_share' AND status='submitting' "
-            "AND COALESCE(gy_status,'') IN ('','submitting') "
-            "AND datetime(COALESCE(NULLIF(updated_at,''),created_at)) "
-            "< datetime('now','localtime', ?)",
-            (
-                share_message,
-                share_message,
-                share_message,
-                timestamp,
-                timestamp,
-                f"-{minutes} minutes",
-            ),
-        )
-        return int(regular_cur.rowcount or 0) + int(share_cur.rowcount or 0)
 
 
 def list_active_download_requests(

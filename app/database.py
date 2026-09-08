@@ -864,36 +864,15 @@ def init_db() -> None:
                 (timestamp, timestamp),
             )
             from app.repositories.download_requests import (
-                _recover_legacy_pending_cancellations_conn,
+                _recover_interrupted_download_submissions_conn,
             )
 
-            _recover_legacy_pending_cancellations_conn(conn, timestamp)
-            conn.execute(
-                "UPDATE download_requests SET status='manual_review',gy_status='manual_review',"
-                "error=CASE WHEN COALESCE(error,'')='' "
-                "THEN '上次进程在光鸭分享转存期间中断，云端写入结果未知；请核对目标目录，勿直接重试' "
-                "ELSE error END,completed_at=COALESCE(completed_at,?),updated_at=? "
-                "WHERE kind='guangya_share' AND status IN ('pending','submitting')",
-                (timestamp, timestamp),
-            )
+            _recover_interrupted_download_submissions_conn(conn, timestamp)
             conn.execute(
                 "UPDATE download_requests SET notification_delivery_status='retry_wait',"
                 "notification_lease_token='',notification_lease_expires_at=NULL,"
                 "notification_next_retry_at=?,updated_at=? "
                 "WHERE notification_delivery_status='sending'",
-                (timestamp, timestamp),
-            )
-            conn.execute(
-                "UPDATE download_requests SET status='manual_review',"
-                "qb_status=CASE WHEN qb_status='submitting' THEN 'manual_review' ELSE qb_status END,"
-                "gy_status=CASE WHEN gy_status='submitting' THEN 'manual_review' ELSE gy_status END,"
-                "error=CASE WHEN COALESCE(error,'')='' "
-                "THEN '上次进程在下载后端提交期间中断，远端接收结果未知；请先核对下载器，勿直接重复提交' "
-                "ELSE substr(error || char(10) || "
-                "'上次进程在下载后端提交期间中断，远端接收结果未知；请先核对下载器，勿直接重复提交',1,1000) END,"
-                "completed_at=COALESCE(completed_at,?),updated_at=? "
-                "WHERE COALESCE(kind,'')<>'guangya_share' AND "
-                "(status='submitting' OR qb_status='submitting' OR gy_status='submitting')",
                 (timestamp, timestamp),
             )
             conn.execute(

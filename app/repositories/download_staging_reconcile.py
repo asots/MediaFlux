@@ -111,19 +111,40 @@ def discover_legacy_confirmation_cleanup(*, limit: int = _MAX_BATCH) -> int:
         ).fetchall()
         created = 0
         timestamp = db.now()
-        for row in rows:
-            # 每个请求至多查看一条最新成功卡；所有同源最新卡仍由执行守卫复核。
-            confirmation = conn.execute(
-                "SELECT c.token FROM organize_confirmations c WHERE c.status='completed' "
-                "AND CASE WHEN json_valid(c.payload_json) THEN "
-                "CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT)=? ELSE 0 END "
+        latest_by_source: dict[str, str] = {}
+        source_ids = list(dict.fromkeys(str(row['gy_target_dir']) for row in rows))
+        if source_ids:
+            placeholders = ','.join('?' for _ in source_ids)
+            source_expression = (
+                "CASE WHEN json_valid(c.payload_json) THEN "
+                "CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT) END"
+            )
+            # 按整数主键倒序流式扫描；status/updated_at 索引会引入整段排序，
+            # 使下方的提前结束无法避免旧历史扫描。newer 的指纹索引仍可使用。
+            confirmations = conn.execute(
+                f"SELECT c.token,{source_expression} AS source_id "
+                "FROM organize_confirmations c NOT INDEXED WHERE c.status='completed' "
+                f"AND {source_expression} IN ({placeholders}) "
                 'AND NOT EXISTS (SELECT 1 FROM organize_confirmations newer '
                 'WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id) '
-                'ORDER BY c.id DESC LIMIT 1', (str(row['gy_target_dir']),),
-            ).fetchone()
-            if confirmation:
+                'ORDER BY c.id DESC', source_ids,
+            )
+            try:
+                for confirmation in confirmations:
+                    latest_by_source.setdefault(str(confirmation['source_id']), str(confirmation['token']))
+                    # 倒序首条即各来源的最新卡。全部找到便结束游标，不能
+                    # 为减少SQL次数而把更早的整段历史继续扫描/传回Python。
+                    if len(latest_by_source) == len(source_ids):
+                        break
+            finally:
+                confirmations.close()
+        # 只批量化历史查找；新旧确认仍进入同一个终态入队器，重新校验唯一
+        # 下载归属与全部最新卡。多请求复用同一来源时也不重复执行相同入队。
+        tokens = dict.fromkeys(latest_by_source.get(str(row['gy_target_dir'])) for row in rows)
+        for token in tokens:
+            if token:
                 before = conn.total_changes
-                enqueue_confirmation_cleanup(conn, token=confirmation['token'], timestamp=timestamp)
+                enqueue_confirmation_cleanup(conn, token=token, timestamp=timestamp)
                 created += int(conn.total_changes > before)
         conn.execute(
             'INSERT INTO settings_kv(key,value,updated_at) VALUES(?,?,?) '
