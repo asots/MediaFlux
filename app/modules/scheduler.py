@@ -106,7 +106,9 @@ def _update_strm_requests(options: dict[str, object], **fields) -> None:
             if not legacy or int(legacy[0]["generation"]) != 0:
                 continue
             owner = legacy[0]
-        db.update_strm_request_state(owner, **fields)
+        db.update_strm_request_state(
+            owner, claimed_targets=options.get("strm_claimed_targets"), **fields
+        )
 
 
 def _refresh_notification_label(refresh: dict) -> str:
@@ -1722,6 +1724,7 @@ class STRMScheduler:
             # 持久队列是唯一权威来源：内存清单只是本轮的快捷路径，
             # 领取结果会补齐上一次进程中断或失败重试遗留的变化目标。
             claimed_targets = self._claim_change_targets(trigger_type, requested_mode)
+            options["strm_claimed_targets"] = claimed_targets
             recovered_owners = db.request_owners_for_work(
                 "change", [item["id"] for item in claimed_targets if item.get("id")],
                 claimed_targets=claimed_targets,

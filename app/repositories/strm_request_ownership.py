@@ -10,6 +10,10 @@ from typing import Any
 INTERRUPTED_ERROR = "上次进程在 STRM 同步或排队期间中断"
 REFRESH_PENDING_ERROR = "STRM 已完成，媒体库刷新等待后台重试"
 
+# lease 从 1 开始；0 仅由 init_db 的活跃归属恢复事务发放，-1 表示无凭据。
+# 通用 download_request 更新已有的 >=0 撤销逻辑同时覆盖启动凭据，无需 schema 变更。
+_INTERRUPTION_PROOF = 0
+
 
 def _db():
     from app import database
@@ -116,6 +120,29 @@ def current_strm_request_owners(request_ids: object) -> list[dict[str, Any]]:
     return [_snapshot(row) for row in rows]
 
 
+def _claimed_change_leases(
+    conn: sqlite3.Connection, claimed_targets: object, *, include_dirty: bool = False
+) -> dict[str, int]:
+    """只认可调用者提交的、仍持有 owner/代次的领取快照。"""
+    leases = {}
+    states = "('running','dirty')" if include_dirty else "('running')"
+    for item in claimed_targets or ():
+        key = str(item.get("id") or "")
+        generation = int(item.get("lease_generation") or 0)
+        if (
+            key
+            and generation > 0
+            and conn.execute(
+                "SELECT 1 FROM strm_change_queue WHERE id=? AND state IN "
+                + states
+                + " AND lease_owner=? AND lease_generation=?",
+                (key, str(item.get("lease_owner") or ""), generation),
+            ).fetchone()
+        ):
+            leases[key] = generation
+    return leases
+
+
 def request_owners_for_work(
     kind: str,
     work_keys: object,
@@ -127,21 +154,9 @@ def request_owners_for_work(
         return []
     with _db().get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        claims = _claimed_change_leases(conn, claimed_targets)
         if claimed_targets is not None:
-            claims = {
-                str(item["id"]): int(item.get("lease_generation") or 0)
-                for item in claimed_targets
-                if item.get("id")
-            }
-            keys = [
-                key
-                for key in keys
-                if key in claims
-                and conn.execute(
-                    "SELECT 1 FROM strm_change_queue WHERE id=? AND state='running' AND lease_generation=?",
-                    (key, claims[key]),
-                ).fetchone()
-            ]
+            keys = [key for key in keys if key in claims]
             if not keys:
                 return []
         placeholders = ",".join("?" for _ in keys)
@@ -160,15 +175,26 @@ def request_owners_for_work(
                 and claimed_targets is not None
                 and row["strm_status"] == "failed"
             )
-            proof = (
-                retry
-                and conn.execute(
-                    "SELECT 1 FROM strm_request_work w JOIN strm_change_queue q ON q.id=w.work_key "
-                    "WHERE w.request_id=? AND w.generation=? AND w.kind='change' "
-                    "AND w.failed_lease_generation>=0 AND q.lease_generation>w.failed_lease_generation "
-                    "AND w.work_key IN (" + placeholders + ") LIMIT 1",
-                    [owner["request_id"], owner["generation"], *keys],
-                ).fetchone()
+            failed_work = (
+                conn.execute(
+                    "SELECT work_key,failed_lease_generation FROM strm_request_work "
+                    "WHERE request_id=? AND generation=? AND organize_task_id=? "
+                    "AND kind='change' AND failed_lease_generation>0",
+                    (
+                        owner["request_id"],
+                        owner["generation"],
+                        owner["organize_task_id"],
+                    ),
+                ).fetchall()
+                if retry
+                else []
+            )
+            # 不能由 B 的新 lease 清掉未恢复的 A；其余失败工作未重领时保留失败。
+            # 分批成功会逐项删除 work，最后一个失败作用域重试时仍可正常恢复。
+            proof = bool(failed_work) and all(
+                item["work_key"] in keys
+                and claims[item["work_key"]] > item["failed_lease_generation"]
+                for item in failed_work
             )
             if proof:
                 # 只允许当前工作自己的新lease恢复失败；换代后旧回调立即失效。
@@ -218,16 +244,28 @@ def _update_strm_owner_state(
     stamp: str,
     *,
     resume_failure: bool = False,
+    claimed_targets: object = None,
+    interruption_proof: bool = False,
 ) -> bool:
     row = _current_owner_row(conn, owner)
     if row is None:
         return False
     old_error = str(row["strm_error"] or "")
-    if (
-        row["strm_status"] == "failed"
-        and old_error != INTERRUPTED_ERROR
-        and not resume_failure
-    ):
+    interrupted = (
+        interruption_proof
+        or conn.execute(
+            "SELECT 1 FROM strm_request_work WHERE request_id=? AND generation=? "
+            "AND organize_task_id=? AND failed_lease_generation=? LIMIT 1",
+            (
+                owner["request_id"],
+                owner["generation"],
+                owner["organize_task_id"],
+                _INTERRUPTION_PROOF,
+            ),
+        ).fetchone()
+        is not None
+    )
+    if row["strm_status"] == "failed" and not (interrupted or resume_failure):
         return False  # 不能用旧成功/旧恢复覆盖后来真实发生的失败。
     if (
         int(owner["generation"]) > 0
@@ -253,22 +291,33 @@ def _update_strm_owner_state(
     allowed = {"strm_status", "strm_error", "strm_finished_at", "strm_run_id"}
     if set(fields) - allowed:
         raise ValueError("STRM 请求投影包含不支持的字段")
+    failure_leases = {}
+    if fields.get("strm_status") == "failed":
+        claims = _claimed_change_leases(conn, claimed_targets, include_dirty=True)
+        work = conn.execute(
+            "SELECT work_key FROM strm_request_work WHERE request_id=? "
+            "AND generation=? AND organize_task_id=? AND kind='change'",
+            (owner["request_id"], owner["generation"], owner["organize_task_id"]),
+        ).fetchall()
+        failure_leases = {
+            item["work_key"]: claims[item["work_key"]]
+            for item in work
+            if item["work_key"] in claims
+        }
+        if claimed_targets and int(owner["generation"]) > 0 and not failure_leases:
+            return False  # 该请求已无本轮仍有效的目标，不能用迟到失败重新盖章。
     from app.repositories.download_requests import _update_download_request_conn
 
     if not _update_download_request_conn(conn, int(owner["request_id"]), fields, stamp):
         return False
-    if fields.get("strm_status") == "failed":
-        # 此失败属于当前队列执行，记录失败lease；普通状态写入会撤销这份凭据。
+    for key, lease in failure_leases.items():
         conn.execute(
-            "UPDATE strm_request_work SET failed_lease_generation=COALESCE("
-            "(SELECT lease_generation FROM strm_change_queue q WHERE q.id=work_key),-1) "
-            "WHERE request_id=? AND generation=? AND kind='change'",
-            (int(owner["request_id"]), int(owner["generation"])),
+            "UPDATE strm_request_work SET failed_lease_generation=? "
+            "WHERE request_id=? AND generation=? AND kind='change' AND work_key=?",
+            (lease, owner["request_id"], owner["generation"], key),
         )
-    # 仅恢复明确属于启动中断/当前队列新lease的准入；后来独立失败不改。
-    if row["strm_status"] == "failed" and (
-        old_error == INTERRUPTED_ERROR or resume_failure
-    ):
+    # 仅恢复具有未撤销启动凭据/当前队列新 lease 证明的准入。
+    if row["strm_status"] == "failed" and (interrupted or resume_failure):
         from app.repositories.media_subscriptions import (
             _download_request_admission_projection,
         )
@@ -301,10 +350,14 @@ def _update_strm_owner_state(
     return True
 
 
-def update_strm_request_state(owner: dict[str, Any], **fields: Any) -> bool:
+def update_strm_request_state(
+    owner: dict[str, Any], *, claimed_targets: object = None, **fields: Any
+) -> bool:
     with _db().get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        return _update_strm_owner_state(conn, owner, fields, _db().now())
+        return _update_strm_owner_state(
+            conn, owner, fields, _db().now(), claimed_targets=claimed_targets
+        )
 
 
 def _complete_request_work(
@@ -313,7 +366,8 @@ def _complete_request_work(
     owners = [
         dict(row)
         for row in conn.execute(
-            "SELECT request_id,generation,organize_task_id FROM strm_request_work WHERE kind=? AND work_key=?",
+            "SELECT request_id,generation,organize_task_id,failed_lease_generation "
+            "FROM strm_request_work WHERE kind=? AND work_key=?",
             (kind, str(work_key)),
         ).fetchall()
     ]
@@ -331,4 +385,6 @@ def _complete_request_work(
                 "strm_finished_at": stamp,
             },
             stamp,
+            # 最后一条关联即将消失；凭据必须与 ACK 删除处于同一事务。
+            interruption_proof=owner["failed_lease_generation"] == _INTERRUPTION_PROOF,
         )

@@ -856,6 +856,20 @@ def init_db() -> None:
                 "WHERE organize_status='running'",
                 (timestamp, timestamp),
             )
+            # 与置失败同事务授予启动凭据，兼容旧 work 的默认 -1。
+            # 只处理当前仍 active 的真实归属；已 failed 的同文本独立失败绝不补发。
+            from app.repositories.strm_request_ownership import _INTERRUPTION_PROOF
+
+            conn.execute(
+                "UPDATE strm_request_work SET failed_lease_generation=? "
+                "WHERE EXISTS(SELECT 1 FROM download_requests r "
+                "WHERE r.id=strm_request_work.request_id "
+                "AND r.strm_generation=strm_request_work.generation "
+                "AND COALESCE(r.organize_task_id,'')=strm_request_work.organize_task_id "
+                "AND r.strm_status IN ('pending','queued','running') "
+                "AND r.status NOT IN ('cancelled','resubmitted','failed'))",
+                (_INTERRUPTION_PROOF,),
+            )
             conn.execute(
                 "UPDATE download_requests SET strm_status='failed',"
                 "strm_error=CASE WHEN COALESCE(strm_error,'')='' "
