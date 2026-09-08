@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -61,7 +62,7 @@ def recover_pending_paths(
     should_stop: Callable[[], bool] | None = None,
     on_refresh_paths: Callable[[list[str]], object] | None = None,
 ) -> None:
-    """完整扫描或可信增量成功后消费旧路径凭据，绝不删除仍被索引引用的路径。
+    """索引迁移与历史副本统一消费旧路径凭据，绝不删除仍被索引引用的路径。
 
     valid_ids 是本轮确认仍有效的 ID；精准增量必须同时给 only_file_ids，
     避免把未核查的其他 ID 当成远端删除。当前新文件存在且指纹正确才删旧
@@ -244,7 +245,8 @@ def reconcile_historical_strm(
     source_keys = {f"guangya:{source['id']}" for source in sources}
     rows = db.list_strm_index_by_prefix("")
     indexed_paths: set[Path] = set()
-    replacements: dict[bytes, list[tuple[Path, str]]] = {}
+    replacements: dict[bytes, list[tuple[str, str, Path, str]]] = {}
+    valid_ids_by_source: dict[str, set[str]] = {}
     for row in rows:
         if _stopped(stats, should_stop):
             return
@@ -268,7 +270,9 @@ def reconcile_historical_strm(
             ):
                 # 这里只整理索引与签名 URL 的候选关系；遇到实际旧副本时
                 # 才在删除边界校验新文件，避免每次全量校准重读所有有效指针。
-                replacements.setdefault(payload, []).append((path, fingerprint))
+                source_key, file_id = str(row["source"]), str(row["file_id"])
+                replacements.setdefault(payload, []).append((source_key, file_id, path, fingerprint))
+                valid_ids_by_source.setdefault(source_key, set()).add(file_id)
         except (OSError, ValueError, TypeError):
             continue
     if all_sources:
@@ -282,6 +286,20 @@ def reconcile_historical_strm(
                 for source in sources
             )
         )
+    pending: list[dict[str, str]] = []
+
+    def persist_pending() -> bool:
+        if not pending:
+            return True
+        try:
+            db.enqueue_strm_path_cleanup(pending)
+        except (sqlite3.Error, RuntimeError, ValueError) as exc:
+            _blocked(stats, root, f"历史 STRM 清理凭据持久化失败（{type(exc).__name__}）")
+            stats.update(stopped=True, stop_stage="recovery-persist")
+            return False
+        pending.clear()
+        return True
+
     for candidate in _local_pointers(roots, stats, should_stop):
         try:
             path = _managed_path(candidate, strm_root)
@@ -301,22 +319,34 @@ def reconcile_historical_strm(
                         "历史 STRM 无索引且无法验证有效新副本，已保留，请人工核对",
                     )
                 continue
-            # 删除前重查新副本及全部来源路径所有者，避免扫描期间外部改写。
-            if not any(
-                strm._fingerprint_matches(new, fingerprint)
-                for new, fingerprint in matches
-            ):
+            # 选择真正存在的替代项以确定持久凭据所属来源；实际删除前由
+            # 统一消费者再次复核新副本与全部路径所有者，不能只信此处快照。
+            replacement = next((
+                item for item in matches if strm._fingerprint_matches(item[2], item[3])
+            ), None)
+            if replacement is None:
                 _blocked(stats, path, "历史 STRM 的有效新副本已变化，已保留旧文件")
                 continue
-            if db.list_strm_path_owners(str(path)):
-                continue
-            owner = {"content_fingerprint": matches[0][1]}
-            if _stopped(stats, should_stop):
+            source_key, file_id, _new, fingerprint = replacement
+            pending.append({
+                "source": source_key,
+                "file_id": file_id,
+                "strm_path": str(path),
+                "content_fingerprint": fingerprint,
+            })
+            if len(pending) >= 500 and not persist_pending():
                 return
-            if strm._delete_owned_file(path, [owner], "清理历史 STRM 副本"):
-                stats["cleaned"] += 1
-                strm._track_change(
-                    stats, "removed", path, strm_root, on_refresh_paths=on_refresh_paths
-                )
         except (OSError, RuntimeError, ValueError) as exc:
             _blocked(stats, candidate, str(exc))
+
+    if _stopped(stats, should_stop) or not persist_pending():
+        return
+    for source_key, valid_ids in sorted(valid_ids_by_source.items()):
+        if _stopped(stats, should_stop):
+            return
+        # 同时恢复前次已删除但尚未交接刷新的凭据，即使磁盘上已没有旧副本。
+        # 这里只处理当前有可信索引的ID，不把未核查的其它ID当成远端删除。
+        recover_pending_paths(
+            source_key, strm_root, stats, valid_ids=valid_ids, only_file_ids=valid_ids,
+            should_stop=should_stop, on_refresh_paths=on_refresh_paths,
+        )

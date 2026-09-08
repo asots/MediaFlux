@@ -2470,6 +2470,7 @@ from app.repositories.strm import (  # noqa: E402,F401
     delete_strm_path_cleanup,
     enqueue_strm_change_targets,
     enqueue_strm_metadata_jobs,
+    enqueue_strm_path_cleanup,
     enqueue_strm_refresh_paths,
     fail_or_retry_strm_metadata_job,
     fail_strm_change_target,

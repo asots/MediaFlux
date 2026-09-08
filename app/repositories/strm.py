@@ -185,6 +185,30 @@ def list_strm_path_owners(strm_path: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def enqueue_strm_path_cleanup(items: list[dict[str, str]]) -> int:
+    """历史副本使用与索引迁移相同的持久清理凭据；调用方提交后才能删文件。"""
+    if not items:
+        return 0
+    database = _database()
+    stamp = database.now()
+    records = []
+    for item in items:
+        values = tuple(str(item.get(key) or "") for key in (
+            "source", "file_id", "strm_path", "content_fingerprint",
+        ))
+        if not all(values):
+            raise ValueError("STRM 清理凭据缺少来源、文件、路径或指纹")
+        records.append((*values, stamp))
+    with database.get_conn() as conn:
+        before = conn.total_changes
+        conn.executemany(
+            "INSERT OR IGNORE INTO strm_path_cleanup("
+            "source,file_id,strm_path,content_fingerprint,created_at) VALUES(?,?,?,?,?)",
+            records,
+        )
+        return conn.total_changes - before
+
+
 def list_strm_path_cleanup(
     source: str, *, after_id: int = 0, limit: int = 500,
 ) -> list[sqlite3.Row]:
