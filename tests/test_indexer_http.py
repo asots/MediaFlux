@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
 import unittest
+from unittest.mock import PropertyMock, patch
+import zlib
+
+import tests  # noqa: F401 -- 应用导入前隔离生产配置和 DB。
 
 import httpx
 
-from app.indexers.errors import IndexerResponseTooLarge, IndexerSecurityError
+from app.indexers.errors import IndexerInvalidResponse, IndexerResponseTooLarge, IndexerSecurityError
 from app.indexers.http import BrowserImpersonatingHttpClient, FixedHostHttpClient
 
 
@@ -19,9 +25,15 @@ class ChunkStream(httpx.AsyncByteStream):
     def __init__(self, chunks):
         self.chunks = list(chunks)
         self.closed = False
+        self.started = False
+        self.read_chunks = 0
+        self.read_bytes = 0
 
     async def __aiter__(self):
+        self.started = True
         for chunk in self.chunks:
+            self.read_chunks += 1
+            self.read_bytes += len(chunk)
             yield chunk
 
     async def aclose(self):
@@ -508,3 +520,285 @@ class FixedHostPostJsonTests(unittest.IsolatedAsyncioTestCase):
                 await client.post_json("https://evil.example/search", json={})
         finally:
             await client.aclose()
+
+
+class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
+    """编码校验必须早于 raw/decoded 迭代，三种入口共用同一边界。"""
+
+    METHODS = ("get", "post", "stream")
+    LIMIT = 2 * 1024 * 1024
+    CHUNK = 64 * 1024
+    PNG = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="
+    )
+
+    def setUp(self):
+        self.network_attempts = []
+        self.stream_entries = 0
+
+        def forbidden(*args, **kwargs):
+            self.network_attempts.append(True)
+            raise AssertionError("HTTP 边界回归禁止真实网络/DNS")
+
+        for name in ("getaddrinfo", "create_connection", "socket.connect", "socket.connect_ex"):
+            self.enterContext(patch("socket." + name, side_effect=forbidden))
+
+    def tearDown(self):
+        self.assertEqual(self.network_attempts, [])
+
+    def make_client(self, stream=None, *, headers=(), strict=True, maximum=LIMIT, response=None):
+        if response is None:
+            response = httpx.Response(200, headers=headers, stream=stream)
+        calls = []
+
+        def handle(request):
+            calls.append(request)
+            return response
+
+        options = {} if strict is None else {"require_identity_encoding": strict}
+        client = FixedHostHttpClient(
+            allowed_hosts={"nyaa.si"}, resolver=PUBLIC_DNS,
+            transport=httpx.MockTransport(handle), max_response_bytes=maximum, **options,
+        )
+        self.addAsyncCleanup(client.aclose)
+        return client, response, calls
+
+    async def read(self, client, method):
+        if method == "get":
+            return (await client.get("https://nyaa.si/", max_redirects=0)).body
+        if method == "post":
+            return (await client.post_json("https://nyaa.si/", json={}, max_redirects=0)).body
+        async with client.stream_post_json("https://nyaa.si/", json={}, max_redirects=0) as response:
+            self.stream_entries += 1
+            return b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    async def assert_rejected_before_read(self, method, headers, chunks, *, error=IndexerInvalidResponse):
+        stream = ChunkStream(chunks)
+        client, response, calls = self.make_client(stream, headers=headers)
+        entries = self.stream_entries
+        with (patch.object(response, "aiter_bytes", side_effect=AssertionError("decoded iterator entered")),
+              patch.object(response, "aiter_raw", side_effect=AssertionError("raw iterator entered")),
+              self.assertRaises(error)):
+            await self.read(client, method)
+        self.assertFalse(stream.started)
+        self.assertEqual((stream.read_chunks, stream.read_bytes), (0, 0))
+        self.assertTrue(stream.closed)
+        self.assertTrue(response.is_closed)
+        self.assertEqual(len(calls), 1)  # 编码/大小拒绝不触发 GET timeout 重试。
+        self.assertEqual(self.stream_entries, entries)  # stream POST 必须在 yield 前拒绝。
+
+    async def test_strict_rejects_encodings_and_multiple_headers_before_all_body_reads(self):
+        headers = [[("Content-Encoding", value)] for value in (
+            "gzip", "br", "deflate", "compress", "gzip, br", "identity, gzip",
+            "identity, identity", "identity;foo=bar",
+        )]
+        headers += [
+            [("Content-Encoding", "identity"), ("Content-Encoding", "gzip")],
+            [("Content-Encoding", "identity"), ("Content-Encoding", "identity")],
+            [("Content-Encoding", ""), ("Content-Encoding", "")],
+        ]
+        for method in self.METHODS:
+            for header in headers:
+                with self.subTest(method=method, header=header):
+                    await self.assert_rejected_before_read(method, header, [self.PNG])
+
+    async def test_strict_rejects_gzip_extra_header_and_bomb_without_consuming_chunks(self):
+        # 合法 gzip FCOMMENT 超过 3MiB，但解压内容仍是完整 1×1 PNG。
+        base = gzip.compress(self.PNG)
+        extra = base[:3] + bytes([base[3] | 16]) + base[4:10] + b"x" * (3 * 1024 * 1024) + b"\0" + base[10:]
+        self.assertGreater(len(extra), self.LIMIT)
+        self.assertEqual(gzip.decompress(extra), self.PNG)
+        bomb = gzip.compress(self.PNG + b"x" * (16 * 1024 * 1024 - len(self.PNG)))
+        self.assertLess(len(bomb), self.LIMIT)
+        for method in self.METHODS:
+            for name, wire in (("extra-header", extra), ("16MiB-bomb", bomb)):
+                headers = {"Content-Type": "image/png", "Content-Encoding": "gzip"}
+                if name == "16MiB-bomb":
+                    headers["Content-Length"] = str(len(wire))
+                with self.subTest(method=method, name=name):
+                    await self.assert_rejected_before_read(method, headers,
+                        [wire[i:i + self.CHUNK] for i in range(0, len(wire), self.CHUNK)])
+
+    async def test_strict_accepts_identity_png_at_exact_limit_using_only_raw_chunks(self):
+        for method in self.METHODS:
+            for encoding in (None, "", "identity", "  IdEnTiTy\t"):
+                with self.subTest(method=method, encoding=encoding):
+                    stream = ChunkStream([self.PNG[:12], self.PNG[12:]])
+                    headers = {"Content-Type": "image/png", "Content-Length": str(len(self.PNG))}
+                    if encoding is not None:
+                        headers["Content-Encoding"] = encoding
+                    client, response, calls = self.make_client(stream, headers=headers, maximum=len(self.PNG))
+                    with (patch.object(response, "aiter_raw", wraps=response.aiter_raw) as raw,
+                          patch.object(response, "aiter_bytes", side_effect=AssertionError("automatic decoder used"))):
+                        self.assertEqual(await self.read(client, method), self.PNG)
+                    raw.assert_called_once_with(chunk_size=self.CHUNK)
+                    self.assertEqual(len(calls), 1)
+                    self.assertTrue(stream.closed)
+                    self.assertTrue(response.is_closed)
+
+    async def test_strict_enforces_declared_length_before_entering_body_or_stream_context(self):
+        for method in self.METHODS:
+            for length, error in ((str(self.LIMIT + 1), IndexerResponseTooLarge),
+                                  ("-1", IndexerInvalidResponse), ("invalid", IndexerInvalidResponse),
+                                  ("1, 2", IndexerInvalidResponse)):
+                with self.subTest(method=method, length=length):
+                    await self.assert_rejected_before_read(method, {"Content-Length": length}, [self.PNG], error=error)
+
+    async def test_strict_limits_raw_bytes_with_missing_or_understated_content_length(self):
+        for method in self.METHODS:
+            for headers in ({}, {"Content-Length": "1"}):
+                with self.subTest(method=method, headers=headers):
+                    count = self.LIMIT // self.CHUNK
+                    stream = ChunkStream([b"x" * self.CHUNK] * (count + 1) + [b"must not be read"])
+                    client, response, calls = self.make_client(stream, headers=headers)
+                    with self.assertRaises(IndexerResponseTooLarge):
+                        await self.read(client, method)
+                    self.assertEqual(stream.read_chunks, count + 1)
+                    self.assertEqual(stream.read_bytes, self.LIMIT + self.CHUNK)
+                    self.assertTrue(stream.closed)
+                    self.assertTrue(response.is_closed)
+                    self.assertEqual(len(calls), 1)
+
+    async def test_strict_stream_is_single_use_and_closes_without_body_consumption(self):
+        for consume in (False, True):
+            with self.subTest(consume=consume):
+                stream = ChunkStream([self.PNG])
+                client, response, _ = self.make_client(stream)
+                async with client.stream_post_json("https://nyaa.si/", json={}) as bounded:
+                    if consume:
+                        self.assertEqual(b"".join([chunk async for chunk in bounded.aiter_bytes()]), self.PNG)
+                        with self.assertRaisesRegex(RuntimeError, "already been consumed"):
+                            _ = [chunk async for chunk in bounded.aiter_bytes()]
+                self.assertEqual(stream.started, consume)
+                self.assertTrue(stream.closed)
+                self.assertTrue(response.is_closed)
+
+    async def test_strict_cancellation_closes_response_for_every_entrypoint(self):
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                waiting = asyncio.Event()
+
+                class WaitingStream(ChunkStream):
+                    async def __aiter__(self):
+                        async for chunk in super().__aiter__():
+                            yield chunk
+                        waiting.set()
+                        await asyncio.Event().wait()
+
+                stream = WaitingStream([b"x" * self.CHUNK])
+                client, response, _ = self.make_client(stream)
+                task = asyncio.create_task(self.read(client, method))
+                try:
+                    await asyncio.wait_for(waiting.wait(), 1)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                    self.assertTrue(stream.closed)
+                    self.assertTrue(response.is_closed)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    async def test_default_and_explicit_false_preserve_gzip_and_deflate_decoding(self):
+        for method in self.METHODS:
+            for strict in (None, False):
+                for encoding, compress in (("gzip", gzip.compress), ("deflate", zlib.compress)):
+                    with self.subTest(method=method, strict=strict, encoding=encoding):
+                        wire = compress(self.PNG)
+                        stream = ChunkStream([wire[:5], wire[5:]])
+                        client, response, _ = self.make_client(stream, strict=strict,
+                            headers={"Content-Encoding": encoding, "Content-Length": str(len(wire))})
+                        self.assertEqual(await self.read(client, method), self.PNG)
+                        self.assertTrue(stream.closed)
+                        self.assertTrue(response.is_closed)
+
+    async def test_default_decoded_size_limit_is_preserved(self):
+        wire = gzip.compress(b"x" * 1025)
+        self.assertLess(len(wire), 1024)
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                stream = ChunkStream([wire])
+                client, response, _ = self.make_client(stream, strict=None, maximum=1024,
+                    headers={"Content-Encoding": "gzip", "Content-Length": str(len(wire))})
+                with self.assertRaises(IndexerResponseTooLarge):
+                    await self.read(client, method)
+                self.assertTrue(stream.closed)
+                self.assertTrue(response.is_closed)
+
+    async def test_encoding_option_does_not_change_get_timeout_retry_or_post_no_retry(self):
+        for strict in (None, True):
+            for method in self.METHODS:
+                with self.subTest(strict=strict, method=method):
+                    calls = []
+
+                    def timeout(request):
+                        calls.append(request)
+                        raise httpx.ReadTimeout("offline fixture", request=request)
+
+                    options = {} if strict is None else {"require_identity_encoding": strict}
+                    client = FixedHostHttpClient(allowed_hosts={"nyaa.si"}, resolver=PUBLIC_DNS,
+                        transport=httpx.MockTransport(timeout), **options)
+                    self.addAsyncCleanup(client.aclose)
+                    with self.assertRaises(httpx.ReadTimeout):
+                        await self.read(client, method)
+                    self.assertEqual(len(calls), 2 if method == "get" else 1)
+
+
+    async def test_strict_prebuffered_content_json_text_remain_compatible_without_decoding(self):
+        for method in self.METHODS:
+            for kind in ("content", "json", "text"):
+                with self.subTest(method=method, kind=kind):
+                    value = {"content": self.PNG, "json": {"ok": True}, "text": "离线响应"}[kind]
+                    response = httpx.Response(200, **{kind: value})
+                    expected = response.content
+                    self.assertTrue(response.is_stream_consumed)
+                    client, _, _ = self.make_client(response=response, maximum=len(expected))
+                    with (patch.object(response, "aiter_bytes", side_effect=AssertionError("buffer decoded again")),
+                          patch.object(response, "aiter_raw", side_effect=AssertionError("consumed stream reopened"))):
+                        self.assertEqual(await self.read(client, method), expected)
+                    self.assertTrue(response.is_closed)
+
+    async def test_strict_checks_buffered_length_without_trusting_missing_or_short_content_length(self):
+        for method in self.METHODS:
+            for declared in (None, "1"):
+                with self.subTest(method=method, declared=declared):
+                    response = httpx.Response(200, content=self.PNG)
+                    response.headers.pop("Content-Length")
+                    if declared is not None:
+                        response.headers["Content-Length"] = declared
+                    client, _, _ = self.make_client(response=response, maximum=len(self.PNG) - 1)
+                    with (patch.object(response, "aiter_bytes", side_effect=AssertionError("buffer decoded again")),
+                          patch.object(response, "aiter_raw", side_effect=AssertionError("consumed stream reopened")),
+                          self.assertRaises(IndexerResponseTooLarge)):
+                        await self.read(client, method)
+                    self.assertTrue(response.is_closed)
+
+    async def test_strict_rejects_buffered_encoding_before_accessing_content(self):
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                response = httpx.Response(200, content=self.PNG)
+                # 模拟显式预读 transport；编码仍须拒绝，不将已有 buffer 重新解码。
+                response.headers["Content-Encoding"] = "gzip"
+                client, _, calls = self.make_client(response=response)
+                entries = self.stream_entries
+                with (patch.object(httpx.Response, "content", new_callable=PropertyMock,
+                                   side_effect=AssertionError("buffer accessed before encoding validation")),
+                      self.assertRaisesRegex(IndexerInvalidResponse, "Content-Encoding")):
+                    await self.read(client, method)
+                self.assertTrue(response.is_closed)
+                self.assertEqual(self.stream_entries, entries)
+                self.assertEqual(len(calls), 1)
+
+    async def test_strict_consumed_transport_without_a_buffer_fails_closed(self):
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                stream = ChunkStream([self.PNG])
+                response = httpx.Response(200, stream=stream)
+                _ = [chunk async for chunk in response.aiter_raw()]
+                self.assertTrue(response.is_stream_consumed)
+                client, _, _ = self.make_client(response=response)
+                with self.assertRaisesRegex(IndexerInvalidResponse, "no buffered body"):
+                    await self.read(client, method)
+                self.assertEqual(stream.read_chunks, 1)  # 不重读已被 transport 消费的流。
+                self.assertTrue(stream.closed)
+                self.assertTrue(response.is_closed)

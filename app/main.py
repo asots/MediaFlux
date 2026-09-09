@@ -649,6 +649,7 @@ def create_app(*, start_background: bool = False) -> FastAPI:
                         )
 
                 from app.discovery.service import shutdown_discovery_service
+                from app.discovery.calendar.service import shutdown_calendar_service
                 from app.discovery.search import shutdown_discovery_search_service
                 from app.modules.directory_scrape import close_directory_scrape_service
                 from app.modules.local_media_service import close_local_media_service
@@ -661,6 +662,7 @@ def create_app(*, start_background: bool = False) -> FastAPI:
                 try:
                     if runtime_safe_to_close:
                         for label, closer in (
+                            ("free-calendar", shutdown_calendar_service),
                             ("discovery", shutdown_discovery_service),
                             ("discovery-search", shutdown_discovery_search_service),
                             ("directory-scrape", close_directory_scrape_service),

@@ -1,0 +1,218 @@
+{
+  "ret": 0,
+  "msg": "",
+  "data": {
+    "CardList": [
+      {
+        "id": "20251112096092",
+        "type": "pc_carousel"
+      },
+      {
+        "id": "af79737f482b9947_1ed31",
+        "type": "pc_hot_filter"
+      },
+      {
+        "id": "20191014007737",
+        "type": "pc_shelves"
+      },
+      {
+        "id": "d4afd_17f79",
+        "type": "channel_play_schedule",
+        "children_list": {
+          "list": {
+            "cards": [
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260907",
+                  "data_key": "week=20260907&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周一",
+                  "sub_title": "07"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260908",
+                  "data_key": "week=20260908&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周二",
+                  "sub_title": "08"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260909",
+                  "data_key": "week=20260909&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周三",
+                  "sub_title": "09"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260910",
+                  "data_key": "week=20260910&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "selected": "1",
+                  "title": "今天",
+                  "sub_title": "10"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260911",
+                  "data_key": "week=20260911&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周五",
+                  "sub_title": "11"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260912",
+                  "data_key": "week=20260912&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周六",
+                  "sub_title": "12"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260913",
+                  "data_key": "week=20260913&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周日",
+                  "sub_title": "13"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200w9z1axf",
+                  "title": "诛仙 最终季",
+                  "type": "3",
+                  "sub_title": "VIP用户每周五10点更新，SVIP权益加码，每周四18点抢先看",
+                  "update_notify_desc": "VIP用户每周五10点更新，SVIP权益加码，每周四18点抢先看",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-08-21"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mcv8hkc8zk8lnov",
+                  "title": "完美世界",
+                  "type": "3",
+                  "sub_title": "VIP用户每周五10点更新1集，SVIP用户限时福利抢先1天看1集（每周四18:00）",
+                  "update_notify_desc": "VIP用户每周五10点更新1集，SVIP用户限时福利抢先1天看1集（每周四18:00）",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2021-04-23"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200r33k6xc",
+                  "title": "死灵法师！我即是天灾",
+                  "type": "3",
+                  "sub_title": "7月24日起每周五10:00更新2集",
+                  "update_notify_desc": "7月24日起每周五10:00更新2集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-07-24"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200plj2c14",
+                  "title": "魔皇大管家",
+                  "type": "3",
+                  "sub_title": "8月28日上午10点一次性更新6集，后续每周五付费更新1集",
+                  "update_notify_desc": "8月28日上午10点一次性更新6集，后续每周五付费更新1集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-08-28"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200ilydv1a",
+                  "title": "无上神帝",
+                  "type": "3",
+                  "sub_title": "每周一、五10:00更新1集，新篇章3月9日开始更新",
+                  "update_notify_desc": "每周一、五10:00更新1集，新篇章3月9日开始更新",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2020-05-18"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200azkttu2",
+                  "title": "逆天至尊",
+                  "type": "3",
+                  "sub_title": "每周一、五10点更1集，新篇章3月9日开始更新",
+                  "update_notify_desc": "每周一、五10点更1集，新篇章3月9日开始更新",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2021-07-16"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200wqewdyv",
+                  "title": "狐妖小红娘13 黄风岭篇",
+                  "type": "3",
+                  "sub_title": "9月11日首播4集，每周五10点更新",
+                  "update_notify_desc": "9月11日首播4集，每周五10点更新",
+                  "pay_time": "10:00",
+                  "free_time": "10:00",
+                  "is_trailer": "1",
+                  "publish_date": "2026-09-11"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200xf3rir6",
+                  "title": "斗罗大陆Ⅱ绝世唐门",
+                  "type": "3",
+                  "sub_title": "VIP用户每周六10点更新。SVIP会员权益加码，抢先1天看更新集（每周五18:00）",
+                  "update_notify_desc": "VIP用户每周六10点更新。SVIP会员权益加码，抢先1天看更新集（每周五18:00）",
+                  "pay_time": "18:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2023-06-24"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "ntvv55epauij204",
+        "type": "pc_card_ad"
+      }
+    ]
+  }
+}

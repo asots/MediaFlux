@@ -1,0 +1,111 @@
+{
+  "kind": "real_public_image_field_samples_not_current_week_availability",
+  "source_request_number": 1,
+  "source_request_time": "2026-09-10T01:38:30.666574+08:00",
+  "source_url": "https://www.youku.com/ku/webcomic",
+  "source_sha256": "a2e3055a2d121a130e1f8bfe3ec9cd7f0368181473d74b0526f7c3af0619ba50",
+  "source_week": [
+    "2026-08-31",
+    "2026-09-06"
+  ],
+  "source_is_current_week": false,
+  "current_week_restored": false,
+  "field_counts": [
+    {
+      "field": "img",
+      "scheme": "http",
+      "host": "liangcang-material.alicdn.com",
+      "query_keys": [],
+      "count": 84
+    },
+    {
+      "field": "hImg",
+      "scheme": "http",
+      "host": "liangcang-material.alicdn.com",
+      "query_keys": [],
+      "count": 86
+    },
+    {
+      "field": "img",
+      "scheme": "http",
+      "host": "m.ykimg.com",
+      "query_keys": [],
+      "count": 2
+    }
+  ],
+  "samples": [
+    {
+      "field": "img",
+      "raw_url": "http://liangcang-material.alicdn.com/prod/upload/981696b79f914f5497f78fb8b9c8d14e.webp.jpg",
+      "scheme": "http",
+      "host": "liangcang-material.alicdn.com",
+      "source_id": "bbdcfbf516104f9dbd65",
+      "title": "被家族抛弃，我觉醒九亿属性点 第二季",
+      "normalized_host": "liangcang-material.alicdn.com",
+      "normalized_path": "/prod/upload/981696b79f914f5497f78fb8b9c8d14e.webp.jpg",
+      "path_normalization": "原始path逐字保留；未decode、未替换扩展名、未补造图片变换或HTTPS可用性",
+      "query": "",
+      "fragment": "",
+      "credentials_present": false,
+      "https_url_verified": true,
+      "image_mime_magic_verified": true,
+      "image_request_number": 1
+    },
+    {
+      "field": "hImg",
+      "raw_url": "http://liangcang-material.alicdn.com/prod/upload/b259268338854f738ef976e92dc894e7.webp.jpg",
+      "scheme": "http",
+      "host": "liangcang-material.alicdn.com",
+      "source_id": "bbdcfbf516104f9dbd65",
+      "title": "被家族抛弃，我觉醒九亿属性点 第二季",
+      "normalized_host": "liangcang-material.alicdn.com",
+      "normalized_path": "/prod/upload/b259268338854f738ef976e92dc894e7.webp.jpg",
+      "path_normalization": "原始path逐字保留；未decode、未替换扩展名、未补造图片变换或HTTPS可用性",
+      "query": "",
+      "fragment": "",
+      "credentials_present": false,
+      "https_url_verified": false,
+      "image_mime_magic_verified": false
+    },
+    {
+      "field": "img",
+      "raw_url": "http://m.ykimg.com/05810000677F92A513FAB41363CE6B02",
+      "scheme": "http",
+      "host": "m.ykimg.com",
+      "source_id": "dcfc601098b54c379a57",
+      "title": "全民御兽：开局山海经，我横扫全球",
+      "normalized_host": "m.ykimg.com",
+      "normalized_path": "/05810000677F92A513FAB41363CE6B02",
+      "path_normalization": "原始path逐字保留；未decode、未替换扩展名、未补造图片变换或HTTPS可用性",
+      "query": "",
+      "fragment": "",
+      "credentials_present": false,
+      "https_url_verified": false,
+      "image_mime_magic_verified": false
+    }
+  ],
+  "image_request": {
+    "number": 1,
+    "started_at": "2026-09-10T01:55:57.499192+08:00",
+    "url": "https://liangcang-material.alicdn.com/prod/upload/981696b79f914f5497f78fb8b9c8d14e.webp.jpg",
+    "host": "liangcang-material.alicdn.com",
+    "path": "/prod/upload/981696b79f914f5497f78fb8b9c8d14e.webp.jpg",
+    "http_status": 200,
+    "mime": "image/jpeg",
+    "bytes": 236869,
+    "sha256": "2327c354be1fe81a886a117d38177a37581cf008d563e7f3dfcd9a7ab3a29a88",
+    "magic_format": "jpeg",
+    "magic_prefix_hex": "ffd8ffe1004e4578696600004d4d002a",
+    "mime_magic_valid": true,
+    "https_image_verified": true
+  },
+  "raw_image_retained": false,
+  "raw_source_retained": false,
+  "mainline_host_confirmation": true,
+  "limitations": [
+    "仅liangcang第一张img做过HTTPS图片GET，m.ykimg只有官方周历字段证据",
+    "只接img，不从hImg补缺",
+    "图片身份不作为元资料或收藏身份",
+    "本图片样本来自旧周，不可据此宣称当周排期恢复"
+  ]
+}

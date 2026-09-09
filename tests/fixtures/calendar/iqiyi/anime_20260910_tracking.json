@@ -1,0 +1,3196 @@
+{
+  "code": 0,
+  "cname": "追番二级页-v7-PCW",
+  "items": [
+    {
+      "channel": "4",
+      "temp": {
+        "id": 159
+      },
+      "video": [
+        {
+          "title": "周一",
+          "sub_title": "09-07",
+          "block_id": "jmd_Mon",
+          "data": [
+            {
+              "album_id": 4812694274119401,
+              "title": "灵武大陆",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2gjv1pyuyik.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周五更新"
+                },
+                {
+                  "text": "国漫榜No.8"
+                },
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "动作"
+                }
+              ]
+            },
+            {
+              "album_id": 4511882081238301,
+              "title": "三角洲：造物主玩家",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_180iyn7spl0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 10
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "竞技动漫榜No.2"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "竞技"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 2212072595881401,
+              "title": "界门之下",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_tjru6cvmw4.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "本周一更新"
+                },
+                {
+                  "text": "动作动漫榜No.3"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "科幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 6070490323312601,
+              "title": "成也萧河",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_o82gz4itzk.html",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 3
+              },
+              "tag3lines": [
+                {
+                  "text": "本周一更新"
+                },
+                {
+                  "text": "校园动漫榜No.2"
+                },
+                {
+                  "text": "校园"
+                },
+                {
+                  "text": "恋爱"
+                },
+                {
+                  "text": "治愈"
+                }
+              ]
+            },
+            {
+              "album_id": 4499849593516501,
+              "title": "斗罗大陆4终极斗罗 动态漫画 合集",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_28j2mfczpk8.html",
+              "date": {
+                "year": 2024,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周一更新"
+                },
+                {
+                  "text": "动态漫动漫榜No.5"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "玄幻"
+                }
+              ]
+            },
+            {
+              "album_id": 2302717336669401,
+              "title": "苍绝剑尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_obiu9nifmc.html",
+              "date": {
+                "year": 2026,
+                "month": 5,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2285069688018001,
+              "title": "全民诡异：开局掌握零元购 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1t3om8emqd8.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动态漫动漫榜No.8"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 1819813496352301,
+              "title": "全民御兽：开局山海经，我横扫全球 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1ncsoog0ht4.html",
+              "date": {
+                "year": 2025,
+                "month": 1,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "奇幻动漫榜No.7"
+                },
+                {
+                  "text": "异世界"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "周二",
+          "sub_title": "09-08",
+          "block_id": "jmd_Tues",
+          "data": [
+            {
+              "album_id": 7824827032232901,
+              "title": "九阳武神",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_20ow74rz76c.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2025,
+                "month": 11,
+                "day": 22
+              },
+              "tag3lines": [
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "无敌流"
+                }
+              ]
+            },
+            {
+              "album_id": 4511882081238301,
+              "title": "三角洲：造物主玩家",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_180iyn7spl0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 10
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "竞技动漫榜No.2"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "竞技"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 8234733780411101,
+              "title": "绝世战魂 第2季",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_t59o3wgac8.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 6,
+                "day": 9
+              },
+              "tag3lines": [
+                {
+                  "text": "昨日更新"
+                },
+                {
+                  "text": "战神流"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "动作"
+                }
+              ]
+            },
+            {
+              "album_id": 6597513285259501,
+              "title": "我的坟冢能滋养修为",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_211ihv84thk.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "系统"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 3221999398131901,
+              "title": "亡灵天灾：我抬手百万骨海 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_27u2uhp7cj0.html",
+              "date": {
+                "year": 2025,
+                "month": 5,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "昨日更新"
+                },
+                {
+                  "text": "系统流"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 3370400079956401,
+              "title": "末世钞能力者 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1ee7zd8s2j8.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 3
+              },
+              "tag3lines": [
+                {
+                  "text": "昨日更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            },
+            {
+              "album_id": 7914669607176901,
+              "title": "全民末日：我！病毒君王 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_gx0wx0acqw.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 10,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "昨日更新"
+                },
+                {
+                  "text": "转生"
+                },
+                {
+                  "text": "热血"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 4320966609480801,
+              "title": "全民转职：我组建了BOSS军团 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_16xz72b3l3s.html",
+              "date": {
+                "year": 2025,
+                "month": 8,
+                "day": 18
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "御兽流"
+                }
+              ]
+            },
+            {
+              "album_id": 2302717336669401,
+              "title": "苍绝剑尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_obiu9nifmc.html",
+              "date": {
+                "year": 2026,
+                "month": 5,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2285069688018001,
+              "title": "全民诡异：开局掌握零元购 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1t3om8emqd8.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动态漫动漫榜No.8"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 1819813496352301,
+              "title": "全民御兽：开局山海经，我横扫全球 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1ncsoog0ht4.html",
+              "date": {
+                "year": 2025,
+                "month": 1,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "奇幻动漫榜No.7"
+                },
+                {
+                  "text": "异世界"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "周三",
+          "sub_title": "09-09",
+          "block_id": "jmd_Wed",
+          "data": [
+            {
+              "album_id": 4198235234784001,
+              "title": "李熊猫",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1wvr4zpy9d8.html",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动漫飙升榜No.1"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 8639827533500001,
+              "title": "大千小镇",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_khu52kn1pg.html",
+              "pay_mark": "NONE_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 17
+              },
+              "tag3lines": [
+                {
+                  "text": "日常动漫榜No.9"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "搞笑"
+                },
+                {
+                  "text": "日常"
+                }
+              ]
+            },
+            {
+              "album_id": 3784317657367801,
+              "title": "都市古仙医",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1la70ef6oaw.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 10,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动漫飙升榜No.3"
+                },
+                {
+                  "text": "医神-玄幻"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 4511882081238301,
+              "title": "三角洲：造物主玩家",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_180iyn7spl0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 10
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "竞技动漫榜No.2"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "竞技"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 7424546274231301,
+              "title": "启运丹田：开局签到至尊丹田",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_10o1sgm6ke8.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2025,
+                "month": 10,
+                "day": 4
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动漫飙升榜No.7"
+                },
+                {
+                  "text": "签到流"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 6597513285259501,
+              "title": "我的坟冢能滋养修为",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_211ihv84thk.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "系统"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 5143186603372401,
+              "title": "神级奸商：全服求我别薅了 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2d127cqmsco.html",
+              "date": {
+                "year": 2025,
+                "month": 5,
+                "day": 26
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "系统流"
+                }
+              ]
+            },
+            {
+              "album_id": 1574350746955201,
+              "title": "斗罗大陆5重生唐三 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_20079ouizgs.html",
+              "date": {
+                "year": 2025,
+                "month": 1,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 5899628997753701,
+              "title": "我只想安静地打游戏 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1prvt0xa214.html",
+              "date": {
+                "year": 2024,
+                "month": 2,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2302717336669401,
+              "title": "苍绝剑尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_obiu9nifmc.html",
+              "date": {
+                "year": 2026,
+                "month": 5,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2285069688018001,
+              "title": "全民诡异：开局掌握零元购 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1t3om8emqd8.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动态漫动漫榜No.8"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 1819813496352301,
+              "title": "全民御兽：开局山海经，我横扫全球 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1ncsoog0ht4.html",
+              "date": {
+                "year": 2025,
+                "month": 1,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "奇幻动漫榜No.7"
+                },
+                {
+                  "text": "异世界"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "今天",
+          "sub_title": "09-10",
+          "block_id": "jmd_Thur",
+          "data": [
+            {
+              "album_id": 8837962497879001,
+              "title": "逆天邪神年番",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_o5999g9dp0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 4,
+                "day": 16
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "动漫飙升榜No.2"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 4862428556681501,
+              "title": "太古神尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2dssx9squck.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 30
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "重生"
+                },
+                {
+                  "text": "动作"
+                }
+              ]
+            },
+            {
+              "album_id": 8313346033482901,
+              "title": "丹道至尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1bsc8u64b8c.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2023,
+                "month": 12,
+                "day": 22
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "动作"
+                }
+              ]
+            },
+            {
+              "album_id": 5466459440004201,
+              "title": "九霄神女",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_hhtpe67a2w.html",
+              "pay_mark": "VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 9,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00上线"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                },
+                {
+                  "text": "逆袭"
+                }
+              ]
+            },
+            {
+              "album_id": 3692870750736401,
+              "title": "我家小师叔不可能这么强",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_brhu6ioa68.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 6597513285259501,
+              "title": "我的坟冢能滋养修为",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_211ihv84thk.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "系统"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 3927103178268901,
+              "title": "雪王来了！",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_aerpybtuug.html",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日11:00更新"
+                },
+                {
+                  "text": "治愈动漫榜No.2"
+                },
+                {
+                  "text": "搞笑"
+                },
+                {
+                  "text": "治愈"
+                },
+                {
+                  "text": "日常"
+                }
+              ]
+            },
+            {
+              "album_id": 3248470871104801,
+              "title": "原来我早就无敌了 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_117jjmsjv3o.html",
+              "date": {
+                "year": 2023,
+                "month": 12,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "凡人流"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                }
+              ]
+            },
+            {
+              "album_id": 4320966609480801,
+              "title": "全民转职：我组建了BOSS军团 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_16xz72b3l3s.html",
+              "date": {
+                "year": 2025,
+                "month": 8,
+                "day": 18
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "御兽流"
+                }
+              ]
+            },
+            {
+              "album_id": 5899628997753701,
+              "title": "我只想安静地打游戏 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1prvt0xa214.html",
+              "date": {
+                "year": 2024,
+                "month": 2,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2302717336669401,
+              "title": "苍绝剑尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_obiu9nifmc.html",
+              "date": {
+                "year": 2026,
+                "month": 5,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 1819813496352301,
+              "title": "全民御兽：开局山海经，我横扫全球 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1ncsoog0ht4.html",
+              "date": {
+                "year": 2025,
+                "month": 1,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "奇幻动漫榜No.7"
+                },
+                {
+                  "text": "异世界"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "周五",
+          "sub_title": "09-11",
+          "block_id": "jmd_Fri",
+          "data": [
+            {
+              "album_id": 5305224104606401,
+              "title": "大主宰年番",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1d74ab0t9ug.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2023,
+                "month": 6,
+                "day": 30
+              },
+              "tag3lines": [
+                {
+                  "text": "本周五更新"
+                },
+                {
+                  "text": "国漫榜No.1"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 8639827533500001,
+              "title": "大千小镇",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_khu52kn1pg.html",
+              "pay_mark": "NONE_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 17
+              },
+              "tag3lines": [
+                {
+                  "text": "日常动漫榜No.9"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "搞笑"
+                },
+                {
+                  "text": "日常"
+                }
+              ]
+            },
+            {
+              "album_id": 4812694274119401,
+              "title": "灵武大陆",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2gjv1pyuyik.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周五更新"
+                },
+                {
+                  "text": "国漫榜No.8"
+                },
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "动作"
+                }
+              ]
+            },
+            {
+              "album_id": 3692870750736401,
+              "title": "我家小师叔不可能这么强",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_brhu6ioa68.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 2455128847735701,
+              "title": "缔灵爱水心缠",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2dagpo1e50c.html",
+              "date": {
+                "year": 2026,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周五更新"
+                },
+                {
+                  "text": "恋爱动漫榜No.7"
+                },
+                {
+                  "text": "恋爱"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "励志"
+                }
+              ]
+            },
+            {
+              "album_id": 2952471673304201,
+              "title": "开心锤锤世界",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2a3379vgptg.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 25
+              },
+              "tag3lines": [
+                {
+                  "text": "本周五更新"
+                },
+                {
+                  "text": "泡面动漫榜No.2"
+                },
+                {
+                  "text": "搞笑"
+                },
+                {
+                  "text": "泡面"
+                },
+                {
+                  "text": "生活"
+                }
+              ]
+            },
+            {
+              "album_id": 3927103178268901,
+              "title": "雪王来了！",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_aerpybtuug.html",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日11:00更新"
+                },
+                {
+                  "text": "治愈动漫榜No.2"
+                },
+                {
+                  "text": "搞笑"
+                },
+                {
+                  "text": "治愈"
+                },
+                {
+                  "text": "日常"
+                }
+              ]
+            },
+            {
+              "album_id": 1851900130260201,
+              "title": "全民转职：驭龙师是最弱职业？ 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_s89qbd844o.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 11,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周五更新"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 5899628997753701,
+              "title": "我只想安静地打游戏 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1prvt0xa214.html",
+              "date": {
+                "year": 2024,
+                "month": 2,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2302717336669401,
+              "title": "苍绝剑尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_obiu9nifmc.html",
+              "date": {
+                "year": 2026,
+                "month": 5,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2285069688018001,
+              "title": "全民诡异：开局掌握零元购 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1t3om8emqd8.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动态漫动漫榜No.8"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 1819813496352301,
+              "title": "全民御兽：开局山海经，我横扫全球 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1ncsoog0ht4.html",
+              "date": {
+                "year": 2025,
+                "month": 1,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "奇幻动漫榜No.7"
+                },
+                {
+                  "text": "异世界"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "周六",
+          "sub_title": "09-12",
+          "block_id": "jmd_Sat",
+          "data": [
+            {
+              "album_id": 7909856612089201,
+              "title": "择日飞升",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1v6u22gybf0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 18
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "国漫榜No.3"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "神怪"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 106741901,
+              "title": "名侦探柯南 普通话",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_19rrjzcqm4.html",
+              "date": {
+                "year": 1996,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "弹幕破1000万"
+                },
+                {
+                  "text": "豆瓣高分"
+                },
+                {
+                  "text": "推理动漫榜No.1"
+                },
+                {
+                  "text": "推理"
+                },
+                {
+                  "text": "校园"
+                }
+              ]
+            },
+            {
+              "album_id": 202134201,
+              "title": "名侦探柯南",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_19rrnfnjyw.html",
+              "date": {
+                "year": 1996,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "豆瓣高分"
+                },
+                {
+                  "text": "推理"
+                },
+                {
+                  "text": "悬疑"
+                },
+                {
+                  "text": "校园"
+                }
+              ]
+            },
+            {
+              "album_id": 3692870750736401,
+              "title": "我家小师叔不可能这么强",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_brhu6ioa68.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 8234733780411101,
+              "title": "绝世战魂 第2季",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_t59o3wgac8.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 6,
+                "day": 9
+              },
+              "tag3lines": [
+                {
+                  "text": "昨日更新"
+                },
+                {
+                  "text": "战神流"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "动作"
+                }
+              ]
+            },
+            {
+              "album_id": 6342424545692001,
+              "title": " 如果历史是一群喵  大明皇朝篇",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_205j4vtsbf8.html",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 11
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "历史"
+                },
+                {
+                  "text": "教育"
+                },
+                {
+                  "text": "泡面"
+                }
+              ]
+            },
+            {
+              "album_id": 6813295898283601,
+              "title": "顶级气运，悄悄修练千年 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_i1w9ofdx8w.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "气运流"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            },
+            {
+              "album_id": 3221999398131901,
+              "title": "亡灵天灾：我抬手百万骨海 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_27u2uhp7cj0.html",
+              "date": {
+                "year": 2025,
+                "month": 5,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "昨日更新"
+                },
+                {
+                  "text": "系统流"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 3248470871104801,
+              "title": "原来我早就无敌了 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_117jjmsjv3o.html",
+              "date": {
+                "year": 2023,
+                "month": 12,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "凡人流"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                }
+              ]
+            },
+            {
+              "album_id": 5815401583744501,
+              "title": "超神宠兽店 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_14v7qba0c4c.html",
+              "date": {
+                "year": 2024,
+                "month": 2,
+                "day": 9
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "御兽流"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 5143186603372401,
+              "title": "神级奸商：全服求我别薅了 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2d127cqmsco.html",
+              "date": {
+                "year": 2025,
+                "month": 5,
+                "day": 26
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "系统流"
+                }
+              ]
+            },
+            {
+              "album_id": 4320966609480801,
+              "title": "全民转职：我组建了BOSS军团 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_16xz72b3l3s.html",
+              "date": {
+                "year": 2025,
+                "month": 8,
+                "day": 18
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "御兽流"
+                }
+              ]
+            },
+            {
+              "album_id": 8184999497859001,
+              "title": "深渊之上",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2doraevavqs.html",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 22
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "科幻"
+                },
+                {
+                  "text": "异能"
+                }
+              ]
+            },
+            {
+              "album_id": 1300010027043001,
+              "title": "绝世武神 动态漫画 第8季",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_dqfafv675o.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2025,
+                "month": 10,
+                "day": 11
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "东方玄幻"
+                }
+              ]
+            },
+            {
+              "album_id": 5899628997753701,
+              "title": "我只想安静地打游戏 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1prvt0xa214.html",
+              "date": {
+                "year": 2024,
+                "month": 2,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2302717336669401,
+              "title": "苍绝剑尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_obiu9nifmc.html",
+              "date": {
+                "year": 2026,
+                "month": 5,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2285069688018001,
+              "title": "全民诡异：开局掌握零元购 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1t3om8emqd8.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动态漫动漫榜No.8"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 1819813496352301,
+              "title": "全民御兽：开局山海经，我横扫全球 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1ncsoog0ht4.html",
+              "date": {
+                "year": 2025,
+                "month": 1,
+                "day": 21
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "奇幻动漫榜No.7"
+                },
+                {
+                  "text": "异世界"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "周日",
+          "sub_title": "09-13",
+          "block_id": "jmd_Sun",
+          "data": [
+            {
+              "album_id": 202861101,
+              "title": "航海王",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_19rrok4nt0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 1999,
+                "month": 10,
+                "day": 20
+              },
+              "tag3lines": [
+                {
+                  "text": "弹幕破5000万"
+                },
+                {
+                  "text": "豆瓣高分"
+                },
+                {
+                  "text": "动漫热播榜No.1"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "热血"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 5560312844176701,
+              "title": "财神窦占龙",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1wgr39oa4c8.html",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 16
+              },
+              "tag3lines": [
+                {
+                  "text": "本周日更新"
+                },
+                {
+                  "text": "奇幻动漫榜No.4"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "恐怖"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 4862428556681501,
+              "title": "太古神尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2dssx9squck.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 30
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "重生"
+                },
+                {
+                  "text": "动作"
+                }
+              ]
+            },
+            {
+              "album_id": 3784317657367801,
+              "title": "都市古仙医",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1la70ef6oaw.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 10,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动漫飙升榜No.3"
+                },
+                {
+                  "text": "医神-玄幻"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 7424546274231301,
+              "title": "启运丹田：开局签到至尊丹田",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_10o1sgm6ke8.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2025,
+                "month": 10,
+                "day": 4
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动漫飙升榜No.7"
+                },
+                {
+                  "text": "签到流"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 5918880978098101,
+              "title": "只有我能用召唤术 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_26lmtym1ryk.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2024,
+                "month": 7,
+                "day": 29
+              },
+              "tag3lines": [
+                {
+                  "text": "本周日更新"
+                },
+                {
+                  "text": "异世界"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "穿越"
+                }
+              ]
+            },
+            {
+              "album_id": 8184999497859001,
+              "title": "深渊之上",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2doraevavqs.html",
+              "date": {
+                "year": 2026,
+                "month": 8,
+                "day": 22
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "科幻"
+                },
+                {
+                  "text": "异能"
+                }
+              ]
+            },
+            {
+              "album_id": 6852602024820901,
+              "title": "斗罗大陆3龙王传说 动态漫画 合集",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_19rur9poxc.html",
+              "date": {
+                "year": 2023,
+                "month": 11,
+                "day": 10
+              },
+              "tag3lines": [
+                {
+                  "text": "本周日更新"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "东方玄幻"
+                }
+              ]
+            },
+            {
+              "album_id": 1300010027043001,
+              "title": "绝世武神 动态漫画 第8季",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_dqfafv675o.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2025,
+                "month": 10,
+                "day": 11
+              },
+              "tag3lines": [
+                {
+                  "text": "本周六更新"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "东方玄幻"
+                }
+              ]
+            },
+            {
+              "album_id": 5899628997753701,
+              "title": "我只想安静地打游戏 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1prvt0xa214.html",
+              "date": {
+                "year": 2024,
+                "month": 2,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "明日10:00更新"
+                },
+                {
+                  "text": "网游流-奇幻"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2302717336669401,
+              "title": "苍绝剑尊",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_obiu9nifmc.html",
+              "date": {
+                "year": 2026,
+                "month": 5,
+                "day": 15
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00更新"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "神怪"
+                }
+              ]
+            },
+            {
+              "album_id": 2285069688018001,
+              "title": "全民诡异：开局掌握零元购 动态漫画",
+              "channel_id": 4,
+              "content_type": "FEATURE_FILM",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1t3om8emqd8.html",
+              "date": {
+                "year": 2025,
+                "month": 4,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "今日更新"
+                },
+                {
+                  "text": "动态漫动漫榜No.8"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "即将上线",
+          "sub_title": "敬请期待",
+          "block_id": "coming",
+          "data": [
+            {
+              "album_id": 5466459440004201,
+              "title": "九霄神女",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_hhtpe67a2w.html",
+              "pay_mark": "VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 9,
+                "day": 2
+              },
+              "tag3lines": [
+                {
+                  "text": "明日09:00上线"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                },
+                {
+                  "text": "逆袭"
+                }
+              ]
+            },
+            {
+              "album_id": 5273939636547001,
+              "title": "万相之王",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1627dg28iic.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "励志"
+                }
+              ]
+            },
+            {
+              "album_id": 6296701092368401,
+              "title": "我不是戏神年番",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_21yt86foals.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "热血"
+                },
+                {
+                  "text": "异能"
+                }
+              ]
+            },
+            {
+              "album_id": 1114709716224001,
+              "title": "神国之上 第2季",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_1xzvb3dl5e0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "玄幻"
+                }
+              ]
+            },
+            {
+              "album_id": 8087937430280501,
+              "title": "异兽迷城",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_n8w9jttjj8.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "超能力"
+                },
+                {
+                  "text": "悬疑"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 7419733279145001,
+              "title": "元尊年番",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_hmc4j6jq1s.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 2557003910387101,
+              "title": "七星鲁王宫",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_gq9im2og74.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "悬疑"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "恐怖"
+                }
+              ]
+            },
+            {
+              "album_id": 8458538051918101,
+              "title": "诸神愚戏",
+              "channel_id": 4,
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2bl1bwuiu5w.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "悬疑"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 1457234533192001,
+              "title": "超能复刻镜",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_s9g93fo21g.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "末日"
+                }
+              ]
+            },
+            {
+              "album_id": 8137671712838601,
+              "title": "一剑独尊年番",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_25ulb3w4dps.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "古装"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 7026672013773801,
+              "title": "别叫我恶魔",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_2ck1rq6ml2o.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "末日"
+                }
+              ]
+            },
+            {
+              "album_id": 4917778000168101,
+              "title": "踏星年番",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_28wf0qzc8no.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "星际文明"
+                },
+                {
+                  "text": "科幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 3573348039423701,
+              "title": "间客",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_18q355t9o9o.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "科幻"
+                },
+                {
+                  "text": "机战"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 6216484507596201,
+              "title": "天渊年番",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_293xw13ej08.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "轮回"
+                },
+                {
+                  "text": "东方玄幻"
+                }
+              ]
+            },
+            {
+              "album_id": 7313045221399801,
+              "title": "赛博剑仙铁雨",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_l1bk14skg8.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2026,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "科幻"
+                },
+                {
+                  "text": "玄幻"
+                }
+              ]
+            },
+            {
+              "album_id": 2200842274009501,
+              "title": "夜无疆年番",
+              "channel_id": 4,
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_eienwqlfe0.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "冒险"
+                }
+              ]
+            },
+            {
+              "album_id": 3908653363762901,
+              "title": "佣兵天下",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_qgrzhdayek.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "热血冒险"
+                },
+                {
+                  "text": "奇幻"
+                }
+              ]
+            },
+            {
+              "album_id": 4710819211461401,
+              "title": "长安督武司",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_fdyqy5mkxo.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "武侠"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 4685952070186001,
+              "title": "长生仙游",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_a9kg2ibw4s.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "武侠"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 3461044820747701,
+              "title": "天下无双之浮冰城篇",
+              "channel_id": 4,
+              "content_type": "PREVUE",
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/v_wa70vnwrio.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "励志"
+                }
+              ]
+            },
+            {
+              "album_id": 8982352350464901,
+              "title": "我有一剑年番",
+              "channel_id": 4,
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/a_2fluft0vtux.html",
+              "pay_mark": "PAY_MARK_FUN_VIP_MARK",
+              "date": {
+                "year": 2027,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "东方玄幻"
+                },
+                {
+                  "text": "热血"
+                }
+              ]
+            },
+            {
+              "album_id": 6578261304915101,
+              "title": "封刀",
+              "channel_id": 4,
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/a_1s7ssyg1qep.html",
+              "pay_mark": "NONE_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "玄幻"
+                },
+                {
+                  "text": "动作"
+                },
+                {
+                  "text": "古装"
+                }
+              ]
+            },
+            {
+              "album_id": 7131755739824701,
+              "title": "江思先生",
+              "channel_id": 4,
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/a_1xo3f1sijwx.html",
+              "pay_mark": "NONE_MARK",
+              "date": {
+                "year": 2026,
+                "month": 7,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "奇幻"
+                },
+                {
+                  "text": "冒险"
+                },
+                {
+                  "text": "搞笑"
+                }
+              ]
+            },
+            {
+              "album_id": 1922490724864801,
+              "title": "宅妖记",
+              "channel_id": 4,
+              "is_episode": false,
+              "isAd": false,
+              "page_url": "https://www.iqiyi.com/a_idf2cc04st.html",
+              "pay_mark": "NONE_MARK",
+              "date": {
+                "year": 2026,
+                "month": 1,
+                "day": 1
+              },
+              "tag3lines": [
+                {
+                  "text": "即将上线"
+                },
+                {
+                  "text": "穿越"
+                },
+                {
+                  "text": "搞笑"
+                },
+                {
+                  "text": "古装"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

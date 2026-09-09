@@ -780,6 +780,25 @@ class DiscoverySearchUIContractTests(unittest.TestCase):
             ),
         )
 
+    def test_discovery_text_controls_use_one_focus_ring_without_double_outline(self):
+        self.assertRegex(
+            self.styles,
+            re.compile(
+                r"\.discovery-page\s+:is\(input\.form-input,\s*select\.form-select\):focus-visible\s*\{"
+                r"[^}]*outline:\s*none;[^}]*border-color:\s*transparent;"
+                r"[^}]*box-shadow:\s*0\s+0\s+0\s+2px\s+var\(--accent\)",
+                re.S,
+            ),
+        )
+        self.assertNotRegex(
+            self.styles,
+            re.compile(r"\.discovery-page\s+input:focus-visible[^}]*outline:", re.S),
+        )
+        self.assertRegex(
+            self.styles,
+            re.compile(r"\.discovery-page\s+button:focus-visible\s*\{[^}]*outline:", re.S),
+        )
+
     def test_css_reserves_control_height_and_contains_mobile_resource_rows(self):
         for selector in (
             ".discovery-search-form",

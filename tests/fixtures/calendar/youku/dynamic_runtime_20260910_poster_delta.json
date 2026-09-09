@@ -1,0 +1,17 @@
+{
+  "kind": "observed_independent_runtime_poster_field_delta",
+  "base_fixture": "dynamic_week_20260910.json",
+  "captured_at": "2026-09-10T03:41:09.973660+08:00",
+  "img_by_source_id": {
+    "fdca5177ae604c66bdb8": "http://liangcang-material.alicdn.com/prod/upload/59a8db341ee74525a0daace3d27b0ad1.webp.jpg",
+    "badbb5792f934ddb82fd": "http://liangcang-material.alicdn.com/prod/upload/98c14d9776084e0ea1a90aaf513ede66.webp.jpg",
+    "dcab66069929483186bc": "http://liangcang-material.alicdn.com/prod/upload/07c0ca8faa8842cc86e8ebaea59b43b2.webp.jpg",
+    "eabedc9465724a09b03d": "http://liangcang-material.alicdn.com/prod/upload/e18a322aa38542ebbaf57c80e00d099c.webp.jpg",
+    "cdcbdabcc35e4e4e8d7b": "http://liangcang-material.alicdn.com/prod/upload/4b4250f9bd014735b9bc928f3888932a.webp.jpg",
+    "caabc3bf10da41a38ff4": "http://liangcang-material.alicdn.com/prod/upload/edf2871cc71e4a0b9ffd6e575cf0d78d.webp.jpg",
+    "adaec02f09f9469ab8d8": "http://liangcang-material.alicdn.com/prod/upload/c33309a311804fa09fe2ccdfb240b53b.webp.jpg",
+    "bdbcd9ea582547d1b014": "http://liangcang-material.alicdn.com/prod/upload/bebc9c3193c149ada58c3e12452a7f8a.webp.jpg",
+    "caab6ed59a5547a78fb1": "http://liangcang-material.alicdn.com/prod/upload/6b1653795624428ebd1c1586b55d6bc7.webp.jpg"
+  },
+  "note": "9个官方img字段实际轮换，其余47节目身份/92排期/91时刻/会员与免费事实完全相同；非合成排期，非运行时备用。"
+}

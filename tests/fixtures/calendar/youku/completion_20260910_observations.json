@@ -1,0 +1,140 @@
+{
+  "captured_timezone": "Asia/Shanghai",
+  "kind": "sanitized_real_sampling_metadata_not_a_runtime_source",
+  "fixture": "anime_20260910_completion_stale_webcomic.html",
+  "fixture_sha256": "6ddc3c94f688f880598154c81112d9fae6c026e6a3099fb59c0a0a064e23c17e",
+  "fixture_fields": "仅日期/节目身份/排期文本/会员标识与一个实际业务script src；无跟踪/凭据/图片/SDK代码",
+  "row_sizes": [
+    11,
+    12,
+    13,
+    14,
+    12,
+    12,
+    12
+  ],
+  "offline_replay": {
+    "recorded_week": {
+      "week_start": "2026-08-31",
+      "week_end": "2026-09-06",
+      "status": "partial",
+      "programmes": 42,
+      "events": 86
+    },
+    "current_week": {
+      "week_start": "2026-09-07",
+      "week_end": "2026-09-13",
+      "status": "unavailable",
+      "programmes": 0,
+      "events": 0
+    }
+  },
+  "requests": [
+    {
+      "number": 1,
+      "started_at": "2026-09-10T01:38:30.666574+08:00",
+      "method": "GET",
+      "url": "https://www.youku.com/ku/webcomic",
+      "host": "www.youku.com",
+      "path": "/ku/webcomic",
+      "evidence": "用户提供的官方动漫周历入口；现有provider和fixture已记录，现场重新读取只为日期与明确资源引用",
+      "http_status": 200,
+      "mime": "text/html; charset=UTF-8",
+      "bytes": 1548646,
+      "sha256": "a2e3055a2d121a130e1f8bfe3ec9cd7f0368181473d74b0526f7c3af0619ba50",
+      "date_groups": [
+        [
+          "08.31",
+          "09.01",
+          "09.02",
+          "09.03",
+          "09.04",
+          "09.05",
+          "09.06"
+        ]
+      ]
+    },
+    {
+      "number": 2,
+      "started_at": "2026-09-10T01:38:45.076516+08:00",
+      "method": "GET",
+      "url": "https://comic.youku.com/",
+      "host": "comic.youku.com",
+      "path": "/",
+      "evidence": "本轮唯一web官方范围搜索结果，官方动漫频道入口（文档证据而非当前可用性）",
+      "http_status": 302,
+      "mime": "text/html; charset=utf-8",
+      "bytes": null,
+      "sha256": null,
+      "redirect_target_without_query": "https://www.youku.com/channel/webcomic",
+      "body_not_consumed": "固定客户端拒绝自动跳转"
+    },
+    {
+      "number": 3,
+      "started_at": "2026-09-10T01:39:01.714325+08:00",
+      "method": "GET",
+      "url": "https://www.youku.com/channel/webcomic",
+      "host": "www.youku.com",
+      "path": "/channel/webcomic",
+      "evidence": "本轮#2官方comic.youku.com/明确302 Location，客户端未自动跟随；手动批准新公开频道路径，无查询参数",
+      "http_status": 302,
+      "mime": "text/html; charset=utf-8",
+      "bytes": null,
+      "sha256": null,
+      "redirect_target_without_query": "https://www.youku.com/ku/webcomic",
+      "body_not_consumed": "固定客户端拒绝自动跳转"
+    },
+    {
+      "number": 4,
+      "started_at": "2026-09-10T01:39:23.889389+08:00",
+      "method": "GET",
+      "url": "https://g.alicdn.com/youku-node/pc-pages-v2/4.1.822/v2/static/js/Page.chunk.js",
+      "host": "g.alicdn.com",
+      "path": "/youku-node/pc-pages-v2/4.1.822/v2/static/js/Page.chunk.js",
+      "evidence": "本轮#1官方www.youku.com/ku/webcomic HTML明确script src，仅读取页面业务bundle寻找公开匿名排期调用，不读安全/播放器SDK",
+      "http_status": 200,
+      "mime": "application/javascript",
+      "bytes": 954363,
+      "sha256": "b75e77c2b96aa89df0475aa6b27889b0394c2cb0ec525955d6e9cb2a4859ae6b"
+    },
+    {
+      "number": 5,
+      "started_at": "2026-09-10T01:56:09.218779+08:00",
+      "method": "GET",
+      "url": "https://g.alicdn.com/youku-node/pc-pages-v2/4.1.822/v2/static/js/Page.chunk.js",
+      "host": "g.alicdn.com",
+      "path": "/youku-node/pc-pages-v2/4.1.822/v2/static/js/Page.chunk.js",
+      "evidence": "原#1官方HTML script src；主线澄清#4是业务JS模糊关键词非确认挑战，明确授权同轮第5次原URL/同UA/无Cookie/无参数，只编译与静态提取公开调用证据",
+      "http_status": 200,
+      "mime": "application/javascript",
+      "bytes": 954363,
+      "sha256": "b75e77c2b96aa89df0475aa6b27889b0394c2cb0ec525955d6e9cb2a4859ae6b",
+      "date_groups": []
+    }
+  ],
+  "stopping_reason": "主线澄清授权同轮第5次原JS取证，同hash及node --check通过，唯一关键词位于发布非法输入catch；已确认原检测假阳性。公开频道MTOP调用依赖SDK，未证明免签匿名固定HTTPS请求，不使用第6次，尚未恢复当周。",
+  "challenge_confirmed": false,
+  "current_week_restored": false,
+  "runtime_fallback_added": false,
+  "original_bodies_retained": false,
+  "same_round_source_requests_used": 5,
+  "source_budget_total": 6,
+  "image_requests_used": 1,
+  "image_budget_total": 1,
+  "public_js_call_evidence_summary": {
+    "api_name": "mtop.youku.columbus.home.query",
+    "parameter_builder": "getChannelPlatoParams",
+    "channel_node_key": "WEBCOMIC",
+    "request_data_fields": [
+      "ms_codes",
+      "params",
+      "system_info"
+    ],
+    "sdk": "window.lib.mtop or module 80",
+    "sdk_module_80_in_bundle": false,
+    "sync_cookie_mode": true,
+    "requires_login": null,
+    "requires_signature": null,
+    "anonymous_unsigned_https_url_verified": false
+  }
+}

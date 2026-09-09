@@ -1,0 +1,56 @@
+{
+  "kind": "independent_complete_provider_cold_session_reverification",
+  "captured_at": "2026-09-10T03:41:09.973660+08:00",
+  "endpoint": "https://acs.youku.com/h5/mtop.youku.columbus.home.query/1.0/",
+  "raw_response_sha256": "0bf750dfc6258a2753eb6a305f5323d684c5f871582b7447819d0c2be9842a1c",
+  "raw_bytes": 524511,
+  "base_fixture": "dynamic_week_20260910.json",
+  "base_fixture_sha256": "752e1be8098bf9e5edc81c4a16a7b38cb0ae07c317590ac8dfeff89b87a14cbe",
+  "poster_delta_fixture": "dynamic_runtime_20260910_poster_delta.json",
+  "poster_delta_sha256": "bd98594e78064a9d2ed39ab3184694c71912eb93116476343e9251f3820f3047",
+  "runtime_summary": {
+    "kind": "LIVE_COMPLETE_PROVIDER_COLD_ANONYMOUS_SESSION",
+    "finished_at": "2026-09-10T03:41:12.652307+08:00",
+    "status": "partial",
+    "message": "优酷官方动态追漫日历：本周47部动漫、92条排期，1条时刻未注明；平台排期与免费进度独立。",
+    "programmes": 47,
+    "events": 92,
+    "timed_events": 91,
+    "source_poster_keys": 47,
+    "free_progress_known": 0,
+    "dates": [
+      "2026-09-07",
+      "2026-09-08",
+      "2026-09-09",
+      "2026-09-10",
+      "2026-09-11",
+      "2026-09-12",
+      "2026-09-13"
+    ],
+    "requests": 3,
+    "elapsed_seconds": 4.882,
+    "automatic_cookie_jar_empty": true,
+    "production_state_touched": false,
+    "account_credentials": false
+  },
+  "parser_parity": [
+    {
+      "date": "2026-09-10",
+      "entire_SourceResult_equals_base_plus_observed_poster_delta": true
+    },
+    {
+      "date": "2026-09-17",
+      "entire_SourceResult_equals_base_plus_observed_poster_delta": true
+    },
+    {
+      "date": "2027-01-01",
+      "entire_SourceResult_equals_base_plus_observed_poster_delta": true
+    }
+  ],
+  "response_header_or_cookie_values_retained": false,
+  "live_steps": [
+    "SSR(GET)",
+    "anonymous initialization(GET)",
+    "current calendar(GET)"
+  ]
+}

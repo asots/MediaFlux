@@ -10,6 +10,8 @@ from app import config
 from app.discovery.models import MediaCard, ProviderError
 from app.discovery.service import get_discovery_service
 from app.discovery.search import get_discovery_search_service
+from app.discovery.calendar.models import SourceUnavailable
+from app.discovery.calendar.service import get_calendar_service
 from app.routes.discovery_image import decode_poster_token, encode_poster_token
 from app.web import api_error, api_response, require_api_login
 
@@ -276,3 +278,103 @@ def remove_watchlist(request: Request, provider: str, media_type: str, external_
         return api_response({"success": True, "removed": bool(removed)})
     except (TypeError, ValueError) as exc:
         return api_error(str(exc), 400)
+
+
+def _calendar_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    from app import database
+
+    def media_identity(raw):
+        for provider in ("tmdb", "douban"):
+            value = str(raw.get(provider + "_id") or "")
+            if re.fullmatch(r"[1-9][0-9]{0,19}", value):
+                return provider, value
+        return "", ""
+
+    all_cards = [card for day in snapshot["days"] for card in day["items"] if card.get("category") == "animation"]
+    all_cards += [card for card in snapshot.get("unscheduled", []) if card.get("category") == "animation"]
+    identities = {(provider, external_id, "tv") for raw in all_cards
+                  for provider, external_id in (media_identity(raw),) if provider}
+    watched = database.list_media_watchlist_keys(list(identities)) if identities else set()
+
+    def card_payload(raw):
+        card = dict(raw)
+        platform_key = card.pop("platform_poster_key", "")
+        primary = card.pop("poster_provider", "") or "tmdb"
+        primary_key = str(card.pop("poster_key", "") or "")
+        keys = {provider: str(card.pop(provider + "_poster_key", "") or "") for provider in ("tmdb", "douban")}
+        if primary in keys and not keys[primary]:
+            keys[primary] = primary_key
+        tokens = {}
+        for provider, key in keys.items():
+            if not key:
+                continue
+            if provider == "tmdb" and not re.fullmatch(r"[A-Za-z0-9_-]+\.(?:jpg|png|webp)", key):
+                continue
+            try:
+                tokens[provider] = encode_poster_token(provider, key)
+            except HTTPException as exc:
+                if exc.status_code != 400:
+                    raise
+        order = [primary] if primary in tokens else []
+        order += [provider for provider in ("tmdb", "douban") if provider in tokens and provider not in order]
+        card["poster_urls"] = [f"/discovery-poster/{provider}/{tokens[provider]}" for provider in order]
+        card["poster_url"] = card["poster_urls"][0] if card["poster_urls"] else ""
+        card["poster_provider"] = order[0] if order else ""
+        # 平台原图独立签名、最后兜底；不进入元资料 tokens，也不生成收藏身份。
+        source = card.get("source")
+        if isinstance(source, str) and source in {"tencent", "iqiyi", "youku"} and platform_key:
+            try:
+                token = encode_poster_token("calendar-" + source, platform_key)
+            except HTTPException as exc:
+                if exc.status_code != 400:
+                    raise
+            else:
+                url = f"/discovery-calendar-poster/{source}/{token}"
+                card["poster_urls"].append(url)
+                if not card["poster_url"]:
+                    card["poster_url"] = url
+                    card["poster_provider"] = "calendar-" + source
+        for provider in ("tmdb", "douban"):
+            value = str(card.get(provider + "_id") or "")
+            card[provider + "_id"] = value if re.fullmatch(r"[1-9][0-9]{0,19}", value) else ""
+        provider, external_id = media_identity(card)
+        card["detail_url"] = (
+            f"/discovery?detail_provider={provider}&detail_type=tv&detail_id={external_id}"
+            if provider else ""
+        )
+        # 收藏身份不随海报 CDN 回退变化；跨 provider 的图片 token 绝不冒充身份源。
+        card["watchlist"] = ({"provider": provider, "external_id": external_id, "media_type": "tv",
+                              "poster_token": tokens.get(provider, ""),
+                              "in_watchlist": f"{provider}:tv:{external_id}" in watched} if provider else None)
+        return card
+    return {
+        **snapshot,
+        "days": [{**day, "items": [card_payload(card) for card in day["items"]
+                                  if card.get("category") == "animation"]} for day in snapshot["days"]],
+        "unscheduled": [card_payload(card) for card in snapshot.get("unscheduled", [])
+                        if card.get("category") == "animation"],
+        "items_count": len({card["stable_id"] for day in snapshot["days"] for card in day["items"]
+                            if card.get("category") == "animation"}),
+    }
+
+
+@router.get("/calendar")
+def free_calendar(request: Request):
+    require_api_login(request)
+    if request.query_params:
+        return api_error("追漫日历仅返回本周动漫排期，不接受额外查询参数", 400)
+    try:
+        return api_response(_calendar_payload(get_calendar_service().get_week()))
+    except SourceUnavailable:
+        return api_error("日历服务暂不可用，请稍后重试", 503)
+
+
+@router.post("/calendar/refresh")
+def refresh_free_calendar(request: Request, data: Any = Body(default=None)):
+    require_api_login(request)
+    if request.query_params or (data is not None and data != {}):
+        return api_error("刷新日历不接受自定义来源或地址", 400)
+    try:
+        return api_response(_calendar_payload(get_calendar_service().get_week(force=True)))
+    except SourceUnavailable:
+        return api_error("日历服务暂不可用，请稍后重试", 503)

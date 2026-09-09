@@ -1,0 +1,18 @@
+{
+  "code": "A00000",
+  "data": {
+    "has_next": 1,
+    "list": [
+      {
+        "albumId": 202861101,
+        "name": "脱敏动漫",
+        "channelId": 4,
+        "videoCount": 0,
+        "latestOrder": 1177,
+        "payMark": 0,
+        "payMarkUrl": "http://pic0.iqiyipic.com/common/20180528/ac/1b/vip_100004_v_601.png",
+        "playUrl": "http://www.iqiyi.com/v_19rrok4nt0.html"
+      }
+    ]
+  }
+}

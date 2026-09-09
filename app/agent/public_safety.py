@@ -106,6 +106,7 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "config.set_safe_policy": "安全策略修改",
     "config.test_media_server": "媒体服务器连接测试",
     "discovery.add_watchlist": "加入探索收藏",
+    "discovery.anime_calendar": "追漫日历",
     "discovery.confirm_mapping": "影视映射确认",
     "discovery.detail": "影视发现详情",
     "discovery.credits": "影视演职员查询",

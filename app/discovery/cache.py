@@ -141,10 +141,12 @@ class DiscoveryCache:
     def set_error(
         self, key: str, provider: str, error: str, *, ttl_seconds: int = 30,
         code: str = "unavailable", status_code: int = 503, retry_after: int = 0,
+        preserve_stale: bool = True,
     ) -> None:
+        """默认保留旧数据；调用方确认旧内容不可用时可改用短期错误缓存。"""
         now = self._clock()
         row = database.get_discovery_cache(key)
-        if row and row["payload"] and row["status"] != "error":
+        if preserve_stale and row and row["payload"] and row["status"] != "error":
             try:
                 stale_until = datetime.strptime(row["stale_until"], _TIMESTAMP)
             except (TypeError, ValueError):

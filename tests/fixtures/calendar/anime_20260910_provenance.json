@@ -1,0 +1,376 @@
+[
+  {
+    "source": "tencent",
+    "number": 1,
+    "method": "POST",
+    "url": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1"
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1"
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "started_at": "2026-09-10T00:11:43+08:00",
+    "finished_at": "2026-09-10T00:11:44+08:00",
+    "http_status": 200,
+    "bytes": 203820,
+    "sha256": "3e7de6112bae588647cb5984a92387504cc76f3b14b671500a0cfdd315a8781c",
+    "fixture_file": "tencent/anime_20260910_calendar_20260910.json",
+    "fixture_sha256": "80dea75884a4e810cfe0d12d380add26a01b8f057e269af9b2af5bb01c801bb8"
+  },
+  {
+    "source": "iqiyi",
+    "number": 1,
+    "method": "GET",
+    "url": "https://mesh.if.iqiyi.com/portal/lw/v7/channel/page/tracking",
+    "params": {
+      "channelId": "4",
+      "mode": "page",
+      "page": "1",
+      "v": "17.091.26283"
+    },
+    "json": null,
+    "started_at": "2026-09-10T00:11:43+08:00",
+    "finished_at": "2026-09-10T00:11:45+08:00",
+    "http_status": 200,
+    "bytes": 612777,
+    "sha256": "1e496e45d32fb4daefa9a9f8174d0d9ea23885395cda5aa15c347825f50308f2",
+    "fixture_file": "iqiyi/anime_20260910_tracking.json",
+    "fixture_sha256": "f82bb5432aeae9fe1bcc5f0dd2aaa24c084b339c67e95ffb0ff0ee09dcb46071"
+  },
+  {
+    "source": "youku",
+    "number": 1,
+    "method": "GET",
+    "url": "https://www.youku.com/ku/webcomic",
+    "params": null,
+    "json": null,
+    "started_at": "2026-09-10T00:11:43+08:00",
+    "finished_at": "2026-09-10T00:11:44+08:00",
+    "http_status": 200,
+    "bytes": 1545545,
+    "sha256": "413a5c4d22f7ef2bc92c07657285c92d58c67bfbc06cf9feb199b93f9cecb961",
+    "fixture_file": "youku/anime_20260910_stale_webcomic.html",
+    "fixture_sha256": "67f51e4005ee48bae089b42de13e6340f32436e0d4a79903fc5cc2d499cd7153"
+  },
+  {
+    "source": "tencent",
+    "number": 2,
+    "method": "POST",
+    "url": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1",
+        "week": "20260907",
+        "un_mod_id": "d4afd_17f79",
+        "un_module_key": ""
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1",
+          "week": "20260907",
+          "un_mod_id": "d4afd_17f79",
+          "un_module_key": ""
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "started_at": "2026-09-10T00:11:44+08:00",
+    "finished_at": "2026-09-10T00:11:46+08:00",
+    "http_status": 200,
+    "bytes": 202741,
+    "sha256": "ce0607418a84d0bf7aaf4c9ba9bf48e8b52042c666ebf210c65400bb3aaab0fa",
+    "fixture_file": "tencent/anime_20260910_calendar_20260907.json",
+    "fixture_sha256": "b87518e9ebb2a446c59279a4d510518c2d40b10a471235ee5dcc3c5586010529"
+  },
+  {
+    "source": "tencent",
+    "number": 3,
+    "method": "POST",
+    "url": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1",
+        "week": "20260908",
+        "un_mod_id": "d4afd_17f79",
+        "un_module_key": ""
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1",
+          "week": "20260908",
+          "un_mod_id": "d4afd_17f79",
+          "un_module_key": ""
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "started_at": "2026-09-10T00:11:46+08:00",
+    "finished_at": "2026-09-10T00:11:48+08:00",
+    "http_status": 200,
+    "bytes": 210474,
+    "sha256": "e16dfa2fb95d944d1430e4f8a920902715cfd70f665cbb9c0688284949bb5d3f",
+    "fixture_file": "tencent/anime_20260910_calendar_20260908.json",
+    "fixture_sha256": "cf2e4bd34313298f739c0e353e252fafec4ee310963340932d1736628b5f02c4"
+  },
+  {
+    "source": "tencent",
+    "number": 4,
+    "method": "POST",
+    "url": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1",
+        "week": "20260909",
+        "un_mod_id": "d4afd_17f79",
+        "un_module_key": ""
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1",
+          "week": "20260909",
+          "un_mod_id": "d4afd_17f79",
+          "un_module_key": ""
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "started_at": "2026-09-10T00:11:48+08:00",
+    "finished_at": "2026-09-10T00:11:50+08:00",
+    "http_status": 200,
+    "bytes": 209636,
+    "sha256": "d3ec2b1667697a818c685643a2b8d0380dfc0bce2f1952f7869cdb37df1d788f",
+    "fixture_file": "tencent/anime_20260910_calendar_20260909.json",
+    "fixture_sha256": "0eb13c0351fe787eadf56478ca8920244c54f6c66355250ea833c8d10d27c921"
+  },
+  {
+    "source": "tencent",
+    "number": 5,
+    "method": "POST",
+    "url": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1",
+        "week": "20260911",
+        "un_mod_id": "d4afd_17f79",
+        "un_module_key": ""
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1",
+          "week": "20260911",
+          "un_mod_id": "d4afd_17f79",
+          "un_module_key": ""
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "started_at": "2026-09-10T00:11:50+08:00",
+    "finished_at": "2026-09-10T00:11:52+08:00",
+    "http_status": 200,
+    "bytes": 204337,
+    "sha256": "8a70133b3a71b4ca26b7be47895eacadc8928ada2d2633251b9b5b84e7f9c8ee",
+    "fixture_file": "tencent/anime_20260910_calendar_20260911.json",
+    "fixture_sha256": "8029be8c75179833a82622827e358bc2004b9437fb7558c32003ea1dff1b991b"
+  },
+  {
+    "source": "tencent",
+    "number": 6,
+    "method": "POST",
+    "url": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1",
+        "week": "20260912",
+        "un_mod_id": "d4afd_17f79",
+        "un_module_key": ""
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1",
+          "week": "20260912",
+          "un_mod_id": "d4afd_17f79",
+          "un_module_key": ""
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "started_at": "2026-09-10T00:11:52+08:00",
+    "finished_at": "2026-09-10T00:11:54+08:00",
+    "http_status": 200,
+    "bytes": 213338,
+    "sha256": "dfea3fbbc7e187b6f7948a2c30a2e8d86454ca474566b00583971c44b0b1e7a7",
+    "fixture_file": "tencent/anime_20260910_calendar_20260912.json",
+    "fixture_sha256": "cc9027585574c13917dae68413efd3bbeccac99cc0f16fed8d170bf37393f0ec"
+  },
+  {
+    "source": "tencent",
+    "number": 7,
+    "method": "POST",
+    "url": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1",
+        "week": "20260913",
+        "un_mod_id": "d4afd_17f79",
+        "un_module_key": ""
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1",
+          "week": "20260913",
+          "un_mod_id": "d4afd_17f79",
+          "un_module_key": ""
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "started_at": "2026-09-10T00:11:54+08:00",
+    "finished_at": "2026-09-10T00:11:56+08:00",
+    "http_status": 200,
+    "bytes": 205341,
+    "sha256": "5486c36a8a09cc98513c7238b550b9331f05295a299a6ef2355a4650fcae71fb",
+    "fixture_file": "tencent/anime_20260910_calendar_20260913.json",
+    "fixture_sha256": "509c62bb737363186f92b6e6ffe3f6a9cc6e2bb4ef5c0f18e50336fb0f3bef8f"
+  },
+  {
+    "source": "youku",
+    "number": 2,
+    "method": "GET",
+    "url": "https://www.youku.com/ku/webcomic",
+    "headers": {
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
+      "Accept-Encoding": "identity"
+    },
+    "reason": "explicit_one_time_stale_week_revalidation",
+    "started_at": "2026-09-10T00:14:42+08:00",
+    "finished_at": "2026-09-10T00:14:44+08:00",
+    "http_status": 200,
+    "bytes": 1575534,
+    "sha256": "14949431f6e1ce76dd7327ec1e2c257b9df6ef4c8ec4ab470cd4bc7093ea8c40",
+    "fixture_file": "youku/anime_20260910_webcomic.html",
+    "fixture_sha256": "688262bbd78265d32edad7aa706fc96d379eb38fbf3eb91972318889022aa2c1",
+    "returned_week_dates": [
+      [
+        "09.07",
+        "09.08",
+        "09.09",
+        "09.10",
+        "09.11",
+        "09.12",
+        "09.13"
+      ]
+    ]
+  }
+]

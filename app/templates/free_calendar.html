@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}追漫日历 - MediaFlux{% endblock %}
+{% block body_class %}discovery-workspace-page weekly-calendar-workspace-page{% endblock %}
+{% block page_title %}追漫日历{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="{{ static_url('css/free-calendar.css') }}">{% endblock %}
+{% block workspace_bar %}
+<div class="discovery-mobile-bar">
+    <button class="icon-btn workspace-menu-btn" id="toggleSidebar" type="button" aria-label="打开导航"><i data-lucide="menu" aria-hidden="true"></i></button>
+</div>
+{% endblock %}
+{% block content %}
+<div class="discovery-page weekly-calendar" data-weekly-calendar data-today="{{ calendar_today }}" data-week-start="{{ calendar_week_start }}" aria-labelledby="calendar-heading">
+    <header class="wc-header">
+        <div class="wc-heading">
+            <a class="wc-back" href="{{ url_for('pages.discovery') }}"><i data-lucide="arrow-left" aria-hidden="true"></i>媒体探索</a>
+            <h1 id="calendar-heading">追漫日历</h1>
+        </div>
+        <div class="wc-tools">
+            <button class="discovery-provider-status" id="calendar-source-toggle" type="button" aria-label="来源状态：正在读取" title="来源状态" aria-controls="calendar-source-panel" aria-expanded="false" data-tone="loading"><i data-lucide="radio" aria-hidden="true"></i></button>
+            <button class="icon-btn discovery-refresh" id="calendar-refresh" type="button" aria-label="刷新日历" title="刷新日历" aria-busy="false"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
+            <section class="wc-source-panel" id="calendar-source-panel" role="region" aria-labelledby="calendar-source-heading" hidden>
+                <div class="wc-panel-heading"><h2 id="calendar-source-heading">来源状态</h2><button class="icon-btn" id="calendar-source-close" type="button" aria-label="关闭来源状态"><i data-lucide="x" aria-hidden="true"></i></button></div>
+                <p class="wc-source-scope">平台公开动漫排期，非全站完整覆盖；访问资格以平台为准。</p>
+                <ul class="wc-source-list">
+                    {% for source, name in [('tencent', '腾讯视频'), ('iqiyi', '爱奇艺'), ('youku', '优酷')] %}
+                    <li data-source="{{ source }}" data-status="loading">
+                        <div class="wc-source-heading"><strong>{{ name }}</strong><span class="wc-source-status">读取中</span></div>
+                        <p class="wc-source-message">正在读取来源状态</p>
+                        <p class="wc-source-time">尚无成功同步</p>
+                    </li>
+                    {% endfor %}
+                </ul>
+                <p class="wc-source-sync" id="calendar-sync">最近同步：尚无成功同步</p>
+            </section>
+        </div>
+    </header>
+    <section class="discovery-control-deck wc-controls" aria-label="本周日期与筛选">
+        <div class="discovery-source-tabs wc-weekdays" id="calendar-weekdays" role="tablist" aria-label="选择本周日期"></div>
+        <div class="wc-filters">
+            <label class="wc-platform" for="calendar-platform"><span class="sr-only">平台</span><select class="form-select" id="calendar-platform"><option value="all">全部平台</option><option value="tencent">腾讯视频</option><option value="iqiyi">爱奇艺</option><option value="youku">优酷</option></select></label>
+            <span class="wc-week-range" id="calendar-week">{{ calendar_week_start }} 起 · 上海时间</span>
+        </div>
+    </section>
+    <section class="wc-stage" id="calendar-stage" aria-labelledby="calendar-day-heading" aria-busy="true">
+        <div class="wc-results-heading">
+            <div class="discovery-shelf-heading"><h2 id="calendar-day-heading">本日更新</h2><span id="calendar-count">读取中</span></div>
+            <p id="calendar-status" role="status" aria-live="polite" data-tone="normal">正在读取本周排期…</p>
+        </div>
+        <div id="calendar-days"></div>
+    </section>
+    <noscript><p class="discovery-state">请启用 JavaScript 读取本周日历。</p></noscript>
+</div>
+{% include "_media_profile_host.html" %}
+{% endblock %}
+{% block scripts %}
+<script src="{{ static_url('js/discovery.js') }}" defer></script>
+<script src="{{ static_url('js/free-calendar.js') }}" defer></script>
+{% endblock %}

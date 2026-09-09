@@ -160,6 +160,16 @@ class DiscoveryCacheTests(unittest.TestCase):
         lookup = self.cache.get(key)
         self.assertEqual((lookup.status, lookup.payload["items"][0]["title"], lookup.last_error), ("stale", "old", "timeout"))
 
+    def test_error_can_explicitly_discard_unusable_prior_payload(self):
+        key = self.cache.make_key("calendar:youku", "anime", "tv", 1, {})
+        self.cache.set_success(key, "calendar:youku", {"entries": []}, ttl_seconds=3600, stale_seconds=86400)
+        self.cache.set_error(key, "calendar:youku", "invalid week", ttl_seconds=30, preserve_stale=False)
+        lookup = self.cache.get(key)
+        self.assertEqual(lookup.status, "error")
+        self.assertIsNone(lookup.payload)
+        self.now += timedelta(seconds=31)
+        self.assertEqual(self.cache.get(key).status, "expired")
+
     def test_error_write_replaces_payload_after_stale_window(self):
         key = self.cache.make_key("tmdb", "popular", "movie", 1, {})
         self.cache.set_success(

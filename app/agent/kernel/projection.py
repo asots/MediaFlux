@@ -79,6 +79,9 @@ def _json_safe(value: Any, *, depth: int = 0) -> Any:
 
 def _model_safe(value: Any, *, depth: int = 0, key: str = "") -> Any:
     safe = _json_safe(value, depth=depth)
+    # 唯一固定应用内路由，不把calendar_url变成任意文件路径/外链的放行口。
+    if key == "calendar_url":
+        return "/discovery/calendar" if isinstance(safe, str) and safe == "/discovery/calendar" else "[页面地址无效]"
     if _PRIVATE_MODEL_KEY_RE.search(str(key or "")):
         return "[内部标识已隐藏；请使用返回的 opaque ref]"
     if isinstance(safe, str) and (

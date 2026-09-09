@@ -5253,9 +5253,14 @@ body:has(.discovery-dialog[open]) { overflow: hidden; }
 .discovery-resource-skeleton-copy { width: 78%; height: 60px; }
 .discovery-resource-skeleton-actions { width: 100%; height: 50px; align-self: center; }
 
-.discovery-page button:focus-visible,
-.discovery-page input:focus-visible,
-.discovery-page select:focus-visible { outline: 2px solid var(--discovery-amber); outline-offset: 2px; }
+/* 文本控件使用一枚连续的主题焦点环；避免基础表单阴影与探索页 outline 叠成双框。 */
+.discovery-page button:focus-visible { outline: 2px solid var(--discovery-amber); outline-offset: 2px; }
+.discovery-page :is(input.form-input, select.form-select):focus-visible {
+    outline: none;
+    border-color: transparent;
+    background: var(--input-focus);
+    box-shadow: 0 0 0 2px var(--accent);
+}
 .discovery-resource-sites:focus-visible,
 .discovery-resource-site-status.is-error:focus-visible { outline: 2px solid var(--discovery-amber); outline-offset: 2px; }
 .discovery-resource-site-status.is-filter:focus-visible { outline: 2px solid var(--discovery-amber); outline-offset: 2px; }

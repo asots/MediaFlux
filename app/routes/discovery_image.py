@@ -7,12 +7,16 @@ import re
 import threading
 from urllib.parse import unquote, urlsplit
 
+import httpx
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from itsdangerous import BadSignature, URLSafeSerializer
 from requests.adapters import HTTPAdapter
 
 from app import config
+from app.discovery.calendar.poster_http import fetch_platform_poster
+from app.discovery.calendar.posters import PLATFORM_IMAGE_HOSTS, canonical_platform_poster_key
+from app.indexers.errors import IndexerError
 from app.logger import get_logger, log_throttled
 from app.modules.image_payload import ImagePayloadError, read_bounded_image
 from app.modules.web_secret import WebSecretUnavailable, get_web_secret
@@ -94,6 +98,11 @@ def _serializer() -> URLSafeSerializer:
 
 def _canonical_poster_key(provider: str, poster_key: str) -> tuple[str, str]:
     provider = str(provider or "").strip().lower()
+    if provider.startswith("calendar-"):
+        key = canonical_platform_poster_key(provider.removeprefix("calendar-"), poster_key)
+        if not key:
+            raise HTTPException(status_code=400, detail="invalid platform poster key")
+        return provider, key
     raw = str(poster_key or "").strip().lstrip("/")
     decoded = unquote(raw)
     if (
@@ -282,3 +291,23 @@ def poster(request: Request, provider: str, token: str):
     finally:
         if upstream is not None:
             upstream.close()
+
+
+@router.get("/discovery-calendar-poster/{source}/{token}", name="discovery_image.calendar_poster")
+async def calendar_poster(request: Request, source: str, token: str):
+    if not request.session.get("logged_in"):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if source not in PLATFORM_IMAGE_HOSTS:
+        raise HTTPException(status_code=404, detail="unknown calendar source")
+    if request.query_params:
+        raise HTTPException(status_code=400, detail="unexpected platform poster parameters")
+    key = decode_poster_token("calendar-" + source, token)
+    try:
+        content, content_type = await fetch_platform_poster(source, key)
+    except (ImagePayloadError, IndexerError, httpx.HTTPError, TimeoutError) as exc:
+        log_throttled(logger, logging.WARNING, f"calendar-image-error:{source}:{type(exc).__name__}",
+                      "平台海报代理失败 source=%s type=%s", source, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="upstream platform image failed") from exc
+    return Response(content=content, media_type=content_type, headers={
+        "Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
+    })

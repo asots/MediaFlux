@@ -1,0 +1,121 @@
+{
+  "kind": "sanitized_live_platform_poster_fields",
+  "captured_local_date": "2026-09-10",
+  "timezone": "Asia/Shanghai",
+  "scope": "仅本轮一份默认动漫排期；不是腾讯七日遍历；不读取详情/播放/搜索。",
+  "schedule": {
+    "source": "tencent",
+    "started_at": "2026-09-10T01:38:42+08:00",
+    "method": "POST",
+    "endpoint": "https://pbaccess.video.qq.com/trpc.vector_layout.page_view.PageService/getPage?video_appid=3000010&vversion_platform=2",
+    "params": null,
+    "json_body": {
+      "page_params": {
+        "page_type": "channel",
+        "page_id": "100119",
+        "scene": "channel",
+        "new_mark_label_enabled": "1"
+      },
+      "page_bypass_params": {
+        "params": {
+          "platform_id": "2",
+          "caller_id": "3000010",
+          "data_mode": "default",
+          "user_mode": "default",
+          "specified_strategy": "",
+          "page_type": "channel",
+          "page_id": "100119",
+          "scene": "channel",
+          "new_mark_label_enabled": "1"
+        },
+        "scene": "channel",
+        "app_version": "",
+        "abtest_bypass_id": ""
+      },
+      "page_context": null
+    },
+    "status": 200,
+    "mime": "application/json",
+    "bytes": 205299,
+    "sha256": "bd828ffb2429d6b2265e53d02900bdf8e4a25b66232fe2d29c24fd621edde6e2",
+    "dns": [
+      {
+        "host": "pbaccess.video.qq.com",
+        "addresses": [
+          "120.232.24.105",
+          "120.232.69.73",
+          "120.233.18.78",
+          "2409:8c54:871:2::14",
+          "2409:8c54:871:2::1d"
+        ]
+      }
+    ],
+    "pin_resolved_address": true,
+    "timeout_seconds": 12,
+    "max_bytes": 2097152,
+    "retries": 0,
+    "max_redirects": 0,
+    "credentials": false,
+    "result": "schedule_captured",
+    "finished_at": "2026-09-10T01:38:43+08:00"
+  },
+  "fixture": {
+    "fixture": "platform_images_20260910.json",
+    "bytes": 7428,
+    "sha256": "d63391d936b506968b68f76b18be036b2e87d76aff74a9e89987d28ba518972a"
+  },
+  "image_field": "image_url",
+  "observed_programme_image_rows": 6,
+  "unique_programme_images": 6,
+  "observed_image_hosts": {
+    "vcover-hz-pic.puui.qpic.cn": 6
+  },
+  "schemes": [
+    "https"
+  ],
+  "queries": [
+    ""
+  ],
+  "image_sample": {
+    "source": "tencent",
+    "field": "data.CardList[3].children_list.list.cards[7].params.image_url",
+    "source_id": "mzc0020082u0tna",
+    "title": "灵境行者",
+    "started_at": "2026-09-10T01:40:23+08:00",
+    "endpoint": "https://vcover-hz-pic.puui.qpic.cn/vcover_hz_pic/0/mzc0020082u0tna1788947534562/750",
+    "method": "GET",
+    "normalized_url": "https://vcover-hz-pic.puui.qpic.cn/vcover_hz_pic/0/mzc0020082u0tna1788947534562/750",
+    "normalization": "unchanged HTTPS; no query/fragment in upstream field",
+    "status": 200,
+    "mime": "image/jpeg",
+    "bytes": 128710,
+    "sha256": "495a64909d69a5d86d6a9f5270f1fd18db428eca118db8319fb225aadcdf8f31",
+    "magic_mime": "image/jpeg",
+    "mime_magic_match": true,
+    "dns": [
+      {
+        "host": "vcover-hz-pic.puui.qpic.cn",
+        "addresses": [
+          "112.48.244.202",
+          "112.49.19.48",
+          "223.100.40.153",
+          "2409:8c38:80:1d1:3b::24",
+          "2409:8c50:a00:4650:50::7",
+          "2409:8c62:e10:d04:5e::2",
+          "36.151.124.104"
+        ]
+      }
+    ],
+    "pin_resolved_address": true,
+    "timeout_seconds": 12,
+    "max_bytes": 2097152,
+    "max_redirects": 0,
+    "retries": 0,
+    "credentials": false,
+    "magic_prefix_hex": "ffd8ffe000104a4649460001",
+    "result": "verified_image",
+    "finished_at": "2026-09-10T01:40:24+08:00"
+  },
+  "redaction": "仅保留官方公开日期/节目identity/排期与正式原封面字段；删除广告、会话/追踪、凭据、详情/播放参数及其他图片。列表索引不重映射。",
+  "limitations": "只 GET image_sample 的精确 CDN 主机一次；其余主机仅有排期字段证据。原字段无 query，未验证带 transform 参数资源。历史 fixture 不变。"
+}

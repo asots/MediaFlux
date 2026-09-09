@@ -1,0 +1,20 @@
+{
+  "page": 1,
+  "total_pages": 1,
+  "total_results": 1,
+  "results": [
+    {
+      "id": 218642,
+      "name": "师兄啊师兄",
+      "original_name": "师兄啊师兄",
+      "first_air_date": "2023-01-19",
+      "genre_ids": [
+        16,
+        35,
+        10765,
+        10759
+      ],
+      "poster_path": "/hLUK05JYFVDVGYJLDlI7FUxV6jh.jpg"
+    }
+  ]
+}

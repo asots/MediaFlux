@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.agent.calendar_actions import anime_calendar, anime_calendar_arguments
 from app.agent.capability_discovery_actions import web_capability_status
 from app.agent.discovery_actions import (
     bangumi_calendar,
@@ -632,8 +633,73 @@ def register_specs(
     )
     registry.register(
         ToolSpec(
+            name="discovery.anime_calendar",
+            description=(
+                "读取腾讯视频、爱奇艺和优酷公开动漫排期的追漫日历；默认今天，可按日期、平台"
+                "和片名筛选。仅覆盖上海当前周已收录的排期，每项是一条真实事件，不保证全站"
+                "覆盖或免费观看。复用已有缓存，冷加载时返回来源状态，不强制刷新或循环轮询。"
+            ),
+            risk=RiskLevel.READ,
+            domains=("discovery",),
+            source_kind="public_calendar",
+            freshness="cached",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "day": {
+                        "type": "string",
+                        "default": "today",
+                        "maxLength": 10,
+                        "anyOf": [
+                            {"enum": [
+                                "today", "tomorrow", "week", "monday", "tuesday",
+                                "wednesday", "thursday", "friday", "saturday", "sunday",
+                            ]},
+                            {"pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+                        ],
+                        "description": "按 Asia/Shanghai 的今天、明天、本周、英文星期或有效日期查询；仅支持当前周。",
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["all", "tencent", "iqiyi", "youku"],
+                        "default": "all",
+                        "description": "all 为国内三源；tencent 腾讯视频、iqiyi 爱奇艺、youku 优酷。",
+                    },
+                    "query": {
+                        "type": "string",
+                        "minLength": 0,
+                        "maxLength": 80,
+                        "default": "",
+                        "description": "可选片名关键词；留空不筛选，不接受链接或路径。",
+                    },
+                    "page": {
+                        "type": "integer", "minimum": 1, "maximum": 100, "default": 1,
+                    },
+                    "limit": {
+                        "type": "integer", "minimum": 1, "maximum": 20, "default": 20,
+                        "description": "每页排期事件数，同节目会员和免费事件分别计数。",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=anime_calendar,
+            validator=anime_calendar_arguments,
+            examples=(
+                "追漫日历",
+                "今天动漫更新",
+                "今天有哪些动画更新",
+                "本周追番日历",
+                "本周腾讯动漫排期",
+                "本周爱奇艺动漫排期",
+                "本周优酷动漫排期",
+                "明天优酷有哪些动漫更新",
+            ),
+        )
+    )
+    registry.register(
+        ToolSpec(
             name="bangumi.calendar",
-            description="读取 Bangumi 本周或指定星期的放送日历，不返回图片地址、收藏状态或 Provider 配置。",
+            description="读取用户明确指定的 Bangumi 本周或指定星期放送表，不表示国内视频平台排期；不返回图片地址、收藏状态或 Provider 配置。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -657,8 +723,8 @@ def register_specs(
             handler=bangumi_calendar,
             validator=bangumi_calendar_arguments,
             examples=(
-                "看看本周追番日历",
-                "今天有哪些动画更新",
+                "看看 Bangumi 本周放送日历",
+                "Bangumi 星期六有哪些日番放送",
             ),
         )
     )

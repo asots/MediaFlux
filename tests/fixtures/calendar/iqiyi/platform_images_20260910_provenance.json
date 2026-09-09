@@ -1,0 +1,105 @@
+{
+  "kind": "sanitized_live_platform_poster_fields",
+  "captured_local_date": "2026-09-10",
+  "timezone": "Asia/Shanghai",
+  "scope": "仅本轮一份默认动漫排期；不是腾讯七日遍历；不读取详情/播放/搜索。",
+  "schedule": {
+    "source": "iqiyi",
+    "started_at": "2026-09-10T01:38:45+08:00",
+    "method": "GET",
+    "endpoint": "https://mesh.if.iqiyi.com/portal/lw/v7/channel/page/tracking",
+    "params": {
+      "channelId": "4",
+      "mode": "page",
+      "page": "1",
+      "v": "17.091.26283"
+    },
+    "json_body": null,
+    "status": 200,
+    "mime": "application/json",
+    "bytes": 611311,
+    "sha256": "feb6dfe21dcbf67e4c1aa42a2fef84b9c7237ddbd99d9b40e9271c6b1e615f2d",
+    "dns": [
+      {
+        "host": "mesh.if.iqiyi.com",
+        "addresses": [
+          "111.48.136.169",
+          "111.63.147.168",
+          "2409:8c04:1001:17ff:a000::5930",
+          "2409:8c4c:e01:100:8000::6a4d"
+        ]
+      }
+    ],
+    "pin_resolved_address": true,
+    "timeout_seconds": 12,
+    "max_bytes": 2097152,
+    "retries": 0,
+    "max_redirects": 0,
+    "credentials": false,
+    "result": "schedule_captured",
+    "finished_at": "2026-09-10T01:38:48+08:00"
+  },
+  "fixture": {
+    "fixture": "platform_images_20260910.json",
+    "bytes": 97513,
+    "sha256": "6448e719eae6f72866bb768b9065e9ea14f3c461151665c3afeea6b113f65f80"
+  },
+  "image_field": "image_cover",
+  "observed_programme_image_rows": 84,
+  "unique_programme_images": 44,
+  "observed_image_hosts": {
+    "pic0.iqiyipic.com": 8,
+    "pic1.iqiyipic.com": 8,
+    "pic2.iqiyipic.com": 13,
+    "pic3.iqiyipic.com": 4,
+    "pic4.iqiyipic.com": 5,
+    "pic5.iqiyipic.com": 20,
+    "pic6.iqiyipic.com": 7,
+    "pic7.iqiyipic.com": 6,
+    "pic8.iqiyipic.com": 7,
+    "pic9.iqiyipic.com": 6
+  },
+  "schemes": [
+    "https"
+  ],
+  "queries": [
+    ""
+  ],
+  "image_sample": {
+    "source": "iqiyi",
+    "field": "items[0].video[0].data[0].image_cover",
+    "source_id": "4812694274119401",
+    "title": "灵武大陆",
+    "started_at": "2026-09-10T01:40:26+08:00",
+    "endpoint": "https://pic0.iqiyipic.com/image/20250416/14/a8/a_100570241_m_601_m4.webp",
+    "method": "GET",
+    "normalized_url": "https://pic0.iqiyipic.com/image/20250416/14/a8/a_100570241_m_601_m4.webp",
+    "normalization": "unchanged HTTPS; no query/fragment in upstream field",
+    "status": 200,
+    "mime": "image/webp",
+    "bytes": 11366,
+    "sha256": "a5ded79ff69630404237e95a81667f0dc20e0bf163f6ccc5006e440b38c5e684",
+    "magic_mime": "image/webp",
+    "mime_magic_match": true,
+    "dns": [
+      {
+        "host": "pic0.iqiyipic.com",
+        "addresses": [
+          "2409:8c6a:400:9::24b4:3d29",
+          "36.180.61.41"
+        ]
+      }
+    ],
+    "pin_resolved_address": true,
+    "timeout_seconds": 12,
+    "max_bytes": 2097152,
+    "max_redirects": 0,
+    "retries": 0,
+    "credentials": false,
+    "magic_prefix_hex": "524946465e2c000057454250",
+    "result": "verified_image",
+    "finished_at": "2026-09-10T01:40:26+08:00"
+  },
+  "redaction": "仅保留官方公开日期/节目identity/排期与正式原封面字段；删除广告、会话/追踪、凭据、详情/播放参数及其他图片。列表索引不重映射。",
+  "limitations": "只 GET image_sample 的精确 CDN 主机一次；其余主机仅有排期字段证据。原字段无 query，未验证带 transform 参数资源。历史 fixture 不变。"
+}

@@ -1,0 +1,190 @@
+{
+  "ret": 0,
+  "msg": "",
+  "data": {
+    "CardList": [
+      {
+        "id": "20251112096092",
+        "type": "pc_carousel"
+      },
+      {
+        "id": "af79737f482b9947_1ed31",
+        "type": "pc_hot_filter"
+      },
+      {
+        "id": "20191014007737",
+        "type": "pc_shelves"
+      },
+      {
+        "id": "d4afd_17f79",
+        "type": "channel_play_schedule",
+        "children_list": {
+          "list": {
+            "cards": [
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260907",
+                  "data_key": "week=20260907&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周一",
+                  "sub_title": "07"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260908",
+                  "data_key": "week=20260908&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周二",
+                  "sub_title": "08"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260909",
+                  "data_key": "week=20260909&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周三",
+                  "sub_title": "09"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260910",
+                  "data_key": "week=20260910&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "selected": "1",
+                  "title": "今天",
+                  "sub_title": "10"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260911",
+                  "data_key": "week=20260911&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周五",
+                  "sub_title": "11"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260912",
+                  "data_key": "week=20260912&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周六",
+                  "sub_title": "12"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260913",
+                  "data_key": "week=20260913&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周日",
+                  "sub_title": "13"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc0020082u0tna",
+                  "title": "灵境行者",
+                  "type": "3",
+                  "sub_title": "9月3日10点首播，后续每周三18点SVIP更新，周四10点VIP更新",
+                  "update_notify_desc": "9月3日10点首播，后续每周三18点SVIP更新，周四10点VIP更新",
+                  "pay_time": "10:00",
+                  "free_time": "10:00",
+                  "is_trailer": "0",
+                  "publish_date": "2026-09-03"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc002000iis17y",
+                  "title": "斩神之凡尘神域 第2季",
+                  "type": "3",
+                  "sub_title": "会员每周四10点更新，SVIP抢先看1天，8月13日10点-9月17日10点大结局点映礼",
+                  "update_notify_desc": "会员每周四10点更新，SVIP抢先看1天，8月13日10点-9月17日10点大结局点映礼",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-06-25"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc0020069gkeft",
+                  "title": "疯了吧！这座城市的人都在找死",
+                  "type": "3",
+                  "sub_title": "首播6集，后续每周四付费更新1集",
+                  "update_notify_desc": "首播6集，后续每周四付费更新1集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-08-27"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200w9z1axf",
+                  "title": "诛仙 最终季",
+                  "type": "3",
+                  "sub_title": "VIP用户每周五10点更新，SVIP权益加码，每周四18点抢先看",
+                  "update_notify_desc": "VIP用户每周五10点更新，SVIP权益加码，每周四18点抢先看",
+                  "pay_time": "18:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-08-21"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mcv8hkc8zk8lnov",
+                  "title": "完美世界",
+                  "type": "3",
+                  "sub_title": "VIP用户每周五10点更新1集，SVIP用户限时福利抢先1天看1集（每周四18:00）",
+                  "update_notify_desc": "VIP用户每周五10点更新1集，SVIP用户限时福利抢先1天看1集（每周四18:00）",
+                  "pay_time": "18:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2021-04-23"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200ot2jctt",
+                  "title": "盘龙",
+                  "type": "3",
+                  "sub_title": "会员看全集",
+                  "update_notify_desc": "会员看全集",
+                  "pay_time": "",
+                  "free_time": "10:00",
+                  "is_trailer": "0",
+                  "publish_date": "2026-04-30"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "p37kqquf4wtrq04",
+        "type": "pc_card_ad"
+      }
+    ]
+  }
+}

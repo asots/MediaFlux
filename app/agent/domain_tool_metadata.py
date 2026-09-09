@@ -182,6 +182,18 @@ TOOL_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
     ),
     "media.subscription_summaries": ("配置了哪些媒体订阅", "媒体追更列表"),
     "rss.create_subscription": ("添加RSS", "创建RSS订阅", "新增RSS订阅"),
+    "discovery.anime_calendar": (
+        "追漫日历",
+        "动漫更新",
+        "动画排期",
+        "本周排期",
+        "今日更新",
+        "明天更新",
+        "腾讯视频",
+        "爱奇艺",
+        "优酷",
+        "国产动画排期",
+    ),
     "discovery.recommend": (
         "最近推荐",
         "新剧推荐",

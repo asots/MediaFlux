@@ -1,0 +1,213 @@
+{
+  "ret": 0,
+  "msg": "",
+  "data": {
+    "CardList": [
+      {
+        "id": "20251112096092",
+        "type": "pc_carousel"
+      },
+      {
+        "id": "af79737f482b9947_1ed31",
+        "type": "pc_hot_filter"
+      },
+      {
+        "id": "20191014007737",
+        "type": "pc_shelves"
+      },
+      {
+        "id": "d4afd_17f79",
+        "type": "channel_play_schedule",
+        "params": {
+          "un_mod_id": "d4afd_17f79",
+          "un_module_key": ""
+        },
+        "children_list": {
+          "list": {
+            "cards": [
+              {
+                "type": "navigation",
+                "params": {
+                  "card_render@item_idx": "0",
+                  "card_render@item_idx_max": "11",
+                  "data_key": "week=20260907&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "sub_title": "07",
+                  "title": "周一",
+                  "week": "20260907"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "card_render@item_idx": "1",
+                  "card_render@item_idx_max": "11",
+                  "data_key": "week=20260908&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "sub_title": "08",
+                  "title": "周二",
+                  "week": "20260908"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "card_render@item_idx": "2",
+                  "card_render@item_idx_max": "11",
+                  "data_key": "week=20260909&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "selected": "1",
+                  "sub_title": "09",
+                  "title": "今天",
+                  "week": "20260909"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "card_render@item_idx": "3",
+                  "card_render@item_idx_max": "11",
+                  "data_key": "week=20260910&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "sub_title": "10",
+                  "title": "周四",
+                  "week": "20260910"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "card_render@item_idx": "4",
+                  "card_render@item_idx_max": "11",
+                  "data_key": "week=20260911&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "sub_title": "11",
+                  "title": "周五",
+                  "week": "20260911"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "card_render@item_idx": "5",
+                  "card_render@item_idx_max": "11",
+                  "data_key": "week=20260912&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "sub_title": "12",
+                  "title": "周六",
+                  "week": "20260912"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "card_render@item_idx": "6",
+                  "card_render@item_idx_max": "11",
+                  "data_key": "week=20260913&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "sub_title": "13",
+                  "title": "周日",
+                  "week": "20260913"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "card_render@item_idx": "7",
+                  "card_render@item_idx_max": "11",
+                  "cid": "mzc00200aaogpgh",
+                  "episode_updated": "更新至157集",
+                  "free_episode": "155",
+                  "free_time": "10:00",
+                  "is_trailer": "0",
+                  "pay_episode": "157",
+                  "pay_status": "16",
+                  "pay_time": "10:00",
+                  "publish_date": "2023-09-25",
+                  "sub_title": "VIP用户每周一10点更新1集，SVIP权益加码，可抢先1天看更新集（周日18:00）",
+                  "title": "仙逆",
+                  "total_episode": "180",
+                  "type": "3",
+                  "type_name": "动漫",
+                  "update_notify_desc": "VIP用户每周一10点更新1集，SVIP权益加码，可抢先1天看更新集（周日18:00）"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "card_render@item_idx": "8",
+                  "card_render@item_idx_max": "11",
+                  "cid": "mzc00200ilydv1a",
+                  "episode_updated": "更新至638集",
+                  "free_episode": "0",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "pay_episode": "620",
+                  "pay_status": "12",
+                  "pay_time": "10:00",
+                  "publish_date": "2020-05-18",
+                  "sub_title": "每周一、五10:00更新1集，新篇章3月9日开始更新",
+                  "title": "无上神帝",
+                  "total_episode": "688",
+                  "type": "3",
+                  "type_name": "动漫",
+                  "update_notify_desc": "每周一、五10:00更新1集，新篇章3月9日开始更新"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "card_render@item_idx": "9",
+                  "card_render@item_idx_max": "11",
+                  "cid": "mzc00200azkttu2",
+                  "episode_updated": "更新至547集",
+                  "free_episode": "0",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "pay_episode": "543",
+                  "pay_status": "12",
+                  "pay_time": "10:00",
+                  "publish_date": "2021-07-16",
+                  "sub_title": "每周一、五10点更1集，新篇章3月9日开始更新",
+                  "title": "逆天至尊",
+                  "total_episode": "580",
+                  "type": "3",
+                  "type_name": "动漫",
+                  "update_notify_desc": "每周一、五10点更1集，新篇章3月9日开始更新"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "card_render@item_idx": "10",
+                  "card_render@item_idx_max": "11",
+                  "cid": "324olz7ilvo2j5f",
+                  "episode_updated": "更新至240集",
+                  "free_episode": "0",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "pay_episode": "240",
+                  "pay_status": "16",
+                  "pay_time": "18:00",
+                  "publish_date": "2020-11-29",
+                  "sub_title": "VIP用户每周二10点更新。SVIP会员权益加码，抢先1天看更新集（每周一18:00）",
+                  "title": "吞噬星空",
+                  "total_episode": "260",
+                  "type": "3",
+                  "type_name": "动漫",
+                  "update_notify_desc": "VIP用户每周二10点更新。SVIP会员权益加码，抢先1天看更新集（每周一18:00）"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "nrqb4fdwfasf404",
+        "type": "pc_card_ad"
+      }
+    ],
+    "has_next_page": true
+  }
+}

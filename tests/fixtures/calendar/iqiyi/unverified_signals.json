@@ -1,0 +1,14 @@
+{
+  "missing_flags": {"title": "脱敏节目", "updateStatus": "更新至18集"},
+  "ambiguous_zero_flags": {"title": "脱敏节目", "is_vip": 0, "pay": 0, "payMark": 0, "updateStatus": "更新至18集"},
+  "ambiguous_false_flags": {"title": "脱敏节目", "is_vip": false, "pay": false, "payMark": false},
+  "null_flags": {"title": "脱敏节目", "is_vip": null, "pay": null, "payMark": null},
+  "vip": {"title": "脱敏节目", "is_vip": 1, "badge": "VIP", "updateStatus": "更新至18集"},
+  "svip": {"title": "脱敏节目", "badge": "SVIP抢先看", "updateStatus": "更新至20集"},
+  "trial": {"title": "脱敏节目", "label": "免费观看6分钟", "isPreview": true},
+  "trailer": {"title": "脱敏节目预告", "label": "免费", "type": "trailer"},
+  "extra": {"title": "脱敏节目花絮", "label": "免费", "type": "extra"},
+  "unbound_schedule": {"text": "非会员每周一免费更新", "programme_id": null},
+  "historic_schedule": {"text": "2020年1月1日起非会员每周一转免1集"},
+  "unverified_full_episode": {"albumId": "123456", "title": "脱敏节目", "type": "正片", "is_vip": 0, "pay": 0, "label": "免费至第6集"}
+}

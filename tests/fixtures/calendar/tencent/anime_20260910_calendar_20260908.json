@@ -1,0 +1,204 @@
+{
+  "ret": 0,
+  "msg": "",
+  "data": {
+    "CardList": [
+      {
+        "id": "20251112096092",
+        "type": "pc_carousel"
+      },
+      {
+        "id": "af79737f482b9947_1ed31",
+        "type": "pc_hot_filter"
+      },
+      {
+        "id": "20191014007737",
+        "type": "pc_shelves"
+      },
+      {
+        "id": "d4afd_17f79",
+        "type": "channel_play_schedule",
+        "children_list": {
+          "list": {
+            "cards": [
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260907",
+                  "data_key": "week=20260907&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周一",
+                  "sub_title": "07"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260908",
+                  "data_key": "week=20260908&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周二",
+                  "sub_title": "08"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260909",
+                  "data_key": "week=20260909&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周三",
+                  "sub_title": "09"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260910",
+                  "data_key": "week=20260910&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "selected": "1",
+                  "title": "今天",
+                  "sub_title": "10"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260911",
+                  "data_key": "week=20260911&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周五",
+                  "sub_title": "11"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260912",
+                  "data_key": "week=20260912&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周六",
+                  "sub_title": "12"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260913",
+                  "data_key": "week=20260913&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周日",
+                  "sub_title": "13"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "324olz7ilvo2j5f",
+                  "title": "吞噬星空",
+                  "type": "3",
+                  "sub_title": "VIP用户每周二10点更新。SVIP会员权益加码，抢先1天看更新集（每周一18:00）",
+                  "update_notify_desc": "VIP用户每周二10点更新。SVIP会员权益加码，抢先1天看更新集（每周一18:00）",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2020-11-29"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc002006n62s11",
+                  "title": "炼气十万年",
+                  "type": "3",
+                  "sub_title": "每周二、周六10点更新",
+                  "update_notify_desc": "每周二、周六10点更新",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2023-02-18"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "7q544xyrava3vxf",
+                  "title": "武神主宰",
+                  "type": "3",
+                  "sub_title": "每周二、日10：00更1集",
+                  "update_notify_desc": "每周二、日10：00更1集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2020-03-08"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200u94ke3h",
+                  "title": "万古神帝",
+                  "type": "3",
+                  "sub_title": "7月21日起每周二10:00更新2集",
+                  "update_notify_desc": "7月21日起每周二10:00更新2集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-07-21"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200cu8uq8c",
+                  "title": "万界独尊",
+                  "type": "3",
+                  "sub_title": "每周二、六10点更1集",
+                  "update_notify_desc": "每周二、六10点更1集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2021-04-06"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200y0aavbe",
+                  "title": "一念永恒 完结季",
+                  "type": "3",
+                  "sub_title": "每周三会员更新1集，7月28日起，每周二18点更新SVIP提前看",
+                  "update_notify_desc": "每周三会员更新1集，7月28日起，每周二18点更新SVIP提前看",
+                  "pay_time": "18:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-07-22"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200n53vkqc",
+                  "title": "遮天",
+                  "type": "3",
+                  "sub_title": "VIP会员每周三10点更新。SVIP会员每周二18点抢先看（9月1日加更一集）",
+                  "update_notify_desc": "VIP会员每周三10点更新。SVIP会员每周二18点抢先看（9月1日加更一集）",
+                  "pay_time": "18:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2023-05-03"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "v4ricet3qarnc04",
+        "type": "pc_card_ad"
+      }
+    ]
+  }
+}

@@ -1,0 +1,190 @@
+{
+  "ret": 0,
+  "msg": "",
+  "data": {
+    "CardList": [
+      {
+        "id": "20251112096092",
+        "type": "pc_carousel"
+      },
+      {
+        "id": "af79737f482b9947_1ed31",
+        "type": "pc_hot_filter"
+      },
+      {
+        "id": "20191014007737",
+        "type": "pc_shelves"
+      },
+      {
+        "id": "d4afd_17f79",
+        "type": "channel_play_schedule",
+        "children_list": {
+          "list": {
+            "cards": [
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260907",
+                  "data_key": "week=20260907&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周一",
+                  "sub_title": "07"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260908",
+                  "data_key": "week=20260908&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周二",
+                  "sub_title": "08"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260909",
+                  "data_key": "week=20260909&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周三",
+                  "sub_title": "09"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260910",
+                  "data_key": "week=20260910&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "selected": "1",
+                  "title": "今天",
+                  "sub_title": "10"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260911",
+                  "data_key": "week=20260911&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周五",
+                  "sub_title": "11"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260912",
+                  "data_key": "week=20260912&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周六",
+                  "sub_title": "12"
+                }
+              },
+              {
+                "type": "navigation",
+                "params": {
+                  "week": "20260913",
+                  "data_key": "week=20260913&page_id=100119&un_mod_id=d4afd_17f79&un_module_key=",
+                  "title": "周日",
+                  "sub_title": "13"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200y0aavbe",
+                  "title": "一念永恒 完结季",
+                  "type": "3",
+                  "sub_title": "每周三会员更新1集，7月28日起，每周二18点更新SVIP提前看",
+                  "update_notify_desc": "每周三会员更新1集，7月28日起，每周二18点更新SVIP提前看",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-07-22"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200n53vkqc",
+                  "title": "遮天",
+                  "type": "3",
+                  "sub_title": "VIP会员每周三10点更新。SVIP会员每周二18点抢先看（9月1日加更一集）",
+                  "update_notify_desc": "VIP会员每周三10点更新。SVIP会员每周二18点抢先看（9月1日加更一集）",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2023-05-03"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc002007ust3jd",
+                  "title": "魔女叛变?我反手养成病娇炽焰天使",
+                  "type": "3",
+                  "sub_title": "8月26日首播6集，后续每周三付费更新1集",
+                  "update_notify_desc": "8月26日首播6集，后续每周三付费更新1集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-08-26"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200dc4bx7d",
+                  "title": "玄幻：我！天命大反派",
+                  "type": "3",
+                  "sub_title": "7月15日起每周三10:00更新2集",
+                  "update_notify_desc": "7月15日起每周三10:00更新2集",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-07-15"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc00200s6u45af",
+                  "title": "火影忍者疾风传[普通话版]",
+                  "type": "3",
+                  "sub_title": "每周三10陆续更新，全集陆续上线中",
+                  "update_notify_desc": "每周三10陆续更新，全集陆续上线中",
+                  "pay_time": "10:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2007-02-15"
+                }
+              },
+              {
+                "type": "poster",
+                "params": {
+                  "cid": "mzc0020082u0tna",
+                  "title": "灵境行者",
+                  "type": "3",
+                  "sub_title": "9月3日10点首播，后续每周三18点SVIP更新，周四10点VIP更新",
+                  "update_notify_desc": "9月3日10点首播，后续每周三18点SVIP更新，周四10点VIP更新",
+                  "pay_time": "18:00",
+                  "free_time": "",
+                  "is_trailer": "0",
+                  "publish_date": "2026-09-03"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "3b04d5b04e88b5e8_18ab6",
+        "type": "pc_video"
+      },
+      {
+        "id": "wy2dchefwxtmg04",
+        "type": "pc_card_ad"
+      }
+    ]
+  }
+}

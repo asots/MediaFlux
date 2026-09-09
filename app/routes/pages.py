@@ -333,6 +333,16 @@ def media_libraries(request: Request):
     return _page(request, "media_libraries.html", "media_libraries")
 
 
+@router.get("/discovery/calendar", name="pages.free_calendar")
+def free_calendar(request: Request):
+    if not config.get_bool("DISCOVERY_ENABLED"):
+        raise HTTPException(status_code=404, detail="not found")
+    from app.discovery.calendar.service import calendar_dates
+    today, week_start = calendar_dates()
+    return _page(request, "free_calendar.html", "discovery",
+                 calendar_today=today, calendar_week_start=week_start)
+
+
 @router.get("/discovery", name="pages.discovery")
 def discovery(request: Request):
     if not config.get_bool("DISCOVERY_ENABLED"):

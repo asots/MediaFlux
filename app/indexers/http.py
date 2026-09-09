@@ -58,6 +58,40 @@ class IndexerHttpResponse:
             return self.body.decode("utf-8", errors="replace")
 
 
+def _validate_response_encoding(response: httpx.Response, *, require_identity_encoding: bool) -> None:
+    # 必须在流迭代/自动解压之前拒绝编码；重复头由 HTTPX 合并为逗号列表，同样拒绝。
+    if (require_identity_encoding
+            and response.headers.get("content-encoding", "").strip().lower() not in {"", "identity"}):
+        raise IndexerInvalidResponse("upstream Content-Encoding must be identity")
+
+
+async def _bounded_response_bytes(
+    response: httpx.Response, max_response_bytes: int, *, require_identity_encoding: bool,
+) -> AsyncIterator[bytes]:
+    _validate_response_encoding(response, require_identity_encoding=require_identity_encoding)
+    if require_identity_encoding and response.is_stream_consumed:
+        # 显式预缓冲 transport（包括 MockTransport）没有可再消费的 raw stream。
+        # 只读已有 buffer，先检查完整长度；绝不调用 aread/aiter_bytes 重新解码。
+        try:
+            content = response.content
+        except httpx.ResponseNotRead as exc:
+            raise IndexerInvalidResponse("consumed upstream response has no buffered body") from exc
+        if len(content) > max_response_bytes:
+            raise IndexerResponseTooLarge(f"buffered response size exceeds {max_response_bytes}")
+        for offset in range(0, len(content), 64 * 1024):
+            yield content[offset:offset + 64 * 1024]
+        return
+    chunks = (response.aiter_raw(chunk_size=64 * 1024)
+              if require_identity_encoding else response.aiter_bytes())
+    total = 0
+    async for chunk in chunks:
+        total += len(chunk)
+        if total > max_response_bytes:
+            raise IndexerResponseTooLarge(f"streamed response size exceeds {max_response_bytes}")
+        if chunk:
+            yield chunk
+
+
 @dataclass(slots=True)
 class IndexerHttpStreamResponse:
     """受限响应流；只能在 FixedHostHttpClient 的上下文中消费一次。"""
@@ -68,24 +102,24 @@ class IndexerHttpStreamResponse:
     _response: httpx.Response
     _max_response_bytes: int
     _consumed: bool = False
+    _require_identity_encoding: bool = False
 
     async def aiter_bytes(self) -> AsyncIterator[bytes]:
         if self._consumed:
             raise RuntimeError("response stream has already been consumed")
         self._consumed = True
-        total = 0
-        async for chunk in self._response.aiter_bytes():
-            total += len(chunk)
-            if total > self._max_response_bytes:
-                raise IndexerResponseTooLarge(
-                    f"streamed response size exceeds {self._max_response_bytes}"
-                )
-            if chunk:
-                yield chunk
+        async for chunk in _bounded_response_bytes(
+            self._response, self._max_response_bytes,
+            require_identity_encoding=self._require_identity_encoding,
+        ):
+            yield chunk
 
 
 class FixedHostHttpClient:
-    """Bounded HTTP client that can only reach explicit public HTTPS hosts."""
+    """Bounded HTTP client that can only reach explicit public HTTPS hosts.
+
+    require_identity_encoding 为可选的读前编码限制，默认保持既有自动解压行为。
+    """
 
     def __init__(
         self,
@@ -98,6 +132,7 @@ class FixedHostHttpClient:
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Resolver | None = None,
         pin_resolved_address: bool = False,
+        require_identity_encoding: bool = False,
     ):
         hosts = frozenset(str(host).strip().rstrip(".").lower() for host in allowed_hosts if str(host).strip())
         if not hosts:
@@ -109,6 +144,7 @@ class FixedHostHttpClient:
         self.max_redirects = int(max_redirects)
         self._resolver = resolver or self._default_resolver
         self.pin_resolved_address = bool(pin_resolved_address)
+        self.require_identity_encoding = bool(require_identity_encoding)
         if transport is None:
             # 部分站点边缘节点（如 1lou 的 CDN）TCP 握手存在间歇性丢包，
             # 首连即卡满超时。retries 只重试连接建立阶段，请求一旦发出
@@ -147,6 +183,10 @@ class FixedHostHttpClient:
             # 旧 loop 已关闭后无法再调度 socket 回调；HTTPX 已先把 client
             # 标记为 closed。记录该降级，但不让应用/TestClient 停机失败。
             logger.warning("索引器 HTTP 客户端所属事件循环已关闭，跳过重复清理")
+
+    def clear_cookies(self) -> None:
+        """供不需要会话状态的公开元数据调用方清空服务端 Cookie。"""
+        self._client.cookies.clear()
 
     async def get(
         self,
@@ -207,6 +247,7 @@ class FixedHostHttpClient:
                 extensions=extensions,
                 follow_redirects=False,
             ) as response:
+                _validate_response_encoding(response, require_identity_encoding=self.require_identity_encoding)
                 if response.status_code in _REDIRECT_CODES:
                     location = response.headers.get("location", "").strip()
                     if not location:
@@ -227,6 +268,7 @@ class FixedHostHttpClient:
                     headers={key.lower(): value for key, value in response.headers.items()},
                     _response=response,
                     _max_response_bytes=self.max_response_bytes,
+                    _require_identity_encoding=self.require_identity_encoding,
                 )
                 return
         raise IndexerSecurityError("redirect limit exceeded")
@@ -279,6 +321,7 @@ class FixedHostHttpClient:
                 extensions=extensions,
                 follow_redirects=False,
             ) as response:
+                _validate_response_encoding(response, require_identity_encoding=self.require_identity_encoding)
                 current_params = None
                 if response.status_code in _REDIRECT_CODES:
                     location = response.headers.get("location", "").strip()
@@ -295,12 +338,11 @@ class FixedHostHttpClient:
                 if declared_size is not None and declared_size > self.max_response_bytes:
                     raise IndexerResponseTooLarge(f"declared response size {declared_size}")
                 body = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in _bounded_response_bytes(
+                    response, self.max_response_bytes,
+                    require_identity_encoding=self.require_identity_encoding,
+                ):
                     body.extend(chunk)
-                    if len(body) > self.max_response_bytes:
-                        raise IndexerResponseTooLarge(
-                            f"streamed response size exceeds {self.max_response_bytes}"
-                        )
                 return IndexerHttpResponse(
                     url=str(current),
                     status_code=response.status_code,

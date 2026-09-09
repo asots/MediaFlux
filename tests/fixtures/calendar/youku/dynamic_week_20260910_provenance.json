@@ -1,0 +1,52 @@
+{
+  "kind": "sanitized_live_anonymous_mtop_calendar",
+  "fixture": "dynamic_week_20260910.json",
+  "fixture_sha256": "752e1be8098bf9e5edc81c4a16a7b38cb0ae07c317590ac8dfeff89b87a14cbe",
+  "raw_response_sha256": "28ce774eef28b83efa14be3311c78c899d3204bcf7d6824aff698538b6b4e01c",
+  "captured_at": "2026-09-10T03:07:53.412923+08:00",
+  "endpoint": "https://acs.youku.com/h5/mtop.youku.columbus.home.query/1.0/",
+  "http_status": 200,
+  "mime": "application/json;charset=UTF-8",
+  "raw_bytes": 520563,
+  "authentication": "fresh anonymous SDK initialization, no account/browser/production credentials",
+  "normal_protocol_source": {
+    "vendor": {
+      "url": "https://g.alicdn.com/youku-node/pc-pages-v2/4.1.822/v2/static/js/vendors.chunk.js",
+      "bytes": 2612415,
+      "sha256": "0f08bc583aedf180527f2d9c88b599406c4b0cb3df9898f5b5d43d01cf9a43d8",
+      "mime": "application/javascript",
+      "module_id": 80,
+      "module_range": {
+        "start": 144689,
+        "end_exclusive": 173614
+      },
+      "module_sha256": "783f685d63e3c65f831c32b35aad09ef9d72cd5d6915d2664da9d47d26f588c1",
+      "module_identification": "Pygments JavaScript lexer + top-level sparse array delimiter counting; 1058 elements; no eval",
+      "duplicate_warning": "Second MTOP copy belongs to module419; not substituted for module80"
+    },
+    "page": {
+      "url": "https://g.alicdn.com/youku-node/pc-pages-v2/4.1.822/v2/static/js/Page.chunk.js",
+      "bytes": 954363,
+      "sha256": "b75e77c2b96aa89df0475aa6b27889b0394c2cb0ec525955d6e9cb2a4859ae6b",
+      "mime": "application/javascript",
+      "module_id": 38,
+      "acquisition": "Read-only reuse of main-line explicitly provided static Page; no GET"
+    }
+  },
+  "date_groups": [
+    "09.07",
+    "09.08",
+    "09.09",
+    "09.10",
+    "09.11",
+    "09.12",
+    "09.13"
+  ],
+  "programmes": 47,
+  "events": 92,
+  "timed_events": 91,
+  "free_progress_known": 0,
+  "removed": "all cookies/sign/t/session/trackInfo/recInfo/ads/unrelated channels and recommendations",
+  "header_or_token_values_retained": false,
+  "validation": "original and sanitized full SourceResult equal for capture week/next week/new year"
+}
