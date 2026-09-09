@@ -1,6 +1,7 @@
 preset = "basic"
 python-interpreter-path = ".venv/bin/python"
-search-path = [".", "packaging/scripts"]
+# 直接运行 tests/*.py 时，Python 会将 tests/ 作为兄弟模块的导入根。
+search-path = [".", "packaging/scripts", "tests"]
 project-includes = [
     "app/**/*.py",
     "tests/**/*.py",
