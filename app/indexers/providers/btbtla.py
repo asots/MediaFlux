@@ -19,7 +19,7 @@ from ..errors import (
     IndexerUnavailable,
 )
 from ..models import IndexerCapabilities, IndexerItem, IndexerPage, IndexerSearchRequest, ResolvedDownload
-from .base import IndexerAdapter, fixed_host_join, magnet_infohash, parse_size_bytes, require_html_response
+from .base import IndexerAdapter, fixed_host_join, is_likely_challenge_page, magnet_infohash, parse_size_bytes, require_html_response
 
 _MAGNET_CANDIDATE = re.compile(r"magnet:\?[^\"'\s<>]+", re.IGNORECASE)
 _RESOURCE_SIZE_SUFFIX = re.compile(r"\[\s*([0-9]+(?:\.[0-9]+)?\s*[KMGTPE]?i?B)\s*\]\s*$", re.IGNORECASE)
@@ -108,7 +108,14 @@ class BTBtlaAdapter(IndexerAdapter):
             )
             text = soup.get_text(" ", strip=True).lower()
             if not candidates:
-                if any(marker in text for marker in ("暂无", "无结果", "no result")):
+                # 当前站点以搜索摘要中的 mac_total=0 表示未命中；普通计数器/挑战页不算空结果。
+                zero_summary = any(
+                    node.get_text(strip=True) == "0"
+                    and re.search(r"^搜索.*找到\s*0\s*部影视作品", node.find_parent("h2").get_text(" ", strip=True))
+                    for node in soup.select("h2 strong.mac_total")
+                )
+                known_empty = any(marker in text for marker in ("暂无", "无结果", "no result"))
+                if (known_empty or zero_summary) and not is_likely_challenge_page(response.body):
                     return IndexerPage(
                         items=[],
                         page=request.page,

@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
+import httpx
 
-from ..errors import IndexerInvalidResponse, IndexerRateLimited, IndexerSecurityError, IndexerUnavailable
+from ..errors import IndexerInvalidResponse, IndexerRateLimited, IndexerSecurityError, IndexerTimeout, IndexerUnavailable
 from ..models import IndexerCapabilities, IndexerItem, IndexerPage, IndexerSearchRequest, ResolvedDownload
 from .base import DirectResultAdapter, fixed_host_join, magnet_infohash, parse_size_bytes, require_html_response
 
@@ -37,10 +38,14 @@ class MikanAdapter(DirectResultAdapter):
     async def search(self, request: IndexerSearchRequest) -> IndexerPage:
         if request.page > 1:
             return IndexerPage(items=[], page=request.page, has_more=False, pagination_supported=False)
-        last_error: IndexerInvalidResponse | IndexerRateLimited | IndexerUnavailable | None = None
+        last_error: IndexerInvalidResponse | IndexerRateLimited | IndexerTimeout | IndexerUnavailable | None = None
         for base_url in self._host_bases:
             try:
                 return await self._search_base(base_url, request)
+            except httpx.TimeoutException:
+                last_error = IndexerTimeout(f"Mikan endpoint timed out: {base_url}")
+            except httpx.TransportError:
+                last_error = IndexerUnavailable(f"Mikan endpoint connection failed: {base_url}")
             except (IndexerInvalidResponse, IndexerRateLimited, IndexerUnavailable) as exc:
                 last_error = exc
         assert last_error is not None
