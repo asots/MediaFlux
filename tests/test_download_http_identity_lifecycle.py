@@ -266,3 +266,26 @@ class HttpTorrentIdentityLifecycleTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(dict(db.get_download_request(request_id)), before)
         self.assertEqual(self.sent, [("qb", None)])
+
+    def test_append_to_file_torrent_keeps_existing_kind_and_payload(self):
+        first = submit_download_input(
+            dispatcher.torrent_download_input("fixture.torrent", TORRENT_A),
+            "qb", origin="telegram:file",
+        )
+        result = self.submit("guangya")
+        self.assertTrue(result["dispatch"]["ok"], result)
+        self.assertEqual(result["request_id"], first["request_id"])
+        self.assertEqual(self.sent, [("qb", TORRENT_A), ("guangya", TORRENT_A)])
+        self.assertEqual(db.get_download_request(first["request_id"])["kind"], "torrent")
+
+    def test_cached_http_append_keeps_original_bytes_when_tracker_wrapper_changes(self):
+        first = submit_download_input(
+            replace(self.raw, torrent_data=TORRENT_A), "qb", origin="rss:cached",
+        )
+        self.payload = TORRENT_A.replace(b"d4:info", b"d8:announce3:foo4:info", 1)
+        self.assertEqual(self.key(self.payload), self.key(TORRENT_A))
+        result = self.submit("guangya")
+        self.assertTrue(result["dispatch"]["ok"], result)
+        self.assertEqual(result["request_id"], first["request_id"])
+        self.assertEqual(self.sent, [("qb", TORRENT_A), ("guangya", TORRENT_A)])
+        self.assertEqual(db.get_download_request(first["request_id"])["torrent_data"], TORRENT_A)
