@@ -185,3 +185,84 @@ class HttpTorrentIdentityLifecycleTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.sent, [("guangya", TORRENT_A)])
         self.fetch.assert_not_called()
+
+    def start_untyped_qb_request(self):
+        first = submit_download_input(
+            replace(self.raw, content_type=""), "qb", origin="telegram:legacy-http",
+        )
+        self.assertTrue(first["dispatch"]["ok"], first)
+        row = db.get_download_request(first["request_id"])
+        self.assertIsNone(row["torrent_data"])
+        self.assertEqual(row["content_type"], "")
+        return first["request_id"]
+
+    def test_active_qb_append_preserves_prepared_dynamic_torrent(self):
+        request_id = self.start_untyped_qb_request()
+        original_task = db.get_download_request(request_id)["qb_task_id"]
+        result = self.submit("guangya")
+        self.assertTrue(result["dispatch"]["ok"], result)
+        self.assertEqual(result["request_id"], request_id)
+        self.assertEqual(self.sent, [("qb", None), ("guangya", TORRENT_A)])
+        self.assertEqual(self.fetch.call_count, 1)
+        row = db.get_download_request(request_id)
+        self.assertEqual(row["qb_task_id"], original_task)
+        self.assertEqual(row["qb_status"], "submitted")
+        self.assertEqual(row["gy_status"], "submitted")
+        self.assertEqual(row["torrent_data"], TORRENT_A)
+        self.assertEqual(row["content_type"], MIME)
+
+    def test_active_qb_both_target_does_not_resubmit_qb_or_refetch_torrent(self):
+        request_id = self.start_untyped_qb_request()
+        self.fetch.side_effect = [(TORRENT_A, {"content-type": MIME}), AssertionError("must reuse verified payload")]
+        result = self.submit("both")
+        self.assertTrue(result["dispatch"]["ok"], result)
+        self.assertEqual(result["request_id"], request_id)
+        self.assertEqual(self.sent, [("qb", None), ("guangya", TORRENT_A)])
+        self.assertEqual(self.fetch.call_count, 1)
+
+    def test_active_qb_append_rejects_changed_content_before_claiming_cloud(self):
+        request_id = self.start_untyped_qb_request()
+        before = dict(db.get_download_request(request_id))
+        self.payload = TORRENT_B
+        result = self.submit("guangya")
+        self.assertFalse(result["dispatch"]["ok"], result)
+        self.assertEqual(self.sent, [("qb", None)])
+        self.assertEqual(dict(db.get_download_request(request_id)), before)
+        self.assertIsNone(db.get_download_request_by_request_key(self.key(TORRENT_B)))
+
+    def test_active_qb_append_does_not_store_payload_after_cancelled_claim(self):
+        request_id = self.start_untyped_qb_request()
+        claim = db.claim_download_request_targets
+
+        def cancel_before_claim(current_id, targets):
+            db.update_download_request(current_id, status="cancelled")
+            return claim(current_id, targets)
+
+        with patch.object(db, "claim_download_request_targets", side_effect=cancel_before_claim):
+            self.submit("guangya")
+        row = db.get_download_request(request_id)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertIsNone(row["torrent_data"])
+        self.assertEqual(row["content_type"], "")
+        self.assertEqual(self.sent, [("qb", None)])
+
+    def test_active_qb_concurrent_appends_only_submit_cloud_once(self):
+        request_id = self.start_untyped_qb_request()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: self.submit("guangya"), range(2)))
+        self.assertTrue(any(result["dispatch"]["ok"] for result in results), results)
+        self.assertTrue(all(result["request_id"] == request_id for result in results))
+        self.assertEqual(self.sent, [("qb", None), ("guangya", TORRENT_A)])
+        self.assertEqual(db.get_download_request(request_id)["torrent_data"], TORRENT_A)
+
+    def test_active_qb_append_rejects_prepared_source_mismatch_before_claim(self):
+        request_id = self.start_untyped_qb_request()
+        before = dict(db.get_download_request(request_id))
+        result = dispatcher.dispatch_missing_targets(
+            request_id, "guangya", prepared_input=replace(
+                self.raw, source_value="https://other.invalid/resource", torrent_data=TORRENT_A,
+            ),
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(dict(db.get_download_request(request_id)), before)
+        self.assertEqual(self.sent, [("qb", None)])

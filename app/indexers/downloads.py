@@ -314,6 +314,9 @@ def _persist_and_dispatch(
         else:
             if admission_id is not None:
                 db.bind_media_download_admission_request(admission_id, existing_id)
+            if item.kind == "http" and item.torrent_data and target in {"guangya", "both"}:
+                # 活动 qB 请求也可能尚无 MIME/bytes；补目标时不能丢掉刚验证的种子。
+                dispatch_kwargs["prepared_input"] = item
             appended = dispatch_missing_targets(
                 existing_id,
                 target,

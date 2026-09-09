@@ -923,6 +923,7 @@ def dispatch_missing_targets(
     qb_task_id_hint: str = "",
     rss_item_id: int | None = None,
     log_path: str | None = None,
+    prepared_input: DownloadInput | None = None,
 ) -> dict[str, Any]:
     """向已有资源请求补充尚未提交的后端，不重置已成功目标。"""
     if targets not in SUPPORTED_TARGETS:
@@ -930,9 +931,29 @@ def dispatch_missing_targets(
     row = db.get_download_request(int(request_id))
     if not row:
         return {"handled": False, "ok": False, "error": "下载请求不存在"}
+    prepared_row = None
+    if prepared_input is not None:
+        # 仅携带当前 HTTP 来源的已校验内容；不在认领前写回，不覆盖已知 qB 身份。
+        if (targets not in {"guangya", "both"} or row["kind"] != "http"
+                or prepared_input.kind != "http" or not prepared_input.torrent_data
+                or prepared_input.source_value != row["source_value"]):
+            return {"handled": True, "ok": False, "error": "准备好的种子与下载来源不一致"}
+        try:
+            _name, torrent_id, _magnet_xt, v2_hash = _torrent_metadata(prepared_input.torrent_data)
+            qb_identity = str(row["qb_task_id"] or "").strip().lower()
+            if (_QB_TORRENT_ID_RE.fullmatch(qb_identity)
+                    and qb_identity not in {torrent_id.lower(), v2_hash.lower()}):
+                raise ValueError("BT identity changed")
+        except ValueError:
+            return {"handled": True, "ok": False, "error": "种子内容与已受理下载不一致，未补充提交"}
+        prepared_row = {**dict(row), "torrent_data": prepared_input.torrent_data,
+                        "content_type": "application/x-bittorrent"}
     claimed = db.claim_download_request_targets(int(request_id), targets)
     if not claimed:
         return {"handled": False, "ok": False, "duplicate": True, "error": "该目标已提交或正在处理"}
+    if prepared_row is not None and "guangya" in claimed:
+        # _submit_guangya 仍须在云端副作用前通过仓储的认领状态/内容身份原子绑定。
+        row = prepared_row
 
     result = _dispatch_claimed_targets(
         row, tuple(claimed),
