@@ -42,7 +42,7 @@
 - 修复 RSS 目录选择双弹窗的层级和窄屏布局、订阅表单按钮与反馈跳动，以及迟到的刮削响应污染新编辑会话的问题（[`8531720`](https://github.com/li88iioo/MediaFlux/commit/853172082e624f2f1a8bdce694e95cfaf439ff05)、[`5783e89`](https://github.com/li88iioo/MediaFlux/commit/5783e89d50cc789cb4223aa11133b4f5f7e3ab5d)、[`a6c7646`](https://github.com/li88iioo/MediaFlux/commit/a6c7646464c75cceaabfd27df6ee06ac89d0f5de)）。
 - 修复 BTBtla 正常零结果页面被误报为站点不可用，以及 Mikan 原始超时/连接异常未尝试已注册备站的问题；保留挑战页拒绝、安全异常和取消语义，不延长总超时预算（[`99aa076`](https://github.com/li88iioo/MediaFlux/commit/99aa0763b6539d083621ea632cf2a71570a3e9e7)）。
 
-- 修复动态 HTTP 种子先提交 qB、再补充光鸭目标时丢失已校验内容的问题；复用原种子且不重复提交 qB，已有 qB 内容身份不一致、取消或竞争认领时拒绝不安全补写（[`68a946a`](https://github.com/li88iioo/MediaFlux/commit/68a946acbfd729ab89e08b7f206e887e3f58a5c4)）。
+- 修复动态 HTTP 种子先提交 qB、再补充光鸭目标时丢失已校验内容的问题；复用原种子且不重复提交 qB，已有 qB 内容身份不一致、取消或竞争认领时拒绝不安全补写（[`68a946a`](https://github.com/li88iioo/MediaFlux/commit/68a946acbfd729ab89e08b7f206e887e3f58a5c4)、[`710f53d`](https://github.com/li88iioo/MediaFlux/commit/710f53d06cf37a496d41480578fa194f2466668c)）。
 
 ### 升级说明
 - 从 v0.1.11 升级的完整数据库跨度为 **schema20→29**，不是仅 28→29。首次启动会先创建迁移前备份，再连续迁移；升级前仍应保留完整数据目录和可用备份。
