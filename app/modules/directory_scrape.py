@@ -34,6 +34,7 @@ from app.modules.episode_mapping import (
     NUMBERING_MODES,
     build_directory_episode_evidence,
     infer_episode_mapping,
+    infer_overflow_tmdb_special_mapping,
     infer_merged_season_cour_mapping,
     normalize_numbering_mode,
     season_episode_counts,
@@ -1898,6 +1899,25 @@ class DirectoryScrapeService:
             )
             for item in inspection.videos
         ])
+        sequence_evidence = build_directory_episode_evidence([
+            (item.relative_dir or "__root__", inspection.directory_name, item.season, item.episode)
+            for item in inspection.videos
+        ], minimum_episodes=1)
+        directory_members: dict[str, int] = {}
+        for item in inspection.videos:
+            key = item.relative_dir or "__root__"
+            directory_members[key] = directory_members.get(key, 0) + 1
+
+        def load_season_detail(tmdb_id: str, season: int) -> dict:
+            cache_key = (tmdb_id, season)
+            if cache_key not in season_detail_cache:
+                try:
+                    loaded = season_detail_loader(tmdb_id, season) if season_detail_loader else {}
+                except Exception:
+                    loaded = {}
+                season_detail_cache[cache_key] = dict(loaded) if isinstance(loaded, dict) else {}
+            return season_detail_cache[cache_key]
+
         for item in inspection.videos:
             source_season, source_episode = item.season, item.episode
             special = bool(
@@ -1928,6 +1948,25 @@ class DirectoryScrapeService:
                 mode=mode,
                 directory_evidence=directory_evidence,
             )
+            current_count = season_episode_counts(detail).get(source_season)
+            if (
+                mode == "auto" and not special and episode_override is None
+                and source_season is not None and source_episode is not None
+                and season_override in (None, source_season)
+                and current_count is not None and source_episode > current_count
+                and season_detail_loader is not None
+            ):
+                tmdb_id = str(detail.get("id") or "").strip()
+                overflow_mapping = infer_overflow_tmdb_special_mapping(
+                    source_season=source_season, source_episode=source_episode,
+                    detail=detail,
+                    source_season_detail=load_season_detail(tmdb_id, source_season),
+                    special_season_detail=load_season_detail(tmdb_id, 0),
+                    directory_evidence=sequence_evidence.get(item.relative_dir or "__root__"),
+                    directory_member_count=directory_members[item.relative_dir or "__root__"],
+                )
+                if overflow_mapping is not None:
+                    mapping = overflow_mapping
             # 单季 TMDB 条目下，发布方可能按 cour 重置为 E01，也可能继续
             # 使用 TMDB 绝对集号。两种形式都先要求同目录形成连续证据，再由
             # ``infer_merged_season_cour_mapping`` 用完整停播分段证明唯一目标；
@@ -1989,7 +2028,7 @@ class DirectoryScrapeService:
                         mapping = merged_mapping
             target_season = mapping.target_season
             target_episode = mapping.target_episode
-            if season_override is not None and not special:
+            if season_override is not None and not special and mapping.mode != "tmdb_special":
                 target_season = season_override
                 if mapping.target_season != target_season:
                     mapping = dataclasses.replace(

@@ -52,6 +52,14 @@ _TMDB_SPECIAL_DECIMAL_MARKER = re.compile(
 )
 _SPECIAL_ASSOCIATION_WINDOW_DAYS = 21
 
+# 经 TMDB 剧集组核验的发布尾项，不按片名、模糊标题或日期邻近猜测。
+# 79141 的 group 5e6c0d87396e9700138b38d2：首季发布 E11–14 对应这四个
+# 稳定 episode ID。运行时仍须核对本季数量、完整目录和当前 Season 00 详情；
+# 不冻结特别篇的展示集号，避免 TMDB 重排后静默投错位置。
+_VERIFIED_RELEASE_SPECIALS = {
+    (79141, 1, 10): (1535061, 1543201, 1549531, 1556661),
+}
+
 
 @dataclass(frozen=True)
 class DirectoryEpisodeEvidence:
@@ -523,6 +531,52 @@ def match_fractional_tmdb_special(
     return next(iter(matches)) if len(matches) == 1 else None
 
 
+def _strict_tmdb_integer(value: object) -> int | None:
+    # ID/目标位置必须是整数，不能把 79141.75 或 E1.75 截断成已核验身份。
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    if isinstance(value, str) and not re.fullmatch(r"[0-9]+", value.strip()):
+        return None
+    return _positive_int(value)
+
+
+def _verified_release_special_ids(
+    detail: dict | None, season: int, regular_count: int,
+) -> tuple[int, ...]:
+    identity = _strict_tmdb_integer(detail.get("id")) if isinstance(detail, dict) else None
+    return _VERIFIED_RELEASE_SPECIALS.get((identity, season, regular_count), ())
+
+
+def _verified_special_episode_numbers(
+    identities: tuple[int, ...], special_season_detail: dict | None,
+) -> list[int]:
+    if not identities or not isinstance(special_season_detail, dict):
+        return []
+    if _strict_tmdb_integer(special_season_detail.get("season_number")) != 0:
+        return []
+    episodes = special_season_detail.get("episodes")
+    if not isinstance(episodes, list):
+        return []
+    by_identity: dict[int, int] = {}
+    seen_numbers: set[int] = set()
+    for item in episodes:
+        if not isinstance(item, dict):
+            return []
+        identity = _strict_tmdb_integer(item.get("id"))
+        number = _strict_tmdb_integer(item.get("episode_number"))
+        season = _strict_tmdb_integer(item.get("season_number", 0))
+        if number is None or number < 1 or season != 0 or number in seen_numbers:
+            return []
+        seen_numbers.add(number)
+        if identity in identities:
+            if identity in by_identity:
+                return []
+            by_identity[identity] = number
+    if set(by_identity) != set(identities):
+        return []
+    return [by_identity[identity] for identity in identities]
+
+
 def infer_overflow_tmdb_special_mapping(
     *,
     source_season: int | None,
@@ -539,8 +593,8 @@ def infer_overflow_tmdb_special_mapping(
     Season 00。这里同时要求：
 
     * TMDB 正片季存在且逐集日期完整；
-    * 特别篇标题带绝对小数标记（如 24.9、36.5）；
-    * 特别篇播出日在该季首尾 21 天窗口内；
+    * 特别篇标题带绝对小数标记（如 24.9、36.5），或命中已核验的稳定集 ID；
+    * 小数编号特别篇播出日在该季首尾 21 天窗口内（已核验 ID 不靠日期猜测）；
     * 当前物理目录恰好是完整正片加尾项，或只剩完整尾项；
     * 目录媒体数、连续编号数和候选特别篇数完全一致。
 
@@ -613,10 +667,15 @@ def infer_overflow_tmdb_special_mapping(
         seen_episodes.add(episode_number)
         dated_candidates.append((marker, episode_number))
     dated_candidates.sort()
-    if not dated_candidates:
+    verified_ids = _verified_release_special_ids(detail, season, regular_count)
+    if verified_ids:
+        target_episodes = _verified_special_episode_numbers(verified_ids, special_season_detail)
+    else:
+        target_episodes = [number for _, number in dated_candidates]
+    if not target_episodes:
         return None
 
-    overflow_count = len(dated_candidates)
+    overflow_count = len(target_episodes)
     expected_end = regular_count + overflow_count
     complete_pack = bool(
         evidence.range_start == 1
@@ -634,7 +693,7 @@ def infer_overflow_tmdb_special_mapping(
     offset = episode - regular_count - 1
     if not 0 <= offset < overflow_count:
         return None
-    target_episode = dated_candidates[offset][1]
+    target_episode = target_episodes[offset]
     return EpisodeMappingPlan(
         season,
         episode,
@@ -701,6 +760,20 @@ def infer_episode_mapping(
     if normalized_mode == "standard":
         return identity
 
+    regular_count = counts.get(season)
+    verified_ids = _verified_release_special_ids(detail, season, regular_count or 0)
+    if (
+        normalized_mode == "auto" and regular_count is not None and verified_ids
+        and regular_count < episode <= regular_count + len(verified_ids)
+    ):
+        # 已知发布尾项不能先泛化成下一季；缺少 Season 00 证明时保持原编号，
+        # 由上层调用严格的 overflow helper 或转人工确认。
+        return EpisodeMappingPlan(
+            season, episode, season, episode, mode="auto",
+            reason="verified_special_mapping_required", confidence=0.0,
+            range_start=range_start, range_end=range_end,
+        )
+
     evidence = directory_evidence
     if (
         evidence is None
@@ -765,6 +838,9 @@ def infer_episode_mapping(
             evidence_valid
             and current_count is not None
             and evidence.range_start > previous_total
+            # 必须让整个目录都落在同一目标季内，不能只让前几集合法就
+            # 部分回卷；同名短剧的 18 集季不能接收动画 E19–40 的目录。
+            and evidence.range_end - previous_total <= current_count
             and evidence.range_end > current_count
             and (
                 evidence.range_start > current_count

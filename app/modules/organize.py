@@ -812,6 +812,9 @@ class Organizer:
             )
             if overflow_mapping is not None:
                 return overflow_mapping
+        if mapping.reason == "verified_special_mapping_required":
+            # 固定 TMDB 身份不等于尾项顺序已证实；不能用绝对编号降级绕过保护。
+            return mapping
         if (
             automatic
             and explicit_tmdb_id
@@ -6126,6 +6129,16 @@ class Organizer:
             parsed_season=parsed_season,
             parsed_episode=parsed_episode,
         )
+        if resolved_mapping is not None and self._maps_tmdb_source_positions(match):
+            current_mapping = infer_episode_mapping(
+                source_season=source_season_value, source_episode=source_episode_value,
+                detail=detail, mode="auto",
+            )
+            if current_mapping.reason == "verified_special_mapping_required":
+                # 旧识别缓存的合法目标不代表当前尾项顺序已证实。丢弃旧映射，
+                # 让下游从原发布位置重新核对完整目录与当前稳定特别篇 ID。
+                # Web 已计算的位置与明确人工覆盖不启用 map_source_positions。
+                resolved_mapping = None
         if resolved_mapping is not None:
             plan.source_season = resolved_mapping.source_season
             plan.source_episode = resolved_mapping.source_episode
