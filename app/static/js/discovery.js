@@ -3094,7 +3094,13 @@
     function restoreDetailFocus() {
         const target = state.activeCard?.querySelector?.('.discovery-card-open') || state.activeCard || elements.searchQuery;
         state.activeCard = null;
-        window.requestAnimationFrame(() => target?.focus?.({preventScroll: true}));
+        window.requestAnimationFrame(() => {
+            const focused = document.activeElement;
+            // 新弹窗或用户已移到其它控件时，旧回合的延迟恢复不能再抢焦点。
+            if (elements.dialog.open || (focused && focused !== document.body && focused !== target
+                && !elements.dialog.contains(focused))) return;
+            target?.focus?.({preventScroll: true});
+        });
     }
 
     function closeDetailDialog() {
@@ -3121,6 +3127,8 @@
         if (event.target === elements.dialog) closeDetailDialog();
     });
     elements.dialog.addEventListener('close', () => {
+        // 原生 close 延迟到达时，新卡片可能已重开；旧事件不能取消新请求或清空其状态。
+        if (elements.dialog.open) return;
         document.body.classList.remove('discovery-modal-open');
         state.detailController?.abort();
         state.detailRequestId += 1;

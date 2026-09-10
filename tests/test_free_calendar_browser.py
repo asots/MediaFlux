@@ -189,7 +189,7 @@ def official_payload():
     data['sources'][2].update(status='partial', message='官方 webcomic 周历样本：47 节目、92 事件；非全站覆盖', sampled=47)
     return data
 
-def render_template(template='free_calendar.html'):
+def render_template(template='free_calendar.html', *, resource_results_enabled=False):
     env = Environment(loader=FileSystemLoader(ROOT / 'app/templates'),
                       autoescape=select_autoescape(['html']))
     env.globals.update(
@@ -202,13 +202,14 @@ def render_template(template='free_calendar.html'):
     return env.get_template(template).render(
         calendar_today=TODAY, calendar_week_start=START, active='discovery',
         discovery_enabled=True, agent_enabled=False,
+        resource_results_enabled=resource_results_enabled,
     )
 
 
 class FixtureNetwork:
     """Context 级 fail-closed HTTP/WS 拦截，包括弹窗；没有 continue/fetch。"""
 
-    def __init__(self, initial):
+    def __init__(self, initial, *, resource_results_enabled=False):
         self.data = copy.deepcopy(initial)
         self.calls = []
         self.pending = []
@@ -227,7 +228,9 @@ class FixtureNetwork:
         self.poster_pending = []
         self.platform_pages = set()
         self.platform_calls = []
-        self.html = render_template()
+        self.indexer_calls = []
+        self.indexer_payload = None  # 用例须显式登记；默认不放行资源检索。
+        self.html = render_template(resource_results_enabled=resource_results_enabled)
         self.static_paths = {
             '/static/' + path: ROOT / 'app/static' / path for path in (
                 'css/main.css', 'css/free-calendar.css', 'js/free-calendar.js',
@@ -302,6 +305,11 @@ class FixtureNetwork:
         elif path.startswith('/api/discovery/detail/'):
             provider,media_type,identity=path.rsplit('/',3)[-3:]
             route.fulfill(status=200,content_type='application/json',body=json.dumps({'detail':{'provider': provider,'media_type': media_type,'external_id': identity,'title': f'详情夹具 {provider} {identity}','year': '2026','poster_url': '','overview': '通过既有 profileOnly 详情弹层显示','tmdb_id': identity if provider=='tmdb' else '','rating': 8.1}}))
+        elif path == '/api/indexers/search' and request.method == 'POST' and self.indexer_payload is not None:
+            self.indexer_calls.append({'method': request.method, 'path': path,
+                'headers': request.headers, 'body': json.loads(request.post_data)})
+            route.fulfill(status=200, content_type='application/json',
+                          body=json.dumps(self.indexer_payload, ensure_ascii=False))
         elif path == '/api/discovery/map':
             route.fulfill(status=200,content_type='application/json',body='{"candidates": []}')
         elif path.startswith('/api/discovery/watchlist'):
@@ -351,8 +359,10 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def make_page(self, data=None, width=1440, hold=False, poster_failures=(), poster_holds=()):
-        network = FixtureNetwork(data if data is not None else synthetic_payload())
+    def make_page(self, data=None, width=1440, hold=False, poster_failures=(), poster_holds=(),
+                  *, resource_results_enabled=False):
+        network = FixtureNetwork(data if data is not None else synthetic_payload(),
+                                 resource_results_enabled=resource_results_enabled)
         network.hold = hold
         network.poster_failures = set(poster_failures)
         network.poster_holds = set(poster_holds)
@@ -824,7 +834,7 @@ class FreeCalendarBrowserTests(unittest.TestCase):
     def test_profile_only_existing_dialog_and_no_video_links(self):
         data=blank_payload()
         data['days'][2]['items']=[synthetic_entry(1),synthetic_entry(2,tmdb_id='',douban_id='1292052')]
-        page,network=self.make_page(data)
+        page,network=self.make_page(data, resource_results_enabled=False)
         paths=[urlsplit(call[1]).path for call in network.calls]
         self.assertFalse(any(path in ['/api/discovery/sections','/api/discovery/items','/api/discovery/search','/api/discovery/watchlist'] for path in paths))
         self.assertEqual(page.locator('[data-discovery-profile-host="true"]').count(),1)
@@ -839,9 +849,130 @@ class FreeCalendarBrowserTests(unittest.TestCase):
             page.locator('[data-discovery-dialog-close]').click()
             page.wait_for_function('!document.querySelector("#discovery-detail-dialog").open && document.querySelector("#calendar-refresh").getAttribute("aria-busy") === "false"')
         self.assertEqual(network.unexpected,[])
+        self.assertFalse(any(urlsplit(call[1]).path.startswith('/api/indexers/') for call in network.calls))
         detail_paths=[urlsplit(call[1]).path for call in network.calls if urlsplit(call[1]).path.startswith('/api/discovery/detail/')]
         self.assertEqual(detail_paths,['/api/discovery/detail/tmdb/tv/12301','/api/discovery/detail/douban/tv/1292052'])
         self.assertFalse(any(urlsplit(call[1]).path in ['/api/discovery/sections','/api/discovery/items'] for call in network.calls))
+
+    def test_card_resource_switch_uses_shared_dialog_and_keeps_calendar_context(self):
+        self._assert_card_resource_switch_context(keyboard=False)
+
+    def test_keyboard_reopen_ignores_previous_close_event_in_both_resource_modes(self):
+        self._assert_card_resource_switch_context(keyboard=True)
+
+    def _assert_card_resource_switch_context(self, *, keyboard):
+        for enabled in (False, True):
+            for width in (1440, 390):
+                with self.subTest(resource_results_enabled=enabled, width=width):
+                    data = blank_payload()
+                    data['days'][2]['items'] = [
+                        synthetic_entry(1, douban_id='1292052'),  # 双身份必须优先 TMDB。
+                        synthetic_entry(2, tmdb_id='', douban_id='1292052'),
+                        synthetic_entry(3, 'youku', tmdb_id='', douban_id='', watchlist=None,
+                                        mapping_status='unmatched', poster_url=''),
+                    ]
+                    page, network = self.make_page(data, width=width, resource_results_enabled=enabled)
+                    calendar_url = page.url
+                    self.assertEqual(page.locator('[data-discovery-profile-host]').get_attribute(
+                        'data-resource-results-enabled'), str(enabled).lower())
+                    self.assertEqual(page.locator('script[src="/static/js/discovery.js"][defer]').count(), 1)
+                    self.assertEqual(page.locator('#discovery-detail-dialog').count(), 1)
+                    for index, (provider, identity) in enumerate((('tmdb', '12301'), ('douban', '1292052'))):
+                        title = f'详情夹具 {provider} {identity}'
+                        # 同 test_indexer_api / test_discovery_search_ui 的公开资源契约；不含下载地址。
+                        network.indexer_payload = {
+                            'query': title, 'page': 1, 'has_more': False, 'partial': False, 'cached': False,
+                            'items': [{'result_id': 'opaque-result', 'site_id': 'nyaa', 'site_name': 'Nyaa',
+                                       'title': 'Demo.Show.S01E01.1080p.WEB-DL', 'size_text': '1 GiB',
+                                       'seeders': 12, 'download_state': 'ready', 'download_kinds': ['magnet']}],
+                            'sites_attempted': ['nyaa'], 'sites_succeeded': ['nyaa'], 'errors': [],
+                            'site_statuses': [{'site_id': 'nyaa', 'site_name': 'Nyaa', 'status': 'success',
+                                               'count': 1, 'query': title, 'attempts': 1,
+                                               'pagination_supported': False, 'has_more': False}],
+                        }
+                        link = page.locator('.wc-card').nth(index).locator('.discovery-card-open')
+                        self.assertEqual(link.get_attribute('href'),
+                                         f'/discovery?detail_provider={provider}&detail_type=tv&detail_id={identity}')
+                        if keyboard:
+                            link.focus()
+                            if index == 1:
+                                # 用户已选择下一张卡片，再执行上一轮待恢复焦点的帧回调。
+                                page.evaluate('''() => {
+                                    window.requestAnimationFrame = window.originalCloseFrame;
+                                    for (const callback of window.pendingCloseFrames.splice(0)) callback(performance.now());
+                                }''')
+                                self.assertTrue(link.evaluate('(e) => document.activeElement === e'))
+                            page.keyboard.press('Enter')
+                        else:
+                            link.click()
+                        page.locator('#discovery-detail-dialog[open]').wait_for()
+                        if keyboard and index == 1:
+                            # 原生 close 事件可晚于下一张 showModal；确定性补派旧事件，不能取消新请求。
+                            page.evaluate("document.querySelector('#discovery-detail-dialog').dispatchEvent(new Event('close'))")
+                        if enabled:
+                            row = page.locator('[data-resource-result-id="opaque-result"]')
+                            row.wait_for()
+                            self.assertIn('Demo.Show.S01E01.1080p.WEB-DL', row.inner_text())
+                            self.assertIn(title, page.locator('#discovery-detail-title').inner_text())
+                            self.assertEqual(page.locator('[data-discovery-resource-panel]').count(), 1)
+                            self.assertIn('检索成功', page.locator('[data-resource-site-filter="nyaa"]').get_attribute('aria-label'))
+                            self.assertEqual(page.locator('.discovery-detail-layout').count(), 0)
+                            call = network.indexer_calls[-1]
+                            self.assertEqual((call['method'], call['path']), ('POST', '/api/indexers/search'))
+                            self.assertEqual(call['headers']['content-type'], 'application/json')
+                            self.assertEqual(call['headers']['x-csrf-token'], 'fixture-csrf-token')
+                            self.assertEqual(call['body'], {
+                                'title': title, 'original_title': '', 'english_title': '', 'aliases': [],
+                                'year': '2026', 'media_type': 'tv', 'sort_mode': 'published_desc', 'page': 1,
+                            })
+                        else:
+                            page.locator('.discovery-detail-layout').wait_for()
+                            self.assertIn(title, page.locator('.discovery-detail-layout').inner_text())
+                            self.assertEqual(page.locator('[data-discovery-resource-panel]').count(), 0)
+                        self.assertEqual(len(network.indexer_calls), index + 1 if enabled else 0)
+                        self.assertEqual(page.url, calendar_url)
+                        self.assertEqual(len(page.context.pages), 1)
+                        if keyboard and index == 0:
+                            page.evaluate('''() => {
+                                window.originalCloseFrame = window.requestAnimationFrame;
+                                window.pendingCloseFrames = [];
+                                window.requestAnimationFrame = (callback) => window.pendingCloseFrames.push(callback);
+                            }''')
+                        page.locator('[data-discovery-dialog-close]').click()
+                        page.wait_for_function('!document.querySelector("#discovery-detail-dialog").open && document.querySelector("#calendar-refresh").getAttribute("aria-busy") === "false"', polling=10)
+                        page.wait_for_function('(index) => document.activeElement === document.querySelectorAll(".wc-card .discovery-card-open")[index]', arg=index, polling=10)
+                        if keyboard and index == 0:
+                            page.wait_for_function('window.pendingCloseFrames.length > 0', polling=10)
+                        self.assertEqual(page.url, calendar_url)
+                        self.assertEqual(len(network.indexer_calls), index + 1 if enabled else 0)
+                    # 无媒体身份仍只打开已验证的平台原页，不尝试档案/资源搜索。
+                    original_url = data['days'][2]['items'][2]['url']
+                    network.platform_pages = {original_url}
+                    original = page.locator('.wc-card').nth(2).locator('.discovery-card-open')
+                    self.assertEqual(original.get_attribute('href'), original_url)
+                    self.assertIsNone(original.get_attribute('data-media-profile-link'))
+                    with page.expect_popup() as popup_event:
+                        original.click()
+                    popup = popup_event.value
+                    popup.wait_for_load_state('domcontentloaded')
+                    self.assertEqual(popup.url, original_url)
+                    self.assertTrue(popup.evaluate('window.opener === null'))
+                    popup.close()
+                    self.assertEqual(network.platform_calls, [original_url])
+                    self.assertEqual(page.url, calendar_url)
+                    self.assertFalse(page.locator('#discovery-detail-dialog').evaluate('(dialog) => dialog.open'))
+                    api_calls = [(method, urlsplit(url).path) for method, url, _ in network.calls
+                                 if urlsplit(url).path.startswith('/api/')]
+                    self.assertEqual([path for _, path in api_calls if path.startswith('/api/discovery/detail/')],
+                                     ['/api/discovery/detail/tmdb/tv/12301', '/api/discovery/detail/douban/tv/1292052'])
+                    self.assertEqual([call for call in api_calls if call[1].startswith('/api/indexers/')],
+                                     [('POST', '/api/indexers/search')] * (2 if enabled else 0))
+                    self.assertTrue(all(method == 'GET' or path in ('/api/indexers/search', '/api/discovery/map')
+                                        for method, path in api_calls), api_calls)
+                    self.assertFalse(any(path in ('/api/discovery/sections', '/api/discovery/items',
+                                                  '/api/discovery/search', '/api/discovery/watchlist')
+                                         for _, path in api_calls))
+                    self.assert_no_overflow(page)
 
     def test_mapping_status_labels_and_tmdb_id_priority_keep_footer_nodes_and_height(self):
         for width in (1440, 320):

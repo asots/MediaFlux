@@ -339,8 +339,11 @@ def free_calendar(request: Request):
         raise HTTPException(status_code=404, detail="not found")
     from app.discovery.calendar.service import calendar_dates
     today, week_start = calendar_dates()
-    return _page(request, "free_calendar.html", "discovery",
-                 calendar_today=today, calendar_week_start=week_start)
+    return _page(
+        request, "free_calendar.html", "discovery",
+        calendar_today=today, calendar_week_start=week_start,
+        resource_results_enabled=config.get_bool("DISCOVERY_RESOURCE_RESULTS_ENABLED", True),
+    )
 
 
 @router.get("/discovery", name="pages.discovery")
