@@ -189,6 +189,8 @@ python mediaflux.py support-bundle
   - [整理纠偏审计与数据回退实战](docs/tutorials/05_纠偏审计与数据回退实战.md)
   - [Apple TV / Infuse / VidHub 直连播放配置](docs/tutorials/06_AppleTV与Infuse及VidHub终极直连配置.md)
   - [性能调优与大规模媒体库优化指南](docs/tutorials/07_性能调优与大规模媒体库优化指南.md)
+  - [Agent 架构、配置与使用实战](docs/tutorials/08_Agent架构与使用实战.md)
+  - [Agent 工具清单与 Provider 能力参考](docs/tutorials/09_Agent工具与能力参考.md)
 
 ---
 
