@@ -254,7 +254,8 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(
             model=ScriptedModel([]), catalog=catalog,
             retriever=CapabilityRetriever(minimum=1, maximum=1),
-            pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state,
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
         )
         reader = asyncio.create_task(collect(session.confirm(
             owner="owner-1", session_id="session-1", plan_id="plan-1"
@@ -442,6 +443,130 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.content.startswith("recent:") for item in bounded))
         self.assertNotIn("old answer", [item.content for item in bounded])
         self.assertEqual(bounded[0].role, "user")
+
+    async def test_latest_oversized_history_turn_is_compacted_not_dropped(self) -> None:
+        catalog = ToolCatalog([read_tool("library.status")])
+        state = InMemorySessionStateStore()
+        session = AgentSession(
+            model=ScriptedModel([]),
+            catalog=catalog,
+            retriever=CapabilityRetriever(),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+            limits=SessionLimits(
+                max_output_tokens=1_024,
+                context_window_tokens=16_384,
+            ),
+        )
+        messages = [
+            ModelMessage(role="user", content="完整读取狐妖小红娘并给方案"),
+            ModelMessage(
+                role="assistant",
+                tool_calls=(
+                    ModelToolCall(
+                        "large-call",
+                        "library.status",
+                        {"objects": ["OBJ" + "A" * 24] * 2_000},
+                    ),
+                ),
+            ),
+            ModelMessage(
+                role="tool",
+                tool_call_id="large-call",
+                tool_name="library.status",
+                content='{"ok":true,"status":"success","summary":"完整读取完成","data":"'
+                + "x" * 100_000
+                + '"}',
+            ),
+            ModelMessage(role="assistant", content="方案 A：按 TMDB 分季规整"),
+            ModelMessage(role="user", content="方案 A"),
+        ]
+
+        bounded = session._bounded_model_messages(
+            messages,
+            history_end=4,
+            tool_definitions=(catalog.get("library.status").model_definition(),),
+        )
+
+        self.assertEqual(bounded[-1].content, "方案 A")
+        self.assertTrue(any("完整读取狐妖小红娘" in item.content for item in bounded))
+        self.assertTrue(any("方案 A：按 TMDB" in item.content for item in bounded))
+        historical_call = next(item for item in bounded if item.tool_calls)
+        self.assertEqual(dict(historical_call.tool_calls[0].arguments), {})
+
+    async def test_compacted_failed_tool_keeps_failure_fact(self) -> None:
+        compact = AgentSession._compact_tool_content(
+            '{"ok":false,"status":"error","code":"precondition_failed",'
+            '"error":"观察快照已过期"}',
+            maximum=240,
+        )
+
+        self.assertIn('"ok":false', compact)
+        self.assertIn("观察快照已过期", compact)
+        self.assertIn("precondition_failed", compact)
+        self.assertNotIn("工具执行完成", compact)
+
+    async def test_final_model_round_is_synthesis_only_and_never_executes_calls(
+        self,
+    ) -> None:
+        calls = 0
+
+        def handler(_arguments, _context):
+            nonlocal calls
+            calls += 1
+            return {"summary": "读取完成", "data": {"count": 200}}
+
+        catalog = ToolCatalog([read_tool("library.status", handler=handler)])
+        state = InMemorySessionStateStore()
+        model = ScriptedModel(
+            [
+                [
+                    ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("read-1", "library.status", {}),
+                    ),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ],
+                [
+                    ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("late-call", "library.status", {}),
+                    ),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ],
+            ]
+        )
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=1, maximum=1),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+            limits=SessionLimits(max_model_rounds=2),
+        )
+
+        events = await collect(
+            session.run(
+                AgentInput(
+                    message="完整读取后汇总",
+                    owner="owner-1",
+                    session_id="session-1",
+                )
+            )
+        )
+
+        self.assertEqual(calls, 1)
+        self.assertTrue(model.requests[0].tools)
+        self.assertEqual(tuple(model.requests[1].tools), ())
+        self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
+        self.assertEqual(events[-1].payload["status"], "partial")
+        self.assertEqual(
+            events[-1].payload["finish_reason"], "model_round_budget_exceeded"
+        )
+        failed = [event for event in events if event.type is AgentEventType.TOOL_FAILED]
+        self.assertEqual(failed[-1].payload["code"], "not_executed_final_round")
+        stored = await state.load(owner="owner-1", session_id="session-1")
+        self.assertIn("部分完成", stored.conversation[-1]["content"])
 
     async def test_reply_context_is_available_to_model_but_not_persisted_as_chat_text(
         self,

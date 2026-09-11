@@ -7,9 +7,14 @@ import json
 import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Protocol
 
+from app.agent.model_context_budget import (
+    bounded_model_messages,
+    compact_tool_content,
+    estimated_tokens,
+)
 from app.agent.public_safety import public_tool_label
 from app.concurrency import CrossLoopAsyncLock
 from app.sensitive_data import contains_sensitive_credential
@@ -80,7 +85,7 @@ DEFAULT_SYSTEM_PROMPT = """你是 MediaFlux Media Agent，一名可操作当前 
 领域判断：
 - “查看/列出/搜索云盘目录”先用通用光鸭文件查询；“创建目录、改名、移动、回收站”是在查询结果上生成文件变更计划。
 - 用户用自然片名描述父目录下的对象时，不要先猜一个同名绝对路径；先列出或递归观察父目录。若同一作品散落在多个发布组目录中，应观察父目录并汇总全部匹配文件，不能只处理第一个目录。
-- 用户要求先整理混乱发布组文件、按 TMDB 集序重命名、再方便后续识别入库时，这是云盘文件规整，不等同于刮削、媒体名称垃圾清理或立即执行媒体整理。先列出共同父目录确认真实发布组名称，再用 paths 一次合并这些目录并以 kinds=["video"]、max_depth=0 聚合正片；只有不便枚举目录时才从共同父目录 search，并用 max_depth 限制花絮子目录。有更多页时沿同一 observation_ref 分页，再一次生成批量文件变更预览。
+- 用户要求先整理混乱发布组文件、按 TMDB 集序重命名、再方便后续识别入库时，这是云盘文件规整，不等同于刮削、媒体名称垃圾清理或立即执行媒体整理。先用 guangya.episode_naming.inspect 一次取得紧凑的完整目录分组，不要分页调用 guangya.fs.query；确认 TMDB 篇章/季集映射后，必须优先一次调用 guangya.episode_naming.plan，只传 target_root 与紧凑 groups。每组用精确 source_path 或唯一的 source_directory_contains、源集号范围、目标季和 expected_count 描述；该工具会自行刷新完整目录快照，生成 Season XX 目录与全部移动改名，并直接返回一张人工确认卡。不要传 observation_ref，不要逐页抄 object_ref，不要逐文件拼 guangya.fs.change.preview，不要擅自拆成 20/50 项，也不要用刮削检查或媒体名称垃圾清理代替文件规整；媒体文件不超过 200 个且新建目录不超过 32 个时必须一次冻结；只有真实超过任一上限时才按完整季拆分。
 - 同一 observation_ref 的全部分页合计已覆盖用户指定的对象数量且未截断时，视为观察完成；直接使用这份快照生成变更预览，不要再创建新的搜索快照或重复核对，否则先前 object_ref 会失效。
 - 大批量剧集需要统一移动并按集号改名时，使用一项 batch_relocate，把每个 object_ref 与真实集号完整列入 items；不要只提交一个示例文件。用户要求全局 1-N/TMDB 顺序时使用 naming="absolute"，按季编号时使用 naming="season_episode"。若目标目录尚不存在，可在同一 operations 中加入 create_directory（可直接传完整 path），并让 batch_relocate.target_path 指向该新目录。
 - 媒体服务器实时统计、媒体总数、qBittorrent 实时任务/速度/进度应先读取 Provider 能力，再执行 Provider 实时查询；全库媒体总数使用 media.items.counts。用户询问“动漫库有多少部”等指定媒体库统计时，先用 media.libraries.list 取得匹配媒体库的安全引用，再用 media.library.counts 统计，不能用全库数量代替，也不能猜媒体库内部 ID。不要用本地历史记录或巡检快照冒充实时状态。
@@ -523,14 +528,30 @@ class AgentSession:
                 text_parts: list[str] = []
                 calls: list[ModelToolCall] = []
                 finish_reason = ""
+                # 只要本轮已经执行过工具，最后一次模型调用就专门用于汇总。
+                # 否则第 12 轮仍执行工具后没有第 13 轮收束，会真实完成调用却
+                # 对用户报 model_round_budget_exceeded，并丢失可续跑上下文。
+                final_synthesis_round = (
+                    round_index == self.limits.max_model_rounds - 1
+                    and total_tool_calls > 0
+                )
+                request_tools = () if final_synthesis_round else tool_definitions
+                request_system_prompt = self.system_prompt
+                if final_synthesis_round:
+                    request_system_prompt += (
+                        "\n\n本次是最终汇总轮次：不得调用任何工具。请只基于已经取得的工具事实"
+                        "给出简洁结论；若任务尚未完整完成，明确写‘部分完成’，说明未执行的"
+                        "写操作，并提示用户可继续，不得声称已生成不存在的确认计划。"
+                    )
                 request = ModelRequest(
-                    system_prompt=self.system_prompt,
+                    system_prompt=request_system_prompt,
                     messages=self._bounded_model_messages(
                         messages,
                         history_end=current_user_index,
-                        tool_definitions=tool_definitions,
+                        tool_definitions=request_tools,
+                        system_prompt=request_system_prompt,
                     ),
-                    tools=tool_definitions,
+                    tools=request_tools,
                     max_output_tokens=self.limits.effective_output_tokens,
                     round_index=round_index,
                 )
@@ -575,6 +596,48 @@ class AgentSession:
                         finish_reason = model_event.finish_reason
 
                 assistant_text = "".join(text_parts).strip()
+                if calls and final_synthesis_round:
+                    for call in calls:
+                        error = ToolPipelineError(
+                            "最终汇总轮次不再执行工具",
+                            code="not_executed_final_round",
+                        )
+                        await publish(
+                            AgentEventType.TOOL_FAILED,
+                            {
+                                "call_id": call.call_id,
+                                "tool": call.name,
+                                "label": public_tool_label(call.name),
+                                "code": error.code,
+                                "message": str(error),
+                            },
+                        )
+                    final_text = assistant_text or (
+                        "部分完成：已完成的检查结果已保留，但模型未在本轮预算内形成完整方案。"
+                        "未生成确认卡的写操作均未执行；你可以回复继续，我会基于现有上下文接着处理。"
+                    )
+                    messages.append(ModelMessage(role="assistant", content=final_text))
+                    await self.state_store.commit(
+                        lease,
+                        conversation=self._persisted_conversation(
+                            messages,
+                            current_user_index=current_user_index,
+                            original_message=agent_input.message,
+                            prior_conversation=state.conversation,
+                        ),
+                    )
+                    await publish(
+                        AgentEventType.TURN_COMPLETED,
+                        {
+                            "status": "partial",
+                            "answer": final_text,
+                            "finish_reason": "model_round_budget_exceeded",
+                            "usage": total_usage,
+                            "model_calls": round_index + 1,
+                            "tool_calls": total_tool_calls,
+                        },
+                    )
+                    return
                 if calls:
                     if total_tool_calls + len(calls) > self.limits.max_tool_calls:
                         raise ToolPipelineError(
@@ -1097,18 +1160,7 @@ class AgentSession:
 
     @staticmethod
     def _estimated_tokens(value: object) -> int:
-        if isinstance(value, str):
-            text = value
-        else:
-            try:
-                text = json.dumps(
-                    value, ensure_ascii=False, separators=(",", ":"), default=str
-                )
-            except (TypeError, ValueError):
-                text = str(value)
-        ascii_chars = sum(1 for char in text if ord(char) < 128)
-        wide_chars = len(text) - ascii_chars
-        return max(1, (ascii_chars + 3) // 4 + wide_chars)
+        return estimated_tokens(value)
 
     def _bounded_model_messages(
         self,
@@ -1116,128 +1168,20 @@ class AgentSession:
         *,
         history_end: int,
         tool_definitions: Sequence[Mapping[str, Any]],
+        system_prompt: str | None = None,
     ) -> tuple[ModelMessage, ...]:
-        """裁剪旧回合并压缩当前工具结果，绝不把超预算请求交给 Provider。"""
-        split_at = max(0, min(int(history_end), len(messages)))
-        history = self._compact_legacy_history(messages[:split_at])
-        current = list(messages[split_at:])
-        fixed_tokens = (
-            self._estimated_tokens(self.system_prompt)
-            + self._estimated_tokens(tool_definitions)
-            + self.limits.effective_output_tokens
-            + 512
+        return bounded_model_messages(
+            messages,
+            history_end=history_end,
+            tool_definitions=tool_definitions,
+            system_prompt=system_prompt or self.system_prompt,
+            context_window_tokens=self.limits.context_window_tokens,
+            output_tokens=self.limits.effective_output_tokens,
         )
-        message_budget = max(0, self.limits.context_window_tokens - fixed_tokens)
-
-        def message_cost(items: Sequence[ModelMessage]) -> int:
-            return sum(8 + self._estimated_tokens(item.to_dict()) for item in items)
-
-        current_cost = message_cost(current)
-        if current_cost > message_budget:
-            current = self._compact_current_chain(current, max_tool_chars=1_200)
-            current_cost = message_cost(current)
-        if current_cost > message_budget:
-            current = self._compact_current_chain(current, max_tool_chars=400)
-            current_cost = message_cost(current)
-        if current_cost > message_budget:
-            raise ToolPipelineError(
-                "当前工具链超过模型上下文上限，请缩小查询范围后重试",
-                code="context_budget_exceeded",
-            )
-        remaining = max(0, message_budget - current_cost)
-        if message_cost(history) <= remaining:
-            return tuple(history + current)
-
-        groups: list[list[ModelMessage]] = []
-        for message in history:
-            if message.role == "user" or not groups:
-                groups.append([])
-            groups[-1].append(message)
-
-        kept: list[list[ModelMessage]] = []
-        for group in reversed(groups):
-            cost = message_cost(group)
-            if cost > remaining:
-                break
-            kept.append(group)
-            remaining -= cost
-        bounded_history = [message for group in reversed(kept) for message in group]
-        return tuple(bounded_history + current)
-
-    @classmethod
-    def _compact_legacy_history(
-        cls, messages: Sequence[ModelMessage]
-    ) -> list[ModelMessage]:
-        """压缩旧版本曾持久化的巨型能力清单，避免长期污染会话窗口。"""
-
-        result: list[ModelMessage] = []
-        for message in messages:
-            if (
-                message.role == "tool"
-                and message.tool_name == "agent.capabilities"
-                and len(message.content) > 4_000
-            ):
-                result.append(
-                    replace(
-                        message,
-                        content=cls._compact_tool_content(
-                            message.content,
-                            maximum=800,
-                        ),
-                    )
-                )
-            else:
-                result.append(message)
-        return result
-
-    @classmethod
-    def _compact_current_chain(
-        cls,
-        messages: Sequence[ModelMessage],
-        *,
-        max_tool_chars: int,
-    ) -> list[ModelMessage]:
-        result: list[ModelMessage] = []
-        for message in messages:
-            if message.role == "tool":
-                result.append(
-                    replace(
-                        message,
-                        content=cls._compact_tool_content(
-                            message.content,
-                            maximum=max_tool_chars,
-                        ),
-                    )
-                )
-            elif message.role == "assistant" and message.tool_calls and message.content:
-                result.append(replace(message, content=""))
-            else:
-                result.append(message)
-        return result
 
     @staticmethod
     def _compact_tool_content(content: str, *, maximum: int) -> str:
-        text = str(content or "")
-        json_text, _separator, suffix = text.partition("\nopaque_refs=")
-        try:
-            payload = json.loads(json_text)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = {}
-        compact = {
-            "ok": bool(payload.get("ok", True)) if isinstance(payload, dict) else True,
-            "status": str(payload.get("status") or "success")[:80]
-            if isinstance(payload, dict)
-            else "success",
-            "summary": str(payload.get("summary") or "工具执行完成")
-            if isinstance(payload, dict)
-            else "工具执行完成",
-            "truncated": True,
-        }
-        reference_suffix = f"\nopaque_refs={suffix}" if suffix else ""
-        budget = max(80, int(maximum) - len(reference_suffix) - 80)
-        compact["summary"] = compact["summary"][:budget]
-        encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
-        return encoded + reference_suffix
+        return compact_tool_content(content, maximum=maximum)
 
     @staticmethod
     def _capability_retrieval_context(

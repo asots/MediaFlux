@@ -130,6 +130,8 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "guangya.fs.change.execute": "光鸭文件变更执行",
     "guangya.fs.change.preview": "光鸭文件变更预览",
     "guangya.fs.query": "光鸭文件查询",
+    "guangya.episode_naming.inspect": "光鸭剧集命名盘点",
+    "guangya.episode_naming.plan": "光鸭剧集分季命名计划",
     "guangya.media_hygiene.preview": "光鸭媒体名称清理预览",
     "guangya.organize.cleanup.classify": "光鸭整理残留逐项复核",
     "guangya.organize.cleanup.execute": "光鸭整理残留清理",

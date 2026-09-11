@@ -7,8 +7,9 @@
 {"id":"resource-search","message":"搜索一下蜘蛛侠崭新之日有没有资源","required":["indexer.search_resources"]}
 {"id":"rss-create","message":"https://mikanani.me/RSS/Bangumi?bangumiId=3979&subgroupid=1256 把这个添加到 RSS 订阅，6 小时刷新，下载到 QB，排除关键字 日，不启用","required":["rss.create_subscription"]}
 {"id":"series-count","message":"我的媒体库里光阴之外有多少集？","required":["library.count_series_episodes"]}
-{"id":"cloud-reorganize","message":"规整一下光鸭云盘根目录/动漫里的从零开始的异世界生活，创建一个新目录，然后按照 TMDB 1-85 集的方式重命名规整","required":["guangya.fs.query","guangya.fs.change.preview","guangya.fs.change.execute"]}
-{"id":"cloud-reorganize-explicit-no-scrape","message":"规整一下光鸭云盘根目录/动漫里的从零开始的异世界生活：先检查现有发布组文件和集号，创建一个新目录，再按照 TMDB 的 1-85 集顺序生成重命名和移动计划，方便我之后执行识别整理入库。不要刮削，不要直接执行写入。","required":["guangya.fs.query","guangya.fs.change.preview","guangya.fs.change.execute"]}
+{"id":"cloud-reorganize","message":"规整一下光鸭云盘根目录/动漫里的从零开始的异世界生活，创建一个新目录，然后按照 TMDB 1-85 集的方式重命名规整","required":["guangya.episode_naming.inspect","guangya.episode_naming.plan"]}
+{"id":"cloud-reorganize-explicit-no-scrape","message":"规整一下光鸭云盘根目录/动漫里的从零开始的异世界生活：先检查现有发布组文件和集号，创建一个新目录，再按照 TMDB 的 1-85 集顺序生成重命名和移动计划，方便我之后执行识别整理入库。不要刮削，不要直接执行写入。","required":["guangya.episode_naming.inspect","guangya.episode_naming.plan"]}
+{"id":"cloud-reorganize-generic-title","message":"把光鸭 /动漫/星河剑影 下不同发布组的剧集按 TMDB 标准分季，创建 Season 目录并一次批量改名，方便后续整理入库","required":["guangya.episode_naming.inspect","guangya.episode_naming.plan"]}
 {"id":"public-web-read","message":"打开这个官方公告 https://example.com/releases/2026 并总结里面的发布日期","required":["web.read"]}
 {"id":"rss-summary-natural-variant","message":"我订阅了那些RSS？","required":["rss.subscription_summaries"]}
 {"id":"recent-playback","message":"查看一下我在 Jellyfin 最近播放了什么","required":["media.recently_played"]}

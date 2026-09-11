@@ -22,6 +22,12 @@ from app.agent.guangya_directory_scrape_actions import (
     run_directory_scrape_confirmed,
     search_directory_scrape,
 )
+from app.agent.guangya_episode_naming_actions import (
+    guangya_episode_naming_inspect_arguments,
+    guangya_episode_naming_plan_arguments,
+    inspect_guangya_episode_naming,
+    prepare_guangya_episode_naming_confirmation,
+)
 from app.agent.guangya_fs_change_actions import (
     execute_guangya_fs_change_confirmed,
     guangya_fs_change_execute_arguments,
@@ -435,6 +441,153 @@ def register_specs(
                 "在光鸭 /动漫 里递归搜索某部作品的全部视频文件",
                 "把刚才确认的多个发布组目录合并读取为一个可变更快照",
                 "读取这个光鸭对象的详情",
+            ),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="guangya.episode_naming.inspect",
+            description=(
+                "为混乱发布组剧集目录建立一次完整只读快照，并把全部视频按来源父目录压缩为"
+                "可识别源季、集号区间、数量、小体积文件数和少量样例。用于制定 TMDB 分季映射；"
+                "不要用 guangya.fs.query 分页读取全部文件，也不要用刮削或垃圾清理工具代替本盘点。"
+            ),
+            risk=RiskLevel.READ,
+            parameters={
+                "type": "object",
+                "required": ["target_root"],
+                "properties": {
+                    "target_root": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2048,
+                        "description": "待规整作品的共同父目录。",
+                    }
+                },
+                "additionalProperties": False,
+            },
+            context_handler=inspect_guangya_episode_naming,
+            validator=guangya_episode_naming_inspect_arguments,
+            related_tools=("guangya.episode_naming.plan", "discovery.search"),
+            domains=("cloud_files", "media_naming", "organize", "media_identity"),
+            source_kind="guangya_episode_naming_inventory",
+            freshness="live",
+            workflow="guangya_episode_naming",
+            workflow_stage=5,
+            examples=(
+                "盘点一部长篇剧集目录里的发布组、源季和集号范围，准备按 TMDB 分季规整",
+                "先完整检查这个混乱剧集目录的文件分组，不要逐页列全部文件",
+            ),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="guangya.episode_naming.plan",
+            description=(
+                "把光鸭共同父目录中的发布组剧集按紧凑篇章映射编译为 TMDB 标准分季文件："
+                "工具会在预检时自行建立完整最新快照，再按精确 source_path 或唯一目录名片段、"
+                "源季集区间和目标季集区间自动选择全部正片，保留扩展名，创建缺失的 Season XX 目录，"
+                "并生成移动加改名的单一冻结计划。模型不得逐文件拼 object_ref，也不需要传分页快照引用；"
+                "最多一次处理 200 个媒体文件并创建 32 个分季目录。调用只产生人工确认卡，不会立即写入云盘。"
+            ),
+            risk=RiskLevel.DANGER,
+            parameters={
+                "type": "object",
+                "required": ["title", "target_root", "groups"],
+                "properties": {
+                    "title": {"type": "string", "minLength": 1, "maxLength": 180},
+                    "target_root": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2048,
+                        "description": "待规整作品的共同父目录；工具会自行递归建立最新完整快照。",
+                    },
+                    "groups": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "target_season",
+                                "source_episode_start",
+                                "source_episode_end",
+                                "expected_count",
+                            ],
+                            "properties": {
+                                "source_path": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 2048,
+                                    "description": "发布组或散落文件所在的精确绝对目录；与 source_directory_contains 二选一。",
+                                },
+                                "source_directory_contains": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 160,
+                                    "description": "唯一匹配来源父目录名称的稳定片段；与 source_path 二选一，适合冗长发布组目录。",
+                                },
+                                "source_season": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 999,
+                                    "description": "只匹配文件名中的指定源季；裸集号时省略。",
+                                },
+                                "source_episode_start": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 9999,
+                                },
+                                "source_episode_end": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 9999,
+                                },
+                                "target_season": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 999,
+                                },
+                                "target_episode_start": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 9999,
+                                    "default": 1,
+                                },
+                                "name_contains": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 160,
+                                    "description": "同目录混有多个篇章时，用稳定的文件名片段精确缩小范围。",
+                                },
+                                "expected_count": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 200,
+                                    "description": "必须填写；实际匹配数不同会拒绝冻结，防止漏集或扩大范围。",
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "trigger_strm": {"type": "boolean", "default": True},
+                },
+                "additionalProperties": False,
+            },
+            validator=guangya_episode_naming_plan_arguments,
+            requires_confirmation=True,
+            context_confirmation_preparer=prepare_guangya_episode_naming_confirmation,
+            context_confirmed_handler=execute_guangya_fs_change_confirmed,
+            domains=("cloud_files", "media_naming", "organize", "metadata", "strm"),
+            source_kind="guangya_fs_change_plan",
+            freshness="live",
+            related_tools=("guangya.fs.query",),
+            workflow="guangya_fs_change",
+            workflow_stage=10,
+            examples=(
+                "把一部长篇动画的多个发布组文件按 TMDB 各季一次规整并给确认卡",
+                "把绝对集 146 到 157 映射为第 12 季 1 到 12 集并移动到 Season 12",
+                "按刚才完整云盘快照把多个篇章一次生成标准分季命名计划",
             ),
         )
     )

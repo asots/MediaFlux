@@ -19,6 +19,7 @@ from typing import Any
 
 from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
 from app.config import PATHS
+from app.modules.guangya_journal import append_guangya_journal
 from app.modules.guangya_workspace import (
     GuangYaWorkspaceStale,
     observation_entry_map,
@@ -31,7 +32,6 @@ from app.modules.organize_delete_audit import (
     execute_recycle_bin_delete,
 )
 from app.modules.process_lock import CrossProcessLock
-from app.modules.guangya_journal import append_guangya_journal
 from app.modules.web_secret import get_web_secret
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
@@ -39,7 +39,12 @@ from app.repositories.organize_operation_jobs import organize_operation_owner_di
 _PLAN_VERSION = 1
 _PLAN_TTL_SECONDS = 10 * 60
 _EXECUTE_TTL_SECONDS = 15 * 60
-_MAX_OPERATIONS = 200
+MAX_FS_CHANGE_INPUT_OPERATIONS = 200
+MAX_FS_CHANGE_OBJECT_OPERATIONS = 200
+MAX_FS_CHANGE_CREATE_OPERATIONS = 200
+MAX_FS_CHANGE_OPERATIONS = (
+    MAX_FS_CHANGE_OBJECT_OPERATIONS + MAX_FS_CHANGE_CREATE_OPERATIONS
+)
 _MAX_PLAN_BYTES = 2 * 1024 * 1024
 _MAX_PLANS = 32
 _MAX_PLANS_PER_OWNER = 4
@@ -741,13 +746,25 @@ def build_fs_change_plan(
     _validate_observation(client, owner, observation)
     if not isinstance(operations, list) or not operations:
         raise GuangYaFSChangeError(
-            f"光鸭变更计划必须包含 1 到 {_MAX_OPERATIONS} 项操作"
+            f"光鸭变更计划必须包含 1 到 {MAX_FS_CHANGE_OPERATIONS} 项操作"
         )
     entries = observation_entry_map(observation)
     operations = _expand_batch_operations(operations, entries)
-    if not 1 <= len(operations) <= _MAX_OPERATIONS:
+    create_count = sum(
+        1
+        for item in operations
+        if str(item.get("op") or "").strip().casefold() == "create_directory"
+    )
+    object_count = len(operations) - create_count
+    if (
+        not 1 <= len(operations) <= MAX_FS_CHANGE_OPERATIONS
+        or object_count > MAX_FS_CHANGE_OBJECT_OPERATIONS
+        or create_count > MAX_FS_CHANGE_CREATE_OPERATIONS
+    ):
         raise GuangYaFSChangeError(
-            f"展开后的光鸭变更计划必须包含 1 到 {_MAX_OPERATIONS} 项操作"
+            "展开后的光鸭变更计划最多包含 "
+            f"{MAX_FS_CHANGE_OBJECT_OPERATIONS} 项对象变更和 "
+            f"{MAX_FS_CHANGE_CREATE_OPERATIONS} 项目录创建"
         )
     operations = [
         *(

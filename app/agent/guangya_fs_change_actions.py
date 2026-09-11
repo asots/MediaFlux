@@ -20,6 +20,9 @@ from app.agent.session_context import (
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.guangya_fs_change import (
+    MAX_FS_CHANGE_CREATE_OPERATIONS,
+    MAX_FS_CHANGE_INPUT_OPERATIONS,
+    MAX_FS_CHANGE_OBJECT_OPERATIONS,
     GuangYaFSChangeError,
     GuangYaFSChangeStale,
     build_fs_change_plan,
@@ -301,10 +304,16 @@ def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, 
     if ref and not valid_observation_ref(ref):
         raise AgentToolError("observation_ref 格式无效")
     raw_operations = arguments.get("operations")
-    if not isinstance(raw_operations, list) or not 1 <= len(raw_operations) <= 200:
-        raise AgentToolError("operations 必须包含 1 到 200 项操作")
+    if (
+        not isinstance(raw_operations, list)
+        or not 1 <= len(raw_operations) <= MAX_FS_CHANGE_INPUT_OPERATIONS
+    ):
+        raise AgentToolError(
+            f"operations 必须包含 1 到 {MAX_FS_CHANGE_INPUT_OPERATIONS} 项操作"
+        )
     operations: list[dict[str, Any]] = []
-    effective_operation_count = 0
+    object_operation_count = 0
+    create_operation_count = 0
     for raw in raw_operations:
         if not isinstance(raw, dict):
             raise AgentToolError("光鸭变更操作必须是对象")
@@ -377,7 +386,7 @@ def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, 
                 "episode_padding": episode_padding,
             }
             operations.append(normalized)
-            effective_operation_count += len(items)
+            object_operation_count += len(items)
             continue
         if op == "create_directory" and set(raw) == {"op", "path"}:
             path = _normalize_path(raw.get("path"), field="path")
@@ -416,9 +425,19 @@ def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, 
                 raise AgentToolError("name 长度必须在 1 到 255 之间")
             normalized["name"] = name.strip()
         operations.append(normalized)
-        effective_operation_count += 1
-    if effective_operation_count > 200:
-        raise AgentToolError("展开后的光鸭变更操作不能超过 200 项")
+        if op == "create_directory":
+            create_operation_count += 1
+        else:
+            object_operation_count += 1
+    if (
+        object_operation_count > MAX_FS_CHANGE_OBJECT_OPERATIONS
+        or create_operation_count > MAX_FS_CHANGE_CREATE_OPERATIONS
+    ):
+        raise AgentToolError(
+            "展开后的光鸭变更操作最多包含 "
+            f"{MAX_FS_CHANGE_OBJECT_OPERATIONS} 项对象变更和 "
+            f"{MAX_FS_CHANGE_CREATE_OPERATIONS} 项目录创建"
+        )
     trigger_strm = arguments.get("trigger_strm", True)
     if type(trigger_strm) is not bool:
         raise AgentToolError("trigger_strm 必须是布尔值")
