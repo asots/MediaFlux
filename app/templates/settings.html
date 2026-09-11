@@ -369,9 +369,16 @@
 
                                     <div class="metadata-option metadata-episode-research">
                                         <span>
-                                            <strong>受控季集研究</strong>
-                                            <small id="episodeResearchDescription">默认关闭。首版仅研究光鸭待确认剧集的冻结案例；唯一、可验证的 TMDB 剧集组映射才可用于无冲突新归档，不自动覆盖或删除目标，歧义、证据不足或冲突仍待确认。Tavily 搜索可选，沿用现有额度。</small>
-                                            <small id="episodeResearchDependency">需先启用「Agent 主动复核」、Agent 总开关与 LLM，并配置模型地址和模型名；关闭任一依赖即停止后续研究授权，不会自动开启依赖。本地媒体继续旧复核，首版不执行本地文件映射。</small>
+                                            <span class="metadata-option-title">
+                                                <strong>受控季集研究</strong>
+                                                <button type="button" class="metadata-help-trigger" data-settings-tooltip="episodeResearchTooltip" aria-label="受控季集研究说明" aria-describedby="episodeResearchDescription episodeResearchDependency">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>
+                                                </button>
+                                            </span>
+                                            <span class="metadata-help-tooltip" id="episodeResearchTooltip" role="tooltip">
+                                                <span id="episodeResearchDescription">默认关闭。首版仅研究光鸭待确认剧集的冻结案例；唯一、可验证的 TMDB 剧集组映射才可用于无冲突新归档，不自动覆盖或删除目标，歧义、证据不足或冲突仍待确认。Tavily 搜索可选，沿用现有额度。</span>
+                                                <span id="episodeResearchDependency">需先启用「Agent 主动复核」、Agent 总开关与 LLM，并配置模型地址和模型名；关闭任一依赖即停止后续研究授权，不会自动开启依赖。本地媒体继续旧复核，首版不执行本地文件映射。</span>
+                                            </span>
                                         </span>
                                         <label class="toggle">
                                             <input type="checkbox" data-key="AGENT_EPISODE_RESEARCH_ENABLED" data-bool="1" aria-label="启用受控季集研究" aria-describedby="episodeResearchDescription episodeResearchDependency" disabled>
@@ -391,9 +398,16 @@
 
                                     <div class="metadata-option metadata-nsfw-clean-review">
                                         <span>
-                                            <strong>允许光鸭 NSFW 清洗入库</strong>
-                                            <small id="nsfwCleanReviewDescription">仅光鸭 NSFW 无完整元数据时，授权 Agent 主动复核 clean_title 并自动执行清洗入库；不确定则保留人工确认，不影响本地媒体或 MetaTube 识别流程。</small>
-                                            <small id="nsfwCleanReviewDependency">需先启用「Agent 主动复核」。关闭任一开关会阻止后续文件开写，已开写文件按原流程收尾。</small>
+                                            <span class="metadata-option-title">
+                                                <strong>允许光鸭 NSFW 清洗入库</strong>
+                                                <button type="button" class="metadata-help-trigger" data-settings-tooltip="nsfwCleanReviewTooltip" aria-label="允许光鸭 NSFW 清洗入库说明" aria-describedby="nsfwCleanReviewDescription nsfwCleanReviewDependency">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>
+                                                </button>
+                                            </span>
+                                            <span class="metadata-help-tooltip" id="nsfwCleanReviewTooltip" role="tooltip">
+                                                <span id="nsfwCleanReviewDescription">仅光鸭 NSFW 无完整元数据时，授权 Agent 主动复核 clean_title 并自动执行清洗入库；不确定则保留人工确认，不影响本地媒体或 MetaTube 识别流程。</span>
+                                                <span id="nsfwCleanReviewDependency">需先启用「Agent 主动复核」。关闭任一开关会阻止后续文件开写，已开写文件按原流程收尾。</span>
+                                            </span>
                                         </span>
                                         <label class="toggle">
                                             <input type="checkbox" data-key="AGENT_NSFW_CLEAN_REVIEW_ENABLED" data-bool="1" aria-label="允许光鸭 NSFW 清洗入库" aria-describedby="nsfwCleanReviewDescription nsfwCleanReviewDependency" disabled>

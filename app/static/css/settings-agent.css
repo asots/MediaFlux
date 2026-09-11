@@ -680,6 +680,27 @@ html[data-settings-config="pending"] .settings-page #settingsForm {
 .metadata-option > span:first-child { min-width: 0; display: grid; gap: 4px; }
 .metadata-option strong { color: var(--text-primary); font-size: 13px; }
 .metadata-option small { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+/* 授权长说明收进信息提示；浮层不占行高，触控与键盘仍可独立访问。 */
+.metadata-option-title { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.metadata-help-trigger {
+    display: inline-flex; align-items: center; justify-content: center; flex: 0 0 44px;
+    width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--radius-sm);
+    color: var(--text-muted); background: transparent; cursor: help;
+}
+.metadata-help-trigger svg { width: 16px; height: 16px; flex: none; }
+.metadata-help-trigger:hover { color: var(--text-primary); background: var(--bg-card-hover); }
+.metadata-help-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.metadata-help-tooltip {
+    position: fixed; z-index: 240; top: 0; left: 0; box-sizing: border-box;
+    width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto;
+    padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-md);
+    color: var(--text-secondary); background: var(--bg-elevated); box-shadow: var(--shadow);
+    font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; overscroll-behavior: contain;
+    visibility: hidden; pointer-events: none;
+}
+.metadata-help-tooltip[data-open] { visibility: visible; pointer-events: auto; }
+.metadata-help-tooltip > span { display: block; }
+.metadata-help-tooltip > span + span { margin-top: 8px; }
 .metadata-nsfw-clean-review .toggle { width: 44px; height: 44px; }
 .metadata-nsfw-clean-review .toggle-slider { inset: 11px 2px; }
 .metadata-nsfw-clean-review input:disabled + .toggle-slider { opacity: .55; cursor: not-allowed; }
@@ -1633,6 +1654,23 @@ html[data-settings-config="pending"] .settings-page #settingsForm {
 @keyframes settings-save-pulse {
     from { opacity: .45; transform: scale(.92); }
     to { opacity: 1; transform: scale(1); }
+}
+/* 双列时共享整列高度：左侧两卡分摊余量，不固定卡高或拉长输入框。 */
+@media (min-width: 1261px) {
+    .metadata-settings-grid { align-items: stretch; }
+    .metadata-column > .metadata-settings-card {
+        display: flex;
+        flex-direction: column;
+        flex: 1 0 auto;
+    }
+    .metadata-column > .metadata-settings-card > .metadata-card-head { flex-shrink: 0; }
+    .metadata-column > .metadata-settings-card > .metadata-card-body { flex: 1; }
+    .metadata-column:first-child .metadata-card-body {
+        display: flex;
+        flex-direction: column;
+    }
+    .metadata-column:first-child .metadata-card-body > * { flex: 1 0 auto; }
+    .metadata-column:first-child .metadata-card-body > .metadata-field { align-content: start; }
 }
 @media (max-width: 1260px) {
     .discovery-settings-grid,

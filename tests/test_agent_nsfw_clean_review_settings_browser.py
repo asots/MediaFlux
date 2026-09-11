@@ -76,8 +76,8 @@ class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def _page(self, width, config):
-        page = self.browser.new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce")
+    def _page(self, width, config, *, touch=False):
+        page = self.browser.new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce", has_touch=touch)
         self.addCleanup(page.close)
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
