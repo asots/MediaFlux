@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import re
 import secrets
@@ -290,6 +291,123 @@ class _AgentCleanWriteBoundary:
             raise DirectoryScrapeConflictError("目标目录已有其他文件，自动清洗转人工核对")
         if stage == "commit":
             self.media_write_attempted = True
+
+
+def _episode_research_receipt_from_row(row) -> dict | None:
+    if row is None:
+        return None
+    try:
+        audit = json.loads(str(row["review_result_json"] or "{}"))
+    except (TypeError, ValueError, KeyError, IndexError) as exc:
+        raise DirectoryScrapeConflictError("识别复核审计损坏，请重新执行整理") from exc
+    if not isinstance(audit, dict) or audit.get("entry_mode") != "episode_research":
+        return None
+    receipt = audit.get("episode_research_receipt")
+    if not isinstance(receipt, dict):
+        raise DirectoryScrapeConflictError("季集研究缺少有效证据回执")
+    return receipt
+
+
+def _episode_research_for_execution(token: str, payload: dict, selected_index: int, actor: str) -> dict | None:
+    if actor != "agent":
+        return None  # 人工候选按钮不隐式授权使用研究映射。
+    row = db.get_organize_confirmation(token)
+    receipt = _episode_research_receipt_from_row(row)
+    if receipt is None:
+        return None
+    if (row is None or str(row["confirmation_actor"] or "") != "agent"
+            or str(row["status"] or "") != "running"
+            or row["selected_index"] != selected_index or str(row["fingerprint"] or "") != _fingerprint(payload)):
+        raise DirectoryScrapeConflictError("季集研究执行所有权或文件快照已变化")
+    from app.modules.episode_research_service import revalidate_episode_research_receipt
+    return revalidate_episode_research_receipt(payload, receipt, expected_candidate_index=selected_index)
+
+
+class _AgentEpisodeWriteBoundary:
+    """研究只授权已验证的新归档位置，不授权替换、删除或越过关闭开关。"""
+    def __init__(self, payload: dict, proposal: dict, *, client):
+        self.payload = copy.deepcopy(payload)
+        self.client = client
+        self.media_write_attempted = False
+        self.contexts: dict[str, dict] = {}
+        files = list(self.payload.get("files") or [])
+        self.frozen = {str(item["file_id"]): item for item in (*files, *self.payload.get("companions", []))}
+        self.expected = {
+            str(files[row["file_index"]]["file_id"]): row for row in proposal["mappings"]
+        }
+
+    def bind_target_context(self, plan, target_id: str, *, companions, target_names) -> None:
+        if not str(target_id or ""):
+            raise DirectoryScrapeConflictError("研究计划缺少有效目标目录")
+        final_names = [str(name).casefold() for name in target_names]
+        if len(set(final_names)) != len(final_names):
+            raise DirectoryScrapeConflictError("本次视频与伴随文件目标名相互冲突")
+        names = {str(plan.original_name).casefold(), *final_names}
+        companion_ids = []
+        for item in companions:
+            frozen = self.frozen.get(str(item.file_id))
+            if frozen is None:
+                raise DirectoryScrapeConflictError("伴随文件不属于冻结研究范围")
+            _validate_snapshot(self.client, frozen, role="研究伴随文件")
+            companion_ids.append(str(item.file_id))
+            names.add(str(item.name).casefold())
+        self.contexts[str(plan.file_id)] = {"target_id": str(target_id), "companions": companion_ids, "names": names}
+
+    def _assert_authorized(self, plan) -> None:
+        from app.modules.episode_research_service import episode_research_enabled
+        if not episode_research_enabled():
+            raise DirectoryScrapeConflictError("复杂季集研究已关闭，未授权后续文件变更")
+        source = str(self.payload.get("source_dir_id") or "")
+        rules = OrganizeRules.from_config().for_source(source)
+        if not organize_rules_snapshot_matches(self.payload.get("rules"), rules):
+            raise DirectoryScrapeConflictError("来源或整理规则已变化，保留人工确认")
+        row = self.expected.get(str(plan.file_id))
+        if row is None or (plan.season, plan.episode) != (row["target_season"], row["target_episode"]):
+            raise DirectoryScrapeConflictError("整理计划与已验证的季集研究映射不一致")
+        if (plan.source_season, plan.source_episode) != (row["source_season"], row["source_episode"]):
+            raise DirectoryScrapeConflictError("源发布编号已变化，研究映射失效")
+        if plan.action != "move" or plan.conflict_decision not in {"new", "coexist"}:
+            raise DirectoryScrapeConflictError("研究映射不授权覆盖、替换或删除已有文件")
+
+    def __call__(self, plan, stage: str, *, target_files=()) -> None:
+        self._assert_authorized(plan)
+        # 始终核对原冻结授权，而不是研究完成后重新扫描得到的新size/etag。
+        frozen = self.frozen.get(str(plan.file_id))
+        if frozen is None:
+            raise DirectoryScrapeConflictError("源视频不属于冻结研究范围")
+        _validate_snapshot(self.client, frozen, role="研究视频")
+        context = self.contexts.get(str(plan.file_id))
+        if stage == "commit":
+            if context is None:
+                raise DirectoryScrapeConflictError("研究计划缺少写前目标上下文")
+            for file_id in context["companions"]:
+                _validate_snapshot(self.client, self.frozen[file_id], role="研究伴随文件")
+            # commit调用原本不传target_files；必须鲜读，不能沿用同包上一集的库存。
+            target_files = self.client.list_dir(context["target_id"])
+        allowed_ids = {str(plan.file_id), *(context["companions"] if context else ())}
+        # 同剧其他集允许存在；已移动的本包前集也不是本次同名覆盖的豁免对象。
+        names = set(context["names"]) if context else {str(plan.new_name or "").casefold()}
+        for item in self.payload.get("companions", []):
+            if isinstance(item, dict) and str(item.get("video_file_id") or "") == str(plan.file_id):
+                names.add(str(item.get("name") or "").casefold())
+        stem = str(plan.new_name or "").rsplit(".", 1)[0].casefold()
+        if any(str(item.file_id) not in allowed_ids and (
+            str(item.name).casefold() in names or (stem and str(item.name).casefold().startswith(stem+"."))
+        ) for item in target_files):
+            raise DirectoryScrapeConflictError("目标存在同名媒体或伴随文件，研究映射保留人工确认")
+        if stage == "commit":
+            self.media_write_attempted = True
+
+    def before_companion_write(self, plan, item, target_id: str, target_name: str) -> None:
+        self._assert_authorized(plan)
+        context = self.contexts.get(str(plan.file_id))
+        if context is None or str(target_id) != context["target_id"] or str(item.file_id) not in context["companions"]:
+            raise DirectoryScrapeConflictError("伴随文件目标超出冻结研究范围")
+        _validate_snapshot(self.client, self.frozen[str(item.file_id)], role="研究伴随文件")
+        names = {str(item.name).casefold(), str(target_name).casefold()}
+        if any(str(other.file_id) != str(item.file_id) and str(other.name).casefold() in names
+               for other in self.client.list_dir(str(target_id))):
+            raise DirectoryScrapeConflictError("伴随文件写前发现同名目标，未授权覆盖")
 
 
 def _persist_confirmation_actions(
@@ -1637,6 +1755,11 @@ def start_confirmation(
     status = str(preview["status"] or "pending")
     if normalized_actor == "agent" and _clean_review_candidate(candidate) and status == "pending":
         _validate_agent_clean_authorization(payload, candidate)
+    if normalized_actor == "agent" and status == "pending":
+        receipt = _episode_research_receipt_from_row(preview)
+        if receipt is not None:
+            from app.modules.episode_research_service import revalidate_episode_research_receipt
+            revalidate_episode_research_receipt(payload, receipt, expected_candidate_index=selected_index)
 
     if status in {"queued", "running", "completed"}:
         if (
@@ -2352,6 +2475,8 @@ def _execute_guangya_confirmation(
         _AgentCleanWriteBoundary(payload, candidate)
         if actor == "agent" and _clean_review_candidate(candidate) else None
     )
+    episode_boundary = None
+    write_boundary = clean_boundary
     try:
         if clean_boundary is not None:
             _validate_agent_clean_authorization(payload, candidate)
@@ -2393,6 +2518,21 @@ def _execute_guangya_confirmation(
             str(item.get("name") or ""): (item.get("season"), item.get("episode"))
             for item in files
         }
+        episode_proposal = _episode_research_for_execution(token, payload, selected_index, actor)
+        if episode_proposal is not None:
+            if provider != "tmdb" or str(match.tmdb_id) != episode_proposal["tmdb_id"]:
+                raise DirectoryScrapeConflictError("当前候选身份与季集研究不一致")
+            # 联网重验耗时期间可能发生同ID内容变化；再次验证整包后才创建计划。
+            for item in files:
+                _validate_snapshot(client, item, role="研究视频")
+            for item in companions:
+                _validate_snapshot(client, item, role="研究伴随文件")
+            position_overrides = {
+                str(files[row["file_index"]]["name"]): (row["target_season"], row["target_episode"])
+                for row in episode_proposal["mappings"]
+            }
+            episode_boundary = _AgentEpisodeWriteBoundary(payload, episode_proposal, client=client)
+            write_boundary = episode_boundary
         multipart_overrides = _confirmed_multipart_overrides(payload, files)
         allowed_ids = {
             str(item.get("file_id") or "") for item in (*files, *companions)
@@ -2400,10 +2540,10 @@ def _execute_guangya_confirmation(
         }
         scoped = ScopedGuangYaClient(client, parent_id, allowed_ids)
         # 自动清洗不授权清理源空目录或旧版本，规则快照验证仍针对原配置。
-        execution_rules = replace(current_rules, clean_empty=False) if clean_boundary else current_rules
+        execution_rules = replace(current_rules, clean_empty=False) if write_boundary else current_rules
         organizer = Organizer(
             client=scoped,
-            **({"before_plan_write": clean_boundary} if clean_boundary is not None else {}),
+            **({"before_plan_write": write_boundary} if write_boundary is not None else {}),
             scraper=FixedMatchScraper(
                 scraper,
                 match,
@@ -2411,7 +2551,7 @@ def _execute_guangya_confirmation(
                 preserve_specials=True,
                 position_overrides=position_overrides,
                 multipart_overrides=multipart_overrides,
-                map_source_positions=provider == "tmdb",
+                map_source_positions=provider == "tmdb" and episode_proposal is None,
             ),
         )
         organizer._validate_target_outside_source(parent_id, current_rules.target_dir_id)
@@ -2437,9 +2577,9 @@ def _execute_guangya_confirmation(
             # 关闭；否则会出现“已完成 / 已移动 0”且父汇总吞掉文件的假成功。
             raise DirectoryScrapeConflictError(unresolved_error)
 
-        if clean_boundary is not None:
+        if write_boundary is not None:
             for plan in plans:
-                clean_boundary(plan, "prepare")
+                write_boundary(plan, "prepare")
         scoped.begin_source_scan()
         from app.modules.organize_probe_notifications import build_notification_context
         notification_context = build_notification_context(
@@ -2469,7 +2609,7 @@ def _execute_guangya_confirmation(
             notification_context=notification_context,
         )
         db.mark_organize_logs_confirmation_actor(operation_token, actor)
-        if clean_boundary is not None and not clean_boundary.media_write_attempted:
+        if write_boundary is not None and not write_boundary.media_write_attempted:
             raise DirectoryScrapeConflictError("执行前检查未通过，未移动媒体，保留人工确认")
         if provider == "tmdb" and actor == "human":
             learning_warnings = _record_confirmation_learning(

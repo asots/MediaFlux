@@ -1680,3 +1680,26 @@ CREATE TABLE IF NOT EXISTS media_probe_cache (
 CREATE INDEX IF NOT EXISTS idx_media_probe_cache_fingerprint_updated
 ON media_probe_cache(etag, size, updated_at DESC, file_id DESC);
 """
+
+# 新建数据库与 29→30 正式迁移共用同一份 DDL，避免约束/索引漂移。
+_EPISODE_RESEARCH_CACHE_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS episode_research_cache (
+        cache_key TEXT PRIMARY KEY NOT NULL
+            CHECK(typeof(cache_key)='text' AND length(CAST(cache_key AS BLOB))=64
+                  AND cache_key NOT GLOB '*[^0-9a-f]*'),
+        policy_version INTEGER NOT NULL
+            CHECK(typeof(policy_version)='integer' AND policy_version>0),
+        status TEXT NOT NULL CHECK(status IN ('verified','proposal','negative')),
+        payload TEXT NOT NULL
+            CHECK(typeof(payload)='text' AND length(CAST(payload AS BLOB))<=262144),
+        expires_at REAL NOT NULL
+            CHECK(typeof(expires_at) IN ('integer','real') AND expires_at>0),
+        updated_at REAL NOT NULL
+            CHECK(typeof(updated_at) IN ('integer','real') AND updated_at>0)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_episode_research_cache_expires "
+    "ON episode_research_cache(expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_episode_research_cache_updated "
+    "ON episode_research_cache(updated_at,cache_key)",
+)
+_SCHEMA += ";\n".join(_EPISODE_RESEARCH_CACHE_STATEMENTS) + ";\n"

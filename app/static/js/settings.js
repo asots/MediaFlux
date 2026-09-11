@@ -107,6 +107,26 @@
     }
     recognitionReviewToggle?.addEventListener('change',syncNsfwCleanReviewAvailability);
 
+    const episodeResearchToggle=form.querySelector('[data-key="AGENT_EPISODE_RESEARCH_ENABLED"]');
+    const episodeResearchLimit=form.querySelector('[data-key="AGENT_EPISODE_RESEARCH_DAILY_LIMIT"]');
+    const episodeResearchDependencies=[
+        'AGENT_ENABLED','AGENT_LLM_ENABLED','AGENT_RECOGNITION_REVIEW_ENABLED',
+        'AGENT_LLM_API_URL','AGENT_LLM_MODEL',
+    ].map(key=>form.querySelector(`[data-key="${key}"]`));
+    function syncEpisodeResearchAvailability(){
+        const dependenciesReady=configReady&&episodeResearchDependencies.every(field=>
+            field?.type==='checkbox'?field.checked:Boolean(field?.value.trim()));
+        // 只改禁用状态，保留独立授权、限额与整行占位；Tavily 不是前置依赖。
+        if(episodeResearchToggle)episodeResearchToggle.disabled=!dependenciesReady
+            ||episodeResearchToggle.dataset.managedByEnvironment==='true';
+        if(episodeResearchLimit)episodeResearchLimit.disabled=!dependenciesReady||!episodeResearchToggle?.checked
+            ||episodeResearchLimit.dataset.managedByEnvironment==='true';
+    }
+    [...episodeResearchDependencies,episodeResearchToggle].filter(Boolean).forEach(field=>{
+        field.addEventListener('input',syncEpisodeResearchAvailability);
+        field.addEventListener('change',syncEpisodeResearchAvailability);
+    });
+
     function revealConfigFields(){
         delete document.documentElement.dataset.settingsConfig;
     }
@@ -114,6 +134,7 @@
     function setConfigReady(){
         configReady=true;
         syncNsfwCleanReviewAvailability();
+        syncEpisodeResearchAvailability();
         form.setAttribute('aria-busy','false');
         revealConfigFields();
         saveButtons.forEach(button=>{
@@ -141,13 +162,15 @@
 
     loadAppConfig().then(config=>{
         // 与执行端 get_bool 一致，避免部署环境使用 on/y 时授权已生效却显示关闭。
-        [recognitionReviewToggle,nsfwCleanReviewToggle].filter(Boolean).forEach(field=>{
+        [recognitionReviewToggle,nsfwCleanReviewToggle,episodeResearchToggle,
+            ...episodeResearchDependencies.filter(field=>field?.type==='checkbox'),
+        ].filter(Boolean).forEach(field=>{
             const key=field.dataset.key;
             if(config[key]===undefined)return;
             config[key]=['1','true','yes','on','y'].includes(String(config[key]).trim().toLowerCase())?'1':'0';
         });
         fillConfigFields(form,config);
-        const configDefaults={TG_NOTIFICATION_ENABLED:'1',TG_NOTIFICATION_LEVEL:'standard',AGENT_ENABLED:'0',LOGIN_WALLPAPER_MODE:'default',DISCOVERY_CACHE_TTL_SECONDS:'21600',DISCOVERY_STALE_TTL_SECONDS:'604800',DISCOVERY_DOUBAN_ENABLED:'1',DISCOVERY_RESOURCE_RESULTS_ENABLED:'1',INDEXER_SEARCH_ENABLED:'1',INDEXER_BTBTLA_MIN_INTERVAL_SECONDS:'5',INDEXER_1LOU_MIN_INTERVAL_SECONDS:'5',INDEXER_1LOU_GOOGLE_ENABLED:'1',DOUBAN_CACHE_TTL_SECONDS:'21600',AI_RECOGNITION_ENABLED:'0',AI_RECOGNITION_CONFIDENCE_THRESHOLD:'0.8',AI_RECOGNITION_REQUESTS_PER_MINUTE:'6',AI_RECOGNITION_DAILY_REQUEST_LIMIT:'100',AI_RECOGNITION_MAX_CONCURRENCY:'2',AI_RECOGNITION_CIRCUIT_BREAKER_SECONDS:'60',ORGANIZE_TAVILY_HINTS_ENABLED:'0',ORGANIZE_TAVILY_HINTS_DAILY_CREDIT_LIMIT:'20',TMDB_MATCH_MODE:'strict',WEB_SEARCH_ENABLED:'0',TAVILY_SEARCH_DEPTH:'basic',TAVILY_MAX_RESULTS:'5',TAVILY_CACHE_TTL_SECONDS:'900',TAVILY_DAILY_CREDIT_LIMIT:'100',TAVILY_TIMEOUT_SECONDS:'10',AGENT_LLM_ENABLED:'0',AGENT_LLM_PROTOCOL:'auto',AGENT_LLM_TIMEOUT_SECONDS:'12',AGENT_LLM_CONTEXT_WINDOW_TOKENS:'128000',AGENT_LIBRARY_PATROL_ENABLED:'0',AGENT_LIBRARY_PATROL_NOTIFY_ENABLED:'0',AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED:'1',AGENT_RECOGNITION_REVIEW_ENABLED:'0',AGENT_NSFW_CLEAN_REVIEW_ENABLED:'0',AGENT_LIBRARY_PATROL_INTERVAL_HOURS:'24',AGENT_LIBRARY_PATROL_MAX_SERIES:'50'};
+        const configDefaults={TG_NOTIFICATION_ENABLED:'1',TG_NOTIFICATION_LEVEL:'standard',AGENT_ENABLED:'0',LOGIN_WALLPAPER_MODE:'default',DISCOVERY_CACHE_TTL_SECONDS:'21600',DISCOVERY_STALE_TTL_SECONDS:'604800',DISCOVERY_DOUBAN_ENABLED:'1',DISCOVERY_RESOURCE_RESULTS_ENABLED:'1',INDEXER_SEARCH_ENABLED:'1',INDEXER_BTBTLA_MIN_INTERVAL_SECONDS:'5',INDEXER_1LOU_MIN_INTERVAL_SECONDS:'5',INDEXER_1LOU_GOOGLE_ENABLED:'1',DOUBAN_CACHE_TTL_SECONDS:'21600',AI_RECOGNITION_ENABLED:'0',AI_RECOGNITION_CONFIDENCE_THRESHOLD:'0.8',AI_RECOGNITION_REQUESTS_PER_MINUTE:'6',AI_RECOGNITION_DAILY_REQUEST_LIMIT:'100',AI_RECOGNITION_MAX_CONCURRENCY:'2',AI_RECOGNITION_CIRCUIT_BREAKER_SECONDS:'60',ORGANIZE_TAVILY_HINTS_ENABLED:'0',ORGANIZE_TAVILY_HINTS_DAILY_CREDIT_LIMIT:'20',TMDB_MATCH_MODE:'strict',WEB_SEARCH_ENABLED:'0',TAVILY_SEARCH_DEPTH:'basic',TAVILY_MAX_RESULTS:'5',TAVILY_CACHE_TTL_SECONDS:'900',TAVILY_DAILY_CREDIT_LIMIT:'100',TAVILY_TIMEOUT_SECONDS:'10',AGENT_LLM_ENABLED:'0',AGENT_LLM_PROTOCOL:'auto',AGENT_LLM_TIMEOUT_SECONDS:'12',AGENT_LLM_CONTEXT_WINDOW_TOKENS:'128000',AGENT_LIBRARY_PATROL_ENABLED:'0',AGENT_LIBRARY_PATROL_NOTIFY_ENABLED:'0',AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED:'1',AGENT_RECOGNITION_REVIEW_ENABLED:'0',AGENT_EPISODE_RESEARCH_ENABLED:'0',AGENT_EPISODE_RESEARCH_DAILY_LIMIT:'10',AGENT_NSFW_CLEAN_REVIEW_ENABLED:'0',AGENT_LIBRARY_PATROL_INTERVAL_HOURS:'24',AGENT_LIBRARY_PATROL_MAX_SERIES:'50'};
         Object.entries(configDefaults).forEach(([key,value])=>{if(config[key])return;const field=form.querySelector(`[data-key="${key}"]`);if(!field)return;if(field.type==='checkbox')field.checked=value==='1';else field.value=value;});
         loadIndexerSiteSelection(config);
         setConfigReady();

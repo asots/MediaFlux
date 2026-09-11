@@ -1524,6 +1524,14 @@ def _migrate_download_resource_and_strm_ownership_v29(conn: sqlite3.Connection) 
     )
 
 
+def _migrate_episode_research_cache_v30(conn: sqlite3.Connection) -> None:
+    """仅新增独立证据缓存；逐语句执行以保留协调器的备份和回滚边界。"""
+    from app.database_schema import _EPISODE_RESEARCH_CACHE_STATEMENTS
+
+    for statement in _EPISODE_RESEARCH_CACHE_STATEMENTS:
+        conn.execute(statement)
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1554,4 +1562,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     26: _migrate_organize_business_snapshot_v27,
     27: _migrate_postprocessing_recovery_v28,
     28: _migrate_download_resource_and_strm_ownership_v29,
+    29: _migrate_episode_research_cache_v30,
 }

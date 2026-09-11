@@ -107,6 +107,10 @@ class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
             "AI_RECOGNITION_DAILY_REQUEST_LIMIT": "100",
             "AI_RECOGNITION_MAX_CONCURRENCY": "2",
             "AI_RECOGNITION_CIRCUIT_BREAKER_SECONDS": "60",
+            # /api/config 保证返回研究默认值；缺失会让空初值与后补的 10 不一致，
+            # 被误当作未保存更改。仅同步 fixture，不放宽 NSFW 的精确 payload 断言。
+            "AGENT_EPISODE_RESEARCH_ENABLED": "0",
+            "AGENT_EPISODE_RESEARCH_DAILY_LIMIT": "10",
             **config,
         })
         page.add_script_tag(path=str(APP_SCRIPT))

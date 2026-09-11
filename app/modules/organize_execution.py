@@ -1,6 +1,8 @@
 """统一整理的串行云端写入阶段。"""
 from __future__ import annotations
 
+from inspect import getattr_static
+
 import threading
 import time
 from typing import TYPE_CHECKING, Callable
@@ -30,6 +32,16 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def _optional_guard_method(guard, name: str):
+    # 与其它可选能力一样只采用真实声明的方法，不触发动态__getattr__/Mock补造能力。
+    try:
+        getattr_static(guard, name)
+    except AttributeError:
+        return None
+    method = getattr(guard, name, None)
+    return method if callable(method) else None
 
 
 def _release_parse_diagnostic(match) -> dict | None:
@@ -494,6 +506,16 @@ def execute_organize_plans(
             existing_original_name = existing.name if existing else ""
             # 可选的授权范围在真实库存仲裁后再校验，且必须早于旧文件备份、移动或回收。
             if write_guard is not None:
+                bind_target = _optional_guard_method(write_guard, "bind_target_context")
+                if callable(bind_target):
+                    video_target_name = p.new_name if rules.rename_enabled and p.new_name else p.original_name
+                    companion_names = []
+                    for item in companions:
+                        subtitle_plan = subtitle_plan_by_id.get(item.file_id)
+                        name = (subtitle_plan.target_name(video_target_name) if subtitle_plan is not None
+                                else companion_target_name(p.original_name, video_target_name, item.name))
+                        companion_names.append(name if rules.rename_enabled else item.name)
+                    bind_target(p, target_id, companions=companions, target_names=[video_target_name, *companion_names])
                 write_guard(p, "conflict", target_files=target_files)
             if existing:
                 if conflict_decision == "replace":
@@ -544,20 +566,18 @@ def execute_organize_plans(
                         ),
                         role="伴随文件",
                     )
-                    journal_entry: dict[str, object] = {
-                        "item": item,
-                        "current_name": item.name,
-                    }
-                    companion_journal.append(journal_entry)
-                    organizer.client.move([item.file_id], target_id)
                     subtitle_plan = subtitle_plan_by_id.get(item.file_id)
                     target_name = (
                         subtitle_plan.target_name(actual_name)
                         if subtitle_plan is not None
-                        else companion_target_name(
-                            p.original_name, actual_name, item.name
-                        )
+                        else companion_target_name(p.original_name, actual_name, item.name)
                     )
+                    companion_guard = _optional_guard_method(write_guard, "before_companion_write")
+                    if callable(companion_guard):
+                        companion_guard(p, item, target_id, target_name if rules.rename_enabled else item.name)
+                    journal_entry: dict[str, object] = {"item": item, "current_name": item.name}
+                    companion_journal.append(journal_entry)
+                    organizer.client.move([item.file_id], target_id)
                     if rules.rename_enabled and target_name != item.name:
                         organizer.client.rename(item.file_id, target_name)
                         journal_entry["current_name"] = target_name

@@ -73,6 +73,7 @@ class RecognitionReviewDecision:
     duration_ms: int = 0
     failure_code: str = ""
     entry_mode: str = ""
+    episode_research_receipt: dict[str, Any] | None = None
 
     @property
     def approved(self) -> bool:
@@ -86,6 +87,8 @@ class RecognitionReviewDecision:
         payload.pop("summary", None)
         if not self.entry_mode:
             payload.pop("entry_mode", None)
+        if self.episode_research_receipt is None:
+            payload.pop("episode_research_receipt", None)
         return payload
 
 
@@ -667,12 +670,54 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
     )
 
 
+def _should_research_episodes(payload: dict, decision: RecognitionReviewDecision | None = None) -> bool:
+    from app.modules.episode_research_service import episode_research_enabled
+    if not episode_research_enabled() or str(payload.get("kind") or "guangya") != "guangya":
+        return False
+    if decision is not None and (decision.approved or decision.status != "abstained"):
+        return False
+    if decision is not None and decision.reason_code in {"episode_boundary_unverified", "episode_position_incomplete"}:
+        return True
+    # 多个同名候选中可能有一个能直接满足标准季集：先保留原复核选择它的机会。
+    # 只有单一候选的明确位置硬冲突才跳过不能改号的旧模型回合。
+    tv_candidates = [item for item in payload.get("candidates", [])
+                     if isinstance(item, dict) and item.get("media_type") == "tv"
+                     and _candidate_provider(item) == "tmdb"]
+    reason = str(payload.get("reason") or "")
+    return len(tv_candidates) == 1 and any(marker in reason for marker in (
+        "文件季号在 TMDB 中不存在", "文件集号超出 TMDB 记录范围",
+    ))
+
+
+def _research_episode_decision(payload: dict) -> RecognitionReviewDecision:
+    from app.modules.episode_research_service import research_confirmation_episodes
+    result = research_confirmation_episodes(payload)
+    verified = result.get("status") == "verified"
+    receipt = result.get("receipt") if verified else None
+    return RecognitionReviewDecision(
+        status="approved" if verified else "abstained",
+        entry_mode="episode_research",
+        candidate_index=receipt["candidate_index"] if isinstance(receipt, dict) else None,
+        confidence=1.0 if verified else 0.0,
+        reason_code=str(result.get("reason_code") or "episode_research_abstained"),
+        summary="已验证唯一完整的季集组对应关系" if verified else "研究证据不足或不可用，保留人工确认",
+        model=str(result.get("model") or ""),
+        tool_calls=int(result.get("tool_calls") or 0), duration_ms=int(result.get("duration_ms") or 0),
+        episode_research_receipt=receipt,
+    )
+
+
 def review_confirmation_payload(payload: dict[str, Any]) -> RecognitionReviewDecision:
     """同步入口，供持久化后台 Worker 调用。异常一律收敛为人工回退。"""
     if not recognition_review_enabled():
         raise RecognitionReviewUnavailable("Agent 主动复核未启用或模型未配置")
     try:
-        return asyncio.run(_review_async(dict(payload)))
+        if _should_research_episodes(payload):
+            return _research_episode_decision(payload)
+        decision = asyncio.run(_review_async(dict(payload)))
+        if _should_research_episodes(payload, decision):
+            return _research_episode_decision(payload)
+        return decision
     except asyncio.TimeoutError:
         return RecognitionReviewDecision(
             status="failed",

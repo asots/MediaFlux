@@ -12,6 +12,8 @@ from fastapi import APIRouter, Body, Request
 from app import config
 from app.clients.douban_authenticated import normalize_dbcl2
 from app.defaults import (
+    DEFAULT_AGENT_EPISODE_RESEARCH_ENABLED,
+    DEFAULT_AGENT_EPISODE_RESEARCH_DAILY_LIMIT,
     DEFAULT_AGENT_LLM_ENABLED,
     DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS,
     MAX_DOWNLOAD_TORRENT_RETENTION_DAYS,
@@ -93,6 +95,11 @@ _AGENT_LIBRARY_PATROL_KEYS = {
     "AGENT_NSFW_CLEAN_REVIEW_ENABLED",
 }
 
+_AGENT_EPISODE_RESEARCH_KEYS = {
+    "AGENT_EPISODE_RESEARCH_ENABLED",
+    "AGENT_EPISODE_RESEARCH_DAILY_LIMIT",
+}
+
 _MEDIA_SERVER_REFRESH_KEYS = {
     "JELLYFIN_PATH_MAPPINGS",
     "JELLYFIN_ALLOW_GLOBAL_REFRESH_FALLBACK",
@@ -119,6 +126,8 @@ _AGENT_SETTINGS_DEFAULTS = {
     "AGENT_LIBRARY_PATROL_NOTIFY_ENABLED": "0",
     "AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED": "1",
     "AGENT_RECOGNITION_REVIEW_ENABLED": "0",
+    "AGENT_EPISODE_RESEARCH_ENABLED": "1" if DEFAULT_AGENT_EPISODE_RESEARCH_ENABLED else "0",
+    "AGENT_EPISODE_RESEARCH_DAILY_LIMIT": str(DEFAULT_AGENT_EPISODE_RESEARCH_DAILY_LIMIT),
     "AGENT_NSFW_CLEAN_REVIEW_ENABLED": "0",
     "AGENT_LIBRARY_PATROL_INTERVAL_HOURS": "24",
     "AGENT_LIBRARY_PATROL_MAX_SERIES": "50",
@@ -173,6 +182,7 @@ _CONFIG_UI_SAVEABLE_KEYS = frozenset({
     *_ORGANIZE_TAVILY_KEYS,
     *_ORGANIZE_POLICY_KEYS,
     *_AGENT_LLM_KEYS,
+    *_AGENT_EPISODE_RESEARCH_KEYS,
     *_WEB_SEARCH_KEYS,
     *_NSFW_ORGANIZE_KEYS,
     "DISCOVERY_ENABLED", "DISCOVERY_CACHE_TTL_SECONDS", "DISCOVERY_STALE_TTL_SECONDS",
@@ -542,6 +552,24 @@ def _validate_agent_llm_updates(data: dict[str, Any]) -> dict[str, str]:
         normalized[key] = str(value)
     return normalized
 
+
+
+def _validate_agent_episode_research_updates(data: dict[str, Any]) -> dict[str, str]:
+    """独立保存授权与限额；执行端仍需核验主动复核和 Agent/LLM 条件。"""
+    normalized: dict[str, str] = {}
+    enabled_key = "AGENT_EPISODE_RESEARCH_ENABLED"
+    if enabled_key in data:
+        normalized[enabled_key] = _normalize_discovery_boolean(enabled_key, data[enabled_key])
+    limit_key = "AGENT_EPISODE_RESEARCH_DAILY_LIMIT"
+    if limit_key in data:
+        try:
+            daily_limit = int(str(data[limit_key]).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{limit_key} 必须是整数") from exc
+        if not 1 <= daily_limit <= 100:
+            raise ValueError(f"{limit_key} 必须在 1 到 100 之间")
+        normalized[limit_key] = str(daily_limit)
+    return normalized
 
 
 def _validate_organize_policy_updates(data: dict[str, Any]) -> dict[str, str]:
@@ -977,6 +1005,9 @@ def get_config(request: Request):
         "AGENT_NSFW_CLEAN_REVIEW_ENABLED",
         _AGENT_SETTINGS_DEFAULTS["AGENT_NSFW_CLEAN_REVIEW_ENABLED"],
     )
+    # 季集研究是新的独立授权，旧主动复核开关不能隐式开启。
+    for key in _AGENT_EPISODE_RESEARCH_KEYS:
+        items.setdefault(key, _AGENT_SETTINGS_DEFAULTS[key])
     # 运行目录只作为缺省值展示；用户保存的 STRM_ROOT（包括显式空值）仍优先。
     items.setdefault("STRM_ROOT", config.get("STRM_ROOT", ""))
     retention_key = "DOWNLOAD_TORRENT_RETENTION_DAYS"
@@ -1103,6 +1134,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
         organize_tavily_updates = _validate_organize_tavily_updates(data)
         organize_policy_updates = _validate_organize_policy_updates(data)
         agent_llm_updates = _validate_agent_llm_updates(data)
+        episode_research_updates = _validate_agent_episode_research_updates(data)
         web_search_updates = _validate_web_search_updates(data)
         login_wallpaper_updates = _validate_login_wallpaper_updates(data)
         nsfw_organize_updates = _validate_nsfw_organize_updates(data)
@@ -1323,6 +1355,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
         organize_tavily_updates,
         organize_policy_updates,
         agent_llm_updates,
+        episode_research_updates,
         login_wallpaper_updates,
         nsfw_organize_updates,
         agent_patrol_updates,
@@ -1676,7 +1709,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
             )
         finally:
             patrol_reload_ms = max(1, round((time.perf_counter() - patrol_reload_started) * 1000))
-    if {"AGENT_RECOGNITION_REVIEW_ENABLED", "AGENT_NSFW_CLEAN_REVIEW_ENABLED"} & changed_keys:
+    if ({"AGENT_RECOGNITION_REVIEW_ENABLED", "AGENT_NSFW_CLEAN_REVIEW_ENABLED"} | _AGENT_EPISODE_RESEARCH_KEYS) & changed_keys:
         try:
             from app.modules.organize_confirmations import (
                 wake_recognition_review_dispatcher,

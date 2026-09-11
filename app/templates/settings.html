@@ -11,6 +11,13 @@
 })();
 </script>
 <link rel="stylesheet" href="{{ static_url('css/settings-agent.css') }}">
+<style>
+/* 沿用相邻独立授权 toggle 的触控热区、禁用态与键盘焦点，不改布局模式。 */
+.metadata-episode-research .toggle { width: 44px; height: 44px; }
+.metadata-episode-research .toggle-slider { inset: 11px 2px; }
+.metadata-episode-research input:disabled + .toggle-slider { opacity: .55; cursor: not-allowed; }
+.metadata-episode-research input:focus-visible + .toggle-slider { outline: 2px solid var(--accent); outline-offset: 3px; }
+</style>
 {% endblock %}
 
 {% block content %}
@@ -359,6 +366,28 @@
                                             <span class="toggle-slider"></span>
                                         </label>
                                     </div>
+
+                                    <div class="metadata-option metadata-episode-research">
+                                        <span>
+                                            <strong>受控季集研究</strong>
+                                            <small id="episodeResearchDescription">默认关闭。首版仅研究光鸭待确认剧集的冻结案例；唯一、可验证的 TMDB 剧集组映射才可用于无冲突新归档，不自动覆盖或删除目标，歧义、证据不足或冲突仍待确认。Tavily 搜索可选，沿用现有额度。</small>
+                                            <small id="episodeResearchDependency">需先启用「Agent 主动复核」、Agent 总开关与 LLM，并配置模型地址和模型名；关闭任一依赖即停止后续研究授权，不会自动开启依赖。本地媒体继续旧复核，首版不执行本地文件映射。</small>
+                                        </span>
+                                        <label class="toggle">
+                                            <input type="checkbox" data-key="AGENT_EPISODE_RESEARCH_ENABLED" data-bool="1" aria-label="启用受控季集研究" aria-describedby="episodeResearchDescription episodeResearchDependency" disabled>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+
+                                    <label class="metadata-field metadata-field-wide">
+                                        <span class="field-label">
+                                            <span class="name">每日季集研究上限</span>
+                                            <span class="hint" id="episodeResearchLimitDescription">默认 10 次，范围 1–100；达到上限仍待确认，不增加 Tavily 额度</span>
+                                        </span>
+                                        <span class="field-control">
+                                            <input type="number" min="1" max="100" step="1" value="10" class="form-input" data-key="AGENT_EPISODE_RESEARCH_DAILY_LIMIT" aria-label="每日季集研究上限" aria-describedby="episodeResearchLimitDescription episodeResearchDependency" disabled>
+                                        </span>
+                                    </label>
 
                                     <div class="metadata-option metadata-nsfw-clean-review">
                                         <span>
