@@ -26,7 +26,8 @@ _HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _remaining(deadline_at: float) -> float:
-    remaining = deadline_at - time.monotonic()
+    # 浮点减法可能比总预算多出极小尾差，传给等待器前硬性钳制上限。
+    remaining = min(_TOTAL_TIMEOUT_SECONDS, deadline_at - time.monotonic())
     if remaining <= 0:
         raise EpisodeResearchError("research_timeout")
     return remaining
