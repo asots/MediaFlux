@@ -209,7 +209,7 @@ async def fetch_youku_calendar(http) -> dict:
             if cookies:
                 headers["Cookie"] = "; ".join(name + "=" + cookies[name] for name in _COOKIE_NAMES if name in cookies)
             # 唯一I/O入口：复用主线factory、全局配额、限频、DNS/TLS/raw大小和deadline。
-            response = await http.get_response(_URL, params=query, headers=headers)
+            response = await http.request("GET", _URL, params=query, headers=headers)
             payload, code = _envelope(response)
             if code == "SUCCESS":
                 return payload

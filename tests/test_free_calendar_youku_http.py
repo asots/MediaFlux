@@ -59,10 +59,10 @@ class RecordingHttp:
         self.snapshots = []
         self.jar_sizes = []
 
-    async def get_response(self, url, *, params, headers):
+    async def request(self, method, url, *, params, headers):
         self.references.append((params, headers))
         self.snapshots.append((url, params.copy(), headers.copy()))
-        result = await self.http.get_response(url, params=params, headers=headers)
+        result = await self.http.request(method, url, params=params, headers=headers)
         self.jar_sizes.append(len(self.http._client._client.cookies))
         return result
 
@@ -444,16 +444,42 @@ class YoukuCalendarHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(body.closed)
 
-    async def test_actual_minimum_interval_is_shared_by_both_gets(self):
-        observed = []
-        def handler(request):
-            observed.append(asyncio.get_running_loop().time())
-            return _response(_success()) if "cookie" in request.headers else _response(_token(), cookie=_GRANT)
-        http, calls = self.client(handler, min_interval=0.02)
-        await fetch_youku_calendar(http)
-        self.assertEqual(len(calls), 2)
-        self.assertGreaterEqual(observed[1] - observed[0], 0.015)
+    async def test_minimum_admission_interval_is_shared_by_both_gets(self):
+        from app.discovery.calendar import http as http_module
 
+        for dns_delay in (0.0, 0.04):
+            with self.subTest(dns_delay=dns_delay):
+                clock = [100.0]
+                admissions, waits, observed = [], [], []
+                resolutions = 0
+                def resolver(host, port):
+                    nonlocal resolutions
+                    resolutions += 1
+                    if resolutions == 1:
+                        clock[0] += dns_delay
+                    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", 443))]
+                def handler(request):
+                    observed.append(clock[0])
+                    return _response(_success()) if "cookie" in request.headers else _response(_token(), cookie=_GRANT)
+                async def sleep(delay):
+                    waits.append(delay)
+                    clock[0] += delay
+                http, calls = self.client(handler, min_interval=0.02, resolver=resolver)
+                original_request = http._client._request
+                async def request(*args, **kwargs):
+                    admissions.append(clock[0])
+                    return await original_request(*args, **kwargs)
+                with patch.object(http_module, "time", SimpleNamespace(monotonic=lambda: clock[0])), patch.object(
+                    http_module, "asyncio", SimpleNamespace(sleep=sleep, timeout=asyncio.timeout)
+                ), patch.object(http._client, "_request", side_effect=request):
+                    await fetch_youku_calendar(http)
+                self.assertEqual(len(calls), 2)
+                self.assertAlmostEqual(admissions[1] - admissions[0], max(0.02, dns_delay))
+                self.assertEqual(len(waits), int(dns_delay == 0))
+                if waits:
+                    self.assertAlmostEqual(waits[0], 0.02)
+                # 慢DNS发生在准入之后；不能把transport两次观察的间隔冒充预算时钟。
+                self.assertAlmostEqual(observed[1] - observed[0], max(0.0, 0.02 - dns_delay))
 
 if __name__ == "__main__":
     unittest.main()

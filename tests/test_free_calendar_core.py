@@ -619,11 +619,11 @@ class CalendarHttpTests(unittest.IsolatedAsyncioTestCase):
             for url, headers in invalid:
                 with self.subTest(url=url, names=list(headers)):
                     with self.assertRaises(SourceUnavailable):
-                        await client.get_response(url, headers=headers)
+                        await client.request("GET", url, headers=headers)
             with self.assertRaises(SourceUnavailable):
-                await client._get(endpoint, None, method="POST", headers={"Accept": "application/json"})
+                await client.request("POST", endpoint, headers={"Accept": "application/json"})
             self.assertEqual((client._requests, calls), (0, []))
-            response = await client.get_response(endpoint, params={"api": "fixture"}, headers={
+            response = await client.request("GET", endpoint, params={"api": "fixture"}, headers={
                 "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded",
                 "Origin": "https://www.youku.com", "Referer": "https://www.youku.com/ku/webcomic",
                 "Cookie": "_m_h5_tk=synthetic_4102444800000; _m_h5_tk_enc=synthetic",
@@ -636,7 +636,7 @@ class CalendarHttpTests(unittest.IsolatedAsyncioTestCase):
             await client.get_text("https://www.youku.com/ku/webcomic")
             self.assertNotIn("cookie", calls[1].headers)
             with self.assertRaises(SourceUnavailable):
-                await client.get_response(endpoint)
+                await client.request("GET", endpoint)
             self.assertEqual(len(calls), 2)
         finally:
             await client.aclose()

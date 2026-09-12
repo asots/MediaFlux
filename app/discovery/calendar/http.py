@@ -105,7 +105,8 @@ class CalendarHttp:
         self._last_request = 0.0
         self._lock = asyncio.Lock()
 
-    async def _get(self, url, params, *, method="GET", json_body=None, headers=None):
+    async def request(self, method, url, *, params=None, json_body=None, headers=None):
+        """统一原始请求与预算；最小间隔按准入计时，包含其后的DNS与响应耗时。"""
         extra_headers = _public_session_headers(url, headers)
         if extra_headers and method != "GET":
             raise SourceUnavailable("公开会话仅支持固定只读 GET")
@@ -135,12 +136,8 @@ class CalendarHttp:
             raise SourceUnavailable("公开页面要求验证，未继续请求")
         return response
 
-    async def get_response(self, url, *, params=None, headers=None):
-        """有界原始响应；仅固定公开接口可附加已核验的匿名会话请求头。"""
-        return await self._get(url, params, headers=headers)
-
     async def get_text(self, url, *, params=None):
-        response = await self._get(url, params)
+        response = await self.request("GET", url, params=params)
         content_type = str(response.headers.get("content-type", "")).lower()
         charset = "gb18030" if any(x in content_type for x in ("gbk", "gb2312", "gb18030")) else "utf-8"
         return response.body.decode(charset, errors="replace")
@@ -152,7 +149,7 @@ class CalendarHttp:
         # 平台匿名排期接口使用只读 POST 查询；与 GET 共用全部安全边界和配额。
         if not isinstance(json_body, dict) or len(json.dumps(json_body)) > 16 * 1024:
             raise SourceUnavailable("公开排期查询参数无效")
-        response = await self._get(url, None, method="POST", json_body=json_body)
+        response = await self.request("POST", url, json_body=json_body)
         return self._parse_json(response.body.decode("utf-8", errors="replace"))
 
     @staticmethod
