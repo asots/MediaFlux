@@ -22,7 +22,8 @@ SETTINGS_SCRIPT = ROOT / "app/static/js/settings.js"
 TEMPLATE = (ROOT / "app/templates/settings.html").read_text("utf-8")
 CONTENT = TEMPLATE.split("{% block content %}", 1)[1].split("{% endblock %}", 1)[0]
 HARNESS = """<!doctype html><html lang="zh-CN" data-theme="light" data-settings-config="pending">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/static/css/main.css"><link rel="stylesheet" href="/static/css/settings-agent.css"></head>
 <body class="settings-page"><main><div class="content">{content}</div></main></body></html>""".format(content=Environment(autoescape=True).from_string(CONTENT).render(
     app_version="test", resource_results_enabled=False,
 ))
@@ -97,8 +98,6 @@ class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
 
         page.route("**/*", route_request)
         page.goto("http://settings.test/settings")
-        for stylesheet in ("main.css", "settings-agent.css"):
-            page.add_style_tag(path=str(ROOT / "app/static/css" / stylesheet))
         page.evaluate(MOCK_FETCH, {
             "TMDB_MATCH_MODE": "strict",
             "ORGANIZE_TAVILY_HINTS_DAILY_CREDIT_LIMIT": "20",
