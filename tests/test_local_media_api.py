@@ -52,6 +52,49 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         self.assertEqual(response.status_code, 302)
         return self._token(self.client.get("/settings").text)
 
+    def test_source_and_item_lists_load_targets_once_for_all_sources(self):
+        self.login()
+        expected_ready = {}
+        for index in range(8):
+            root = self.local_root / f"source-{index}"
+            root.mkdir(); (root / "Movie.mkv").write_bytes(b"movie")
+            source_id = db.create_local_media_source(
+                name=f"source-{index}", qb_profile="", qb_path_prefix="", local_root=str(root),
+            )
+            expected_ready[source_id] = index % 2 == 0
+            if expected_ready[source_id]:
+                db.upsert_local_library_target(source_id, "movie", str(self.movie_target))
+        hidden = db.create_local_media_source(
+            name="hidden", qb_profile="", qb_path_prefix="", local_root=str(self.local_root / "hidden"), owner="other",
+        )
+        db.upsert_local_library_target(hidden, "movie", str(self.movie_target), owner="other")
+        expected_order = [source.id for source in db.list_local_media_sources(owner="admin")]
+        original_connect = db._connect
+        queries = []
+
+        def connect():
+            conn = original_connect()
+            conn.set_trace_callback(queries.append)
+            return conn
+
+        for endpoint in ("sources", "items"):
+            with self.subTest(endpoint=endpoint):
+                queries.clear()
+                with patch.object(db, "_connect", side_effect=connect):
+                    response = self.client.get(f"/api/local-media/{endpoint}")
+                self.assertEqual(response.status_code, 200, response.text)
+                target_queries = [sql for sql in queries if sql.startswith("SELECT") and "FROM local_library_targets" in sql]
+                self.assertEqual(len(target_queries), 1)
+                payload = response.json()
+                self.assertEqual([source["id"] for source in payload["sources"]], expected_order)
+                if endpoint == "items":
+                    self.assertEqual(len(payload["items"]), 8)
+                    for item in payload["items"]:
+                        self.assertEqual(item["organize_ready"], expected_ready[item["source_id"]])
+                else:
+                    for source in payload["sources"]:
+                        self.assertEqual(bool(source["targets"]), expected_ready[source["id"]])
+
     def test_get_requires_login_and_post_requires_csrf(self):
         self.assertEqual(self.client.get("/api/local-media/sources").status_code, 401)
         self.assertEqual(self.client.get("/api/local-media/items").status_code, 401)

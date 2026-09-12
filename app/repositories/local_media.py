@@ -524,13 +524,18 @@ def upsert_local_library_target(
         return int(row["id"])
 
 
-def list_local_library_targets(source_id: int, *, owner: str = "admin"):
+def list_local_library_targets(source_id: int | None = None, *, owner: str = "admin"):
     from app.modules.local_media_models import LocalLibraryTarget
 
+    where = "owner=?"
+    params: list[object] = [_local_media_owner(owner)]
+    if source_id is not None:
+        where += " AND source_id=?"
+        params.append(int(source_id))
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM local_library_targets WHERE source_id=? AND owner=? ORDER BY category,id",
-            (int(source_id), _local_media_owner(owner)),
+            f"SELECT * FROM local_library_targets WHERE {where} ORDER BY source_id,category,id",
+            params,
         ).fetchall()
     return [LocalLibraryTarget.from_row(row) for row in rows]
 

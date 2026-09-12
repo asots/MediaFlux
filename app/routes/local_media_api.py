@@ -98,8 +98,7 @@ def _optional_integer(
     return number
 
 
-def _source_payload(source) -> dict:
-    targets = db.list_local_library_targets(source.id, owner=_OWNER)
+def _source_payload(source, targets) -> dict:
     return {
         "id": source.id, "name": source.name, "qb_profile": source.qb_profile,
         "qb_path_prefix": source.qb_path_prefix, "local_root": source.local_root,
@@ -112,6 +111,18 @@ def _source_payload(source) -> dict:
             for item in targets
         ],
     }
+
+
+def _candidate_payloads(source, candidates, *, organize_ready: bool, error: str, allow_nested: bool = False):
+    items: list[dict] = []
+    for candidate in candidates:
+        try:
+            items.append(candidate_payload(
+                source, candidate, organize_ready=organize_ready, allow_nested=allow_nested,
+            ))
+        except (FileNotFoundError, OSError, PathMappingError):
+            error = error or "目录扫描不完整：部分条目在读取期间发生变化"
+    return items, error
 
 
 def _task_display_name(task) -> str:
@@ -349,7 +360,13 @@ def list_media_server_libraries(provider: str, request: Request):
 @router.get("/sources")
 def list_sources(request: Request):
     require_api_login(request)
-    return {"sources": [_source_payload(item) for item in db.list_local_media_sources(owner=_OWNER)]}
+    targets_by_source: dict[int, list] = {}
+    for target in db.list_local_library_targets(owner=_OWNER):
+        targets_by_source.setdefault(target.source_id, []).append(target)
+    return {"sources": [
+        _source_payload(source, targets_by_source.get(source.id, []))
+        for source in db.list_local_media_sources(owner=_OWNER)
+    ]}
 
 
 @router.post("/sources")
@@ -370,7 +387,10 @@ def create_source(request: Request, data: dict | None = Body(default=None)):
             mode=_text(payload, "mode", max_length=16) or "move", targets=targets,
         )
         get_local_media_scheduler().reload()
-        return _source_payload(db.get_local_media_source(source_id, owner=_OWNER))
+        return _source_payload(
+            db.get_local_media_source(source_id, owner=_OWNER),
+            db.list_local_library_targets(source_id, owner=_OWNER),
+        )
     except Exception as exc:
         return _safe_error(exc)
 
@@ -408,7 +428,10 @@ def update_source(source_id: int, request: Request, data: dict | None = Body(def
             targets=effective_targets,
         )
         get_local_media_scheduler().reload()
-        return _source_payload(db.get_local_media_source(source_id, owner=_OWNER))
+        return _source_payload(
+            db.get_local_media_source(source_id, owner=_OWNER),
+            db.list_local_library_targets(source_id, owner=_OWNER),
+        )
     except Exception as exc:
         return _safe_error(exc)
 
@@ -444,18 +467,9 @@ def list_media_items(request: Request, source_id: int = 0, path: str = ""):
                 return api_error(error or "目录读取失败", 400)
             targets = db.list_local_library_targets(source.id, owner=_OWNER)
             organize_ready = bool(targets) and source.mode != "preview_only"
-            serialized: list[dict] = []
-            serialization_incomplete = False
-            for candidate in candidates:
-                try:
-                    serialized.append(candidate_payload(
-                        source, candidate, organize_ready=organize_ready, allow_nested=True,
-                    ))
-                except (FileNotFoundError, OSError, PathMappingError):
-                    serialization_incomplete = True
-                    continue
-            if serialization_incomplete and not error:
-                error = "目录扫描不完整：部分条目在读取期间发生变化"
+            serialized, error = _candidate_payloads(
+                source, candidates, organize_ready=organize_ready, error=error, allow_nested=True,
+            )
             root_candidate = Path(source.local_root).expanduser().absolute()
             root = assert_within(root_candidate, root_candidate)
             relative = current.relative_to(root)
@@ -484,34 +498,16 @@ def list_media_items(request: Request, source_id: int = 0, path: str = ""):
 
         items: list[dict] = []
         source_results: list[dict] = []
+        bound_sources = {target.source_id for target in db.list_local_library_targets(owner=_OWNER)}
         for source in db.list_local_media_sources(owner=_OWNER):
-            targets = db.list_local_library_targets(source.id, owner=_OWNER)
-            organize_ready = bool(targets) and source.mode != "preview_only"
             candidates, error, _ = discover_local_media_directory_candidates(source)
-            if error and not candidates:
-                source_results.append({
-                    "id": source.id, "name": source.name, "count": 0, "error": error,
-                })
-                continue
-            serialized: list[dict] = []
-            serialization_incomplete = False
-            for candidate in candidates:
-                try:
-                    serialized.append(
-                        candidate_payload(source, candidate, organize_ready=organize_ready)
-                    )
-                except (FileNotFoundError, OSError, PathMappingError):
-                    # 列表读取期间条目可能被下载器改名或移动；跳过瞬时失效项即可。
-                    serialization_incomplete = True
-                    continue
-            if serialization_incomplete and not error:
-                error = "目录扫描不完整：部分条目在读取期间发生变化"
+            serialized, error = _candidate_payloads(
+                source, candidates,
+                organize_ready=source.id in bound_sources and source.mode != "preview_only", error=error,
+            )
             items.extend(serialized)
             source_results.append({
-                "id": source.id,
-                "name": source.name,
-                "count": len(serialized),
-                "error": error,
+                "id": source.id, "name": source.name, "count": len(serialized), "error": error,
             })
         items.sort(key=lambda item: (item["source_name"].casefold(), item["name"].casefold()))
         return {"items": items, "sources": source_results, "browse": None}
