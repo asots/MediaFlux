@@ -513,7 +513,19 @@ async function clearRuntimeLogs(){
 document.getElementById('runtimeClearBtn').addEventListener('click',clearRuntimeLogs);
 window.addEventListener('beforeunload',stopRuntimeLogs);
 
+function restoreOrganizeFiltersFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    for (const [key, id] of [['origin', 'orgOrigin'], ['status', 'orgStatus']]) {
+        const field = document.getElementById(id);
+        const value = params.get(key);
+        if (field && [...field.options].some(option => option.value === value)) {
+            field.value = value;
+        }
+    }
+}
+
 // 初次加载：已退场的 #scrape 及未知书签统一回落到整理日志。
+restoreOrganizeFiltersFromUrl();
 const initialTab = window.location.hash.slice(1);
 if (initialTab === 'runtime') {
     switchTab('runtime');

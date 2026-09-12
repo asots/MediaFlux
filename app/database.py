@@ -1533,6 +1533,7 @@ def count_organize_logs(status: str | None = None, keyword: str = "") -> int:
 _TIMELINE_STATUS_VALUES = {
     "success",
     "failed",
+    "issues",
     "skipped",
     "reverted",
     "processing",
@@ -1629,7 +1630,10 @@ def _organize_timeline_query(
     if normalized_origin != "all":
         sql += " AND origin=?"
         params.append(normalized_origin)
-    if normalized_status:
+    if normalized_status == "issues":
+        # 对齐看板历史异常口径；旧failed筛选仍保留“已删除”的兼容语义。
+        sql += " AND raw_status IN ('failed','interrupted','partial_failed','revert_failed')"
+    elif normalized_status:
         sql += " AND status=?"
         params.append(normalized_status)
     clean_keyword = str(keyword or "").strip()

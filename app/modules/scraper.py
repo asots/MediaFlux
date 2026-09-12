@@ -653,9 +653,10 @@ _BRACKET_DUB_AUDIO_NOISE = re.compile(
     r"(?:korean|japanese|english|chinese|mandarin|cantonese)[ ._-]+audio|"
     r"dub(?:bed)?|dual[ ._-]?audio)$"
 )
+# 年龄限制版只在完整括号发布标记中清理，不能删除裸片名中的年龄词或描述性副标题。
 _BRACKET_RELEASE_EDITION_NOISE = re.compile(
     r"(?i)^(?:\d{2,3}\s*(?:fps|帧率|幀率)(?:版本|版)?|"
-    r"高(?:码|碼)(?:率)?(?:版本|版))$"
+    r"高(?:码|碼)(?:率)?(?:版本|版)|年[齡龄]限制版)$"
 )
 _BRACKET_STREAMING_PLATFORM_NOISE = re.compile(
     r"(?i)^(?:wetv|tving|iqiyi|youku|viki|viu|crunchyroll|"

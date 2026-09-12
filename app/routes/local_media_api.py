@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app import database as db
 from app.clients.base import close_media_server_client
+from app.clients.qbittorrent import close_qbittorrent_client
 from app.logger import get_logger
 from app.modules.local_directory_browser import VIRTUAL_ROOT, browse_local_directories
 from app.modules.local_path_mapping import (
@@ -694,6 +695,7 @@ def external_hints(request: Request, data: dict | None = Body(default=None)):
 def execute_media(request: Request, data: dict | None = Body(default=None)):
     require_api_login(request)
     payload = data or {}
+    qb_client = None
     try:
         service = get_local_media_service()
         task_id = service.create_manual_task(
@@ -711,13 +713,29 @@ def execute_media(request: Request, data: dict | None = Body(default=None)):
         )
         if not db.claim_local_media_task(task_id, expected="waiting_stable", owner=_OWNER):
             raise LocalMediaServiceError("任务已被其他操作认领")
-        result = service.execute_task(_OWNER, task_id)
+        task = db.get_local_media_task(task_id, owner=_OWNER)
+        if task is None:
+            raise LocalMediaServiceError("本地媒体任务不存在")
+        if task.qb_hash:
+            # 人工重试仍保留qB归属，与调度/通知确认入口一样传入短生命周期客户端。
+            try:
+                qb_client = get_local_media_scheduler().qb_factory()
+                if qb_client is None:
+                    raise LocalMediaServiceError("qB 客户端不可用")
+            except Exception as exc:
+                message = "qB 客户端初始化失败，请检查下载器配置后重试；尚未移动源文件"
+                db.update_local_media_task(task_id, owner=_OWNER, status="failed", error=message)
+                logger.warning("手动整理qB客户端初始化失败 task=%s type=%s", task_id, type(exc).__name__)
+                raise LocalMediaServiceError(message) from exc
+        result = service.execute_task(_OWNER, task_id, qb_client=qb_client)
         notify_local_media_task(task_id, result, owner=_OWNER)
         return result
     except Exception as exc:
         if "task_id" in locals():
             notify_local_media_task(task_id, owner=_OWNER, error=str(exc))
         return _safe_error(exc)
+    finally:
+        close_qbittorrent_client(qb_client)
 
 
 @router.post("/tasks/{task_id}/inspect")

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from app import database as db
 from app.services import build_automation_summary
-from tests.support import IsolatedDatabaseTestCase
+from tests.support import IsolatedDatabaseTestCase, isolated_test_database
 
 
 class DashboardAutomationSummaryTests(IsolatedDatabaseTestCase):
@@ -48,6 +48,33 @@ class DashboardAutomationSummaryTests(IsolatedDatabaseTestCase):
                 self.assertEqual(summary["healthy"], expected_total == 0)
 
 
+    def test_organize_issues_keep_the_historical_guangya_failure_scope(self):
+        with isolated_test_database() as database_path:
+            # 生产本地状态形状是 24 完成、1 失败、1 待确认，不应冒充光鸭的 23 项。
+            root = str(database_path.parent)
+            source_id = db.create_local_media_source("本地来源", "default", root, root)
+            for index, status in enumerate(["completed"] * 24 + ["failed", "requires_manual"]):
+                task_id = db.create_local_media_task(source_id, "", f"{root}/task-{index}")
+                db.update_local_media_task(task_id, status=status)
+            summary = build_automation_summary()
+            self.assertEqual(summary["organize_issues"], 0)
+            self.assertEqual(summary["issues"], 0)
+            self.assertEqual(summary["issue_source"], "none")
+
+            failures = ("failed", "interrupted", "partial_failed", "revert_failed")
+            for index in range(23):
+                db.add_organize_log("光鸭", "/incoming", "/library", f"cloud-{index}", failures[index % 4])
+            for status in ("success", "skipped", "reverted", "deleted", "confirmed", "manual"):
+                db.add_organize_log("光鸭", "/incoming", "/library", status, status)
+            summary = build_automation_summary()
+            visible_logs = db.list_organize_timeline(origin="guangya", status="issues", limit=100)
+            self.assertEqual(summary["organize_issues"], sum(row["raw_status"] in failures for row in visible_logs))
+            self.assertEqual(summary["organize_issues"], 23)
+            self.assertEqual(len(visible_logs), 23)
+            self.assertEqual(summary["issues"], 23)
+            self.assertEqual(summary["issue_source"], "organize")
+
+
 class DashboardTemplateContractTests(IsolatedDatabaseTestCase):
     def test_progress_widths_avoid_jinja_inside_css_style_attributes(self):
         template = Path("app/templates/dashboard.html").read_text(encoding="utf-8")
@@ -64,6 +91,9 @@ class DashboardTemplateContractTests(IsolatedDatabaseTestCase):
         self.assertIn("automation.issue_source == 'downloads'", template)
         self.assertIn("automation.issue_source == 'rss'", template)
         self.assertIn("automation.issue_source == 'organize'", template)
+        self.assertIn("url_for('pages.logs')", template)
+        self.assertNotIn("url_for('pages.organize')", template)
+        self.assertNotIn("整理待处理", template)
         self.assertIn("automation.issue_source == 'strm'", template)
         self.assertIn("automation.issue_source == 'mixed'", template)
         self.assertIn("url_for('pages.guangya_strm') ~ '#diagnostics'", template)

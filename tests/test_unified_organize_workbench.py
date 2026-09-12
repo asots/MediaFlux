@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -208,6 +211,52 @@ class UnifiedOrganizeWorkbenchTests(IsolatedDatabaseTestCase):
         self.assertEqual(filtered.status_code, 200)
         self.assertEqual(filtered.json()["total"], 1)
         self.assertEqual(filtered.json()["items"][0]["record_key"], f"local:{local_id}")
+
+    def test_dashboard_issue_filter_matches_count_and_excludes_deleted_or_local_history(self):
+        self._seed_timeline()  # 额外本地失败不能计入光鸭看板入口。
+        statuses = ("failed", "interrupted", "partial_failed", "revert_failed")
+        expected = set()
+        for index in range(23):
+            expected.add(db.add_organize_log("光鸭", "/incoming", "/library", f"issue-{index}", statuses[index % 4]))
+        deleted = db.add_organize_log("光鸭", "/incoming", "", "deleted-item", "deleted")
+        db.add_organize_log("光鸭", "/incoming", "", "manual-item", "manual")
+        response = self.client.get("/api/logs/organize/timeline", params={"origin": "guangya", "status": "issues", "page_size": 100})
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["total"], 23)
+        self.assertEqual({row["id"] for row in data["items"]}, expected)
+        self.assertTrue(all(row["origin"] == "guangya" for row in data["items"]))
+        self.assertEqual(db.get_dashboard_automation_summary()["organize_issues"], data["total"])
+        # 保持旧“失败”筛选含已删除的兼容语义，不顺带重定义已有筛选。
+        self.assertIn(deleted, {row["id"] for row in db.list_organize_timeline(origin="guangya", status="failed", limit=100)})
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node 验证日志页链接参数")
+    def test_log_deep_link_restores_only_supported_origin_and_status(self):
+        script = Path("app/static/js/logs.js").read_text(encoding="utf-8")
+        self.assertLess(script.index("restoreOrganizeFiltersFromUrl();"), script.index("const initialTab ="))
+        program = r"""
+const fs=require('node:fs'), vm=require('node:vm'), assert=require('node:assert/strict');
+const source=fs.readFileSync('app/static/js/logs.js','utf8');
+const html=fs.readFileSync('app/templates/logs.html','utf8');
+const helper=source.slice(source.indexOf('function restoreOrganizeFiltersFromUrl()'),source.indexOf('// 初次加载：'));
+for(const [search,origin,status] of [
+ ['?origin=guangya&status=issues','guangya','issues'],
+ ['?origin=local&status=manual','local','manual'],
+ ['?origin=unknown&status=%3Cscript%3E','all',''],
+ ['', 'all',''],
+]) {
+ const fields={};
+ for(const [id,value] of [['orgOrigin','all'],['orgStatus','']]) {
+  const block=html.match(new RegExp('<select[^>]*id="'+id+'"[^>]*>(.*?)</select>', 's'))[1];
+  fields[id]={value,options:[...block.matchAll(/<option value="([^"]*)"/g)].map(m=>({value:m[1]}))};
+ }
+ const context=vm.createContext({URLSearchParams,window:{location:{search}},document:{getElementById:id=>fields[id]}});
+ vm.runInContext(helper,context);context.restoreOrganizeFiltersFromUrl();
+ assert.deepEqual([fields.orgOrigin.value,fields.orgStatus.value],[origin,status]);
+}
+"""
+        result = subprocess.run([shutil.which("node"), "-e", program], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_guangya_manual_record_is_not_counted_as_skipped(self):
         log_id = db.add_organize_log(

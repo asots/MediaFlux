@@ -855,8 +855,9 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
             "status": "planned", "plans": [{"target_name": "Movie.mkv"}],
             "_move_plans": [object()], "_cleanup_candidates": [object()],
         }
-        service.create_manual_task.return_value = 88
-        service.execute_task.return_value = {"status": "completed", "task_id": 88}
+        task_id = db.create_local_media_task(source_id, "", "/tmp/source/Example.mkv", owner="admin", trigger="manual")
+        service.create_manual_task.return_value = task_id
+        service.execute_task.return_value = {"status": "completed", "task_id": task_id}
         service.external_hints.return_value = {"items": [{"title": "Example"}], "errors": []}
         with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
             "app.routes.local_media_api.db.claim_local_media_task", return_value=True
@@ -896,6 +897,97 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         service.external_hints.assert_called_once_with(
             "admin", "inspect-1", "Example", "auto",
         )
+
+    def _manual_qb_execute_case(self, *, qb_hash="fixture-qb-hash"):
+        source_id = db.create_local_media_source(
+            name="本地下载", qb_profile="", qb_path_prefix="",
+            local_root=str(self.local_root), owner="admin",
+        )
+        path = self.local_root / "Example.mkv"
+        path.write_bytes(b"frozen source")
+        task_id = db.create_local_media_task(source_id, qb_hash, str(path), owner="admin")
+        db.update_local_media_task(task_id, owner="admin", status="requires_manual")
+        service = Mock()
+        service.create_manual_task.side_effect = lambda *_args, **_kwargs: db.prepare_manual_local_media_task(
+            source_id, str(path), owner="admin", tmdb_id="1", media_type="movie",
+        )
+        service.execute_task.return_value = {"status": "completed", "task_id": task_id}
+        return task_id, path, service
+
+    def test_manual_execute_passes_preserved_qb_client_and_closes_it(self):
+        csrf = self.login()
+        task_id, path, service = self._manual_qb_execute_case()
+        qb_client = Mock()
+        scheduler = SimpleNamespace(qb_factory=Mock(return_value=qb_client))
+        with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
+            "app.routes.local_media_api.get_local_media_scheduler", return_value=scheduler
+        ), patch("app.routes.local_media_api.notify_local_media_task"):
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(db.get_local_media_task(task_id, owner="admin").qb_hash, "fixture-qb-hash")
+        service.execute_task.assert_called_once_with("admin", task_id, qb_client=qb_client)
+        scheduler.qb_factory.assert_called_once_with()
+        qb_client.close.assert_called_once_with()
+        self.assertEqual(path.read_bytes(), b"frozen source")
+
+    def test_manual_execute_without_qb_does_not_create_client(self):
+        csrf = self.login()
+        task_id, _path, service = self._manual_qb_execute_case(qb_hash="")
+        with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
+            "app.routes.local_media_api.get_local_media_scheduler"
+        ) as scheduler, patch("app.routes.local_media_api.notify_local_media_task"):
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 200, response.text)
+        scheduler.assert_not_called()
+        service.execute_task.assert_called_once_with("admin", task_id, qb_client=None)
+
+    def test_manual_execute_closes_qb_client_when_execution_fails(self):
+        from app.modules.local_media_service import LocalMediaServiceError
+        csrf = self.login()
+        task_id, path, service = self._manual_qb_execute_case()
+        service.execute_task.side_effect = LocalMediaServiceError("fixture execution failure")
+        qb_client = Mock()
+        with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
+            "app.routes.local_media_api.get_local_media_scheduler", return_value=SimpleNamespace(qb_factory=lambda: qb_client)
+        ), patch("app.routes.local_media_api.notify_local_media_task"):
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 400)
+        service.execute_task.assert_called_once_with("admin", task_id, qb_client=qb_client)
+        qb_client.close.assert_called_once_with()
+        self.assertEqual(path.read_bytes(), b"frozen source")
+
+    def test_manual_qb_client_factory_failure_does_not_leave_claimed_task_or_move_source(self):
+        csrf = self.login()
+        for failure in (RuntimeError("private credential must not leak"), None):
+            with self.subTest(failure=type(failure).__name__):
+                with db.get_conn() as conn:
+                    conn.execute("DELETE FROM local_media_tasks")
+                    conn.execute("DELETE FROM local_media_sources")
+                task_id, path, service = self._manual_qb_execute_case()
+                factory = Mock(side_effect=failure) if isinstance(failure, Exception) else Mock(return_value=None)
+                with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
+                    "app.routes.local_media_api.get_local_media_scheduler", return_value=SimpleNamespace(qb_factory=factory)
+                ), patch("app.routes.local_media_api.notify_local_media_task"):
+                    response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertNotIn("private credential", response.text)
+                service.execute_task.assert_not_called()
+                self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "failed")
+                self.assertEqual(path.read_bytes(), b"frozen source")
+
+    def test_manual_execute_lost_claim_does_not_create_qb_client(self):
+        csrf = self.login()
+        _task_id, path, service = self._manual_qb_execute_case()
+        with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
+            "app.routes.local_media_api.db.claim_local_media_task", return_value=False
+        ), patch("app.routes.local_media_api.get_local_media_scheduler") as scheduler, patch(
+            "app.routes.local_media_api.notify_local_media_task"
+        ):
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 400)
+        scheduler.assert_not_called()
+        service.execute_task.assert_not_called()
+        self.assertEqual(path.read_bytes(), b"frozen source")
 
     def test_preview_rejects_invalid_position_override_before_service_call(self):
         csrf = self.login(); headers = {"X-CSRF-Token": csrf}

@@ -29,9 +29,9 @@
                 {% set issue_title = '查看 ' ~ automation.issues ~ ' 项 RSS 处理失败' %}
                 {% set issue_label = 'RSS 待处理' %}
             {% elif automation.issue_source == 'organize' %}
-                {% set issue_href = url_for('pages.organize') %}
-                {% set issue_title = '查看 ' ~ automation.issues ~ ' 项整理异常' %}
-                {% set issue_label = '整理待处理' %}
+                {% set issue_href = url_for('pages.logs') ~ '?origin=guangya&status=issues#organize' %}
+                {% set issue_title = '查看 ' ~ automation.issues ~ ' 项光鸭历史整理异常' %}
+                {% set issue_label = '整理异常' %}
             {% elif automation.issue_source == 'strm' %}
                 {% set issue_href = url_for('pages.guangya_strm') ~ '#diagnostics' %}
                 {% set issue_title = '查看 ' ~ automation.issues ~ ' 项 STRM 失败任务' %}
@@ -198,7 +198,7 @@
             <div class="dashboard-fact-list">
                 <a class="dashboard-fact-item" href="{{ url_for('pages.downloads') }}{% if automation.downloads_review %}?view=issues{% endif %}"><span class="dashboard-fact-icon"><i data-lucide="download"></i></span><div><strong>下载处理中 {{ automation.downloads_active }} 项</strong><span>{% if automation.downloads_review %}{{ automation.downloads_review }} 项下载或后处理异常{% else %}队列提交与转存状态正常{% endif %}</span></div><small>任务</small></a>
                 <a class="dashboard-fact-item" href="{{ url_for('pages.rss') }}"><span class="dashboard-fact-icon is-blue"><i data-lucide="rss"></i></span><div><strong>RSS 待处理 {{ automation.rss_pending }} 项</strong><span>{% if automation.rss_failed %}{{ automation.rss_failed }} 项处理失败{% else %}订阅队列暂无失败{% endif %}</span></div><small>订阅</small></a>
-                <a class="dashboard-fact-item" href="{{ url_for('pages.organize') }}"><span class="dashboard-fact-icon is-orange"><i data-lucide="folder-check"></i></span><div><strong>整理异常 {{ automation.organize_issues }} 项</strong><span>{% if automation.organize_issues %}包含失败、中断或部分失败{% else %}整理记录状态正常{% endif %}</span></div><small>整理</small></a>
+                <a class="dashboard-fact-item" href="{{ url_for('pages.logs') }}?origin=guangya&amp;status=issues#organize" title="查看光鸭历史失败、中断、部分失败或回退失败记录"><span class="dashboard-fact-icon is-orange"><i data-lucide="folder-check"></i></span><div><strong>光鸭整理异常 {{ automation.organize_issues }} 项</strong><span>{% if automation.organize_issues %}历史异常日志，不代表待确认队列{% else %}光鸭整理记录暂无异常{% endif %}</span></div><small>整理</small></a>
                 <a class="dashboard-fact-item" href="{{ url_for('pages.guangya_strm') }}#diagnostics"><span class="dashboard-fact-icon"><i data-lucide="refresh-cw"></i></span><div><strong>STRM 待重试 {{ automation.strm_failures }} 项</strong><span>{% if automation.strm_last_at %}最近运行 {{ automation.strm_last_at[:16]|replace('T', ' ') }} · {{ automation.strm_last_status or '未知' }}{% else %}尚无同步运行记录{% endif %}</span></div><small>同步</small></a>
             </div>
         </article>

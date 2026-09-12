@@ -1190,6 +1190,110 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
         self.assertTrue(all("仅限港澳台地区" not in query for query in queries))
         self.assertTrue(all(not query.endswith(" 04") for query in queries))
 
+    def test_age_restricted_ani_release_keeps_clean_title_episode_and_specs(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper(client=Mock(api_key="", base_url=""))
+        filename = (
+            "[ANi] 從後面來的神威先生 [年齡限制版] - 11 "
+            "[1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
+        )
+        expected = "從後面來的神威先生"
+        context = scraper.extract_recognition_context(filename)
+        parsed = parser.parse_media(filename)
+
+        self.assertEqual(context.normalized_title, expected)
+        self.assertEqual(context.filename_title, expected)
+        self.assertEqual(context.title_variants, [expected])
+        self.assertEqual(scraper.generate_query_variants(context), [expected])
+        self.assertEqual(parser.clean_title(filename), expected)
+        self.assertEqual(parsed.title, expected)
+        self.assertEqual(context.filename, filename)
+        self.assertEqual(parsed.filename, filename)
+        self.assertEqual((context.media_type, context.season, context.episode), ("tv", None, 11))
+        self.assertEqual((parsed.source_season, parsed.source_episode), (None, 11))
+        self.assertEqual((parsed.effective_season, parsed.effective_episode), (None, 11))
+        self.assertIn("[ANi]", context.cleaned_components["release_prefixes"])
+        self.assertEqual(context.cleaned_components["language_tags"], ["CHT"])
+        for value in ("年齡限制版", "1080P", "Baha", "WEB-DL", "AAC AVC", "CHT"):
+            with self.subTest(value=value):
+                self.assertIn(value, context.cleaned_components["noise_tokens"])
+                self.assertIn(
+                    ("noise_tokens", value),
+                    [(token.kind, token.value) for token in parsed.tokens],
+                )
+
+    def test_exact_age_restricted_edition_brackets_are_release_noise(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper(client=Mock(api_key="", base_url=""))
+        for edition in ("年齡限制版", "年龄限制版"):
+            for opening, closing in (("[", "]"), ("【", "】"), ("(", ")"), ("（", "）")):
+                with self.subTest(edition=edition, brackets=opening + closing):
+                    filename = (
+                        f"[ANi] 星空物語 {opening} {edition} {closing} - 11 "
+                        "[1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
+                    )
+                    context = scraper.extract_recognition_context(
+                        filename, f"/动漫/{filename.rsplit('.', 1)[0]}",
+                    )
+                    self.assertTrue(scraper._is_bracket_noise(edition))
+                    self.assertEqual(context.normalized_title, "星空物語")
+                    self.assertEqual(context.filename_title, "星空物語")
+                    self.assertEqual(context.folder_title, "星空物語")
+                    self.assertEqual(context.episode, 11)
+                    self.assertEqual(parser.clean_title(filename), "星空物語")
+                    self.assertEqual(scraper.generate_query_variants(context), ["星空物語"])
+                    self.assertIn(edition, context.cleaned_components["noise_tokens"])
+
+    def test_age_words_and_descriptive_brackets_are_preserved(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper(client=Mock(api_key="", base_url=""))
+        samples = (
+            ("十八岁的天空", "十八岁的天空"),
+            ("十八歲的天空", "十八歲的天空"),
+            ("年龄的故事", "年龄的故事"),
+            ("年齡的故事", "年齡的故事"),
+            ("年龄限制版的故事", "年龄限制版的故事"),
+            ("年齡限制版的故事", "年齡限制版的故事"),
+            ("星空物語 年龄限制版", "星空物語 年龄限制版"),
+            ("星空物語 年齡限制版", "星空物語 年齡限制版"),
+            ("星空物語（30多岁）", "星空物語（30多岁）"),
+            ("星空物語（30多歲）", "星空物語（30多歲）"),
+            ("星空物語 [12岁]", "星空物語 12岁"),
+            ("星空物語 (12歲)", "星空物語 12歲"),
+            ("星空物語（年龄限制）", "星空物語（年龄限制）"),
+            ("星空物語（年齡限制）", "星空物語（年齡限制）"),
+            ("星空物語 [年龄限制版的故事]", "星空物語 年龄限制版的故事"),
+            ("星空物語（年齡限制版的故事）", "星空物語（年齡限制版的故事）"),
+        )
+        for title, expected in samples:
+            with self.subTest(title=title):
+                filename = f"[ANi] {title} - 11 [1080P][WEB-DL].mp4"
+                context = scraper.extract_recognition_context(filename)
+                self.assertEqual(context.normalized_title, expected)
+                self.assertEqual(parser.clean_title(filename), expected)
+                self.assertEqual(context.episode, 11)
+
+    def test_age_edition_and_region_tags_preserve_official_age_parenthesis(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper(client=Mock(api_key="", base_url=""))
+        for edition, region in (
+            ("年龄限制版", "仅限港澳台地区"),
+            ("年齡限制版", "僅限港澳台地區"),
+        ):
+            with self.subTest(edition=edition, region=region):
+                expected = "星空物語（30多岁）新的旅程"
+                filename = (
+                    f"[ANi] {expected} [{edition}]（{region}） - 11 "
+                    "[1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
+                )
+                context = scraper.extract_recognition_context(filename)
+                self.assertEqual(context.normalized_title, expected)
+                self.assertEqual(parser.clean_title(filename), expected)
+                queries = scraper.generate_query_variants(context)
+                self.assertEqual(queries[0], expected)
+                self.assertTrue(all(edition not in query and region not in query for query in queries))
+                self.assertEqual(context.episode, 11)
+
     def test_ordinal_attack_season_requires_episode_and_title_tail_context(self):
         scraper = self.recognition_module()
 

@@ -8,10 +8,11 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from app import database as db
 from app.clients.base import DashboardData, Library, MediaItem
 from app.config import web_credentials
 from app.main import create_app
-from tests.support import InitializedWebTestCase
+from tests.support import InitializedWebTestCase, isolated_test_database
 
 
 class MediaHubPageContractTests(InitializedWebTestCase):
@@ -204,7 +205,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
         cases = (
             ("downloads", 2, "/downloads?view=issues", "查看 2 项下载及后处理异常"),
             ("rss", 3, "/rss#rss", "查看 3 项 RSS 处理失败"),
-            ("organize", 4, "/organize", "查看 4 项整理异常"),
+            ("organize", 4, "/logs?origin=guangya&amp;status=issues#organize", "查看 4 项光鸭历史整理异常"),
             ("strm", 5, "/guangya/strm#diagnostics", "查看 5 项 STRM 失败任务"),
             ("mixed", 7, "#dashboardAutomationStatus", "查看 7 项跨模块待处理问题"),
         )
@@ -226,6 +227,38 @@ class MediaHubPageContractTests(InitializedWebTestCase):
             self.assertIn(f'href="{href}" title="{title}" aria-label="{title}"', response.text)
 
         self.assertIn('id="dashboardAutomationStatus"', response.text)
+
+    def test_dashboard_historical_issues_link_to_logs_not_the_execution_page(self):
+        self._login()
+        with isolated_test_database() as database_path:
+            root = str(database_path.parent)
+            source_id = db.create_local_media_source("本地来源", "default", root, root)
+            for index, status in enumerate(["completed"] * 24 + ["failed", "requires_manual"]):
+                task_id = db.create_local_media_task(source_id, "", f"{root}/task-{index}")
+                db.update_local_media_task(task_id, status=status)
+            for index in range(23):
+                db.add_organize_log("光鸭", "/incoming", "/library", f"cloud-{index}", "failed")
+            with patch(
+                "app.routes.pages.get_cached_dashboards_or_stubs",
+                return_value=([self._dashboard()], True),
+            ):
+                response = self.client.get("/")
+            self.assertEqual(response.status_code, 200)
+            indicator = re.search(r'<a[^>]*data-dashboard-issues-link[^>]*>.*?</a>', response.text, re.S)
+            self.assertIsNotNone(indicator)
+            self.assertIn('href="/logs?origin=guangya&amp;status=issues#organize"', indicator.group())
+            self.assertIn('data-count-target="23"', indicator.group())
+            self.assertIn('<small>整理异常</small>', indicator.group())
+            self.assertIn('title="查看 23 项光鸭历史整理异常"', indicator.group())
+            fact = re.search(
+                r'<a class="dashboard-fact-item"[^>]*>[^<]*<span[^>]*>.*?'
+                r'<strong>光鸭整理异常 23 项</strong>.*?</a>', response.text, re.S,
+            )
+            self.assertIsNotNone(fact)
+            self.assertIn('href="/logs?origin=guangya&amp;status=issues#organize"', fact.group())
+            self.assertIn('历史异常日志，不代表待确认队列', fact.group())
+            self.assertNotIn('href="/organize"', indicator.group() + fact.group())
+            self.assertEqual(self.client.get("/logs?origin=guangya&status=issues#organize").status_code, 200)
 
     def test_recent_media_page_renders_internal_results_and_filters(self):
         self._login()
