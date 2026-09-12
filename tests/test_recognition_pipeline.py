@@ -31,7 +31,6 @@ class RecognitionContractMixin:
             "generate_query_variants",
             "score_candidate",
             "decide_threshold",
-            "deterministic_recognize",
         )
         missing = [name for name in required if not hasattr(scraper, name)]
         self.assertEqual(missing, [], f"缺少确定性识别接口: {missing}")
@@ -39,10 +38,51 @@ class RecognitionContractMixin:
 
 
 class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
+    def test_release_projection_and_context_keep_their_distinct_public_contracts(self):
+        from tests.support import isolated_test_database
+
+        self.enterContext(isolated_test_database("parser-projection.db"))
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper("offline-fixture")
+        self.addCleanup(parser.close)
+        fields = ('title', 'year', 'media_type', 'tmdb_id', 'source_season', 'source_episode', 'effective_season', 'effective_episode')
+        context_fields = ('normalized_title', 'filename_year', 'folder_year', 'media_type', 'season', 'episode')
+        # 文件名投影与含目录信息的识别上下文有不同职责；统一核心不能改写输出。
+        cases = [
+            ('The.Multi.2024', '', ('The Multi', '2024', 'movie', '', None, None, None, None), ('The Multi', '2024', '', 'movie', None, None)),
+            ('The.Multi.2024', '/library/Shows/Season 02', ('The Multi', '2024', 'movie', '', 2, None, 2, None), ('The Multi', '2024', '', 'tv', 2, None)),
+            ('The.Multi.2024.xyz', '', ('The Multi', '2024', 'movie', '', None, None, None, None), ('The Multi xyz', '2024', '', 'movie', None, None)),
+            ('The.Multi.2024.xyz', '/library/Shows/Season 02', ('The Multi', '2024', 'movie', '', 2, None, 2, None), ('The Multi xyz', '2024', '', 'tv', 2, None)),
+            ('Dune.Part.Two.tmdb-693134.mkv', '', ('Dune Part Two', '', 'movie', '693134', None, None, None, None), ('Dune Part Two', '', '', 'movie', None, None)),
+            ('Dune.Part.Two.tmdb-693134.mkv', '/library/Shows/Season 02', ('Dune Part Two', '', 'movie', '693134', 2, None, 2, None), ('Dune Part Two', '', '', 'tv', 2, None)),
+            ('Example.Show - 03 tmdb12345.mkv', '', ('Example Show', '', 'tv', '12345', None, 3, None, 3), ('Example Show', '', '', 'tv', None, 3)),
+            ('Example.Show - 03 tmdb12345.mkv', '/library/Shows/Season 02', ('Example Show', '', 'tv', '12345', 2, 3, 2, 3), ('Example Show', '', '', 'tv', 2, 3)),
+            ('1917.2019.mkv', '', ('1917', '2019', 'movie', '', None, None, None, None), ('1917', '2019', '', 'movie', None, None)),
+            ('1917.2019.mkv', '/library/Shows/Season 02', ('1917', '2019', 'movie', '', 2, None, 2, None), ('1917', '2019', '', 'tv', 2, None)),
+            ('Show.Name.E03.mkv', '', ('Show Name', '', 'tv', '', None, 3, None, 3), ('Show Name', '', '', 'tv', None, 3)),
+            ('Show.Name.E03.mkv', '/library/Shows/Season 02', ('Show Name', '', 'tv', '', 2, 3, 2, 3), ('Show Name', '', '', 'tv', 2, 3)),
+            ('Show.02x03.1080p.mkv', '', ('Show', '', 'tv', '', 2, 3, 2, 3), ('Show', '', '', 'tv', 2, 3)),
+            ('Show.02x03.1080p.mkv', '/library/Shows/Season 02', ('Show', '', 'tv', '', 2, 3, 2, 3), ('Show', '', '', 'tv', 2, 3)),
+            ('Show.S00E02.mkv', '', ('Show', '', 'tv', '', 0, 2, 0, 2), ('Show', '', '', 'tv', 0, 2)),
+            ('Show.S00E02.mkv', '/library/Shows/Season 02', ('Show', '', 'tv', '', 0, 2, 0, 2), ('Show', '', '', 'tv', 0, 2)),
+            ('Title.[AB12CD34].mkv', '', ('Title', '', 'movie', '', None, None, None, None), ('Title', '', '', 'movie', None, None)),
+            ('Title.[AB12CD34].mkv', '/library/Shows/Season 02', ('Title', '', 'movie', '', 2, None, 2, None), ('Title', '', '', 'tv', 2, None)),
+        ]
+        for filename, parent, expected_release, expected_context in cases:
+            with self.subTest(filename=filename, parent=parent):
+                result = parser.parse_media(filename, parent)
+                self.assertEqual(tuple(getattr(result, key) for key in fields), expected_release)
+                self.assertEqual(tuple(getattr(result.context, key) for key in context_fields), expected_context)
+
+    def test_redundant_filename_parser_and_module_wrapper_are_retired(self):
+        scraper = self.recognition_module()
+        self.assertFalse(hasattr(scraper.TMDBScraper, "_parse_filename_fields"))
+        self.assertFalse(hasattr(scraper, "deterministic_recognize"))
+
     def test_public_contract_keeps_parent_path_optional(self):
         scraper = self.recognition_module()
 
-        signature = inspect.signature(scraper.deterministic_recognize)
+        signature = inspect.signature(scraper.TMDBScraper.deterministic_recognize)
         self.assertIn("filename", signature.parameters)
         self.assertEqual(signature.parameters["parent_path"].default, "")
         self.assertIn("cleaned_components", scraper.RecognitionContext.__dataclass_fields__)

@@ -1,6 +1,7 @@
 """识别热路径的宽松性能契约：约束缓存复用，不绑定具体机器速度。"""
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from pathlib import Path
 from time import perf_counter
@@ -17,6 +18,33 @@ FIXTURE = Path(__file__).parent / "fixtures" / "release_recognition_cases.jsonl"
 
 
 class RecognitionPerformanceContractTests(unittest.TestCase):
+    def test_release_parse_reuses_one_core_for_context_and_preprocessing(self):
+        from app.modules import scraper as module
+
+        parser = module.TMDBScraper("offline-fixture")
+        self.addCleanup(parser.close)
+        with patch.object(module, "_parse_release_core", wraps=module._parse_release_core) as build:
+            parser.parse_media("Example.Show.S01E03.mkv", "/library/Show")
+        self.assertEqual(build.call_count, 1)
+
+    def test_deterministic_projection_cannot_mutate_shared_raw_facts(self):
+        from app.modules import scraper as module
+
+        parser = module.TMDBScraper("offline-fixture")
+        self.addCleanup(parser.close)
+        core = module._parse_release_core("Example.Show.S01E03.mkv", "/library/Show")
+        original = dataclasses.asdict(core.context)
+
+        def recognize(context, *_args, **_kwargs):
+            context.title_variants.append("changed variant")
+            context.cleaned_components.setdefault("diagnostic", []).append("changed")
+            context.season = 9
+            return module.RecognitionResult(context=context, status="matched")
+
+        with patch.object(parser, "_recognize_context", side_effect=recognize):
+            parser.deterministic_recognize("Example.Show.S01E03.mkv", "/library/Show", _core=core)
+        self.assertEqual(dataclasses.asdict(core.context), original)
+
     def test_full_corpus_reuses_guessit_cache_on_warm_pass(self):
         cases = load_release_recognition_cases(FIXTURE)
         self.assertGreaterEqual(len(cases), 200)

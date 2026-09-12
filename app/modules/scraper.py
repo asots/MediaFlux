@@ -212,6 +212,37 @@ class RecognitionContext:
     cleaned_components: dict[str, list[str]] = field(default_factory=dict)
 
 
+@dataclass
+class _ReleaseParseCore:
+    """单次发布名事实解析及其领域投影。"""
+
+    context: RecognitionContext
+    release_fields: dict[str, object] | None = None
+
+
+def _copy_cleaned_components(
+    components: dict[str, list[str]] | None,
+) -> dict[str, list[str]]:
+    """复制解析证据容器，防止不同领域投影互相写入。"""
+    return {
+        key: list(values or ())
+        for key, values in (components or {}).items()
+    }
+
+
+def _copy_recognition_context(
+    context: RecognitionContext,
+    **changes: object,
+) -> RecognitionContext:
+    """复制上下文及其嵌套集合；规则/回退只修改自己的投影。"""
+    return replace(
+        context,
+        title_variants=list(context.title_variants),
+        cleaned_components=_copy_cleaned_components(context.cleaned_components),
+        **changes,
+    )
+
+
 @dataclass(frozen=True)
 class ReleaseParseResult:
     """文件名、父目录和预处理规则融合后的统一解析结果。
@@ -2103,78 +2134,60 @@ def _folder_context(
     return title, year, media_type, season
 
 
-def extract_recognition_context(filename: str, parent_path: str = "") -> RecognitionContext:
-    """阶段 1/2：归一化文件名并提取文件/目录上下文。"""
-    raw_name = str(filename or "")
-    raw_parent_path = str(parent_path or "")
-    parse_name = _strip_explicit_tmdb_markers(raw_name)
-    parse_parent_path = _strip_explicit_tmdb_markers_from_path(raw_parent_path)
-    stem = strip_media_file_suffix(parse_name)
-    identity_stem = _strip_trailing_checksum(stem)
+def _parse_release_surface(
+    stem: str, *, context_mode: bool,
+) -> dict[str, object]:
+    """解析一个文件名 surface；领域差异只通过输入策略表达。"""
+    source = str(stem or "")
+    identity_stem = _strip_trailing_checksum(source) if context_mode else source
     guessed = _guessit_info(identity_stem)
-    guessed_title = str(guessed.get("title") or "").strip()
+    guessed_title_raw = str(guessed.get("title") or "").strip()
     guessed_year = _position_number(guessed.get("year"))
     year_tokens = [match.group(1) for match in _YEAR_TOKEN.finditer(identity_stem)]
     filename_year = str(guessed_year or (year_tokens[-1] if year_tokens else ""))
-    fractional_position = fractional_episode_position(stem)
-    explicit_episode = _extract_episode(stem)
+    fractional_position = fractional_episode_position(source) if context_mode else None
+    explicit_episode = _extract_episode(source)
     guessed_episode = _position_number(guessed.get("episode"))
     guessed_season = _season_number(guessed.get("season"))
-    has_season_range = bool(_SEASON_RANGE_TOKEN.search(stem))
-    if has_season_range:
+    if _SEASON_RANGE_TOKEN.search(source):
         guessed_season = None
-    if (
-        explicit_episode is None
-        and _UNDERSCORE_DUAL_EPISODE_TOKEN.search(stem)
-    ):
-        # GuessIt 会把未知语义的 ``[19_91]`` 猜成第 19 集。确定性解析器
-        # 只有在同一标题存在明确季度时才接受这种“季内_绝对”双编号；缺少
-        # 季度证据时同步丢弃 GuessIt 的位置，避免把尺寸/私有发布标签入库。
+    if explicit_episode is None and _UNDERSCORE_DUAL_EPISODE_TOKEN.search(source):
         guessed_episode = None
         guessed_season = None
     untrusted_guessed_episode = _guessit_episode_is_untrusted(
-        stem,
-        explicit_episode,
-        guessed_episode,
-        guessed_season,
+        source, explicit_episode, guessed_episode, guessed_season,
     )
-    if untrusted_guessed_episode:
-        guessed_episode = None
-        guessed_season = None
-    if _has_unaccepted_release_x_position(stem):
-        # GuessIt 会把 ``16x9`` 当成 S16E09；画面比例不能改变媒体类型。
+    if untrusted_guessed_episode or _has_unaccepted_release_x_position(source):
         guessed_episode = None
         guessed_season = None
     episode = explicit_episode if explicit_episode is not None else guessed_episode
     explicit_season = _extract_explicit_season(
-        stem, episode_context=episode is not None,
+        source, episode_context=episode is not None,
     )
     implicit_season, implicit_season_span = _implicit_season_hint(
-        stem, episode_context=episode is not None,
+        source, episode_context=episode is not None,
     )
-    season = explicit_season if explicit_season is not None else implicit_season
-    special_episode = _extract_special_episode(stem)
-    # GuessIt 会把 ``20th Remaster - 069`` 中的 ordinal 误报成 Season 0。
-    # S00/OVA 等特别篇已经由显式季号与 special_episode 单独识别，这里只
-    # 接受正季号，避免普通长篇发布被错误送进 Specials。
-    if (
-        season is None
+    deterministic_season = (
+        explicit_season if explicit_season is not None else implicit_season
+    )
+    season = deterministic_season
+    if not context_mode and season is None:
+        season = guessed_season
+    elif (
+        context_mode
+        and season is None
         and explicit_episode is None
         and guessed_season is not None
         and guessed_season > 0
     ):
-        # 已由 ``Title - 100`` / ``Title [100]`` 这类稳定裸集号规则命中时，
-        # GuessIt 可能把三位集号的首位同时误报成季号（100 -> S01E100）。
-        # 裸集号应保持 season=None，交给目录级连续集包证据按 TMDB 季容量
-        # 换算；只有本地规则没解析到集号时才采纳 GuessIt 的季号。
         season = guessed_season
+    special_episode = _extract_special_episode(source)
     if special_episode is not None:
-        season = 0
-        episode = special_episode
+        season, episode = 0, special_episode
     elif fractional_position is not None:
-        season = 0
-        episode = None
-    title_source = _strip_known_episode_suffix(stem, episode, season)
+        season, episode = 0, None
+
+    title_source = _strip_known_episode_suffix(source, episode, season)
     if explicit_season is None and implicit_season is not None:
         title_source = _remove_text_span(title_source, implicit_season_span)
     if fractional_position is not None:
@@ -2184,8 +2197,6 @@ def extract_recognition_context(filename: str, parent_path: str = "") -> Recogni
     )
     filename_title, cleaned = _clean_release_stem(title_source)
     if special_episode is not None:
-        # 先按完整括号清洗整包元数据，再去除独立特别篇标记；反过来会把
-        # ``[01-46 FIN + OVA]`` 拆成无法再完整识别的残缺范围。
         filename_title = strip_special_media_markers(
             _SPECIAL_EPISODE_TOKEN.sub(" ", filename_title)
         )
@@ -2197,20 +2208,107 @@ def extract_recognition_context(filename: str, parent_path: str = "") -> Recogni
         cleaned[component_name] = _unique_text((
             *cleaned.get(component_name, []), *values,
         ))
-    filename_title = re.sub(r"\s+", " ", _strip_season_tokens(filename_title)).strip(" ._-")
-    guessed_title = re.sub(r"\s+", " ", _strip_season_tokens(guessed_title)).strip(" ._-")
+    filename_title = re.sub(
+        r"\s+", " ", _strip_season_tokens(filename_title)
+    ).strip(" ._-")
+    guessed_title = re.sub(
+        r"\s+", " ", _strip_season_tokens(guessed_title_raw)
+    ).strip(" ._-")
     if not filename_title and guessed_title:
         filename_title = guessed_title
-    elif _prefer_guessit_numeric_title(guessed_title, filename_title, guessed_year):
+    elif context_mode and _prefer_guessit_numeric_title(
+        guessed_title, filename_title, guessed_year,
+    ):
         filename_title = guessed_title
+
+    release_title = ""
+    if not context_mode:
+        canonical_title = (
+            release_title_candidates[0] if release_title_candidates else filename_title
+        )
+        if deterministic_season is not None:
+            canonical_title = _strip_season_tokens(canonical_title)
+        canonical_title = re.sub(
+            r"\s+", " ", canonical_title
+        ).strip(" ._-")
+        release_title = guessed_title_raw
+        if canonical_title and (
+            not release_title
+            or implicit_season is not None
+            or _low_information_query(release_title)
+            or (
+                len(_comparison_key(canonical_title).replace(" ", ""))
+                > len(_comparison_key(release_title).replace(" ", ""))
+                and _title_similarity_score(canonical_title, release_title) < 0.9
+            )
+        ):
+            release_title = canonical_title
+        if deterministic_season is not None:
+            release_title = _strip_season_tokens(release_title)
+        if special_episode is not None:
+            release_title = strip_special_media_markers(
+                _SPECIAL_EPISODE_TOKEN.sub(" ", release_title)
+            )
+        release_title = re.sub(r"\s+", " ", release_title).strip(" ._-")
+    guessed_type = str(guessed.get("type") or "").lower()
+    media_type = "tv" if (
+        season is not None
+        or episode is not None
+        or (guessed_type == "episode" and not untrusted_guessed_episode)
+    ) else "movie"
+    return {
+        "stem": source,
+        "info": guessed,
+        "guessed_title": guessed_title,
+        "guessed_title_raw": guessed_title_raw,
+        "guessed_year": guessed_year,
+        "filename_year": filename_year,
+        "fractional_position": fractional_position,
+        "explicit_episode": explicit_episode,
+        "guessed_episode": guessed_episode,
+        "guessed_season": guessed_season,
+        "untrusted_guessed_episode": untrusted_guessed_episode,
+        "explicit_season": explicit_season,
+        "implicit_season": implicit_season,
+        "implicit_season_span": implicit_season_span,
+        "season": season,
+        "episode": episode,
+        "special_episode": special_episode,
+        "title_source": title_source,
+        "release_title_candidates": release_title_candidates,
+        "cleaned": cleaned,
+        "filename_title": filename_title,
+        "release_title": release_title,
+        "media_type": media_type,
+    }
+
+
+def _parse_release_core(
+    filename: str, parent_path: str = "", *, include_release: bool = False,
+) -> _ReleaseParseCore:
+    """构造一次事实解析，并按需提供 release 领域投影。"""
+    raw_name = str(filename or "")
+    raw_parent_path = str(parent_path or "")
+    parse_name = _strip_explicit_tmdb_markers(raw_name)
+    parse_parent_path = _strip_explicit_tmdb_markers_from_path(raw_parent_path)
+    filename_stem = strip_media_file_suffix(parse_name)
+    surface = _parse_release_surface(filename_stem, context_mode=True)
+    guessed = surface["info"]
+    filename_title = str(surface["filename_title"] or "")
+    cleaned = dict(surface["cleaned"] or {})
+    release_title_candidates = list(surface["release_title_candidates"] or [])
+    episode = surface["episode"]
+    season = surface["season"]
     folder_title, folder_year, folder_type, folder_season = _folder_context(
         parse_parent_path, episode_context=episode is not None,
     )
     if season is None:
         season = folder_season
-    filename_is_generic = not filename_title or bool(re.fullmatch(r"(?i)(?:e|ep|episode)?\s*\d+", filename_title))
-    if filename_is_generic and guessed_title:
-        filename_title = guessed_title
+    filename_is_generic = not filename_title or bool(
+        re.fullmatch(r"(?i)(?:e|ep|episode)?\s*\d+", filename_title)
+    )
+    if filename_is_generic and surface["guessed_title"]:
+        filename_title = str(surface["guessed_title"])
         filename_is_generic = False
     if release_title_candidates:
         filename_title = release_title_candidates[0]
@@ -2227,14 +2325,16 @@ def extract_recognition_context(filename: str, parent_path: str = "") -> Recogni
             filename_title = shortened_title
             filename_is_generic = False
     normalized_title = folder_title if filename_is_generic and folder_title else filename_title
-    guessed_type = str(guessed.get("type") or "").lower()
     media_type = "tv" if (
         season is not None
         or episode is not None
-        or (guessed_type == "episode" and not untrusted_guessed_episode)
+        or (
+            str(guessed.get("type") or "").lower() == "episode"
+            and not surface["untrusted_guessed_episode"]
+        )
     ) else (folder_type or "movie")
-    original_source = _strip_known_episode_suffix(stem, episode, season)
-    if fractional_position is not None:
+    original_source = _strip_known_episode_suffix(filename_stem, episode, season)
+    if surface["fractional_position"] is not None:
         original_source = strip_special_media_markers(original_source)
     original_title, _ = _clean_release_stem(original_source)
     original_title = re.sub(
@@ -2250,12 +2350,12 @@ def extract_recognition_context(filename: str, parent_path: str = "") -> Recogni
         + _split_title_variants(normalized_title)
         + _split_title_variants(folder_title)
     )
-    return RecognitionContext(
+    context = RecognitionContext(
         filename=raw_name,
         parent_path=raw_parent_path,
         normalized_title=normalized_title,
         filename_title=filename_title,
-        filename_year=filename_year,
+        filename_year=str(surface["filename_year"] or ""),
         folder_title=folder_title,
         folder_year=folder_year,
         media_type=media_type,
@@ -2264,6 +2364,46 @@ def extract_recognition_context(filename: str, parent_path: str = "") -> Recogni
         title_variants=variants,
         cleaned_components=cleaned,
     )
+    release_fields = None
+    if include_release:
+        explicit_tmdb_id = _explicit_tmdb_id_from_path(raw_name)
+        release_stem = (
+            parse_name.rsplit(".", 1)[0] if "." in parse_name else parse_name
+        )
+        if explicit_tmdb_id:
+            release_episode = _extract_episode(release_stem)
+            release_season = _extract_season(
+                release_stem, episode_context=release_episode is not None,
+            )
+            release_special = _extract_special_episode(release_stem)
+            if release_special is not None:
+                release_season, release_episode = 0, release_special
+            release_fields = {
+                "title": "",
+                "year": "",
+                "type": "tv" if release_season is not None or release_episode is not None else "movie",
+                "tmdb_id": explicit_tmdb_id,
+                "season": release_season,
+                "episode": release_episode,
+            }
+        else:
+            release_surface = _parse_release_surface(
+                release_stem, context_mode=False,
+            )
+            release_fields = {
+                "title": str(release_surface["release_title"] or ""),
+                "year": str(release_surface["guessed_year"] or ""),
+                "type": str(release_surface["media_type"] or "movie"),
+                "tmdb_id": "",
+                "season": release_surface["season"],
+                "episode": release_surface["episode"],
+            }
+    return _ReleaseParseCore(context=context, release_fields=release_fields)
+
+
+def extract_recognition_context(filename: str, parent_path: str = "") -> RecognitionContext:
+    """阶段 1/2：归一化文件名并提取文件/目录上下文。"""
+    return _parse_release_core(filename, parent_path).context
 
 
 def _explicit_animation_source_marker(context: RecognitionContext) -> str:
@@ -2381,9 +2521,7 @@ def _inherit_source_query_provenance(
     """保留预处理前会影响安全决策的来源证据。"""
     if source_context is None:
         return
-    cleaned = {
-        key: list(values) for key, values in context.cleaned_components.items()
-    }
+    cleaned = _copy_cleaned_components(context.cleaned_components)
     weak_folders = list(
         cleaned.get(_SOURCE_LOW_INFORMATION_FOLDERS_KEY, [])
     )
@@ -4617,110 +4755,6 @@ class TMDBScraper:
         )
 
     # ===== 文件名解析与清洗 =====
-    def _parse_filename_fields(self, filename: str) -> dict[str, object]:
-        name = filename.rsplit(".", 1)[0] if "." in filename else filename
-        # 文件名中的显式 TMDB 标记优先级最高。
-        explicit_tmdb_id = _explicit_tmdb_id_from_path(filename)
-        if explicit_tmdb_id:
-            markerless_name = _strip_explicit_tmdb_markers(name)
-            episode = _extract_episode(markerless_name)
-            season = _extract_season(
-                markerless_name, episode_context=episode is not None
-            )
-            special_episode = _extract_special_episode(markerless_name)
-            if special_episode is not None:
-                season, episode = 0, special_episode
-            guessed_type = "tv" if season is not None or episode is not None else "movie"
-            return {
-                "title": "", "year": "", "type": guessed_type, "tmdb_id": explicit_tmdb_id,
-                "season": season, "episode": episode,
-            }
-        try:
-            info = _guessit_info(name)
-            title = str(info.get("title", "") or "")
-            season = _season_number(info.get("season"))
-            episode = _position_number(info.get("episode"))
-            if _SEASON_RANGE_TOKEN.search(name):
-                season = None
-            if _has_unaccepted_release_x_position(name):
-                # 与统一识别上下文保持一致：画面比例不是季集位置。
-                season = None
-                episode = None
-            explicit_episode = _extract_episode(name)
-            untrusted_guessed_episode = _guessit_episode_is_untrusted(
-                name,
-                explicit_episode,
-                episode,
-                season,
-            )
-            if untrusted_guessed_episode:
-                episode = None
-                season = None
-            explicit_season = _extract_explicit_season(
-                name, episode_context=(explicit_episode is not None or episode is not None),
-            )
-            implicit_season, implicit_season_span = _implicit_season_hint(
-                name, episode_context=(explicit_episode is not None or episode is not None),
-            )
-            deterministic_season = (
-                explicit_season if explicit_season is not None else implicit_season
-            )
-            special_episode = _extract_special_episode(name)
-            if deterministic_season is not None:
-                season = deterministic_season
-            if explicit_episode is not None:
-                episode = explicit_episode
-            if special_episode is not None:
-                season = 0
-                episode = special_episode
-            title_source = _strip_known_episode_suffix(name, episode, season)
-            if explicit_season is None and implicit_season is not None:
-                title_source = _remove_text_span(title_source, implicit_season_span)
-            canonical_title, _ = _clean_release_stem(title_source)
-            release_candidates, _ = _non_destructive_release_title_candidates(
-                title_source
-            )
-            if release_candidates:
-                canonical_title = release_candidates[0]
-            if deterministic_season is not None:
-                canonical_title = _strip_season_tokens(canonical_title)
-            canonical_title = re.sub(r"\s+", " ", canonical_title).strip(" ._-")
-            # GuessIt 主要提供季集等结构字段。标题以原始发布名清洗结果为锚，
-            # 避免长中文标题被错误切成末尾短语（例如仅剩“S 級”）。
-            if canonical_title and (
-                not title
-                or implicit_season is not None
-                or _low_information_query(title)
-                or (
-                    len(_comparison_key(canonical_title).replace(" ", ""))
-                    > len(_comparison_key(title).replace(" ", ""))
-                    and _title_similarity_score(canonical_title, title) < 0.9
-                )
-            ):
-                title = canonical_title
-            if deterministic_season is not None:
-                title = _strip_season_tokens(title)
-            if special_episode is not None:
-                title = _SPECIAL_EPISODE_TOKEN.sub(" ", title)
-                title = strip_special_media_markers(title)
-            title = re.sub(r"\s+", " ", title).strip(" ._-")
-            mtype = "tv" if (
-                (info.get("type") == "episode" and not untrusted_guessed_episode)
-                or season is not None
-                or episode is not None
-            ) else "movie"
-            return {
-                "title": title,
-                "year": str(info.get("year", "") or ""),
-                "type": mtype,
-                "season": season,
-                "episode": episode,
-            }
-        except Exception as e:
-            logger.warning("guessit 解析失败 type=%s", type(e).__name__)
-            return {"title": name, "year": "", "type": "movie",
-                    "season": None, "episode": None}
-
     @staticmethod
     def _release_parse_tokens(context: RecognitionContext) -> tuple[ReleaseParseToken, ...]:
         tokens: list[ReleaseParseToken] = []
@@ -4782,13 +4816,10 @@ class TMDBScraper:
         self, filename: str, parent_path: str = "", match: MatchResult | None = None,
     ) -> ReleaseParseResult:
         """一次性生成标题、原始季集、有效季集与可审计证据。"""
-        fields = dict(self._parse_filename_fields(filename) or {})
-        context = extract_recognition_context(filename, parent_path)
-        from app.modules.recognition_preprocess_rules import apply_rules
-
-        processed = apply_rules(
-            filename, parent_path, season=context.season, episode=context.episode,
-        )
+        core = _parse_release_core(filename, parent_path, include_release=True)
+        context = core.context
+        fields = dict(core.release_fields or {})
+        processed = self.prepare_recognition(filename, parent_path, _core=core)
         effective_season = processed.season
         effective_episode = processed.episode
         if match is not None and match.preprocess_evaluated:
@@ -4832,16 +4863,26 @@ class TMDBScraper:
 
     def parse_source_position(self, filename: str, parent_path: str = "") -> tuple[int | None, int | None]:
         """返回未应用预处理和集数映射的原始季集位置。"""
-        context = extract_recognition_context(filename, parent_path)
+        context = _parse_release_core(filename, parent_path).context
         return context.season, context.episode
 
-    def prepare_recognition(self, filename: str, parent_path: str = ""):
+    def prepare_recognition(
+        self,
+        filename: str,
+        parent_path: str = "",
+        *,
+        _core: _ReleaseParseCore | None = None,
+    ):
         """构造统一识别投影；原始显式 ID、人工锁和强制规则仍在其前判定。"""
         from app.modules.recognition_preprocess_rules import apply_rules
 
-        raw_context = extract_recognition_context(filename, parent_path)
+        core = _core or _parse_release_core(filename, parent_path)
+        context = core.context
         return apply_rules(
-            filename, parent_path, season=raw_context.season, episode=raw_context.episode,
+            filename,
+            parent_path,
+            season=context.season,
+            episode=context.episode,
         )
 
     @staticmethod
@@ -5996,13 +6037,15 @@ class TMDBScraper:
         *,
         media_type_hint: str = "",
         source_context: RecognitionContext | None = None,
+        _core: _ReleaseParseCore | None = None,
     ) -> RecognitionResult:
         """执行不含 AI 的确定性 TMDB 搜索、评分与阈值决策。
 
         ``source_context`` 只保留管理员预处理前的目录来源；标题替换可以
         改善搜索召回，但不能重新让低信息根目录覆盖完整文件标题。
         """
-        context = extract_recognition_context(filename, parent_path)
+        core = _core or _parse_release_core(filename, parent_path)
+        context = _copy_recognition_context(core.context)
         _inherit_source_query_provenance(context, source_context)
         hint = str(media_type_hint or "").strip().lower()
         if hint in {"movie", "tv"}:
@@ -6142,7 +6185,7 @@ class TMDBScraper:
                 season=context.season,
                 episode=context.episode,
                 title_variants=titles,
-                cleaned_components=dict(context.cleaned_components),
+                cleaned_components=_copy_cleaned_components(context.cleaned_components),
             )
             second = self._recognize_context(
                 hint_context,
@@ -6574,7 +6617,7 @@ class TMDBScraper:
         ):
             return deterministic
         if retry.context is not None:
-            cleaned = dict(retry.context.cleaned_components)
+            cleaned = _copy_cleaned_components(retry.context.cleaned_components)
             cleaned["release_prefixes"] = _unique_text(
                 [raw_token, *cleaned.get("release_prefixes", [])]
             )
@@ -6757,7 +6800,7 @@ class TMDBScraper:
                 season=context.season,
                 episode=context.episode,
                 title_variants=_unique_text((hint_title, *search_anchors)),
-                cleaned_components=dict(context.cleaned_components),
+                cleaned_components=_copy_cleaned_components(context.cleaned_components),
             )
             second = self._recognize_context(
                 hint_context,
@@ -7008,7 +7051,7 @@ class TMDBScraper:
                 season=source_context.season,
                 episode=source_context.episode,
                 title_variants=[hint_title],
-                cleaned_components=dict(source_context.cleaned_components),
+                cleaned_components=_copy_cleaned_components(source_context.cleaned_components),
             )
             strict = self._recognize_context(
                 hint_context,
@@ -7166,7 +7209,7 @@ class TMDBScraper:
                 ai_result.original_title,
                 *ai_result.aliases,
             )),
-            cleaned_components=dict(context.cleaned_components),
+            cleaned_components=_copy_cleaned_components(context.cleaned_components),
         )
         second = self._recognize_context(
             ai_context,
@@ -7511,7 +7554,8 @@ class TMDBScraper:
     ) -> MatchResult:
         self._last_search_error = ""
         self._last_search_status = ""
-        parsed = self._parse_filename_fields(filename)
+        core = _parse_release_core(filename, parent_path, include_release=True)
+        parsed = dict(core.release_fields or {})
         filename_tmdb_id, filename_tmdb_conflict = _resolve_explicit_tmdb_marker(
             filename
         )
@@ -7528,11 +7572,11 @@ class TMDBScraper:
 
         # 辅助源最终放行必须回看未经过管理员预处理规则的标题锚点；搜索本身
         # 仍使用预处理投影，以保留规则对召回率的改善。
-        raw_context = extract_recognition_context(filename, parent_path)
+        raw_context = core.context
         raw_source_anchors = _source_title_anchors(raw_context)
 
         # 先在原始输入上解析投影，但不改变显式 ID、人工锁和管理员规则的优先级。
-        processed = self.prepare_recognition(filename, parent_path)
+        processed = self.prepare_recognition(filename, parent_path, _core=core)
 
         if filename_tmdb_conflict or parent_tmdb_conflict:
             result = MatchResult(
@@ -7568,7 +7612,9 @@ class TMDBScraper:
         media_type = hint or parsed["type"]
 
         # 1. 上下文映射锁。旧版仅按文件名保存的锁保留审计但不再自动命中。
-        locked = self._get_lock(filename, parent_path, media_type_hint=hint)
+        locked = self._get_lock(
+            filename, parent_path, media_type_hint=hint, context=raw_context,
+        )
         if locked:
             result = MatchResult(
                 tmdb_id=locked["tmdb_id"], title=locked.get("title", ""),
@@ -7597,12 +7643,18 @@ class TMDBScraper:
 
         # 人工确认形成的标题别名只在证据唯一时生效，并且仍回读 TMDB
         # 详情；这比继续扩张发布组硬编码更稳定，也不会绕过类型校验。
+        processed_core = core
+        if (
+            processed.filename != filename
+            or processed.parent_path != parent_path
+        ):
+            processed_core = _parse_release_core(
+                processed.filename, processed.parent_path,
+            )
         try:
             from app.modules.media_aliases import lookup_manual_alias
 
-            alias_context = extract_recognition_context(
-                processed.filename, processed.parent_path
-            )
+            alias_context = processed_core.context
             alias_entry = lookup_manual_alias(
                 _unique_text((
                     alias_context.normalized_title,
@@ -7641,16 +7693,16 @@ class TMDBScraper:
             )
             return self._attach_preprocess(result, processed)
 
-        deterministic = (
-            self.deterministic_recognize(
-                processed.filename, processed.parent_path,
-                media_type_hint=hint, source_context=raw_context,
-            )
-            if hint
-            else self.deterministic_recognize(
-                processed.filename, processed.parent_path,
-                source_context=raw_context,
-            )
+        deterministic_kwargs = {
+            "source_context": raw_context,
+            "_core": processed_core,
+        }
+        if hint:
+            deterministic_kwargs["media_type_hint"] = hint
+        deterministic = self.deterministic_recognize(
+            processed.filename,
+            processed.parent_path,
+            **deterministic_kwargs,
         )
         if deterministic.context is not None:
             verified_implicit_season = bool(
@@ -7735,11 +7787,13 @@ class TMDBScraper:
         raw_name: str,
         parent_path: str = "",
         media_type_hint: str = "",
+        *,
+        context: RecognitionContext | None = None,
     ) -> tuple[str, str, int]:
         normalized_parent = re.sub(
             r"/+", "/", str(parent_path or "").replace("\\", "/").strip()
         ).strip("/")
-        context = extract_recognition_context(raw_name, normalized_parent)
+        context = context or extract_recognition_context(raw_name, normalized_parent)
         hint = str(media_type_hint or "").strip().lower()
         media_type = hint if hint in {"movie", "tv"} else context.media_type
         season = context.season if isinstance(context.season, int) and context.season >= 0 else -1
@@ -7751,9 +7805,10 @@ class TMDBScraper:
         parent_path: str = "",
         *,
         media_type_hint: str = "",
+        context: RecognitionContext | None = None,
     ) -> Optional[dict]:
         normalized_parent, media_type, season = self._lock_context(
-            raw_name, parent_path, media_type_hint
+            raw_name, parent_path, media_type_hint, context=context,
         )
         return get_tmdb_lock(
             raw_name=raw_name,
@@ -7854,12 +7909,3 @@ class TMDBScraper:
             "已锁定映射: %s [%s] → tmdb-%s (%s)",
             raw_name, parent_path or "根目录", tmdb_id, title,
         )
-
-
-def deterministic_recognize(filename: str, parent_path: str = "") -> RecognitionResult:
-    """兼容函数入口；现有调用只传 filename 时仍可工作。"""
-    scraper = TMDBScraper()
-    try:
-        return scraper.deterministic_recognize(filename, parent_path)
-    finally:
-        scraper.close()
