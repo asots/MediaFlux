@@ -25,6 +25,12 @@ def _clear_rss() -> None:
 
 
 class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
+    def test_qb_snapshot_has_only_the_unified_public_entrypoint(self):
+        self.assertTrue(callable(getattr(RSSEngine, "submit_qb_snapshot", None)))
+        self.assertFalse(hasattr(RSSEngine, "submit_pending_qb_snapshot"))
+        self.assertFalse(hasattr(RSSEngine, "retry_failed_qb_snapshot"))
+        self.assertFalse(hasattr(RSSEngine, "_submit_qb_snapshot"))
+
     def setUp(self):
         _clear_rss()
         self.runtime = {
@@ -115,12 +121,15 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
             "error": "QB_SECRET /private/path",
         }
         with patch.object(
-            RSSEngine, "submit_pending_qb_snapshot", return_value=raw
+            RSSEngine, "submit_qb_snapshot", return_value=raw
         ) as submit:
             result = submit_pending_rss_to_qb_confirmed({"limit": 2}, fingerprint)
         expected_rows, runtime = submit.call_args.args
         self.assertEqual([item["id"] for item in expected_rows], [second, first])
         self.assertEqual(runtime, self.runtime)
+        self.assertIs(
+            submit.call_args.kwargs["claim"], db.claim_pending_rss_qb_entries
+        )
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "partial")
         self.assertEqual(
@@ -150,7 +159,7 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
             "outcome_unknown": 1,
         }
         fingerprint = prepare_rss_pending_download({"limit": 1})[1]
-        with patch.object(RSSEngine, "submit_pending_qb_snapshot", return_value=raw):
+        with patch.object(RSSEngine, "submit_qb_snapshot", return_value=raw):
             result = submit_pending_rss_to_qb_confirmed({"limit": 1}, fingerprint)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "review_required")
@@ -173,7 +182,7 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
             "outcome_unknown": 1,
         }
         fingerprint = prepare_rss_pending_download({"limit": 3})[1]
-        with patch.object(RSSEngine, "submit_pending_qb_snapshot", return_value=raw):
+        with patch.object(RSSEngine, "submit_qb_snapshot", return_value=raw):
             result = submit_pending_rss_to_qb_confirmed({"limit": 3}, fingerprint)
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "partial")
@@ -266,7 +275,9 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
                 return_value=TorrentAddResult(True),
             ) as add,
         ):
-            result = RSSEngine().submit_pending_qb_snapshot(expected, self.runtime)
+            result = RSSEngine().submit_qb_snapshot(
+                expected, self.runtime, claim=db.claim_pending_rss_qb_entries
+            )
         self.assertEqual(result["submitted"], 1)
         self.assertEqual(result["failed"], 1)
         init.assert_called_once_with(
@@ -319,7 +330,9 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
             "app.clients.qbittorrent.QBittorrentClient.add_torrent_detailed",
             return_value=TorrentAddResult(False, "qb_outcome_unknown", False),
         ):
-            result = RSSEngine().submit_pending_qb_snapshot(expected, self.runtime)
+            result = RSSEngine().submit_qb_snapshot(
+                expected, self.runtime, claim=db.claim_pending_rss_qb_entries
+            )
         self.assertEqual(result["failed"], 1)
         self.assertEqual(result["outcome_unknown"], 1)
 
@@ -355,7 +368,9 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
                 return_value=TorrentAddResult(True),
             ) as add,
         ):
-            result = RSSEngine().submit_pending_qb_snapshot(expected, self.runtime)
+            result = RSSEngine().submit_qb_snapshot(
+                expected, self.runtime, claim=db.claim_pending_rss_qb_entries
+            )
         self.assertTrue(result["ok"])
         self.assertEqual(result["submitted"], 2)
         self.assertEqual(result["failed"], 0)

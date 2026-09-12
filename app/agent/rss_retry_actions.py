@@ -157,7 +157,9 @@ def _retry_failed_rss_to_qb_state(state: dict[str, Any]) -> ToolResult:
 
     from app.modules.rss import RSSEngine
 
-    raw = RSSEngine().retry_failed_qb_snapshot(entries, runtime_config)
+    raw = RSSEngine().submit_qb_snapshot(
+        entries, runtime_config, claim=db.claim_retryable_failed_rss_qb_entries,
+    )
     requested = max(0, int(raw.get("requested") or 0))
     claimed = max(0, int(raw.get("claimed") or 0))
     submitted = max(0, int(raw.get("submitted") or 0))

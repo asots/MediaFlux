@@ -1128,37 +1128,14 @@ class RSSEngine:
             "review_required": outcome_unknown_count > 0,
         }
 
-    def submit_pending_qb_snapshot(
-        self,
-        expected_entries: list[dict],
-        runtime_config: dict,
-    ) -> dict:
-        """复核并提交 Agent 已确认的 qB pending 集合。"""
-        return self._submit_qb_snapshot(
-            expected_entries,
-            runtime_config,
-            claim=db.claim_pending_rss_qb_entries,
-        )
-
-    def retry_failed_qb_snapshot(
-        self,
-        expected_entries: list[dict],
-        runtime_config: dict,
-    ) -> dict:
-        """复核并重试 Agent 已确认的可安全重试 qB 失败集合。"""
-        return self._submit_qb_snapshot(
-            expected_entries,
-            runtime_config,
-            claim=db.claim_retryable_failed_rss_qb_entries,
-        )
-
-    def _submit_qb_snapshot(
+    def submit_qb_snapshot(
         self,
         expected_entries: list[dict],
         runtime_config: dict,
         *,
         claim,
     ) -> dict:
+        """按已选定的 pending/retry 原子认领规则执行确认快照。"""
         requested = len(expected_entries)
         if not requested or requested > 20 or not str(runtime_config.get("url") or "").strip():
             return {

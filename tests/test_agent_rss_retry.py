@@ -277,8 +277,14 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
             "outcome_unknown": 1,
         }
         fingerprint = prepare_rss_failure_retry({"limit": 1})[1]
-        with patch.object(RSSEngine, "retry_failed_qb_snapshot", return_value=raw):
+        with patch.object(
+            RSSEngine, "submit_qb_snapshot", return_value=raw
+        ) as submit:
             result = retry_failed_rss_to_qb_confirmed({"limit": 1}, fingerprint)
+        self.assertIs(
+            submit.call_args.kwargs["claim"],
+            db.claim_retryable_failed_rss_qb_entries,
+        )
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "review_required")
         self.assertEqual(result.data["outcome_unknown"], 1)
@@ -299,7 +305,7 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
             "outcome_unknown": 1,
         }
         fingerprint = prepare_rss_failure_retry({"limit": 3})[1]
-        with patch.object(RSSEngine, "retry_failed_qb_snapshot", return_value=raw):
+        with patch.object(RSSEngine, "submit_qb_snapshot", return_value=raw):
             result = retry_failed_rss_to_qb_confirmed({"limit": 3}, fingerprint)
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "partial")
@@ -344,7 +350,9 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
             "app.clients.qbittorrent.QBittorrentClient.add_torrent_detailed",
             return_value=TorrentAddResult(False, "qb_outcome_unknown", False),
         ):
-            result = RSSEngine().retry_failed_qb_snapshot(expected, self.runtime)
+            result = RSSEngine().submit_qb_snapshot(
+                expected, self.runtime, claim=db.claim_retryable_failed_rss_qb_entries
+            )
         self.assertEqual(result["failed"], 1)
         self.assertEqual(result["outcome_unknown"], 1)
         row = db.get_rss_entry(entry_id)
@@ -383,7 +391,9 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
             "app.clients.qbittorrent.QBittorrentClient.add_torrent_detailed",
             side_effect=outcomes,
         ):
-            result = RSSEngine().retry_failed_qb_snapshot(expected, self.runtime)
+            result = RSSEngine().submit_qb_snapshot(
+                expected, self.runtime, claim=db.claim_retryable_failed_rss_qb_entries
+            )
         self.assertEqual(
             result,
             {
