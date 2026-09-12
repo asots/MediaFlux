@@ -71,11 +71,25 @@ def execute_organize_plans(
 
     apply_notification_context(stats, notification_context)
 
-    def write_organize_audit(log_args, log_kwargs, items):
-        payload = dict(log_kwargs)
+    def write_plan_audit(plan, match, destination, status, outcome, items):
+        payload = {
+            "source_dir_id": source_dir_id,
+            "original_parent_id": plan.original_parent_id,
+            "original_name": plan.original_name,
+            "media_type": match.media_type,
+            "provider": organizer._match_provider(match),
+            "external_id": organizer._match_external_id(match),
+            "title": match.title,
+            "year": match.year,
+            "release_parse": _release_parse_diagnostic(match),
+            **outcome,
+        }
         if operation_token:
             payload["operation_token"] = operation_token
-        return organizer._write_organize_audit(log_args, payload, items)
+        return organizer._write_organize_audit(
+            ("guangya", plan.original_path, destination, plan.file_id, status, match.tmdb_id),
+            payload, items,
+        )
 
     subtitle_plans_by_video = subtitle_plans_by_video or {}
     moved_companions: set[str] = set()
@@ -106,95 +120,6 @@ def execute_organize_plans(
             3,
         )
         return runtime.inventory_revision(detail)
-
-    def load_target_inventory(target_id: str, *, force: bool = False):
-        """读取或复用单写入器维护的目标库存。
-
-        有目录 etag/更新时间时先做轻量版本校验，仅在版本变化、每 32 次写入
-        或 30 秒到期时重新分页读取；版本字段不可用时严格维持逐计划完整刷新。
-        覆盖/删除仍另行执行文件级快照校验，任何写入异常都会立即失效缓存。
-        """
-        snapshot = runtime.get_inventory(target_id)
-        current_revision = None
-        revision_checked = False
-        stale = bool(
-            snapshot is not None
-            and (
-                snapshot.writes_since_refresh >= 32
-                or time.monotonic() - snapshot.refreshed_at >= 30.0
-            )
-        )
-        if snapshot is not None and not force and not stale:
-            current_revision = read_target_revision(target_id)
-            revision_checked = True
-            if (
-                snapshot.revision is not None
-                and current_revision == snapshot.revision
-            ):
-                stats["target_inventory_cache_hits"] = int(
-                    stats.get("target_inventory_cache_hits", 0) or 0
-                ) + 1
-                return snapshot
-            if current_revision is not None and snapshot.revision is not None:
-                stats["target_revision_mismatches"] = int(
-                    stats.get("target_revision_mismatches", 0) or 0
-                ) + 1
-            else:
-                stats["target_revision_fallback_refreshes"] = int(
-                    stats.get("target_revision_fallback_refreshes", 0) or 0
-                ) + 1
-
-        # 首次读取也必须先建立版本基线；否则“先 list_dir、后第一次
-        # file_info”的窗口会把已经过期的列表误标为当前版本。目录在分页
-        # 读取期间变化时重试一次，持续变化则失败关闭，避免基于混合快照替换。
-        revision_before = current_revision
-        if not revision_checked:
-            revision_before = read_target_revision(target_id)
-        files = []
-        stable_revision = None
-        for attempt in range(2):
-            refresh_started = time.monotonic()
-            files = organizer.client.list_dir(target_id)
-            stats["target_inventory_refresh_elapsed_seconds"] = round(
-                float(stats.get(
-                    "target_inventory_refresh_elapsed_seconds", 0.0
-                ) or 0.0) + max(0.0, time.monotonic() - refresh_started),
-                3,
-            )
-            if revision_before is None:
-                break
-            revision_after = read_target_revision(target_id)
-            if revision_after is None:
-                break
-            if revision_after == revision_before:
-                stable_revision = revision_after
-                break
-            stats["target_revision_mismatches"] = int(
-                stats.get("target_revision_mismatches", 0) or 0
-            ) + 1
-            if attempt == 0:
-                stats["target_inventory_unstable_retries"] = int(
-                    stats.get("target_inventory_unstable_retries", 0) or 0
-                ) + 1
-                revision_before = revision_after
-                continue
-            runtime.invalidate_inventory(target_id)
-            stats["target_inventory_unstable_failures"] = int(
-                stats.get("target_inventory_unstable_failures", 0) or 0
-            ) + 1
-            raise RuntimeError("目标目录在库存读取期间持续变化，请稍后重试")
-        snapshot = runtime.store_inventory(
-            target_id, files,
-            {item.file_id: item.name for item in files if not item.is_dir},
-            revision=stable_revision,
-        )
-        stats["target_dir_refreshes"] = int(
-            stats.get("target_dir_refreshes", 0) or 0
-        ) + 1
-        stats["target_inventory_refreshes"] = int(
-            stats.get("target_inventory_refreshes", 0) or 0
-        ) + 1
-        return snapshot
 
     def checkpoint_target_revision(target_id: str) -> None:
         """成功写入后记录目录新版本；失败或字段缺失则让下一计划严格刷新。"""
@@ -253,28 +178,15 @@ def execute_organize_plans(
         companions = organizer._companions_for_plan(
             plan, companion_files.get(plan.original_path, [])
         )
-        write_organize_audit(
-            (
-                "guangya", plan.original_path,
-                plan.target_path + "/" + target_name,
-                plan.file_id, "skipped", match.tmdb_id,
-            ),
+        write_plan_audit(
+            plan, match, plan.target_path + "/" + target_name, "skipped",
             {
-                "source_dir_id": source_dir_id,
-                "original_parent_id": plan.original_parent_id,
-                "original_name": plan.original_name,
                 "current_parent_id": plan.original_parent_id,
                 "current_name": plan.original_name,
                 "target_parent_id": target_parent_id,
-                "media_type": match.media_type,
-                "provider": organizer._match_provider(match),
-                "external_id": organizer._match_external_id(match),
-                "title": match.title,
-                "year": match.year,
                 "season": position_season,
                 "episode": position_episode,
                 "error": reason,
-                "release_parse": _release_parse_diagnostic(match),
                 "legacy_incomplete": False,
             },
             [{
@@ -344,23 +256,14 @@ def execute_organize_plans(
             match = p.match or MatchResult()
             parsed = organizer._parse_media_fields(p.original_name)
             position_season, position_episode = resolved_plan_position(p, parsed)
-            write_organize_audit(
-                ("guangya", p.original_path, p.target_path, p.file_id, "skipped", match.tmdb_id),
+            write_plan_audit(
+                p, match, p.target_path, "skipped",
                 {
-                    "source_dir_id": source_dir_id,
-                    "original_parent_id": p.original_parent_id,
-                    "original_name": p.original_name,
                     "current_parent_id": p.original_parent_id,
                     "current_name": p.original_name,
-                    "media_type": match.media_type,
-                    "provider": organizer._match_provider(match),
-                    "external_id": organizer._match_external_id(match),
-                    "title": match.title,
-                    "year": match.year,
                     "season": position_season,
                     "episode": position_episode,
                     "error": skip_reason,
-                    "release_parse": _release_parse_diagnostic(match),
                     "legacy_incomplete": False,
                 },
                 [{
@@ -384,26 +287,14 @@ def execute_organize_plans(
                 p, companion_files.get(p.original_path, [])
             )
             try:
-                write_organize_audit(
-                    (
-                        "guangya", p.original_path, "", p.file_id,
-                        audit_status, match.tmdb_id,
-                    ),
+                write_plan_audit(
+                    p, match, "", audit_status,
                     {
-                        "source_dir_id": source_dir_id,
-                        "original_parent_id": p.original_parent_id,
-                        "original_name": p.original_name,
                         "current_parent_id": p.original_parent_id,
                         "current_name": p.original_name,
-                        "media_type": match.media_type,
-                        "provider": organizer._match_provider(match),
-                        "external_id": organizer._match_external_id(match),
-                        "title": match.title,
-                        "year": match.year,
                         "season": position_season,
                         "episode": position_episode,
                         "error": p.note or match.error or "未进入整理执行",
-                        "release_parse": _release_parse_diagnostic(match),
                         "legacy_incomplete": False,
                     },
                     [{
@@ -486,7 +377,10 @@ def execute_organize_plans(
             runtime.remember_target_path(
                 str(rules.target_dir_id or ""), p.target_path, target_id,
             )
-            target_snapshot = load_target_inventory(target_id)
+            target_snapshot = runtime.load_target_inventory(
+                target_id, list_files=organizer.client.list_dir,
+                read_revision=read_target_revision, stats=stats,
+            )
             target_files = target_snapshot.files
             evidence_names = target_snapshot.evidence_names
             probe_batches, probe_hits = organizer._prime_existing_variant_cache(
@@ -768,27 +662,14 @@ def execute_organize_plans(
             )
             log_id = None
             try:
-                log_id = write_organize_audit(
-                    (
-                        "guangya", p.original_path,
-                        p.target_path + "/" + actual_name,
-                        p.file_id, "success", p.match.tmdb_id,
-                    ),
+                log_id = write_plan_audit(
+                    p, p.match, p.target_path + "/" + actual_name, "success",
                     {
-                        "source_dir_id": source_dir_id,
-                        "original_parent_id": p.original_parent_id,
-                        "original_name": p.original_name,
                         "current_parent_id": target_id,
                         "current_name": actual_name,
                         "target_parent_id": target_id,
-                        "media_type": p.match.media_type,
-                        "provider": organizer._match_provider(p.match),
-                        "external_id": organizer._match_external_id(p.match),
-                        "title": p.match.title,
-                        "year": p.match.year,
                         "season": position_season,
                         "episode": position_episode,
-                        "release_parse": _release_parse_diagnostic(p.match),
                         "legacy_incomplete": False,
                     },
                     [{
@@ -930,26 +811,14 @@ def execute_organize_plans(
                 current_group["error"] = failure_message
             parsed = organizer._parse_media_fields(p.original_name)
             position_season, position_episode = resolved_plan_position(p, parsed)
-            failed_log_id = write_organize_audit(
-                (
-                    "guangya", p.original_path, p.target_path,
-                    p.file_id, "failed", p.match.tmdb_id,
-                ),
+            failed_log_id = write_plan_audit(
+                p, p.match, p.target_path, "failed",
                 {
-                    "source_dir_id": source_dir_id,
-                    "original_parent_id": p.original_parent_id,
-                    "original_name": p.original_name,
                     "current_parent_id": "" if rollback_incomplete else p.original_parent_id,
                     "current_name": "" if rollback_incomplete else p.original_name,
-                    "media_type": p.match.media_type,
-                    "provider": organizer._match_provider(p.match),
-                    "external_id": organizer._match_external_id(p.match),
-                    "title": p.match.title,
-                    "year": p.match.year,
                     "season": position_season,
                     "episode": position_episode,
                     "error": failure_message,
-                    "release_parse": _release_parse_diagnostic(p.match),
                     "legacy_incomplete": rollback_incomplete,
                 },
                 [{

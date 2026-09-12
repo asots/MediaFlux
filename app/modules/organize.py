@@ -5774,14 +5774,7 @@ class Organizer:
             )
         if automatic and explicit_tmdb_conflict:
             marker_error = "同一路径层级包含多个不同 TMDB 标记，已阻止自动整理"
-            match.need_confirm = True
-            match.status = "low_confidence"
-            match.error = marker_error
-            rejected = getattr(match, "rejected_constraints", None)
-            if isinstance(rejected, list) and "explicit_tmdb_marker_conflict" not in rejected:
-                rejected.append("explicit_tmdb_marker_conflict")
-            plan.action = "skip"
-            plan.note = marker_error
+            plan.require_confirmation(marker_error, constraint="explicit_tmdb_marker_conflict")
             return plan
         if automatic and explicit_tmdb_id:
             recognized_tmdb_id = str(
@@ -5814,14 +5807,7 @@ class Organizer:
             elif expects_tv and str(getattr(match, "media_type", "") or "").lower() != "tv":
                 marker_error = "显式 TMDB 标记所在文件包含剧集/特典位置，但识别结果不是剧集，需人工确认"
             if marker_error:
-                match.need_confirm = True
-                match.status = "low_confidence"
-                match.error = marker_error
-                rejected = getattr(match, "rejected_constraints", None)
-                if isinstance(rejected, list) and "explicit_tmdb_marker_mismatch" not in rejected:
-                    rejected.append("explicit_tmdb_marker_mismatch")
-                plan.action = "skip"
-                plan.note = marker_error
+                plan.require_confirmation(marker_error, constraint="explicit_tmdb_marker_mismatch")
                 return plan
         automatic_policy = automatic_match_policy(rules.automatic_match_preset)
         automatic_proof = (
@@ -6018,11 +6004,7 @@ class Organizer:
             )
         ):
             message = "标题尾部数字同时属于媒体正式名称，无法安全确定季号，需人工确认"
-            match.need_confirm = True
-            match.status = "low_confidence"
-            match.error = message
-            plan.action = "skip"
-            plan.note = message
+            plan.require_confirmation(message)
             plan.episode = parsed_episode
             return plan
 
@@ -6039,11 +6021,7 @@ class Organizer:
             tmdb_identity = self._supports_tmdb_position_validation(match)
             if season_title_hint is not None and not tmdb_identity and automatic:
                 message = "检测到季标题线索，但当前候选不是 TMDB 身份，无法安全换算季号，需人工确认"
-                match.need_confirm = True
-                match.status = "low_confidence"
-                match.error = message
-                plan.action = "skip"
-                plan.note = message
+                plan.require_confirmation(message)
                 plan.episode = parsed_episode
                 return plan
             inferred_season = season_title_hint if tmdb_identity else None
@@ -6078,11 +6056,7 @@ class Organizer:
                 and has_unresolved_season_hint(file.name, parent_path)
             ):
                 message = "检测到续作/分部标记但无法安全确定 TMDB 季号，需人工确认"
-                match.need_confirm = True
-                match.status = "low_confidence"
-                match.error = message
-                plan.action = "skip"
-                plan.note = message
+                plan.require_confirmation(message)
                 plan.episode = parsed_episode
                 return plan
             if (
@@ -6095,11 +6069,7 @@ class Organizer:
                 )
             ):
                 message = "发布标题仍包含未解释的篇章信息，无法安全确定 TMDB 季号，需人工确认"
-                match.need_confirm = True
-                match.status = "low_confidence"
-                match.error = message
-                plan.action = "skip"
-                plan.note = message
+                plan.require_confirmation(message)
                 plan.episode = parsed_episode
                 return plan
             if (
@@ -6111,11 +6081,7 @@ class Organizer:
                 and parsed_episode > 24
             ):
                 message = "孤立高集号缺少季号或连续目录证据，已阻止自动整理"
-                match.need_confirm = True
-                match.status = "low_confidence"
-                match.error = message
-                plan.action = "skip"
-                plan.note = message
+                plan.require_confirmation(message)
                 plan.episode = parsed_episode
                 return plan
             if parsed_season is None:
@@ -6170,11 +6136,7 @@ class Organizer:
                 f"检测到多集文件 E{range_start:02d}-E{episode_end:02d}，"
                 "当前单文件命名不能安全表达范围，需人工确认"
             )
-            match.need_confirm = True
-            match.status = "low_confidence"
-            match.error = message
-            plan.action = "skip"
-            plan.note = message
+            plan.require_confirmation(message)
             plan.season = parsed_season
             plan.episode = range_start
             return plan
@@ -6187,11 +6149,7 @@ class Organizer:
             message = (
                 f"剧集文件缺少集数，不能自动归档: {file.name}（无法确定集号）"
             )
-            match.need_confirm = True
-            match.status = "low_confidence"
-            match.error = message
-            plan.action = "skip"
-            plan.note = message
+            plan.require_confirmation(message)
             plan.season = parsed_season
             return plan
         maps_tmdb_source_positions = self._maps_tmdb_source_positions(match)
@@ -6363,13 +6321,8 @@ class Organizer:
                     }
             if validation.get("required") and not validation.get("passed"):
                 message = self.scraper.position_validation_error(validation)
-                match.need_confirm = True
-                match.status = "low_confidence"
-                match.error = message
                 constraint = f"tmdb_position_{validation.get('reason') or 'unverified'}"
-                rejected = getattr(match, "rejected_constraints", None)
-                if isinstance(rejected, list) and constraint not in rejected:
-                    rejected.append(constraint)
+                plan.require_confirmation(message, constraint=constraint)
                 threshold_decision = dict(
                     getattr(match, "threshold_decision", None) or {}
                 )
@@ -6378,8 +6331,6 @@ class Organizer:
                     "reason": constraint,
                 })
                 match.threshold_decision = threshold_decision
-                plan.action = "skip"
-                plan.note = message
                 plan.season = parsed_season
                 plan.episode = parsed_episode
                 return plan
@@ -6417,17 +6368,11 @@ class Organizer:
                         if identity_probe_position_recovery_candidate
                         else "文件季集位置无法由安全映射消解，需人工确认"
                     )
-                    match.need_confirm = True
-                    match.status = "low_confidence"
-                    match.error = message
-                    plan.action = "skip"
-                    plan.note = message
+                    plan.require_confirmation(message)
                     plan.season = parsed_season
                     plan.episode = parsed_episode
                     return plan
-                match.need_confirm = False
-                match.status = "matched"
-                match.error = ""
+                plan.mark_matched()
                 recoverable_constraints = {
                     "tmdb_position_season_not_found",
                     "tmdb_position_episode_out_of_range",
@@ -6486,17 +6431,11 @@ class Organizer:
                 )
                 if not directory_identity_attestation_accepted:
                     message = "目录身份凭证未通过当前文件的最终季集复核，需人工确认"
-                    match.need_confirm = True
-                    match.status = "low_confidence"
-                    match.error = message
-                    plan.action = "skip"
-                    plan.note = message
+                    plan.require_confirmation(message)
                     plan.season = parsed_season
                     plan.episode = parsed_episode
                     return plan
-                match.need_confirm = False
-                match.status = "matched"
-                match.error = ""
+                plan.mark_matched()
                 match.metadata = {
                     **dict(getattr(match, "metadata", None) or {}),
                     _DIRECTORY_IDENTITY_ATTESTATION_ACCEPTED_KEY: {
@@ -6593,17 +6532,11 @@ class Organizer:
                 )
                 if not automatic_proof_accepted:
                     message = "自动识别证据与最终季集位置不一致，需人工确认"
-                    match.need_confirm = True
-                    match.status = "low_confidence"
-                    match.error = message
-                    plan.action = "skip"
-                    plan.note = message
+                    plan.require_confirmation(message)
                     plan.season = parsed_season
                     plan.episode = parsed_episode
                     return plan
-                match.need_confirm = False
-                match.status = "matched"
-                match.error = ""
+                plan.mark_matched()
                 match.metadata = {
                     **dict(getattr(match, "metadata", None) or {}),
                     "verified_automatic_identity_proof_accepted": {
@@ -6642,17 +6575,11 @@ class Organizer:
                 )
                 if not directory_package_proof_accepted:
                     message = "连续剧集包身份凭证未通过最终季集复核，需人工确认"
-                    match.need_confirm = True
-                    match.status = "low_confidence"
-                    match.error = message
-                    plan.action = "skip"
-                    plan.note = message
+                    plan.require_confirmation(message)
                     plan.season = parsed_season
                     plan.episode = parsed_episode
                     return plan
-                match.need_confirm = False
-                match.status = "matched"
-                match.error = ""
+                plan.mark_matched()
                 match.metadata = {
                     **dict(getattr(match, "metadata", None) or {}),
                     _DIRECTORY_PACKAGE_IDENTITY_ACCEPTED_KEY: {
@@ -6668,11 +6595,7 @@ class Organizer:
             and not automatic_proof_accepted
         ):
             message = "自动识别强证据未完成最终季集复核，需人工确认"
-            match.need_confirm = True
-            match.status = "low_confidence"
-            match.error = message
-            plan.action = "skip"
-            plan.note = message
+            plan.require_confirmation(message)
             plan.season = parsed_season
             plan.episode = parsed_episode
             return plan
@@ -6681,11 +6604,7 @@ class Organizer:
             and not directory_package_proof_accepted
         ):
             message = "连续剧集包身份凭证未完成最终季集复核，需人工确认"
-            match.need_confirm = True
-            match.status = "low_confidence"
-            match.error = message
-            plan.action = "skip"
-            plan.note = message
+            plan.require_confirmation(message)
             plan.season = parsed_season
             plan.episode = parsed_episode
             return plan

@@ -177,3 +177,96 @@ class OrganizeTaskRuntime:
                     self._recognition_inflight.discard(key)
                 self._recognition_condition.notify_all()
             raise
+
+
+    def load_target_inventory(
+        self, target_id: str, *, list_files: Callable[[str], list[Any]],
+        read_revision: Callable[[str], tuple[str, int] | None], stats: dict,
+    ) -> TargetInventorySnapshot:
+        """读取或复用单写入器维护的目标库存。
+
+        有目录 etag/更新时间时先做轻量版本校验，仅在版本变化、每 32 次写入
+        或 30 秒到期时重新分页读取；版本字段不可用时严格维持逐计划完整刷新。
+        覆盖/删除仍另行执行文件级快照校验，任何写入异常都会立即失效缓存。
+        """
+        snapshot = self.get_inventory(target_id)
+        current_revision = None
+        revision_checked = False
+        stale = bool(
+            snapshot is not None
+            and (
+                snapshot.writes_since_refresh >= 32
+                or time.monotonic() - snapshot.refreshed_at >= 30.0
+            )
+        )
+        if snapshot is not None and not stale:
+            current_revision = read_revision(target_id)
+            revision_checked = True
+            if (
+                snapshot.revision is not None
+                and current_revision == snapshot.revision
+            ):
+                stats["target_inventory_cache_hits"] = int(
+                    stats.get("target_inventory_cache_hits", 0) or 0
+                ) + 1
+                return snapshot
+            if current_revision is not None and snapshot.revision is not None:
+                stats["target_revision_mismatches"] = int(
+                    stats.get("target_revision_mismatches", 0) or 0
+                ) + 1
+            else:
+                stats["target_revision_fallback_refreshes"] = int(
+                    stats.get("target_revision_fallback_refreshes", 0) or 0
+                ) + 1
+
+        # 首次读取也必须先建立版本基线；否则“先 list_dir、后第一次
+        # file_info”的窗口会把已经过期的列表误标为当前版本。目录在分页
+        # 读取期间变化时重试一次，持续变化则失败关闭，避免基于混合快照替换。
+        revision_before = current_revision
+        if not revision_checked:
+            revision_before = read_revision(target_id)
+        files = []
+        stable_revision = None
+        for attempt in range(2):
+            refresh_started = time.monotonic()
+            files = list_files(target_id)
+            stats["target_inventory_refresh_elapsed_seconds"] = round(
+                float(stats.get(
+                    "target_inventory_refresh_elapsed_seconds", 0.0
+                ) or 0.0) + max(0.0, time.monotonic() - refresh_started),
+                3,
+            )
+            if revision_before is None:
+                break
+            revision_after = read_revision(target_id)
+            if revision_after is None:
+                break
+            if revision_after == revision_before:
+                stable_revision = revision_after
+                break
+            stats["target_revision_mismatches"] = int(
+                stats.get("target_revision_mismatches", 0) or 0
+            ) + 1
+            if attempt == 0:
+                stats["target_inventory_unstable_retries"] = int(
+                    stats.get("target_inventory_unstable_retries", 0) or 0
+                ) + 1
+                revision_before = revision_after
+                continue
+            self.invalidate_inventory(target_id)
+            stats["target_inventory_unstable_failures"] = int(
+                stats.get("target_inventory_unstable_failures", 0) or 0
+            ) + 1
+            raise RuntimeError("目标目录在库存读取期间持续变化，请稍后重试")
+        snapshot = self.store_inventory(
+            target_id, files,
+            {item.file_id: item.name for item in files if not item.is_dir},
+            revision=stable_revision,
+        )
+        stats["target_dir_refreshes"] = int(
+            stats.get("target_dir_refreshes", 0) or 0
+        ) + 1
+        stats["target_inventory_refreshes"] = int(
+            stats.get("target_inventory_refreshes", 0) or 0
+        ) + 1
+        return snapshot

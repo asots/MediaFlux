@@ -78,6 +78,25 @@ class OrganizePlan:
     multipart_ambiguous: bool = False
 
 
+    def require_confirmation(self, reason: str, *, constraint: str = "") -> None:
+        """将身份/位置拒绝统一投影到识别结果和执行计划，不覆盖位置证据。"""
+        self.match.need_confirm = True
+        self.match.status = "low_confidence"
+        self.match.error = reason
+        if constraint:
+            rejected = getattr(self.match, "rejected_constraints", None)
+            if isinstance(rejected, list) and constraint not in rejected:
+                rejected.append(constraint)
+        self.action = "skip"
+        self.note = reason
+
+    def mark_matched(self) -> None:
+        """身份/位置证明通过后，清除先前的待确认状态；证据由调用方保留。"""
+        self.match.need_confirm = False
+        self.match.status = "matched"
+        self.match.error = ""
+
+
 @dataclass(frozen=True)
 class OrganizeContext:
     """一次整理运行的上下文。
@@ -98,7 +117,7 @@ class OrganizeContext:
     automatic: bool = False
     # 组级流水线的实时进度回调；只用于观测，异常不得影响整理结果。
     group_progress: Callable[[dict], None] | None = None
-    # 回退开关：为 False 时继续使用整源扫描/规划/执行的旧路径。
+    # 选择整源快照规划；预览、max_files 和受限目录来源不能逐组重新枚举。
     group_pipeline: bool = True
     # 单次调用的审计归属键；用于精确回读本轮日志，避免并发任务污染。
     operation_token: str = ""

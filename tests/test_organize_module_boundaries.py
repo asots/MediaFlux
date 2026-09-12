@@ -18,6 +18,69 @@ from app.modules.scraper import MatchResult
 
 
 class OrganizeModuleBoundaryTests(unittest.TestCase):
+    def test_plan_confirmation_and_matched_transitions_keep_position_evidence(self):
+        for rejected in (None, [], ["existing"], ["constraint"]):
+            with self.subTest(rejected=rejected):
+                match = MatchResult(tmdb_id="42", media_type="tv", metadata={"identity": "keep"})
+                match.rejected_constraints = rejected.copy() if isinstance(rejected, list) else None
+                plan = organize_models.OrganizePlan("video", "A.mkv", "Season", match=match, season=2, episode=3)
+                plan.require_confirmation("needs confirmation", constraint="constraint")
+                plan.require_confirmation("needs confirmation", constraint="constraint")
+                self.assertEqual((plan.action, plan.note, match.need_confirm, match.status, match.error),
+                    ("skip", "needs confirmation", True, "low_confidence", "needs confirmation"))
+                expected = None if rejected is None else list(dict.fromkeys([*rejected, "constraint"]))
+                self.assertEqual(match.rejected_constraints, expected)
+                plan.mark_matched()
+                plan.mark_matched()
+                self.assertEqual((match.need_confirm, match.status, match.error), (False, "matched", ""))
+                self.assertEqual((plan.season, plan.episode, plan.action, plan.note), (2, 3, "skip", "needs confirmation"))
+                self.assertEqual(match.metadata, {"identity": "keep"})
+                self.assertEqual(match.rejected_constraints, expected)
+
+    def test_inventory_owner_reuses_revision_and_refreshes_at_write_budget(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        runtime = OrganizeTaskRuntime()
+        item = SimpleNamespace(file_id="video", name="A.mkv", is_dir=False)
+        listing = Mock(return_value=[item])
+        revision = Mock(return_value=("etag", 1))
+        stats = {}
+        first = runtime.load_target_inventory("target", list_files=listing, read_revision=revision, stats=stats)
+        second = runtime.load_target_inventory("target", list_files=listing, read_revision=revision, stats=stats)
+        self.assertIs(first, second)
+        self.assertEqual(first.evidence_names, {"video": "A.mkv"})
+        self.assertEqual((listing.call_count, revision.call_count), (1, 3))
+        self.assertEqual(stats["target_inventory_cache_hits"], 1)
+        first.writes_since_refresh = 32
+        refreshed = runtime.load_target_inventory("target", list_files=listing, read_revision=revision, stats=stats)
+        self.assertIsNot(first, refreshed)
+        self.assertEqual(refreshed.writes_since_refresh, 0)
+        self.assertEqual((listing.call_count, revision.call_count), (2, 5))
+        self.assertEqual(stats["target_inventory_refreshes"], 2)
+
+    def test_missing_or_unstable_inventory_revision_never_reuses_unverified_files(self):
+        from unittest.mock import Mock
+
+        runtime = OrganizeTaskRuntime()
+        listing = Mock(return_value=[])
+        revision = Mock(return_value=None)
+        stats = {}
+        for _ in range(2):
+            runtime.load_target_inventory("missing-revision", list_files=listing, read_revision=revision, stats=stats)
+        self.assertEqual(listing.call_count, 2)
+        self.assertEqual(stats["target_revision_fallback_refreshes"], 1)
+        revision.side_effect = [("a", 1), ("b", 2), ("c", 3)]
+        with self.assertRaisesRegex(RuntimeError, "持续变化"):
+            runtime.load_target_inventory("changing", list_files=listing, read_revision=revision, stats=stats)
+        self.assertIsNone(runtime.get_inventory("changing"))
+        self.assertEqual(stats["target_inventory_unstable_retries"], 1)
+        self.assertEqual(stats["target_inventory_unstable_failures"], 1)
+        revision.side_effect = None
+        revision.return_value = ("stable", 4)
+        recovered = runtime.load_target_inventory("changing", list_files=listing, read_revision=revision, stats=stats)
+        self.assertEqual(recovered.revision, ("stable", 4))
+
     def test_models_rules_and_identity_are_direct_exports_not_parallel_implementations(self):
         for module in (organize_models, organize_rules, organize_identity):
             for name, value in inspect.getmembers(module):
