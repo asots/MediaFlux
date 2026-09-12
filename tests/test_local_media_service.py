@@ -84,6 +84,12 @@ class SharedPositionFakeScraper(FakeScraper):
 
 
 class LocalMediaServiceTests(IsolatedDatabaseTestCase):
+    def test_execution_uses_persisted_tasks_without_an_in_memory_write_entry(self):
+        self.assertFalse(hasattr(LocalMediaService, "execute_preview"))
+        self.assertFalse(hasattr(LocalMediaService, "_execute_preview_under_writer"))
+        self.assertTrue(callable(LocalMediaService.create_manual_task))
+        self.assertTrue(callable(LocalMediaService.execute_task))
+
     def setUp(self):
         super().setUp()
         probe = patch(

@@ -1990,40 +1990,6 @@ class LocalMediaService:
         self.inspections.discard(owner, inspection_id)
         return task_id
 
-    @_local_media_operation
-    def execute_preview(
-        self, owner: str, inspection_id: str, preview: dict[str, Any],
-    ) -> MoveTransactionResult:
-        with _local_media_write_lease():
-            return self._execute_preview_under_writer(owner, inspection_id, preview)
-
-    def _execute_preview_under_writer(
-        self, owner: str, inspection_id: str, preview: dict[str, Any],
-    ) -> MoveTransactionResult:
-        inspection = self.inspections.get(owner, inspection_id)
-        if preview.get("status") != "planned" or not preview.get("_move_plans"):
-            raise LocalMediaServiceError("预览尚未达到可执行状态")
-        if preview.get("pending_confirmations"):
-            raise LocalMediaServiceError("预览仍有媒体需要人工确认，尚未移动任何文件")
-        executable_plans = [
-            item for item in preview["_move_plans"] if item.action != "skip"
-        ]
-        if not executable_plans:
-            result = MoveTransactionResult(
-                status="completed",
-                warnings=["按冲突策略保留现有文件，没有需要移动的项目"],
-            )
-            self.inspections.discard(owner, inspection_id)
-            return result
-        targets = db.list_local_library_targets(inspection.source_id, owner=owner)
-        transaction = LocalMoveTransaction(
-            [inspection.root], [Path(item.path) for item in targets], owner=owner,
-        )
-        result = transaction.execute(executable_plans)
-        self.inspections.discard(owner, inspection_id)
-        return result
-
-
 _service: LocalMediaService | None = None
 _service_lock = threading.Lock()
 
