@@ -1,0 +1,216 @@
+digraph MediaFluxFullChain {
+  graph [
+    label="MediaFlux · 项目完整全链路流转拓扑\n源码基线：2026-09-12",
+    labelloc=t,
+    labeljust=c,
+    fontname="Noto Sans CJK SC",
+    fontsize=22,
+    fontcolor="#0F172A",
+    bgcolor="#F8FAFC",
+    rankdir=TB,
+    newrank=true,
+    compound=true,
+    splines=polyline,
+    nodesep=0.32,
+    ranksep=0.58,
+    pad="0.35",
+    margin="0.1"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Noto Sans CJK SC",
+    fontsize=11,
+    fontcolor="#0F172A",
+    color="#94A3B8",
+    penwidth=1.15,
+    margin="0.14,0.09"
+  ];
+
+  edge [
+    fontname="Noto Sans CJK SC",
+    fontsize=9,
+    fontcolor="#475569",
+    color="#64748B",
+    arrowsize=0.72,
+    penwidth=1.05
+  ];
+
+  // ===== 外部参与者与基础设施 =====
+  subgraph cluster_external {
+    label="外部参与者与基础设施";
+    labelloc=t;
+    fontname="Noto Sans CJK SC";
+    fontsize=14;
+    fontcolor="#334155";
+    color="#CBD5E1";
+    penwidth=1.1;
+    style="rounded,filled";
+    fillcolor="#F1F5F9";
+
+    web_user [label="浏览器\nWeb 控制台", fillcolor="#E0F2FE", color="#38BDF8"];
+    tg_user [label="Telegram 用户\n命令 / 链接 / 回调", fillcolor="#FCE7F3", color="#F472B6"];
+    rss_source [label="RSS / Mikan\n订阅源", fillcolor="#FEF3C7", color="#F59E0B"];
+    indexer_source [label="资源站点\n多站 Indexer Provider", fillcolor="#FEF3C7", color="#F59E0B"];
+    discovery_source [label="探索数据源\nTMDB · 豆瓣 · Bangumi", fillcolor="#EDE9FE", color="#8B5CF6"];
+
+    qb [label="qBittorrent\n本地下载器", fillcolor="#DBEAFE", color="#3B82F6"];
+    guangya [label="光鸭云盘\n离线 / 分享 / 目录 / 直链", fillcolor="#CCFBF1", color="#14B8A6"];
+    metadata [label="元数据与识别 Provider\nTMDB · OpenAI-compatible AI\nMetaTube（可选）", fillcolor="#EDE9FE", color="#8B5CF6"];
+    media_servers [label="Jellyfin / Emby\n媒体库、搜索、刷新", fillcolor="#DCFCE7", color="#22C55E"];
+    telegram_api [label="Telegram API\nPolling / 消息发送", fillcolor="#FCE7F3", color="#F472B6"];
+    cloud_cdn [label="光鸭 CDN\n实际视频数据流", fillcolor="#CCFBF1", color="#14B8A6"];
+  }
+
+  // ===== MediaFlux 运行时 =====
+  subgraph cluster_runtime {
+    label="MediaFlux 单进程运行时（FastAPI + Uvicorn · 单 Worker）";
+    labelloc=t;
+    fontname="Noto Sans CJK SC";
+    fontsize=15;
+    fontcolor="#1E293B";
+    color="#64748B";
+    penwidth=1.35;
+    style="rounded,filled";
+    fillcolor="#FFFFFF";
+
+    runtime_entry [label="容器 / CLI 入口\nDocker entrypoint → mediaflux.py → app/cli.py\n路径、权限、生产模式、端口", fillcolor="#F8FAFC", color="#64748B"];
+    fastapi [label="app/main.py\ncreate_app() + lifespan\n中间件 · 路由 · /healthz · /readyz", fillcolor="#F8FAFC", color="#64748B"];
+    web_ui [label="页面层\nJinja2 templates + static JS/CSS\n登录、看板、下载、整理、STRM、设置", fillcolor="#E0F2FE", color="#38BDF8"];
+    http_api [label="路由 / API 层\npages.py + /api/*\nSession · CSRF · 权限 · 输入校验", fillcolor="#DBEAFE", color="#3B82F6"];
+    tg_adapter [label="Telegram 适配层\nbot/handlers.py + progress.py\n命令、普通消息、Inline Callback、进度草稿", fillcolor="#FCE7F3", color="#EC4899"];
+    agent_kernel [label="Media Agent Kernel\nAgentInput → Session → Capability → ToolPipeline\nEffectPlan / Confirm / AgentEvent", fillcolor="#FEF3C7", color="#D97706"];
+    schedulers [label="进程内后台单例\nRSS、媒体订阅、下载跟踪、本地整理、光鸭整理\nSTRM、媒体刷新、通知、Agent 巡检/任务", fillcolor="#FEF3C7", color="#F59E0B"];
+
+    subgraph cluster_domain {
+      label="统一领域服务与业务状态机";
+      labelloc=t;
+      fontname="Noto Sans CJK SC";
+      fontsize=13;
+      fontcolor="#475569";
+      color="#CBD5E1";
+      style="rounded,dashed";
+      fillcolor="#FCFCFD";
+
+      discovery [label="发现与资源索引\napp/discovery + app/indexers + rss.py\n榜单、订阅、候选与筛选", fillcolor="#EDE9FE", color="#8B5CF6"];
+      download_dispatch [label="统一下载编排\ndownload_dispatcher.py\n协议识别、幂等、目标独立状态、重投", fillcolor="#FFF7ED", color="#F97316"];
+      download_tracker [label="下载状态跟踪\ndownload_tracker.py\nqB / 光鸭完成判定、恢复、整理准入", fillcolor="#FFF7ED", color="#F97316"];
+      recognition [label="统一识别引擎\ndirectory_media → scraper → naming\n预处理、TMDB/AI 复核、季集、规格、版本", fillcolor="#F5F3FF", color="#8B5CF6"];
+      organize [label="整理协调与确认\norganize + organize_tasks + confirmations\n扫描、规划、冲突、人工确认、审计", fillcolor="#FFF7ED", color="#EA580C"];
+      local_media [label="本地媒体流水线\nlocal_media_service + scheduler\n路径映射、Writer 锁、移动事务、qB 收尾", fillcolor="#EFF6FF", color="#2563EB"];
+      strm [label="STRM 引擎\nstrm.py + scheduler.py\n全量/增量、索引、失败重试、退役清理", fillcolor="#ECFDF5", color="#059669"];
+      refresh [label="媒体库刷新合并器\nmedia_refresh_coordinator\n去重、分批、绑定 Jellyfin / Emby", fillcolor="#F0FDF4", color="#16A34A"];
+      notification [label="通知与投递中心\nNotificationEvent → Telegram outbox\n确认卡、进度、终态、失败告警", fillcolor="#FDF2F8", color="#DB2777"];
+      playback [label="播放访问面\n/playgy 302 + media_proxy\n签名校验、直链获取、代理透传、播放审计", fillcolor="#ECFEFF", color="#0891B2"];
+    }
+
+    subgraph cluster_state {
+      label="持久化、并发与恢复";
+      labelloc=t;
+      fontname="Noto Sans CJK SC";
+      fontsize=13;
+      fontcolor="#475569";
+      color="#CBD5E1";
+      style="rounded,dashed";
+      fillcolor="#FCFCFD";
+
+      sqlite [label="SQLite + WAL\napp/database.py + repositories\n下载、整理、STRM、订阅、Agent、代理、通知 outbox", fillcolor="#ECFDF5", color="#10B981"];
+      filesystem [label="文件与配置\n/app/db：user.env / cache / logs\n/media/downloads · /media/library · /data/strm", fillcolor="#ECFDF5", color="#10B981"];
+      locks [label="一致性护栏\nruntime lifecycle / process lock / Writer lock\n任务 lease · owner · revision · 单 Worker", fillcolor="#F8FAFC", color="#64748B"];
+      recovery [label="迁移、备份与恢复\nschema / migrations / backup\n启动恢复中断任务、确认、来源退役和失败账本", fillcolor="#F8FAFC", color="#64748B"];
+    }
+  }
+
+  // ===== 启动与入口 =====
+  runtime_entry -> fastapi [label="启动 / 生命周期", color="#334155"];
+  fastapi -> web_ui [label="渲染页面", color="#2563EB"];
+  fastapi -> http_api [label="注册路由", color="#2563EB"];
+  fastapi -> schedulers [label="lifespan 启停", color="#D97706"];
+  web_user -> web_ui [label="HTTP", color="#0284C7"];
+  web_ui -> http_api [label="fetch / SSE", color="#0284C7"];
+  tg_user -> telegram_api [label="命令 / 消息 / 回调", color="#DB2777"];
+  telegram_api -> tg_adapter [label="Polling / callback updates", color="#DB2777"];
+  tg_adapter -> download_dispatch [label="链接 / 种子提交", color="#EA580C"];
+  tg_adapter -> organize [label="整理 / 同步 / 确认", color="#EA580C"];
+  tg_adapter -> agent_kernel [label="自然语言 / Agent 回调", color="#D97706"];
+  http_api -> download_dispatch [label="Web API", color="#2563EB"];
+  http_api -> organize [label="预览 / 执行 / 纠偏", color="#2563EB"];
+  http_api -> strm [label="STRM 管理", color="#2563EB"];
+  http_api -> discovery [label="探索 / 订阅 / 索引", color="#2563EB"];
+  http_api -> playback [label="代理配置 / 播放入口", color="#2563EB"];
+  agent_kernel -> discovery [label="READ / 引用", color="#D97706"];
+  agent_kernel -> download_dispatch [label="WRITE 预检 / 确认", color="#D97706"];
+  agent_kernel -> organize [label="领域工具", color="#D97706"];
+  agent_kernel -> strm [label="状态 / 重试 / 运行", color="#D97706"];
+
+  // ===== 发现与下载 =====
+  rss_source -> discovery [label="定时拉取 RSS", color="#F59E0B", style=dashed];
+  indexer_source -> discovery [label="多站搜索", color="#F59E0B", style=dashed];
+  discovery_source -> discovery [label="榜单 / 详情 / 排期", color="#8B5CF6", style=dashed];
+  discovery -> download_dispatch [label="RSS 条目 / 资源候选", color="#EA580C"];
+  schedulers -> discovery [label="RSS / 订阅 / 索引周期任务", color="#D97706", style=dashed];
+  schedulers -> download_tracker [label="周期对账", color="#D97706", style=dashed];
+  download_dispatch -> qb [label="磁力 / 种子 / HTTP", color="#2563EB"];
+  download_dispatch -> guangya [label="离线 / 分享转存", color="#0F766E"];
+  download_dispatch -> sqlite [label="request / target 状态", color="#64748B", style=dotted];
+  qb -> download_tracker [label="进度 / 任务完成", color="#2563EB", style=dashed];
+  guangya -> download_tracker [label="远端任务状态", color="#0F766E", style=dashed];
+  download_tracker -> local_media [label="qB 完成 → 创建本地任务", color="#2563EB", style=dashed];
+  download_tracker -> organize [label="光鸭完成 → 进入整理", color="#0F766E", style=dashed];
+
+  // ===== 统一识别与本地 / 云端整理 =====
+  local_media -> recognition [label="扫描 / 预览 / 识别", color="#2563EB"];
+  organize -> recognition [label="扫描 / 规划 / 识别", color="#EA580C"];
+  recognition -> metadata [label="搜索、详情、线索、AI", color="#8B5CF6"];
+  metadata -> recognition [label="候选 / 严格复核", color="#8B5CF6", style=dashed];
+  recognition -> organize [label="身份、命名、分类、版本计划", color="#EA580C"];
+  organize -> local_media [label="本地目标：进入 Writer", color="#2563EB"];
+  local_media -> filesystem [label="移动 / 清理 / qB 收尾", color="#2563EB"];
+  organize -> guangya [label="云端 mkdir / move / rename / delete", color="#0F766E"];
+  guangya -> organize [label="目录快照 / 状态回读", color="#0F766E", style=dashed];
+  organize -> sqlite [label="任务、确认、日志、删除审计", color="#64748B", style=dotted];
+  local_media -> sqlite [label="本地任务 / 操作步骤", color="#64748B", style=dotted];
+  organize -> notification [label="候选 / 终态事件", color="#DB2777", style=dashed];
+  local_media -> notification [label="整理结果 / 人工确认", color="#DB2777", style=dashed];
+
+  // ===== STRM / 刷新 / 播放 =====
+  organize -> strm [label="可信变化 → 增量队列", color="#059669", style=dashed];
+  schedulers -> strm [label="Cron / 全量扫描", color="#D97706", style=dashed];
+  strm -> guangya [label="目录扫描 / 元数据 / 直链信息", color="#0F766E"];
+  strm -> filesystem [label="生成 .strm / NFO / 图片", color="#059669"];
+  strm -> sqlite [label="strm_index / failures / retirements", color="#64748B", style=dotted];
+  strm -> refresh [label="变化 scope", color="#16A34A", style=dashed];
+  local_media -> refresh [label="本地库变化", color="#16A34A", style=dashed];
+  refresh -> media_servers [label="刷新媒体库 / 绑定路径", color="#16A34A"];
+  media_servers -> playback [label="读取 STRM / 播放请求", color="#0891B2"];
+  playback -> guangya [label="校验签名后获取 signedURL", color="#0F766E"];
+  guangya -> cloud_cdn [label="302 目标直链", color="#0F766E"];
+  cloud_cdn -> media_servers [label="视频数据直达播放器", color="#0F766E", style=dashed];
+  playback -> media_servers [label="media-proxy：HTTP / WS 透传", color="#0891B2", style=dashed];
+  playback -> sqlite [label="播放会话 / 审计记录", color="#64748B", style=dotted];
+
+  // ===== 通知与运维闭环 =====
+  schedulers -> notification [label="统一消费者 / 唤醒", color="#D97706", style=dashed];
+  notification -> sqlite [label="outbox / lease / revision", color="#64748B", style=dotted];
+  notification -> telegram_api [label="可靠投递 / 重试", color="#DB2777", style=dashed];
+  notification -> web_ui [label="API / SSE / 页面状态", color="#DB2777", style=dashed];
+  sqlite -> recovery [label="迁移 / 备份 / 状态恢复", color="#64748B", style=dotted];
+  filesystem -> recovery [label="配置 / 日志 / 媒体指针", color="#64748B", style=dotted];
+  recovery -> fastapi [label="启动前恢复并初始化", color="#334155", style=dashed];
+  locks -> fastapi [label="单 Worker 准入", color="#64748B", style=dotted];
+  locks -> schedulers [label="调度互斥 / shutdown", color="#64748B", style=dotted];
+  locks -> organize [label="单 Writer / owner", color="#64748B", style=dotted];
+  locks -> strm [label="STRM 操作锁", color="#64748B", style=dotted];
+
+  // ===== 图例 =====
+  legend [
+    label="图例\n实线：同步调用 / 数据流\n虚线：异步、调度、队列或回调\n点线：持久化、锁或恢复关系",
+    shape=note,
+    fillcolor="#FFFFFF",
+    color="#CBD5E1",
+    fontcolor="#475569",
+    fontsize=10
+  ];
+  legend -> fastapi [style=invis];
+}

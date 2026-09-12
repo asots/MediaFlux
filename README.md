@@ -180,6 +180,7 @@ python mediaflux.py support-bundle
 - ❓ [**常见问题 (FAQ)**](docs/常见问题.md)：整理移动、局域网访问、STRM 播放、刮削排错常见疑问。
 - ⚙️ [**配置参考**](docs/配置参考.md)：全量环境变量与配置项说明。
 - 🛠️ [**开发文档**](docs/开发文档.md)：内部架构设计、统一整理流程与开发规范。
+- 🗺️ [**项目全链路拓扑图**](docs/项目全链路拓扑图.md)：从启动、入口、下载、识别、整理到 STRM 播放、刷新、通知和恢复的完整流转图。
 - 🎬 [**进阶教程专区**](docs/tutorials/)：
   - [自动化流转全景与工作流程](docs/tutorials/00_自动化流转全景与工作流程.md)
   - [Jellyfin / Emby 与 STRM 直链播放实战](docs/tutorials/01_Jellyfin与Emby媒体库及STRM播放实战.md)
