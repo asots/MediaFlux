@@ -15,7 +15,7 @@ class DownloadTrackerLifecycleTests(unittest.TestCase):
         entered = threading.Event()
         release = threading.Event()
 
-        def reconcile(*_args, **_kwargs):
+        def reconcile():
             entered.set()
             release.wait(2)
             return 0, 0
@@ -23,7 +23,7 @@ class DownloadTrackerLifecycleTests(unittest.TestCase):
         with patch(
             "app.modules.download_tracker.db.reconcile_startup_media_download_admissions",
             side_effect=reconcile,
-        ):
+        ) as reconcile_call:
             starter = threading.Thread(target=tracker.start)
             starter.start()
             self.assertTrue(entered.wait(1))
@@ -33,6 +33,7 @@ class DownloadTrackerLifecycleTests(unittest.TestCase):
 
         self.assertFalse(starter.is_alive())
         self.assertIsNone(tracker._thread)
+        reconcile_call.assert_called_once_with()
 
     def test_manual_review_without_candidate_button_points_to_web(self) -> None:
         row = {

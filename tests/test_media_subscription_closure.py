@@ -142,7 +142,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         )[0]
         second_admission = self._claim_dispatching(second_subscription, second_candidate)
 
-        projected, released = db.reconcile_startup_media_download_admissions(stale_seconds=60)
+        projected, released = db.reconcile_startup_media_download_admissions()
 
         self.assertEqual(projected, 0)
         self.assertEqual(released, 2)
@@ -173,9 +173,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
                 "UPDATE media_download_admissions SET updated_at=? WHERE id=?",
                 (old_stamp, original_admission),
             )
-        _projected, released = db.reconcile_startup_media_download_admissions(
-            stale_seconds=60
-        )
+        _projected, released = db.reconcile_startup_media_download_admissions()
         self.assertEqual(released, 1)
 
         retry_admission = db.claim_media_download_admission(
@@ -222,9 +220,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(created)
 
-        projected, released = db.reconcile_startup_media_download_admissions(
-            stale_seconds=3600
-        )
+        projected, released = db.reconcile_startup_media_download_admissions()
 
         self.assertEqual(projected, 0)
         self.assertEqual(released, 1)
@@ -335,7 +331,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             request_id, status="manual_review", error="提交结果未知，请人工核验"
         )
 
-        projected, released = db.reconcile_startup_media_download_admissions(stale_seconds=60)
+        projected, released = db.reconcile_startup_media_download_admissions()
 
         self.assertEqual(projected, 1)
         self.assertEqual(released, 0)

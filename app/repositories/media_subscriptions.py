@@ -1081,9 +1081,7 @@ def sync_media_download_admission_for_request(request_id: int) -> int:
         )
 
 
-def reconcile_startup_media_download_admissions(
-    *, stale_seconds: int = 900
-) -> tuple[int, int]:
+def reconcile_startup_media_download_admissions() -> tuple[int, int]:
     """启动时恢复崩溃窗口中的准入锁，并投影已绑定请求的真实状态。
 
     ``pending`` 请求尚未领取任何下载后端，可安全释放对应准入；下一次提交会
@@ -1092,9 +1090,6 @@ def reconcile_startup_media_download_admissions(
     """
     database = _database()
     stamp = database.now()
-    # 保留参数兼容旧调用；启动恢复只处理尚未提交到任何后端的状态，
-    # 不需要等待 stale 窗口，否则刚创建 pending 请求后重启会永久占住 media_key。
-    _ = stale_seconds
     projected = 0
     released = 0
     with database.get_conn() as conn:

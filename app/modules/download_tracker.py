@@ -88,9 +88,7 @@ class DownloadTracker:
                 return
             generation = self._lifecycle_generation
         try:
-            projected, released = db.reconcile_startup_media_download_admissions(
-                stale_seconds=self._missing_grace_seconds()
-            )
+            projected, released = db.reconcile_startup_media_download_admissions()
             if projected or released:
                 logger.info(
                     "启动恢复下载准入：投影 %s 条，释放 %s 条可重试记录",
