@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from app.clients.tmdb import TMDBClient, close_tmdb_client
 from app.discovery.models import ProviderError, ProviderNotConfigured
 from app.indexers.config import tmdb_detail_is_animation
 from app.indexers.downloads import download_indexer_result_public
-from app.indexers.models import IndexerMediaSearchRequest
+from app.indexers.models import AggregatedIndexerResult, IndexerMediaSearchRequest
 from app.indexers.runtime import get_indexer_service, run_indexer_awaitable
 from app.logger import get_logger
 from app.modules.media_identity import build_media_key
@@ -1338,6 +1339,63 @@ class MediaSubscriptionService:
             "partial": search_partial,
         }
 
+    async def _search_resources(
+        self, row, detail, service, *, target: _ExpectedMedia | None = None,
+        sites=None, revision: int | None = None, cancel_event=None,
+    ) -> AggregatedIndexerResult | None:
+        """统一检索与诊断；库存状态和候选投影仍由调用方决定。"""
+        original_key = "original_name" if target is not None else "original_title"
+        options = ({"sort_mode": "published_desc", "season": target.season, "episode": target.episode}
+                   if target is not None else {})
+        request = IndexerMediaSearchRequest.create(
+            title=str(row["title"]), original_title=str(detail.get(original_key) or row["original_title"] or ""),
+            year=row["year"], media_type="tv" if target is not None else "movie", **options,
+        )
+        failure = None
+        phase = "site_selection"
+        try:
+            selected = (sites or None) if target is not None else _resolve_search_sites(
+                _loads(row["sites_json"], []), detail, service,
+            )
+            phase = "search"
+            aggregated = await run_indexer_awaitable(service.search_media(request, selected))
+            if revision is not None:
+                phase = "check_validity"
+                self._ensure_active_check(int(row["id"]), revision, cancel_event)
+        except (Exception, asyncio.CancelledError) as exc:
+            failure, aggregated = exc, None
+        propagate = isinstance(failure, asyncio.CancelledError) or (
+            revision is not None and isinstance(failure, MediaSubscriptionError)
+        )
+        event = {
+            "event": "media_subscription.search", "subscription_id": row["id"],
+            "run_id": _ACTIVE_CHECK_RUN_ID.get(), "mode": "check" if revision is not None else "preview",
+            "media_type": request.media_type, "season": request.season, "episode": request.episode,
+        }
+        if failure is not None:
+            if isinstance(failure, asyncio.CancelledError):
+                outcome = "cancelled"
+            elif revision is not None and isinstance(failure, MediaSubscriptionError):
+                outcome = "cancelled" if failure.code == "cancelled" else "rejected"
+            else:
+                outcome = "unavailable"
+            event.update(outcome=outcome, error_type=type(failure).__name__, failure_stage=phase)
+        else:
+            # 不记录查询正文、下载URL或服务端错误message；仅记录可关联的站点事实。
+            errors = [{"site_id": item.site_id, "code": item.code} for item in aggregated.errors]
+            outcome = ("unavailable" if errors and not aggregated.sites_succeeded and not aggregated.items
+                       else "partial" if aggregated.partial or errors
+                       else "success" if aggregated.items
+                       else "empty" if aggregated.sites_attempted else "not_run")
+            event.update(outcome=outcome, result_count=len(aggregated.items), cached=bool(aggregated.cached),
+                         sites_attempted=list(aggregated.sites_attempted), sites_succeeded=list(aggregated.sites_succeeded),
+                         source_errors=errors)
+        logger.log(logging.WARNING if event["outcome"] in {"unavailable", "partial", "rejected"} else logging.INFO,
+                   "media_subscription.search %s", _dumps(event), extra={"media_subscription_search": event})
+        if propagate:
+            raise failure
+        return aggregated
+
     async def _preview_search_missing_tv(
         self,
         row: Any,
@@ -1351,8 +1409,6 @@ class MediaSubscriptionService:
             return self._empty_preview_search("disabled")
         service = get_indexer_service()
         sites = _resolve_search_sites(_loads(row["sites_json"], []), detail, service)
-        original = str(detail.get("original_name") or row["original_title"] or "")
-        aliases = [value for value in (str(row["title"]), original) if value]
         targets = sorted(
             (
                 item
@@ -1366,28 +1422,11 @@ class MediaSubscriptionService:
         candidate_total = 0
         for target in targets:
             assert target.season is not None and target.episode is not None
-            request = IndexerMediaSearchRequest.create(
-                title=str(row["title"]),
-                original_title=original,
-                aliases=aliases,
-                year=row["year"],
-                media_type="tv",
-                sort_mode="published_desc",
-                season=target.season,
-                episode=target.episode,
+            aggregated = await self._search_resources(
+                row, detail, service, sites=sites, target=target,
             )
-            try:
-                aggregated = await run_indexer_awaitable(
-                    service.search_media(request, sites or None)
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
+            if aggregated is None:
                 partial = True
-                logger.warning(
-                    "媒体订阅实时资源搜索失败 subscription=%s episode=S%02dE%02d type=%s",
-                    row["id"], target.season, target.episode, type(exc).__name__,
-                )
                 items.append({
                     "season": target.season,
                     "episode": target.episode,
@@ -1438,26 +1477,10 @@ class MediaSubscriptionService:
         if not config.get_bool("INDEXER_SEARCH_ENABLED"):
             return self._empty_preview_search("disabled")
         service = get_indexer_service()
-        request = IndexerMediaSearchRequest.create(
-            title=str(row["title"]),
-            original_title=str(detail.get("original_title") or row["original_title"] or ""),
-            year=row["year"],
-            media_type="movie",
+        aggregated = await self._search_resources(
+            row, detail, service,
         )
-        try:
-            aggregated = await run_indexer_awaitable(
-                service.search_media(
-                    request,
-                    _resolve_search_sites(_loads(row["sites_json"], []), detail, service),
-                )
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "媒体订阅实时电影资源搜索失败 subscription=%s type=%s",
-                row["id"], type(exc).__name__,
-            )
+        if aggregated is None:
             return self._empty_preview_search("unavailable")
         candidates = [
             self._preview_candidate(item.to_public_dict())
@@ -1518,8 +1541,6 @@ class MediaSubscriptionService:
     ) -> tuple[int, int, dict[str, int] | None]:
         if not config.get_bool("INDEXER_SEARCH_ENABLED"):
             return 0, 0, search_rotation
-        original = str(detail.get("original_name") or row["original_title"] or "")
-        aliases = [value for value in (str(row["title"]), original) if value]
         revision = int(row["revision"] or 1)
         self._ensure_active_check(int(row["id"]), revision, cancel_event)
         service = get_indexer_service()
@@ -1535,28 +1556,10 @@ class MediaSubscriptionService:
         for target in targets:
             self._ensure_active_check(int(row["id"]), revision, cancel_event)
             assert target.season is not None and target.episode is not None
-            request = IndexerMediaSearchRequest.create(
-                title=str(row["title"]),
-                original_title=original,
-                aliases=aliases,
-                year=row["year"],
-                media_type="tv",
-                sort_mode="published_desc",
-                season=target.season,
-                episode=target.episode,
+            aggregated = await self._search_resources(
+                row, detail, service, sites=sites, target=target, revision=revision, cancel_event=cancel_event,
             )
-            try:
-                aggregated = await run_indexer_awaitable(
-                    service.search_media(request, sites or None)
-                )
-                self._ensure_active_check(int(row["id"]), revision, cancel_event)
-            except (asyncio.CancelledError, MediaSubscriptionError):
-                raise
-            except Exception as exc:
-                logger.warning(
-                    "媒体订阅资源搜索失败 subscription=%s episode=S%02dE%02d type=%s",
-                    row["id"], target.season, target.episode, type(exc).__name__,
-                )
+            if aggregated is None:
                 continue
             public = {"items": [item.to_public_dict() for item in aggregated.items]}
             ranked = rank_episode_search(public, season=target.season, episode=target.episode)
@@ -1620,24 +1623,10 @@ class MediaSubscriptionService:
         revision = int(row["revision"] or 1)
         self._ensure_active_check(int(row["id"]), revision, cancel_event)
         service = get_indexer_service()
-        request = IndexerMediaSearchRequest.create(
-            title=str(row["title"]),
-            original_title=str(detail.get("original_title") or row["original_title"] or ""),
-            year=row["year"],
-            media_type="movie",
+        aggregated = await self._search_resources(
+            row, detail, service, revision=revision, cancel_event=cancel_event,
         )
-        try:
-            aggregated = await run_indexer_awaitable(
-                service.search_media(
-                    request,
-                    _resolve_search_sites(_loads(row["sites_json"], []), detail, service),
-                )
-            )
-            self._ensure_active_check(int(row["id"]), revision, cancel_event)
-        except (asyncio.CancelledError, MediaSubscriptionError):
-            raise
-        except Exception as exc:
-            logger.warning("媒体订阅电影搜索失败 subscription=%s type=%s", row["id"], type(exc).__name__)
+        if aggregated is None:
             return 0, 0
         candidates = [
             item.to_public_dict() for item in aggregated.items
