@@ -2872,22 +2872,14 @@ def _strm_source_id(source: str) -> str:
     return source
 
 
-def _resolve_strm_index_path(strm_path: str, strm_root: str) -> Path:
-    path = Path(str(strm_path or "")).expanduser()
+def _classify_strm_index_row(
+    row: sqlite3.Row, strm_root: str, configured_source_ids: set[str], temp_root: Path
+) -> dict[str, bool]:
+    path = Path(str(row["strm_path"] or "")).expanduser()
     if not path.is_absolute():
         path = Path(str(strm_root or "")).expanduser() / path
-    return path.resolve(strict=False)
-
-
-def _classify_strm_index_row(
-    row: sqlite3.Row, strm_root: str, configured_source_ids: set[str]
-) -> dict[str, bool]:
-    resolved_path = _resolve_strm_index_path(row["strm_path"], strm_root)
-    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
-    try:
-        in_temp_dir = resolved_path.is_relative_to(temp_root)
-    except AttributeError:  # pragma: no cover - Python < 3.9 compatibility
-        in_temp_dir = temp_root == resolved_path or temp_root in resolved_path.parents
+    resolved_path = path.resolve(strict=False)
+    in_temp_dir = resolved_path.is_relative_to(temp_root)
     exists = resolved_path.is_file()
     source_id = _strm_source_id(row["source"])
     real_source = source_id in configured_source_ids
@@ -2923,6 +2915,7 @@ def _strm_index_kind(source: str) -> str:
 def list_strm_index_diagnostics(strm_root: str) -> dict:
     """只读统计 STRM 索引状态，仅返回安全计数和确认测试行 ID。"""
     configured_source_ids = _configured_strm_source_ids()
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id,source,strm_path FROM strm_index ORDER BY id"
@@ -2954,7 +2947,7 @@ def list_strm_index_diagnostics(strm_root: str) -> dict:
         "metadata_queue": count_strm_metadata_jobs(),
     }
     for row in rows:
-        classification = _classify_strm_index_row(row, strm_root, configured_source_ids)
+        classification = _classify_strm_index_row(row, strm_root, configured_source_ids, temp_root)
         for key in ("existing", "missing", "real_source", "confirmed_test_artifact"):
             result[key] += int(classification[key])
         if classification["confirmed_test_artifact"]:
@@ -2974,12 +2967,9 @@ def delete_confirmed_test_strm_indexes(ids: list[int]) -> int:
     """事务内复核并删除确认的测试索引；不执行任何文件系统删除。"""
     if not isinstance(ids, list):
         raise ValueError("索引 ID 必须为列表")
-    normalized_ids: list[int] = []
-    for item in ids:
-        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
-            raise ValueError("索引 ID 必须为正整数")
-        if item not in normalized_ids:
-            normalized_ids.append(item)
+    if any(isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in ids):
+        raise ValueError("索引 ID 必须为正整数")
+    normalized_ids = list(dict.fromkeys(ids))
     if not normalized_ids:
         return 0
 
@@ -2987,21 +2977,21 @@ def delete_confirmed_test_strm_indexes(ids: list[int]) -> int:
 
     strm_root = config.get("STRM_ROOT", "")
     configured_source_ids = _configured_strm_source_ids()
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    placeholders = ",".join("?" for _ in normalized_ids)
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        for row_id in normalized_ids:
-            row = conn.execute(
-                "SELECT id,source,strm_path FROM strm_index WHERE id=?",
-                (row_id,),
-            ).fetchone()
-            if (
-                row is None
-                or not _classify_strm_index_row(row, strm_root, configured_source_ids)[
-                    "confirmed_test_artifact"
-                ]
-            ):
-                raise ValueError("请求包含非确认测试索引，已拒绝整个清理请求")
-        placeholders = ",".join("?" for _ in normalized_ids)
+        rows = conn.execute(
+            f"SELECT id,source,strm_path FROM strm_index WHERE id IN ({placeholders})",
+            normalized_ids,
+        ).fetchall()
+        if len(rows) != len(normalized_ids) or any(
+            not _classify_strm_index_row(row, strm_root, configured_source_ids, temp_root)[
+                "confirmed_test_artifact"
+            ]
+            for row in rows
+        ):
+            raise ValueError("请求包含非确认测试索引，已拒绝整个清理请求")
         cursor = conn.execute(
             f"DELETE FROM strm_index WHERE id IN ({placeholders})", normalized_ids
         )

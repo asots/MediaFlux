@@ -60,9 +60,8 @@ def cleanup_index_diagnostics(request: Request, data: dict = Body(...)):
         for item in ids
     ):
         return api_error("ids 只能包含正整数", 400)
-    normalized_ids = list(dict.fromkeys(ids))
     try:
-        deleted = db.delete_confirmed_test_strm_indexes(normalized_ids)
+        deleted = db.delete_confirmed_test_strm_indexes(ids)
         diagnostics = db.list_strm_index_diagnostics(config.get("STRM_ROOT", ""))
     except ValueError:
         return api_error("请求包含非确认测试索引，未执行清理", 409)

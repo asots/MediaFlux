@@ -101,6 +101,17 @@ class StrmIndexDiagnosticClassifierTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             conn.execute("DELETE FROM strm_index")
 
+    def test_batch_diagnostics_resolves_temp_root_only_once(self):
+        with tempfile.TemporaryDirectory(prefix="mediaflux-strm-diagnostic-") as root:
+            temp_root = Path(root)
+            ids = [_insert_index(f"guangya:{uuid.uuid4()}", temp_root / f"{i}.strm") for i in range(8)]
+            with _config_values(temp_root), patch(
+                "app.database.tempfile.gettempdir", wraps=tempfile.gettempdir
+            ) as resolve_temp_root:
+                result = db.list_strm_index_diagnostics(str(temp_root))
+            self.assertEqual(result["confirmed_test_artifact_ids"], ids)
+            self.assertEqual(resolve_temp_root.call_count, 1)
+
     def test_only_missing_unconfigured_tmp_uuid_source_is_confirmed_test_artifact(self):
         with tempfile.TemporaryDirectory(prefix="mediaflux-strm-diagnostic-") as root:
             temp_root = Path(root)
@@ -195,6 +206,29 @@ class StrmIndexCleanupTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             conn.execute("DELETE FROM strm_index")
 
+    def test_batch_cleanup_reads_once_and_preserves_duplicate_and_retry_semantics(self):
+        statements = []
+        original = db.get_conn
+
+        @contextmanager
+        def traced_conn():
+            with original() as conn:
+                conn.set_trace_callback(statements.append)
+                yield conn
+
+        with tempfile.TemporaryDirectory(prefix="mediaflux-strm-cleanup-") as root:
+            temp_root = Path(root)
+            ids = [_insert_index(f"guangya:{uuid.uuid4()}", temp_root / f"{i}.strm") for i in range(8)]
+            with _config_values(temp_root), patch.object(db, "get_conn", traced_conn), patch(
+                "app.database.tempfile.gettempdir", wraps=tempfile.gettempdir
+            ) as resolve_temp_root, patch.object(Path, "unlink", side_effect=AssertionError("不应删除文件")):
+                self.assertEqual(db.delete_confirmed_test_strm_indexes(ids[::-1] + ids), len(ids))
+                reads = [sql for sql in statements if sql.startswith("SELECT ") and "FROM strm_index" in sql]
+                self.assertEqual(len(reads), 1)
+                self.assertEqual(resolve_temp_root.call_count, 1)
+                with self.assertRaisesRegex(ValueError, "确认测试索引"):
+                    db.delete_confirmed_test_strm_indexes(ids)
+
     def test_cleanup_deletes_a_confirmed_test_index_without_touching_filesystem(self):
         with tempfile.TemporaryDirectory(prefix="mediaflux-strm-cleanup-") as root:
             temp_root = Path(root)
@@ -223,8 +257,9 @@ class StrmIndexCleanupTests(IsolatedDatabaseTestCase):
                 "guangya:manual-source", temp_root / "manual-missing.strm"
             )
             with _config_values(temp_root):
-                with self.assertRaisesRegex(ValueError, "确认测试索引"):
-                    db.delete_confirmed_test_strm_indexes([confirmed_id, unsafe_id])
+                for rejected_id in (unsafe_id, unsafe_id + 1):
+                    with self.subTest(rejected_id=rejected_id), self.assertRaisesRegex(ValueError, "确认测试索引"):
+                        db.delete_confirmed_test_strm_indexes([confirmed_id, rejected_id])
 
             with db.get_conn() as conn:
                 remaining_ids = {
