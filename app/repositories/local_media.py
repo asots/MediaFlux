@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from pathlib import Path
 
 import sqlite3
 from collections.abc import Iterable
@@ -58,36 +59,32 @@ def _active_local_media_task_for_path(
     content_path: str,
 ) -> sqlite3.Row | None:
     """按规范路径查找唯一活动任务，并拒绝祖先/后代范围重叠。"""
-    from app.modules.local_media_models import local_media_paths_overlap
-
-    rows = conn.execute(
+    target = Path(content_path)
+    ancestors = set(target.parents)
+    match: sqlite3.Row | None = None
+    exact_count = 0
+    overlaps = False
+    for row in conn.execute(
         "SELECT id,source_id,qb_hash,content_path,trigger,status,operation_token,error "
-        "FROM local_media_tasks "
-        "WHERE owner=? AND status NOT IN ('completed','failed') "
-        "ORDER BY id",
+        "FROM local_media_tasks WHERE owner=? AND status NOT IN ('completed','failed')",
         (owner,),
-    ).fetchall()
-    exact_matches: list[sqlite3.Row] = []
-    overlapping_matches: list[sqlite3.Row] = []
-    for row in rows:
+    ):
         try:
-            candidate_path = _canonical_local_media_content_path(row["content_path"])
+            candidate = Path(_canonical_local_media_content_path(row["content_path"]))
         except ValueError:
             continue
-        if candidate_path == content_path:
-            exact_matches.append(row)
-        elif local_media_paths_overlap(candidate_path, content_path):
-            overlapping_matches.append(row)
-    if len(exact_matches) > 1:
+        if candidate == target:
+            exact_count += 1
+            match = row
+        elif candidate in ancestors or target in candidate.parents:
+            overlaps = True
+    if exact_count > 1:
         raise RuntimeError("同一路径存在多个活动本地媒体任务，请先完成或清理旧任务")
-    if exact_matches and overlapping_matches:
-        raise RuntimeError("同一路径范围存在多个活动本地媒体任务，请先完成或清理旧任务")
-    if not exact_matches:
-        if overlapping_matches:
+    if overlaps:
+        if match is None:
             raise ValueError("该路径与未完成的本地媒体任务范围重叠")
-        return None
-    match = exact_matches[0]
-    if int(match["source_id"] or 0) != int(source_id):
+        raise RuntimeError("同一路径范围存在多个活动本地媒体任务，请先完成或清理旧任务")
+    if match is not None and int(match["source_id"] or 0) != int(source_id):
         raise ValueError("该路径已有其他本地媒体来源的活动任务")
     return match
 

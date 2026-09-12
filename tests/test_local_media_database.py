@@ -12,6 +12,72 @@ from tests.support import IsolatedDatabaseTestCase
 
 
 class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
+    def test_active_lookup_resolves_legacy_symlink_paths_on_each_query(self):
+        import tempfile
+        from pathlib import Path
+        from app.repositories import local_media as repository
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            first, second, alias = root / "First", root / "Second", root / "Alias"
+            first.mkdir(); second.mkdir(); alias.symlink_to(first, target_is_directory=True)
+            source_id = db.create_local_media_source(
+                name="dynamic-path", qb_profile="", qb_path_prefix="", local_root=str(root),
+            )
+            task_id = db.create_local_media_task(source_id, "", str(first / "Movie.mkv"))
+            with db.get_conn() as conn:
+                conn.execute("UPDATE local_media_tasks SET content_path=? WHERE id=?", (str(alias / "Movie.mkv"), task_id))
+                match = repository._active_local_media_task_for_path(conn, source_id=source_id, owner="admin", content_path=str(first / "Movie.mkv"))
+                self.assertEqual(match["id"] if match else None, task_id)
+                alias.unlink(); alias.symlink_to(second, target_is_directory=True)
+                match = repository._active_local_media_task_for_path(conn, source_id=source_id, owner="admin", content_path=str(second / "Movie.mkv"))
+                self.assertEqual(match["id"] if match else None, task_id)
+                self.assertIsNone(repository._active_local_media_task_for_path(conn, source_id=source_id, owner="admin", content_path=str(first / "Movie.mkv")))
+
+    def test_active_lookup_streams_candidates_and_resolves_each_path_once(self):
+        from unittest.mock import patch
+        from app.modules import local_media_models as models
+        from app.repositories import local_media as repository
+
+        owner = "stream-owner"
+        source_id = db.create_local_media_source(
+            name="stream-source", qb_profile="", qb_path_prefix="",
+            local_root="/tmp/stream-source", owner=owner,
+        )
+        calls = {"fetchall": 0, "iterated": 0}
+
+        class Cursor:
+            def __init__(self, cursor):
+                self.cursor = cursor
+
+            def fetchall(self):
+                rows = self.cursor.fetchall()
+                calls["fetchall"] += len(rows)
+                return rows
+
+            def __iter__(self):
+                for row in self.cursor:
+                    calls["iterated"] += 1
+                    yield row
+
+        class Connection:
+            def execute(self, *args):
+                return Cursor(conn.execute(*args))
+
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO local_media_tasks(owner,source_id,content_path,operation_token,status,created_at,updated_at) VALUES(?,?,?,?,'recognizing',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+                [(owner, source_id, f"/tmp/stream-source/Movie-{index}.mkv", f"stream-{index}") for index in range(30)],
+            )
+            with patch.object(models, "canonical_local_media_content_path", wraps=models.canonical_local_media_content_path) as canonical:
+                result = repository._active_local_media_task_for_path(
+                    Connection(), source_id=source_id, owner=owner,
+                    content_path="/tmp/stream-source/Missing.mkv",
+                )
+        self.assertIsNone(result)
+        self.assertEqual(calls, {"fetchall": 0, "iterated": 30})
+        self.assertEqual(canonical.call_count, 30)
+
     def test_waiting_task_queue_is_oldest_first_beyond_scheduler_batch_limit(self):
         owner = "queue-order-owner"
         source_id = db.create_local_media_source(
