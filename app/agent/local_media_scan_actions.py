@@ -184,6 +184,8 @@ def scan_local_media_sources_confirmed(
         ),
         data={
             "operation": "scan_sources",
+            "scan_ref": str(result.get("scan_ref") or ""),
+            "scan_recorded": bool(result.get("scan_recorded", bool(result.get("scan_ref")))),
             "source_numbers": public_numbers,
             "scanned_sources": int(result.get("scanned_sources") or 0),
             "candidates": int(result.get("candidate_count") or 0),

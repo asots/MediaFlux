@@ -29,7 +29,12 @@ from app.agent.state_commit import (
     active_agent_state_commit_buffer,
 )
 from app.clients.base import close_media_server_client
-from app.modules.local_media_models import LOCAL_BUSY_TASK_STATUSES, LOCAL_TASK_STATUSES
+from app.modules.local_media_models import (
+    LOCAL_BUSY_TASK_STATUSES,
+    LOCAL_TASK_STATUSES,
+    LocalMediaTask,
+)
+from app.modules.local_media_outcomes import local_media_task_outcome
 from app.modules.local_media_scheduler import get_local_media_scheduler
 from app.modules.local_media_service import (
     LocalMediaServiceError,
@@ -45,7 +50,7 @@ from app.modules.web_secret import get_web_secret
 _WORKSPACE_OWNER = "admin"
 _MAX_TASK_NUMBER = 100
 _MAX_INSPECTION_NUMBER = 2_147_483_647
-_ALLOWED_SCOPES = frozenset({"all", "attention", "active", "history"})
+_ALLOWED_SCOPES = frozenset({"all", "attention", "active", "history", "skipped", "latest_scan"})
 _RETRYABLE = frozenset({"failed", "requires_manual"})
 
 logger = logging.getLogger(__name__)
@@ -810,7 +815,7 @@ def _strict_number(value: Any, label: str) -> int:
 
 def local_media_task_summaries_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict) or not set(arguments).issubset(
-        {"scope", "limit"}
+        {"scope", "limit", "scan_ref", "offset"}
     ):
         raise AgentToolError("本地媒体任务列表参数无效")
     scope = str(arguments.get("scope") or "all").strip().lower()
@@ -819,7 +824,30 @@ def local_media_task_summaries_arguments(arguments: dict[str, Any]) -> dict[str,
     limit = arguments.get("limit", 12)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
         raise AgentToolError("limit 必须是 1 到 20 的整数")
-    return {"scope": scope, "limit": limit}
+    offset = arguments.get("offset", 0)
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or not 0 <= offset <= 2_147_483_647
+    ):
+        raise AgentToolError("offset 必须是非负整数，且不能超过 2147483647")
+    result = {"scope": scope, "limit": limit, "offset": offset}
+    if "scan_ref" in arguments:
+        scan_ref = arguments["scan_ref"]
+        if scan_ref == "LM-UNRECORDED":
+            result["scan_ref"] = scan_ref
+            return result
+        if (
+            not isinstance(scan_ref, str)
+            or not scan_ref.startswith("LM")
+            or not scan_ref[2:].isascii()
+            or not scan_ref[2:].isdigit()
+            or scan_ref[2:3] == "0"
+            or len(scan_ref) > 20
+        ):
+            raise AgentToolError("scan_ref 必须是本地扫描通知中的 LM 编号")
+        result["scan_ref"] = scan_ref
+    return result
 
 
 def local_media_task_number_arguments(arguments: dict[str, Any]) -> dict[str, int]:
@@ -863,8 +891,55 @@ def _status_reason(status: str) -> str:
     }.get(status, "unknown")
 
 
-def _task_public(task: Any, number: int) -> dict[str, Any]:
+def _outcome_public(outcome: dict[str, Any]) -> dict[str, Any]:
     return {
+        "original_filename": sanitize_public_text(
+            outcome.get("original_filename"), limit=255
+        ),
+        "file_names": [
+            name
+            for value in (outcome.get("file_names") or [])[:20]
+            if (name := sanitize_public_text(value, limit=255))
+        ],
+        "file_names_truncated": bool(outcome.get("file_names_truncated")),
+        "file_outcome": outcome.get("file_outcome")
+        if outcome.get("file_outcome")
+        in {
+            "archived",
+            "conflict_skipped",
+            "partial",
+            "unknown",
+            "pending",
+            "failed",
+            "cancelled",
+            "preview_only",
+        }
+        else "unknown",
+        **{
+            key: max(0, int(outcome.get(key) or 0))
+            for key in (
+                "video_count",
+                "archived_video_count",
+                "skipped_video_count",
+                "unknown_video_count",
+            )
+        },
+        **{
+            key: sanitize_public_text(outcome.get(key), limit=40)
+            for key in ("created_at", "updated_at", "completed_at")
+        },
+    }
+
+
+def _task_public(
+    task: Any, number: int, *, outcome: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    if outcome is None:
+        outcome = local_media_task_outcome(
+            task, db.list_local_media_task_items(int(task.id), owner=_WORKSPACE_OWNER)
+        )
+    return {
+        **_outcome_public(outcome),
         "task_number": number,
         "status": str(task.status),
         "reason_code": _status_reason(str(task.status)),
@@ -889,44 +964,192 @@ def _task_public(task: Any, number: int) -> dict[str, Any]:
     }
 
 
-def _scope_tasks(scope: str, limit: int) -> list[Any]:
-    rows = db.list_local_media_tasks(owner=_WORKSPACE_OWNER, limit=100)
+def _scope_statuses(scope: str) -> set[str]:
     if scope == "attention":
-        rows = [item for item in rows if item.status in _RETRYABLE]
-    elif scope == "active":
-        rows = [item for item in rows if item.status in LOCAL_BUSY_TASK_STATUSES]
-    elif scope == "history":
-        rows = [item for item in rows if item.status in {"completed", "failed"}]
-    elif scope != "all":
-        rows = [item for item in rows if item.status == scope]
-    return rows[:limit]
+        return set(_RETRYABLE)
+    if scope == "active":
+        return set(LOCAL_BUSY_TASK_STATUSES)
+    if scope == "history":
+        return {"completed", "failed"}
+    if scope == "skipped":
+        return {"completed"}
+    return {scope} if scope in LOCAL_TASK_STATUSES else set()
+
+
+def _scope_tasks(scope: str, limit: int, offset: int = 0) -> list[Any]:
+    # 过滤和更新时间排序必须先于 LIMIT，不能先截断最近创建的历史任务。
+    sql = "SELECT t.* FROM local_media_tasks t WHERE t.owner=?"
+    params: list[Any] = [_WORKSPACE_OWNER]
+    statuses = sorted(_scope_statuses(scope))
+    if statuses:
+        sql += " AND t.status IN (" + ",".join("?" for _ in statuses) + ")"
+        params.extend(statuses)
+    if scope == "skipped":
+        sql += (
+            " AND EXISTS (SELECT 1 FROM local_media_task_items i WHERE i.task_id=t.id"
+            " AND i.owner=t.owner AND i.role='video' AND i.action='skip')"
+            " AND t.warning NOT LIKE '%仅预览模式：未移动文件%'"
+        )
+    sql += " ORDER BY COALESCE(NULLIF(t.updated_at,''),t.created_at) DESC,t.id DESC LIMIT ? OFFSET ?"
+    params.extend((limit, offset))
+    with db.get_conn() as conn:
+        return [
+            LocalMediaTask.from_row(row) for row in conn.execute(sql, params).fetchall()
+        ]
+
+
+def _scan_tasks(
+    scan: dict[str, Any], scope: str, limit: int, offset: int = 0
+) -> tuple[list[Any], dict[int, dict[str, Any]], int, int]:
+    membership = list(dict.fromkeys(int(value) for value in scan.get("task_ids", [])))
+    found: dict[int, Any] = {}
+    with db.get_conn() as conn:
+        for batch_offset in range(0, len(membership), 500):
+            batch = membership[batch_offset : batch_offset + 500]
+            sql = (
+                "SELECT * FROM local_media_tasks WHERE owner=? AND id IN ("
+                + ",".join("?" for _ in batch)
+                + ")"
+            )
+            for row in conn.execute(sql, [_WORKSPACE_OWNER, *batch]).fetchall():
+                task = LocalMediaTask.from_row(row)
+                found[task.id] = task
+    summary = scan.get("summary") or {}
+    snapshots = {
+        int(item["task_id"]): item
+        for item in summary.get("task_outcomes", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("task_id"), int)
+        and item["task_id"] in found
+    }
+    statuses = _scope_statuses(scope)
+    tasks = []
+    for task_id in membership:
+        task = found.get(task_id)
+        if task is None:
+            continue
+        snapshot = snapshots.get(task_id)
+        status = snapshot.get("status", task.status) if snapshot else task.status
+        if statuses and status not in statuses:
+            continue
+        if scope == "skipped":
+            outcome = snapshot or local_media_task_outcome(
+                task, db.list_local_media_task_items(task.id, owner=_WORKSPACE_OWNER)
+            )
+            if not outcome.get("skipped_video_count"):
+                continue
+        tasks.append(task)
+    return (
+        tasks[offset : offset + limit],
+        snapshots,
+        len(membership) - len(found),
+        len(tasks),
+    )
 
 
 def list_local_media_task_summaries(
     arguments: dict[str, Any], context: ToolContext
 ) -> ToolResult:
     owner = _require_owner(context)
-    tasks = _scope_tasks(str(arguments["scope"]), int(arguments["limit"]))
+    scope = str(arguments["scope"])
+    offset = int(arguments.get("offset", 0))
+    limit = int(arguments["limit"])
+    matched_total: int | None = None
+    scan: dict[str, Any] | None = None
+    snapshots: dict[int, dict[str, Any]] = {}
+    missing = 0
+    if scope == "latest_scan" or arguments.get("scan_ref"):
+        from app.modules.local_media_scan_runs import resolve_local_media_scan
+
+        try:
+            scan = resolve_local_media_scan(
+                str(arguments.get("scan_ref") or ""), owner=_WORKSPACE_OWNER
+            )
+        except ValueError as exc:
+            raise AgentToolError("本地扫描引用无效") from exc
+        except LookupError:
+            _context_store.capture_tasks(owner=owner, tasks=[])
+            return ToolResult(
+                True,
+                "not_recorded",
+                "未记录到对应本地扫描的任务明细，不能以其他历史任务替代此次通知。",
+                data={
+                    "scope": scope,
+                    "scan_ref": str(arguments.get("scan_ref") or ""),
+                    "scan_recorded": False,
+                    "total": 0,
+                    "offset": offset,
+                    "limit": limit,
+                    "has_more": False,
+                    "next_offset": None,
+                    "matched_total": 0,
+                    "tasks": [],
+                },
+            )
+        tasks, snapshots, missing, matched_total = _scan_tasks(
+            scan, scope, limit, offset
+        )
+        has_more = offset + len(tasks) < matched_total
+    else:
+        page = _scope_tasks(scope, limit + 1, offset)
+        has_more = len(page) > limit
+        tasks = page[:limit]
     _context_store.capture_tasks(owner=owner, tasks=tasks)
-    items = [_task_public(task, index) for index, task in enumerate(tasks, start=1)]
+    items = []
+    for index, task in enumerate(tasks, start=1):
+        snapshot = snapshots.get(int(task.id))
+        item = _task_public(task, index, outcome=snapshot)
+        if scan:
+            item["outcome_basis"] = (
+                "scan_snapshot" if snapshot else "current_task_state"
+            )
+            if snapshot and snapshot.get("status") in LOCAL_TASK_STATUSES:
+                item["current_status"] = item["status"]
+                item["status"] = snapshot["status"]
+                item["reason_code"] = _status_reason(item["status"])
+        items.append(item)
     attention = sum(item["status"] in _RETRYABLE for item in items)
+    scan_data = (
+        {
+            "scan_ref": scan.get("scan_ref"),
+            "scan_started_at": scan.get("started_at", ""),
+            "scan_finished_at": scan.get("finished_at", ""),
+            "scan_reported_at": str(
+                (scan.get("summary") or {}).get("reported_at") or ""
+            ),
+            "scan_recorded": True,
+            "scan_task_count": len(scan.get("task_ids", [])),
+            "missing_task_count": missing,
+            "missing_tasks_excluded": bool(missing),
+        }
+        if scan
+        else {}
+    )
     return ToolResult(
         True,
-        "attention" if attention else "completed",
-        f"已列出 {len(items)} 个本地媒体任务"
-        if items
-        else "当前范围内没有本地媒体任务",
+        "attention" if attention or missing else "completed",
+        f"已列出本页 {len(items)} 个本地媒体任务" if items else "本页没有本地媒体任务",
         data={
-            "scope": arguments["scope"],
+            "scope": scope,
             "total": len(items),
+            "total_kind": "page_count",
+            "offset": offset,
+            "limit": limit,
+            "has_more": has_more,
+            "next_offset": offset + len(items) if has_more else None,
+            **({"matched_total": matched_total} if matched_total is not None else {}),
             "attention": attention,
             "tasks": items,
+            **scan_data,
+            "task_number_kind": "owner_scoped_ordinal_not_database_id",
+            "pagination_note": "total 仅为本页条数；翻页请保留 scan_ref/scope 并使用 next_offset。每次列表重建短期任务序号，后续动作使用最新一页的 task_number。",
+            "outcome_note": "任务完成不等于文件已归档；冲突跳过必须按 skipped_video_count/file_outcome 解释。扫描快照是当次事实，可用动作基于任务当前状态。",
             "expires_in_seconds": _context_store.ttl_seconds,
         },
         evidence=[
             Evidence(
                 "sqlite:local_media_tasks",
-                "仅返回当前管理工作区任务的短期公开序号、媒体标题、阶段和可执行动作；未返回数据库 ID、路径、哈希、错误正文、规则或媒体库内部标识。",
+                "返回本地任务的短期公开序号、安全原文件名、时间与文件级结果；没有数据库 ID、目录路径、哈希或错误正文。指定扫描时仅查询该次扫描成员，不以其他历史任务补位。",
                 _now(),
             )
         ],

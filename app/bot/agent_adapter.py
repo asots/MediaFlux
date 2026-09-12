@@ -564,13 +564,16 @@ def _approval_markup(telebot_module: Any, approval: ApprovalView) -> Any:
 
 
 def _reply_context(message: Any) -> dict[str, Any]:
+    # Telegram 选择性引用可能来自消息末尾或外部消息；优先使用用户选中的片段。
+    quote = getattr(message, "quote", None)
     replied = getattr(message, "reply_to_message", None)
-    if replied is None:
-        return {}
     text = str(
-        getattr(replied, "text", "") or getattr(replied, "caption", "") or ""
+        getattr(quote, "text", "")
+        or getattr(replied, "text", "")
+        or getattr(replied, "caption", "")
+        or ""
     ).strip()
-    return {"text": text[:1200]} if text else {}
+    return {"text": text[:2_000]} if text else {}
 
 
 def _execute_query(

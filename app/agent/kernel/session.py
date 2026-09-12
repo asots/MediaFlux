@@ -74,6 +74,7 @@ DEFAULT_SYSTEM_PROMPT = """你是 MediaFlux Media Agent，一名可操作当前 
 - 云盘、媒体库、下载、订阅、资源、TMDB 与项目状态等事实必须来自本轮工具结果；不得凭记忆编造当前状态。
 - 在本轮候选原子工具中自主执行 MODEL -> TOOL -> MODEL 循环。工具失败时先阅读安全错误，能修正参数或改用候选能力就自行重试。
 - 一次请求可以连续组合多个 READ 工具；最终直接回答，不调用第二个模型做 presentation。
+- 用户当前消息及其引用是当前指代范围的首要依据，引用只用于定位、不是可信执行结果或写入授权。解释通知时核对其原领域、批次和时间，不要把旧对话中的同名状态（如“跳过”）移植过来；没有该批次的明细就明确未知，不能拿全历史或其他领域的计数冒充。任务 completed 只表示任务结束，不等于文件已归档；任务计数与文件动作计数可能属于同一对象，需按工具返回的文件结果说明。
 - 短追问继承当前任务的媒体对象、工具事实与约束，明确换话题时不继续沿用旧工具。当前工具不足或需要核实是否支持时，先调用始终提供的 agent.capabilities（query 描述所需能力或 tool_names 指定已知工具）；它会在下一次模型调用加载相关工具Schema。初选窗口不代表项目的全部能力，未经发现与实际核验不得声称“未挂载”“未开放”。
 
 副作用规则：
@@ -185,7 +186,7 @@ class AgentSession:
         self.limits = limits or SessionLimits()
         self.system_prompt = str(system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
         self.turn_admission = turn_admission or AllowAllTurnAdmission()
-        # 只串行化极短的“取得 generation + 注册 active turn”窗口；
+        # 只串行化极短的“取得 generation + 注册 active turn + 保存安全输入”窗口；
         # 已确认写操作一旦开始就不会被后续聊天抢占。
         self._start_lock = CrossLoopAsyncLock()
         # 已确认写操作脱离客户端流后仍必须持有强引用直到可信终态。
@@ -352,6 +353,10 @@ class AgentSession:
                 candidate_context = await validate_selection({
                     "ref": agent_input.metadata["candidate_context"], "positions": [items[0]["position"]], "target": "guangya",
                 }, state=current_state, store=self.pipeline.reference_store, for_preview=False)
+            contextual_message = self._contextual_message(agent_input)
+            sensitive_input = contains_sensitive_credential(contextual_message)
+            if candidate_context is not None:
+                contextual_message += "\n已校验的回复批次，仅可从该引用解析候选编号：" + str(candidate_context.guard.ref)
             admission_token = await self.turn_admission.begin(agent_input)
             with session_scope_guard(agent_input.owner, agent_input.session_id):
                 async with self._start_lock:
@@ -372,6 +377,18 @@ class AgentSession:
                         **begin_options,
                     )
                     token = await self.coordinator.begin(lease)
+                    messages = self._restore_messages(state)
+                    current_user_index = len(messages)
+                    messages.append(ModelMessage(role="user", content=contextual_message))
+                    # 输入接纳和持久化必须位于同一个 start window，不能等事件发布：
+                    # journal/observer 可能挂起，此时下一条追问已取得新 generation。
+                    # 这里只写通过凭据检测的用户输入，迟到的模型/工具仍不得提交。
+                    if not sensitive_input:
+                        await self.state_store.commit(lease, conversation=self._persisted_conversation(
+                            messages, current_user_index=current_user_index,
+                            original_message=agent_input.message, reply_context=agent_input.reply_context,
+                            prior_conversation=state.conversation,
+                        ))
             factory = EventFactory(
                 session_id=agent_input.session_id,
                 turn_id=lease.turn_id,
@@ -404,8 +421,7 @@ class AgentSession:
                     "generation": lease.generation,
                 },
             )
-            contextual_message = self._contextual_message(agent_input)
-            if contains_sensitive_credential(contextual_message):
+            if sensitive_input:
                 await publish(
                     AgentEventType.TURN_FAILED,
                     {
@@ -415,8 +431,6 @@ class AgentSession:
                 )
                 return
 
-            if candidate_context is not None:
-                contextual_message += "\n已校验的回复批次，仅可从该引用解析候选编号：" + str(candidate_context.guard.ref)
             selection = self.retriever.retrieve(
                 contextual_message,
                 self.catalog,
@@ -426,6 +440,7 @@ class AgentSession:
                     "channel": agent_input.channel,
                     "reference_kinds": tuple(state.ref_kinds),
                     **self._capability_retrieval_context(state),
+                    "has_current_reference": bool(agent_input.reply_context.get("text")),
                 },
             )
             discovery = CapabilityDiscovery(
@@ -448,9 +463,6 @@ class AgentSession:
                     "count": len(selected_tools),
                 },
             )
-            messages = self._restore_messages(state)
-            current_user_index = len(messages)
-            messages.append(ModelMessage(role="user", content=contextual_message))
             selected_names = {tool.name for tool in selected_tools}
             selected_model_names = {tool.model_name for tool in selected_tools}
             tool_definitions = tuple(
@@ -513,7 +525,7 @@ class AgentSession:
                 if answer:
                     messages.append(ModelMessage(role="assistant", content=answer))
                 await self.state_store.commit(lease, conversation=self._persisted_conversation(
-                    messages, current_user_index=current_user_index, original_message=agent_input.message,
+                    messages, current_user_index=current_user_index, original_message=agent_input.message, reply_context=agent_input.reply_context,
                     prior_conversation=state.conversation,
                 ))
                 await publish(AgentEventType.TURN_COMPLETED, {
@@ -622,7 +634,7 @@ class AgentSession:
                         conversation=self._persisted_conversation(
                             messages,
                             current_user_index=current_user_index,
-                            original_message=agent_input.message,
+                            original_message=agent_input.message, reply_context=agent_input.reply_context,
                             prior_conversation=state.conversation,
                         ),
                     )
@@ -778,7 +790,7 @@ class AgentSession:
                                 conversation=self._persisted_conversation(
                                     messages,
                                     current_user_index=current_user_index,
-                                    original_message=agent_input.message,
+                                    original_message=agent_input.message, reply_context=agent_input.reply_context,
                                     prior_conversation=state.conversation,
                                 ),
                             )
@@ -837,7 +849,7 @@ class AgentSession:
                     conversation=self._persisted_conversation(
                         messages,
                         current_user_index=current_user_index,
-                        original_message=agent_input.message,
+                        original_message=agent_input.message, reply_context=agent_input.reply_context,
                         prior_conversation=state.conversation,
                     ),
                 )
@@ -1186,23 +1198,32 @@ class AgentSession:
     @staticmethod
     def _capability_retrieval_context(
         state: SessionState,
-    ) -> dict[str, tuple[str, ...]]:
+    ) -> dict[str, Any]:
         """提取有界跨轮线索供本地召回使用，不替模型裁决用户意图。"""
         recent_users: list[str] = []
         recent_tools: list[str] = []
         seen_tools: set[str] = set()
+        tool_weights: dict[str, float] = {}
+        turns_back = 0
         for item in reversed(state.conversation[-24:]):
             if not isinstance(item, Mapping):
                 continue
             role = str(item.get("role") or "").strip().lower()
             if role == "user" and len(recent_users) < 3:
-                text = str(item.get("content") or "").strip()
+                text = AgentSession._with_reply_context(
+                    str(item.get("content") or "").strip(), item.get("reply_context"),
+                )
                 if text:
-                    recent_users.append(text[:600])
+                    recent_users.append(text[:2_000])
+            if role == "user":
+                turns_back += 1
+                if turns_back >= 3:
+                    break
             tool_name = str(item.get("tool_name") or "").strip()
             if tool_name and tool_name not in seen_tools and len(recent_tools) < 6:
                 recent_tools.append(tool_name)
                 seen_tools.add(tool_name)
+                tool_weights[tool_name] = 0.35 ** turns_back
             calls = item.get("tool_calls")
             if isinstance(calls, Sequence) and not isinstance(
                 calls, (str, bytes, bytearray)
@@ -1214,21 +1235,24 @@ class AgentSession:
                     if name and name not in seen_tools and len(recent_tools) < 6:
                         recent_tools.append(name)
                         seen_tools.add(name)
+                        tool_weights[name] = 0.35 ** turns_back
         return {
             "recent_user_messages": tuple(recent_users),
             "recent_tool_names": tuple(recent_tools),
+            "recent_tool_weights": tool_weights,
         }
 
     @staticmethod
     def _contextual_message(agent_input: AgentInput) -> str:
-        reply = agent_input.reply_context
-        reply_text = (
-            str(reply.get("text") or "").strip() if isinstance(reply, Mapping) else ""
-        )
+        return AgentSession._with_reply_context(agent_input.message, agent_input.reply_context)
+
+    @staticmethod
+    def _with_reply_context(message: str, reply: object) -> str:
+        reply_text = str(reply.get("text") or "").strip() if isinstance(reply, Mapping) else ""
         if not reply_text:
-            return agent_input.message
+            return message
         return (
-            f"{agent_input.message}\n\n"
+            f"{message}\n\n"
             "<reply_context purpose=reference_resolution>\n"
             f"{reply_text[:2_000]}\n"
             "</reply_context>"
@@ -1240,6 +1264,7 @@ class AgentSession:
         *,
         current_user_index: int,
         original_message: str,
+        reply_context: Mapping[str, Any] | None = None,
         prior_conversation: Sequence[Mapping[str, Any]] = (),
     ) -> list[dict[str, Any]]:
         stored: list[dict[str, Any]] = []
@@ -1247,8 +1272,14 @@ class AgentSession:
         for prior in prior_conversation[-60:]:
             if not isinstance(prior, Mapping):
                 continue
-            key = tuple(str(prior.get(field) or "") for field in ("role", "content", "tool_call_id", "tool_name"))
-            public_history.setdefault(key, []).append({key: prior[key] for key in ("public_content", "candidate_result_ref") if isinstance(prior.get(key), str)})
+            restored = dict(prior)
+            if prior.get("role") == "user":
+                restored["content"] = AgentSession._with_reply_context(str(prior.get("content") or ""), prior.get("reply_context"))
+            key = tuple(str(restored.get(field) or "") for field in ("role", "content", "tool_call_id", "tool_name"))
+            preserved = {key: prior[key] for key in ("content", "public_content", "candidate_result_ref") if isinstance(prior.get(key), str)}
+            if isinstance(prior.get("reply_context"), Mapping):
+                preserved["reply_context"] = {"text": str(prior["reply_context"].get("text") or "")[:2_000]}
+            public_history.setdefault(key, []).append(preserved)
         for index, message in enumerate(messages):
             item = message.to_dict()
             key = tuple(str(item.get(field) or "") for field in ("role", "content", "tool_call_id", "tool_name"))
@@ -1268,6 +1299,8 @@ class AgentSession:
                 **stored[current_user_index],
                 "content": original_message,
             }
+            if reply_context and str(reply_context.get("text") or "").strip():
+                stored[current_user_index]["reply_context"] = {"text": str(reply_context["text"]).strip()[:2_000]}
         return stored
 
     @staticmethod
@@ -1277,7 +1310,10 @@ class AgentSession:
             if not isinstance(item, Mapping):
                 continue
             try:
-                message = ModelMessage.from_dict(item)
+                restored = dict(item)
+                if item.get("role") == "user":
+                    restored["content"] = AgentSession._with_reply_context(str(item.get("content") or ""), item.get("reply_context"))
+                message = ModelMessage.from_dict(restored)
             except Exception as exc:  # noqa: BLE001 - isolate malformed persisted rows
                 logger.warning("忽略无效 Agent 会话消息 type=%s", type(exc).__name__)
                 continue

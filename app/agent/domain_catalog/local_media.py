@@ -166,7 +166,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="local_media.task_summaries",
-            description="只读列出本地媒体任务的 owner 绑定短期公开序号、媒体标题、阶段和可用动作，不返回路径、哈希、数据库 ID 或错误正文。",
+            description="只读列出本地媒体任务的原文件名、时间、阶段和文件归档/冲突跳过结果。任务 completed 不等于视频入库；task_number 是本次列表短期序号，不是数据库 ID。询问整理通知里哪个完成或跳过时使用通知 scan_ref（LM 编号）或 scope=latest_scan，仅核对该批次，禁止用历史整理或 RSS 跳过记录代替。结果分页，has_more 时保留 scan_ref/scope 并用 next_offset 继续；total 仅指本页。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -178,16 +178,20 @@ def register_specs(
                             "attention",
                             "active",
                             "history",
+                            "skipped",
+                            "latest_scan",
                             *sorted(LOCAL_TASK_STATUSES),
                         ],
                     },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "scan_ref": {"type": "string", "pattern": "^(LM[1-9][0-9]{0,17}|LM-UNRECORDED)$", "maxLength": 20},
+                    "offset": {"type": "integer", "minimum": 0, "maximum": 2147483647},
                 },
                 "additionalProperties": False,
             },
             context_handler=list_local_media_task_summaries,
             validator=local_media_task_summaries_arguments,
-            examples=("列出本地媒体任务", "查看失败的本地整理任务"),
+            examples=("列出本地媒体任务", "查看失败的本地整理任务", "刚才本地整理通知里哪个完成哪个跳过", "查看本次扫描 LM12 的文件结果"),
         )
     )
     registry.register(

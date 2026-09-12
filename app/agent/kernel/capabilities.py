@@ -291,22 +291,24 @@ class CapabilityRetriever:
         raw_hints = runtime.get("recent_user_messages", ())
         if isinstance(raw_hints, str):
             raw_hints = (raw_hints,)
-        hint_counts = Counter(
-            _tokens(
-                " ".join(
-                    str(item)[:600]
-                    for item in raw_hints
-                    if str(item).strip()
-                )
-            )
-        )
+        # 历史只补足省略表达，越旧越弱；当前显式引用不能被旧话题压过。
+        history_scale = 0.2 if runtime.get("has_current_reference") else 1.0
+        hints = [
+            (Counter(_tokens(str(item)[:2_000])), _normalize(str(item)[:2_000]), 0.35 ** index)
+            for index, item in enumerate(raw_hints)
+            if str(item).strip()
+        ][:3]
         raw_recent_tools = runtime.get("recent_tool_names", ())
         if isinstance(raw_recent_tools, str):
             raw_recent_tools = (raw_recent_tools,)
-        recent_tool_names = {
-            str(item).strip()
-            for item in raw_recent_tools
-            if str(item).strip()
+        recent_tool_names = list(dict.fromkeys(
+            str(item).strip() for item in raw_recent_tools if str(item).strip()
+        ))[:6]
+        explicit_weights = runtime.get("recent_tool_weights") or {}
+        # 工具可在同一回合连续调用，不能把列表中的第几个工具当成回合远近。
+        recent_tool_weights = {
+            name: max(0.0, min(1.0, float(explicit_weights.get(name, 1.0))))
+            for name in recent_tool_names
         }
         negated_counts = _negated_tokens(message)
         for token, count in negated_counts.items():
@@ -354,7 +356,6 @@ class CapabilityRetriever:
         )
         total_docs = len(documents)
         normalized_message = _normalize(message)
-        normalized_hints = _normalize(" ".join(str(item) for item in raw_hints))
         scores: dict[str, float] = {}
         for tool in visible:
             tokens = documents[tool.name]
@@ -371,12 +372,11 @@ class CapabilityRetriever:
                 weight=1.0,
                 **overlap_options,
             )
-            score += _bm25_overlap(
-                hint_counts,
-                counts,
-                weight=0.55,
-                **overlap_options,
-            )
+            for hint_counts, _normalized_hint, recency in hints:
+                score += _bm25_overlap(
+                    hint_counts, counts, weight=0.55 * recency * history_scale,
+                    **overlap_options,
+                )
             normalized_name = _normalize(tool.name)
             normalized_domain = _normalize(tool.domain)
             if normalized_name in normalized_message:
@@ -390,13 +390,16 @@ class CapabilityRetriever:
                     or normalized_message in normalized_example
                 ):
                     score += 5.0
-                elif normalized_example and normalized_hints and (
-                    normalized_example in normalized_hints
-                    or normalized_hints in normalized_example
-                ):
-                    score += 1.5
-            if tool.name in recent_tool_names or tool.model_name in recent_tool_names:
-                score += 8.0
+                elif normalized_example:
+                    score += max((
+                        1.5 * recency * history_scale
+                        for _counts, hint, recency in hints
+                        if hint and (normalized_example in hint or hint in normalized_example)
+                    ), default=0.0)
+            score += 8.0 * history_scale * max(
+                recent_tool_weights.get(tool.name, 0.0),
+                recent_tool_weights.get(tool.model_name, 0.0),
+            )
             negative_overlap = 0.0
             negative_document = negative_documents[tool.name]
             for token, negative_frequency in negated_counts.items():
@@ -428,7 +431,10 @@ class CapabilityRetriever:
         def adjacency_score(tool: KernelToolSpec) -> float:
             score = scores[tool.name]
             if tool.name in recent_tool_names or tool.model_name in recent_tool_names:
-                score += min(5.0, max(0.0, score) * 0.5)
+                score += min(5.0, max(0.0, score) * 0.5) * history_scale * max(
+                    recent_tool_weights.get(tool.name, 0.0),
+                    recent_tool_weights.get(tool.model_name, 0.0),
+                )
             return score
 
         sources = sorted(selected, key=lambda tool: (-adjacency_score(tool), tool.name))

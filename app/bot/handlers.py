@@ -3352,6 +3352,10 @@ def _run_local_organize_stage(
     moved_items = 0
     skipped_items = 0
     task_results: dict[int, dict] = {}
+    task_outcomes: list[dict] = []
+    from app.modules.local_media_outcomes import local_media_task_outcome
+    from app.modules.local_media_scan_runs import finish_local_media_scan_report
+
     take_result = getattr(scheduler, "take_captured_task_result", None)
     for task_id in task_ids:
         task = db.get_local_media_task(task_id, owner="admin")
@@ -3366,18 +3370,18 @@ def _run_local_organize_stage(
                 if isinstance(captured_result, dict)
                 else {"status": "requires_manual"}
             )
-        if status == "completed":
-            for item in db.list_local_media_task_items(task_id, owner="admin"):
-                if str(item["action"] or "") == "skip":
-                    skipped_items += 1
-                else:
-                    moved_items += 1
+        outcome = local_media_task_outcome(
+            task, db.list_local_media_task_items(task_id, owner="admin")
+        )
+        task_outcomes.append({"task_id": task_id, "status": status, **outcome})
+        moved_items += int(outcome["archived_video_count"])
+        skipped_items += int(outcome["skipped_video_count"])
     source_errors = [
         f"{item.get('name') or '未命名来源'!s}：{item.get('error') or ''!s}"
         for item in (scan_result.get("sources") or [])
         if isinstance(item, dict) and str(item.get("error") or "")
     ]
-    return {
+    summary = {
         **scan_result,
         "completed": completed,
         "requires_manual": requires_manual,
@@ -3386,7 +3390,18 @@ def _run_local_organize_stage(
         "skipped_items": skipped_items,
         "source_errors": source_errors,
         "task_results": task_results,
+        "task_outcomes": task_outcomes,
     }
+    if summary.get("scan_recorded") is False:
+        summary["report_saved"] = False
+    elif summary.get("scan_ref"):
+        try:
+            finish_local_media_scan_report(str(summary["scan_ref"]), summary, owner="admin")
+        except Exception as exc:  # noqa: BLE001 - report persistence is not the task outcome
+            # 保存查询回执失败不能把真实已结束的整理任务改报“整理失败”。
+            logger.warning("本地扫描通知结果保存失败 type=%s", type(exc).__name__)
+            summary["report_saved"] = False
+    return summary
 
 
 def _local_organize_event(summary: dict) -> NotificationEvent:
@@ -3398,11 +3413,36 @@ def _local_organize_event(summary: dict) -> NotificationEvent:
     lines = [f"• {message}" for message in list(summary.get("source_errors") or [])[:5]]
     if not int(summary.get("candidate_count", 0) or 0):
         lines.append("下载目录中暂未发现可整理的媒体候选。")
+    labels = {
+        "archived": "已归档",
+        "conflict_skipped": "冲突跳过（本次未归档）",
+        "partial": "部分归档/跳过，详见批次明细",
+        "preview_only": "仅预览（本次未归档）",
+        "unknown": "任务已结束，文件结果未记录",
+        "failed": "执行失败",
+    }
+    outcomes = list(summary.get("task_outcomes") or [])
+    for item in outcomes[:4]:
+        name = str(item.get("original_filename") or "未命名文件")
+        label = "待确认（未归档）" if item.get("status") == "requires_manual" else labels.get(
+            str(item.get("file_outcome") or ""), "仍在处理中"
+        )
+        lines.append(f"• {name[:160]}：{label}")
+    if len(outcomes) > 4:
+        lines.append(f"…另有 {len(outcomes) - 4} 项，可按本地扫描编号查看完整明细。")
+    if int(summary.get("skipped_items", 0) or 0):
+        lines.append("任务已结束包含冲突跳过；‘已结束’与‘已归档’不是同一计数。")
+    if summary.get("scan_recorded") is False:
+        lines.append("本次批次回执未保存，请勿用上一次扫描替代；以下文件结果来自本次实际执行。")
+    elif summary.get("report_saved") is False:
+        lines.append("本条通知的结果快照未保存，后续查询仅能读取任务当前状态。")
+    scan_fields = (("本地扫描", str(summary["scan_ref"])),) if summary.get("scan_ref") else ()
     return NotificationEvent(
         "本地下载整理部分完成" if attention else "本地下载整理完成",
         layout="relaxed",
         fields=(
-            ("状态", "需要处理" if attention else "整理完成"),
+            *scan_fields,
+            ("状态", "需要处理" if attention else "处理结束"),
             (
                 "来源",
                 f"{int(summary.get('scanned_sources', 0) or 0):,} 已扫描 · "
@@ -3411,7 +3451,7 @@ def _local_organize_event(summary: dict) -> NotificationEvent:
             ("候选", f"{int(summary.get('candidate_count', 0) or 0):,} 个"),
             (
                 "任务",
-                f"{int(summary.get('completed', 0) or 0):,} 完成 · "
+                f"{int(summary.get('completed', 0) or 0):,} 已结束 · "
                 f"{int(summary.get('requires_manual', 0) or 0):,} 待确认 · "
                 f"{int(summary.get('failed', 0) or 0):,} 失败",
             ),
@@ -3457,6 +3497,8 @@ def _all_organize_event(cloud_state: dict, local_summary: dict) -> NotificationE
         f"本地：{message}"
         for message in list(local_summary.get("source_errors") or [])[:4]
     )
+    if local_summary.get("scan_recorded") is False:
+        lines.append("本地扫描回执未保存，请勿用上一次扫描替代；任务仍按实际结果统计。")
     strm = cloud_stats.get("strm") if isinstance(cloud_stats.get("strm"), dict) else {}
     strm_text = "未触发"
     if strm:
@@ -3484,10 +3526,15 @@ def _all_organize_event(cloud_state: dict, local_summary: dict) -> NotificationE
             f"\n\n{'、'.join(pending_sources)}待确认项目将继续发送候选卡；"
             "若未收到，请前往 Web 待确认队列继续处理。"
         )
+    local_scan_fields = (
+        (("本地扫描", str(local_summary["scan_ref"])),)
+        if local_summary.get("scan_ref") else ()
+    )
     return NotificationEvent(
         "全部整理部分完成" if attention else "全部整理完成",
         layout="relaxed",
         fields=(
+            *local_scan_fields,
             ("状态", "需要处理" if attention else "全部完成"),
             (
                 "光鸭云盘",
@@ -3498,11 +3545,17 @@ def _all_organize_event(cloud_state: dict, local_summary: dict) -> NotificationE
             ("STRM", strm_text),
             (
                 "本地下载",
-                f"{int(local_summary.get('completed', 0) or 0):,} 完成 · "
+                f"{int(local_summary.get('completed', 0) or 0):,} 已结束 · "
                 f"{int(local_summary.get('requires_manual', 0) or 0):,} 待确认 · "
                 f"{int(local_summary.get('failed', 0) or 0):,} 失败",
             ),
-            ("本地归档", f"{int(local_summary.get('moved_items', 0) or 0):,} 个文件"),
+            (
+                "本地文件",
+                (
+                    f"{int(local_summary.get('moved_items', 0) or 0):,} 已归档 · "
+                    f"{int(local_summary.get('skipped_items', 0) or 0):,} 冲突跳过"
+                ),
+            ),
         ),
         lines=tuple(lines),
         footer=footer,

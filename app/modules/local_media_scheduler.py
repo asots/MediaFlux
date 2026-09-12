@@ -327,6 +327,7 @@ class LocalMediaScheduler:
         本入口用于 Web/TG 的一次性用户操作，不依赖已废弃的目录轮询配置；
         仅预览来源和未配置归档目标的来源不会被移动。
         """
+        scan_started_at = db.now()
         task_ids: list[int] = []
         source_results: list[dict[str, object]] = []
         selected_source_ids = (
@@ -401,10 +402,9 @@ class LocalMediaScheduler:
         if capture_results and unique_task_ids:
             with self._guard:
                 self._capture_result_task_ids.update(unique_task_ids)
-        if unique_task_ids:
-            self.reload()
-        return {
+        summary = {
             "ok": True,
+            "scan_started_at": scan_started_at,
             "source_count": len(source_results),
             "scanned_sources": sum(1 for item in source_results if not item["skipped"]),
             "candidate_count": sum(int(item["candidates"]) for item in source_results),
@@ -412,6 +412,21 @@ class LocalMediaScheduler:
             "task_ids": unique_task_ids,
             "sources": source_results,
         }
+        from app.modules.local_media_scan_runs import (
+            UNRECORDED_LOCAL_SCAN,
+            record_local_media_scan,
+        )
+
+        try:
+            summary["scan_ref"] = record_local_media_scan(summary, owner=self.owner)
+            summary["scan_recorded"] = True
+        except Exception as exc:  # noqa: BLE001 - accepted tasks must still wake if receipt storage fails
+            logger.warning("本地扫描回执保存失败 type=%s", type(exc).__name__)
+            summary["scan_ref"] = UNRECORDED_LOCAL_SCAN
+            summary["scan_recorded"] = False
+        if unique_task_ids:
+            self.reload()
+        return summary
 
     def _complete_captured_task_result(
         self,
