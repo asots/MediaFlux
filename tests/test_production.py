@@ -3318,6 +3318,8 @@ class TelegramBotTests(unittest.TestCase):
             ):
                 agent(command_message)
                 agent_reset(command_message)
+                from app.bot.agent_adapter import AGENT_EXECUTOR
+                self.assertTrue(AGENT_EXECUTOR.stop(timeout=2, cancel_queries=False))
             guide.assert_called_once_with(bot, command_message, ANY)
             reset.assert_called_once_with(bot, command_message)
         self.assertEqual(bot.replies[0][1], "未授权会话")

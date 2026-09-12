@@ -194,6 +194,8 @@ class TelegramGroupWriteAuthorizationTests(unittest.TestCase):
                 and filters["func"](message)
             )
             receive_link(message)
+            from app.bot.agent_adapter import AGENT_EXECUTOR
+            self.assertTrue(AGENT_EXECUTOR.stop(timeout=2, cancel_queries=False))
 
         create_request.assert_not_called()
         handle_agent_message.assert_called_once_with(bot, telebot, message)

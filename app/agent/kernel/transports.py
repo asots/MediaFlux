@@ -5,16 +5,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import secrets
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .adapters import EventObserver, TurnView, consume_events, iter_ndjson
+from .events import AgentEventType
 from .metrics import KernelMetrics
 from .session import AgentSession
-from .state import AgentInput, SelectionInvalidError
+from .state import AgentInput, CancellationToken, SelectionInvalidError
 from .ux_selection import normalize_selection
 
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
@@ -159,22 +162,34 @@ class TelegramKernelTransport:
         request: QueryEnvelope,
         *,
         observe: EventObserver | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> TurnView:
-        normalized = QueryEnvelope(
-            owner=request.owner,
-            session_id=request.session_id,
-            message=request.message,
-            request_id=request.request_id,
-            channel="telegram",
-            reply_context=request.reply_context,
-            metadata=request.metadata,
-            selection=request.selection,
-        )
+        normalized = replace(request, channel="telegram")
         events = self.metrics.track(
             self.session.run(normalized.to_agent_input()),
             channel="telegram",
         )
-        return await consume_events(events, observe=observe)
+        cancel_task = None
+
+        async def cancel_on_stop():
+            await cancellation.wait()
+            await self.cancel(owner=normalized.owner, session_id=normalized.session_id)
+
+        async def cancellable_events():
+            nonlocal cancel_task
+            async for event in events:
+                # 先注册真实 turn，再响应停机，避免 stop 早于 admission 时丢失取消。
+                if cancellation is not None and event.type is AgentEventType.TURN_STARTED:
+                    cancel_task = asyncio.create_task(cancel_on_stop())
+                yield event
+
+        try:
+            return await consume_events(cancellable_events(), observe=observe)
+        finally:
+            if cancel_task is not None:
+                cancel_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cancel_task
 
     async def confirm(
         self,
@@ -182,13 +197,7 @@ class TelegramKernelTransport:
         *,
         observe: EventObserver | None = None,
     ) -> TurnView:
-        normalized = EffectEnvelope(
-            owner=request.owner,
-            session_id=request.session_id,
-            plan_id=request.plan_id,
-            request_id=request.request_id,
-            channel="telegram",
-        ).normalized()
+        normalized = replace(request, channel="telegram").normalized()
         events = self.session.confirm(
             owner=normalized.owner,
             session_id=normalized.session_id,

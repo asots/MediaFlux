@@ -9,7 +9,7 @@ from app.agent.kernel.adapters import TurnView, consume_events
 from app.agent.kernel.events import AgentEventType, EventFactory
 from app.agent.kernel.state import AgentInput
 from app.agent.models import ToolResult
-from app.bot.agent_adapter import _turn_text
+from app.bot.agent_adapter import _render_turn
 from tests.test_agent_kernel_adapters import event_stream
 from tests import test_agent_kernel_browser as browser_tests
 from tests.test_agent_kernel_browser import SESSION_ID, _event
@@ -36,10 +36,10 @@ class AgentFailureProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view.status, 'failed')
         self.assertEqual(view.effect_result['status'], 'manual_review')
         self.assertIn(WARNING, view.error_message)
-        self.assertIn('请先核对下载器', _turn_text(view))
-        self.assertIn('勿直接重复提交', _turn_text(view))
-        self.assertIn('光鸭云盘', _turn_text(view))
-        self.assertNotIn('通过写后校验', _turn_text(view))
+        self.assertIn('请先核对下载器', _render_turn(view))
+        self.assertIn('勿直接重复提交', _render_turn(view))
+        self.assertIn('光鸭云盘', _render_turn(view))
+        self.assertNotIn('通过写后校验', _render_turn(view))
 
     async def test_failure_without_dto_keeps_specific_cause(self):
         factory = EventFactory(session_id='s', turn_id='t', request_id='r')
@@ -50,13 +50,13 @@ class AgentFailureProjectionTests(unittest.IsolatedAsyncioTestCase):
         ]))
         self.assertEqual(view.error_code, 'manual_review')
         self.assertEqual(view.error_message, WARNING)
-        self.assertIn('请先核对下载器', _turn_text(view))
-        self.assertIn('勿直接重复提交', _turn_text(view))
+        self.assertIn('请先核对下载器', _render_turn(view))
+        self.assertIn('勿直接重复提交', _render_turn(view))
 
     async def test_empty_effect_result_is_not_verified_success_in_telegram(self):
         view = TurnView(session_id='s', turn_id='t', request_id='r', status='effect_completed')
-        self.assertNotIn('通过写后校验', _turn_text(view))
-        self.assertIn('勿直接重复提交', _turn_text(view))
+        self.assertNotIn('通过写后校验', _render_turn(view))
+        self.assertIn('勿直接重复提交', _render_turn(view))
 
 
 

@@ -13,10 +13,11 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Coroutine
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import suppress
+from contextvars import ContextVar, copy_context
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any
 
 from app import config
 from app.agent.feature_gate import (
@@ -28,7 +29,7 @@ from app.agent.kernel.adapters import ApprovalView, TurnView
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
 from app.agent.kernel.events import AgentEvent, AgentEventType
 from app.agent.kernel.public_view import format_public_result
-from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
+from app.agent.kernel.state import CancellationToken, SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import EffectEnvelope, QueryEnvelope
 from app.agent.owner_routes import configured_telegram_user_ids
 from app.agent.public_safety import public_tool_label
@@ -82,20 +83,15 @@ _TOOL_PROGRESS_LABELS = {
     "local_media": "正在检查本地媒体",
     "automation": "正在检查自动化任务",
 }
-_T = TypeVar("_T")
 
 
 def _enabled(value: object) -> bool:
     return str(value or "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
-def _allowed_user_ids() -> set[str]:
-    return configured_telegram_user_ids()
-
-
 def telegram_user_is_allowed(user_id: object) -> bool:
     user = str(user_id or "").strip()
-    return bool(_ALLOWED_USER_RE.fullmatch(user) and user in _allowed_user_ids())
+    return bool(_ALLOWED_USER_RE.fullmatch(user) and user in configured_telegram_user_ids())
 
 
 def telegram_agent_control_access(chat_id: object, user_id: object) -> str:
@@ -106,7 +102,7 @@ def telegram_agent_control_access(chat_id: object, user_id: object) -> str:
         not _ALLOWED_ID_RE.fullmatch(chat)
         or not _ALLOWED_USER_RE.fullmatch(user)
         or chat != configured_chat
-        or user not in _allowed_user_ids()
+        or user not in configured_telegram_user_ids()
     ):
         return "unauthorized"
     return "allowed"
@@ -151,28 +147,65 @@ def _request_id(source: Any, text: str) -> str:
     return f"tg_{message_id}_{digest}"[:150]
 
 
-def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
-    """让同步 TeleBot handler 安全消费异步 Kernel。"""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
+class TelegramAgentExecutor:
+    """有界执行同步 Telegram 业务；普通查询可取消，确认写入只等待结束。"""
 
-    result: list[_T] = []
-    errors: list[BaseException] = []
+    def __init__(self, *, max_queries: int = 8, max_controls: int = 2):
+        self._limits = (max_queries, max_controls)
+        self._lock = threading.RLock()
+        self._pool: ThreadPoolExecutor | None = None
+        self._jobs: dict[Future, bool] = {}
+        self._closing = True
+        self._cancellation = CancellationToken()
 
-    def runner() -> None:
+    def start(self) -> bool:
+        with self._lock:
+            if self._pool is not None:
+                return not self._closing
+            self._pool = ThreadPoolExecutor(
+                max_workers=sum(self._limits), thread_name_prefix="telegram-agent",
+            )
+            self._cancellation = CancellationToken()
+            self._closing = False
+            return True
+
+    def submit(self, function, *args, control: bool = False) -> Future | None:
+        with self._lock:
+            if self._closing or sum(kind == control for kind in self._jobs.values()) >= self._limits[control]:
+                return None
+            context = copy_context()
+            context.run(AGENT_CANCELLATION.set, self._cancellation)
+            future = self._pool.submit(context.run, function, *args)
+            self._jobs[future] = control
+            future.add_done_callback(self._finished)
+            return future
+
+    def _finished(self, future: Future) -> None:
+        with self._lock:
+            self._jobs.pop(future, None)
         try:
-            result.append(asyncio.run(coro))
-        except BaseException as exc:  # noqa: BLE001 - 需跨线程原样传播
-            errors.append(exc)
+            future.result()
+        except Exception as exc:
+            logger.warning("Telegram Agent 后台处理失败 type=%s", type(exc).__name__)
 
-    thread = threading.Thread(target=runner, name="telegram-agent-kernel", daemon=True)
-    thread.start()
-    thread.join()
-    if errors:
-        raise errors[0]
-    return result[0]
+    def stop(self, *, timeout: float = 5.0, cancel_queries: bool = True) -> bool:
+        with self._lock:
+            self._closing = True
+            pool = self._pool
+            jobs = tuple(self._jobs)
+            if cancel_queries:
+                self._cancellation.cancel("service_stopping")
+        if wait(jobs, timeout=max(0.0, timeout)).not_done:
+            return False
+        if pool is not None:
+            pool.shutdown(wait=True)
+        with self._lock:
+            self._pool = None
+        return True
+
+
+AGENT_CANCELLATION: ContextVar[CancellationToken | None] = ContextVar("telegram_agent_cancellation", default=None)
+AGENT_EXECUTOR = TelegramAgentExecutor()
 
 
 def _thread_kwargs(source: Any) -> dict[str, Any]:
@@ -192,14 +225,11 @@ def _tool_progress(tool_name: object) -> str:
     return _TOOL_PROGRESS_LABELS.get(prefix, "正在调用项目能力")
 
 
-def _public_summary(value: Any) -> str:
-    if isinstance(value, dict):
-        for key in ("summary", "message", "title", "status"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return _safe_text(candidate, limit=1200)
-    if isinstance(value, str):
-        return _safe_text(value, limit=1200)
+def _public_summary(value: dict[str, Any]) -> str:
+    for key in ("summary", "message", "title", "status"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return _safe_text(candidate, limit=1200)
     return ""
 
 
@@ -273,18 +303,6 @@ def _truncate_stream_overflow_preview(rendered: object) -> str:
     return split_telegram_html(candidate, limit=_TELEGRAM_MESSAGE_LIMIT)[-1]
 
 
-def _render_turn(view: TurnView) -> str:
-    return render_telegram_markdown(_turn_text(view))
-
-
-def _turn_chunks(view: TurnView) -> tuple[str, ...]:
-    """将完整 Agent 终态转换为 Telegram-safe HTML 分段，不截断正文。"""
-
-    rendered = _render_turn(view)
-    chunks = split_telegram_html(rendered, limit=_MAX_MESSAGE)
-    return chunks or ("Agent 未返回可显示的回答，请重试。",)
-
-
 def _preview_lines(
     approval: ApprovalView,
     *,
@@ -348,34 +366,27 @@ def _preview_lines(
     return lines
 
 
-def _effect_result_text(view: TurnView) -> str:
-    if not view.effect_result:
-        return "执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。"
-    return format_public_result(view.effect_result, fallback="操作已结束。")
-
-
-def _turn_text(view: TurnView) -> str:
+def _render_turn(view: TurnView) -> str:
     if view.status == "success":
         chain = _tool_chain_line(view.tool_calls)
-        answer = str(
-            view.answer or "Agent 未返回可显示的回答，请重试。"
-        ).replace("\x00", "").strip()
-        return f"{answer}\n\n🔎 执行：{chain}" if chain else answer
-    if view.status == "effect_completed":
-        return _effect_result_text(view)
-    if view.status == "cancelled":
-        return "已停止本次任务。"
-    if view.status == "failed":
-        if view.effect_result:
-            return format_public_result(
-                {**view.effect_result, "ok": False,
-                 "error": view.effect_result.get("error") or view.error_message},
-                fallback=view.error_message or "确认执行未能完成。",
-            )
-        return _safe_text(view.error_message or "Agent 暂时无法完成该请求。")
-    if view.status == "approval_required":
-        return "等待确认。"
-    return _safe_text(view.answer or "任务已结束。")
+        answer = str(view.answer or "Agent 未返回可显示的回答，请重试。").replace("\x00", "").strip()
+        body = f"{answer}\n\n🔎 执行：{chain}" if chain else answer
+    elif view.status == "effect_completed":
+        body = (format_public_result(view.effect_result, fallback="操作已结束。")
+                if view.effect_result else "执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。")
+    elif view.status == "cancelled":
+        body = "已停止本次任务。"
+    elif view.status == "failed":
+        body = (format_public_result(
+            {**view.effect_result, "ok": False,
+             "error": view.effect_result.get("error") or view.error_message},
+            fallback=view.error_message or "确认执行未能完成。",
+        ) if view.effect_result else _safe_text(view.error_message or "Agent 暂时无法完成该请求。"))
+    elif view.status == "approval_required":
+        body = "等待确认。"
+    else:
+        body = _safe_text(view.answer or "任务已结束。")
+    return render_telegram_markdown(body)
 
 
 class _ExistingMessageProgress(TelegramProgress):
@@ -426,11 +437,15 @@ class _TelegramEventObserver:
             await self._publish_stream(force=first_delta)
             return
 
-        text = ""
-        force = False
-        if event.type is AgentEventType.CAPABILITIES_SELECTED:
-            text = "正在理解任务…"
-        elif event.type is AgentEventType.MODEL_TOOL_CALL:
+        text, force = {
+            AgentEventType.CAPABILITIES_SELECTED: ("正在理解任务…", False),
+            AgentEventType.TOOL_COMPLETED: ("正在整理查询结果…", False),
+            AgentEventType.TOOL_FAILED: ("当前方法不可用，正在调整方案…", True),
+            AgentEventType.EFFECT_PREVIEW_STARTED: ("正在生成安全变更预览…", True),
+            AgentEventType.EFFECT_COMPLETED: ("正在校验执行结果…", False),
+            AgentEventType.EFFECT_FAILED: ("执行未完成，正在整理结果…", False),
+        }.get(event.type, ("", False))
+        if event.type is AgentEventType.MODEL_TOOL_CALL:
             self.model_text = ""
             self.last_stream = ""
             self.active_tool = str(event.payload.get("tool") or "")
@@ -441,18 +456,6 @@ class _TelegramEventObserver:
             text = _tool_progress(self.active_tool) + "…"
         elif event.type is AgentEventType.TOOL_PROGRESS:
             text = _tool_progress(event.payload.get("tool") or self.active_tool) + "…"
-        elif event.type is AgentEventType.TOOL_COMPLETED:
-            text = "正在整理查询结果…"
-        elif event.type is AgentEventType.TOOL_FAILED:
-            text = "当前方法不可用，正在调整方案…"
-            force = True
-        elif event.type is AgentEventType.EFFECT_PREVIEW_STARTED:
-            text = "正在生成安全变更预览…"
-            force = True
-        elif event.type is AgentEventType.EFFECT_COMPLETED:
-            text = "正在校验执行结果…"
-        elif event.type is AgentEventType.EFFECT_FAILED:
-            text = "执行未完成，正在整理结果…"
         if text:
             await self._publish_status(text, force=force)
 
@@ -606,7 +609,7 @@ def _execute_query(
     from app.bot.agent_candidates import reply_selection_ref
 
     runtime = get_agent_kernel_runtime()
-    candidate_context = _run_async(reply_selection_ref(runtime, owner=owner, session_id=session_id, message=source))
+    candidate_context = asyncio.run(reply_selection_ref(runtime, owner=owner, session_id=session_id, message=source))
     progress = TelegramProgress(
         bot,
         telebot_module,
@@ -618,8 +621,8 @@ def _execute_query(
     ).begin("<b>Media Agent</b>\n正在理解任务…")
     observer = _TelegramEventObserver(progress)
     try:
-        view = _run_async(
-            get_agent_kernel_runtime().telegram.query(
+        view = asyncio.run(
+            runtime.telegram.query(
                 QueryEnvelope(
                     owner=owner,
                     session_id=session_id,
@@ -630,6 +633,7 @@ def _execute_query(
                     metadata={"candidate_context": candidate_context} if candidate_context else {},
                 ),
                 observe=observer,
+                cancellation=AGENT_CANCELLATION.get(),
             )
         )
         if view.approval is not None:
@@ -644,11 +648,11 @@ def _execute_query(
             from app.bot.agent_candidates import render, start_draft
 
             candidates = dict(view.candidate_view)
-            draft = _run_async(start_draft(runtime, owner=owner, session_id=session_id, view=candidates))
+            draft = asyncio.run(start_draft(runtime, owner=owner, session_id=session_id, view=candidates))
             body, markup = render(telebot_module, candidates, draft)
             progress.finish(body, reply_markup=markup)
         else:
-            progress.finish_many(_turn_chunks(view))
+            progress.finish_many(split_telegram_html(_render_turn(view), limit=_MAX_MESSAGE) or ("Agent 未返回可显示的回答，请重试。",))
         return view
     except Exception:
         with suppress(Exception):
@@ -676,15 +680,13 @@ def handle_agent_message(bot: Any, telebot_module: Any, message: Any) -> bool:
             user_id=user_id,
             text=text,
         )
-    except SelectionInvalidError as exc:
-        bot.reply_to(message, str(exc))
-    except RuntimeError as exc:
-        if "频繁" in str(exc) or "重复" in str(exc):
+    except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
+        if isinstance(exc, SelectionInvalidError) or (
+            isinstance(exc, RuntimeError) and ("频繁" in str(exc) or "重复" in str(exc))
+        ):
             bot.reply_to(message, str(exc))
         else:
             logger.warning("Telegram Agent 请求失败 type=%s", type(exc).__name__)
-    except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
-        logger.warning("Telegram Agent 请求失败 type=%s", type(exc).__name__)
     return True
 
 
@@ -693,7 +695,7 @@ def _candidate_result_markup(owner: str, session_id: str, plan_id: str, body: st
     from app.bot.agent_candidates import finish_result
 
     try:
-        return _run_async(finish_result(
+        return asyncio.run(finish_result(
             get_agent_kernel_runtime(), owner=owner, session_id=session_id,
             plan_id=plan_id, result_html=body, telebot=telebot_module,
         ))
@@ -741,7 +743,7 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
     runtime = get_agent_kernel_runtime()
     if getattr(runtime, "store", None) is not None:
         try:
-            state = _run_async(runtime.store.load(owner=owner, session_id=session_id))
+            state = asyncio.run(runtime.store.load(owner=owner, session_id=session_id))
             if state.pending_effect_plan_id != envelope.plan_id:
                 bot.answer_callback_query(call.id, "该计划已处理或被替代，请使用当前消息中的按钮。", show_alert=True)
                 return
@@ -750,8 +752,8 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
             return
     if match.group("action") == "x":
         try:
-            discarded = _run_async(
-                get_agent_kernel_runtime().telegram.cancel_effect(envelope)
+            discarded = asyncio.run(
+                runtime.telegram.cancel_effect(envelope)
             )
         except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
             logger.warning("Telegram Agent 取消计划失败 type=%s", type(exc).__name__)
@@ -770,8 +772,8 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
     )
     observer = _TelegramEventObserver(_ExistingMessageProgress(bot, call.message))
     try:
-        view = _run_async(
-            get_agent_kernel_runtime().telegram.confirm(
+        view = asyncio.run(
+            runtime.telegram.confirm(
                 envelope,
                 observe=observer,
             )
@@ -895,7 +897,7 @@ def handle_agent_reset(bot: Any, message: Any) -> None:
     session_id = telegram_agent_session_id(chat_id, user_id)
     try:
         runtime = get_agent_kernel_runtime()
-        _run_async(runtime.lifecycle.reset(owner=owner, session_id=session_id))
+        asyncio.run(runtime.lifecycle.reset(owner=owner, session_id=session_id))
         bot.reply_to(message, "Media Agent 会话已重置。")
     except SessionBusyError:
         bot.reply_to(message, "已确认写操作正在执行，当前会话暂不能重置。")
@@ -905,23 +907,18 @@ def handle_agent_reset(bot: Any, message: Any) -> None:
 
 
 def _apply_agent_control_action(action_name: str) -> str:
-    updates: dict[str, str]
-    if action_name == "enable_all":
-        updates = {"AGENT_ENABLED": "1", "TG_AGENT_ENABLED": "1"}
-        notice = "Media Agent 已开启"
-    elif action_name == "disable_all":
-        updates = {"AGENT_ENABLED": "0", "TG_AGENT_ENABLED": "0"}
-        notice = "Media Agent 已关闭"
-    elif action_name == "enable_telegram":
-        if not is_agent_enabled():
-            raise ValueError("请先开启 Media Agent 全局开关")
-        updates = {"TG_AGENT_ENABLED": "1"}
-        notice = "Telegram Agent 已开启"
-    elif action_name == "disable_telegram":
-        updates = {"TG_AGENT_ENABLED": "0"}
-        notice = "Telegram Agent 已关闭"
-    else:
-        raise ValueError("不支持的 Agent 控制操作")
+    if action_name == "enable_telegram" and not is_agent_enabled():
+        raise ValueError("请先开启 Media Agent 全局开关")
+    actions = {
+        "enable_all": ({"AGENT_ENABLED": "1", "TG_AGENT_ENABLED": "1"}, "Media Agent 已开启"),
+        "disable_all": ({"AGENT_ENABLED": "0", "TG_AGENT_ENABLED": "0"}, "Media Agent 已关闭"),
+        "enable_telegram": ({"TG_AGENT_ENABLED": "1"}, "Telegram Agent 已开启"),
+        "disable_telegram": ({"TG_AGENT_ENABLED": "0"}, "Telegram Agent 已关闭"),
+    }
+    try:
+        updates, notice = actions[action_name]
+    except KeyError as exc:
+        raise ValueError("不支持的 Agent 控制操作") from exc
     with agent_runtime_transition():
         config.set_and_save(updates)
         invalidate_agent_runtime_generation()

@@ -1,6 +1,7 @@
 """Telegram 资源批选的薄 UI：短句柄、原位键盘、持久化 CAS；不执行下载。"""
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 import time
@@ -128,7 +129,7 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
         _edit_final,
         _preview_lines,
         _render_turn,
-        _run_async,
+        AGENT_CANCELLATION,
     )
 
     match = CALLBACK_RE.fullmatch(str(call.data or ""))
@@ -137,7 +138,7 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
         return
     runtime = get_agent_kernel_runtime()
     try:
-        view, draft = _run_async(load_draft(runtime, owner=owner, session_id=session_id, handle=match.group(1), message_id=call.message.message_id))
+        view, draft = asyncio.run(load_draft(runtime, owner=owner, session_id=session_id, handle=match.group(1), message_id=call.message.message_id))
         action = match.group("action")
         if draft["phase"] != "select" and not (draft["phase"] == "result" and action == "b"):
             raise SelectionInvalidError("正在处理预检或确认，请使用当前按钮。")
@@ -166,7 +167,7 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
                 raise SelectionInvalidError("当前目标尚未就绪，请先切换目标。")
             draft["phase"] = "previewing"
         draft["positions"] = sorted(selected)
-        draft = _run_async(save_draft(runtime, owner=owner, session_id=session_id, view=view, draft=draft, expected=match.group(1)))
+        draft = asyncio.run(save_draft(runtime, owner=owner, session_id=session_id, view=view, draft=draft, expected=match.group(1)))
     except Exception as exc:  # noqa: BLE001 - 安全失败，不删除另一并发点击刚更新的键盘
         text = str(exc) if isinstance(exc, SelectionInvalidError) else "候选已失效，请重新搜索后选择。"
         bot.answer_callback_query(call.id, text, show_alert=True)
@@ -177,19 +178,19 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
         _edit_final(bot, call.message, body, reply_markup=markup, rendered_html=True)
         return
     try:
-        result = _run_async(runtime.telegram.query(QueryEnvelope(
+        result = asyncio.run(runtime.telegram.query(QueryEnvelope(
             owner=owner, session_id=session_id,
             message=f"预览候选 {','.join(str(pos) for pos in draft['positions'])}，目标 {draft['target']}。",
             selection={"ref": view["selection_ref"], "positions": draft["positions"], "target": draft["target"]},
             request_id=f"tgsel_{call.id}"[:150], channel="telegram",
-        )))
+        ), cancellation=AGENT_CANCELLATION.get()))
         if result.approval:
             draft.update(phase="approval", plan_id=result.approval.plan_id)
-            _run_async(save_draft(runtime, owner=owner, session_id=session_id, view=view, draft=draft, expected=draft["handle"]))
+            asyncio.run(save_draft(runtime, owner=owner, session_id=session_id, view=view, draft=draft, expected=draft["handle"]))
             _edit_final(bot, call.message, "\n".join(_preview_lines(result.approval)), reply_markup=_approval_markup(telebot, result.approval), rendered_html=True)
         else:
             draft.update(phase="result", result_html=_render_turn(result))
-            draft = _run_async(save_draft(runtime, owner=owner, session_id=session_id, view=view, draft=draft, expected=draft["handle"]))
+            draft = asyncio.run(save_draft(runtime, owner=owner, session_id=session_id, view=view, draft=draft, expected=draft["handle"]))
             body, markup = render(telebot, view, draft)
             _edit_final(bot, call.message, body, reply_markup=markup, rendered_html=True)
     except Exception:  # noqa: BLE001 - 预检或投递中断，不把未知状态伪造成执行成功

@@ -534,7 +534,7 @@ def test_get_session_restores_only_valid_current_candidates_and_query_accepts_se
     response = api.client.get(f"/api/agent/sessions/{SESSION}")
     assert response.status_code == 200 and response.json()["candidate_view"] == view
     class Web:
-        async def query(self, envelope):
+        async def query(self, envelope, *, cancellation=None):
             assert envelope.to_agent_input().metadata["selection"] == _selection(view)
             yield b'{"type":"turn.completed"}\n'
     api.runtime.web = Web()

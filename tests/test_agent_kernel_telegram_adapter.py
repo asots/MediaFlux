@@ -119,7 +119,7 @@ class FakeTelegramTransport:
         self.confirmations = []
         self.cancelled = []
 
-    async def query(self, envelope, *, observe=None):
+    async def query(self, envelope, *, observe=None, cancellation=None):
         self.queries.append(envelope)
         if observe is not None:
             for event in self.events:
@@ -443,5 +443,182 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         self.assertIn("旧操作已失效", bot.answers[-1][1])
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+class TelegramAgentExecutorTests(unittest.TestCase):
+    def test_queries_are_bounded_and_do_not_occupy_control_capacity(self):
+        import threading
+        from concurrent.futures import wait
+
+        executor = adapter.TelegramAgentExecutor(max_queries=2, max_controls=1)
+        release = threading.Event()
+        started = [threading.Event(), threading.Event()]
+        executor.start()
+        try:
+            def query(index):
+                started[index].set()
+                release.wait(3)
+                return index
+            jobs = [executor.submit(query, index) for index in range(2)]
+            self.assertTrue(all(event.wait(1) for event in started))
+            self.assertIsNone(executor.submit(lambda: None))
+            control = executor.submit(lambda: "control responded", control=True)
+            self.assertEqual(control.result(1), "control responded")
+            self.assertFalse(executor.stop(timeout=0.01))
+            self.assertFalse(executor.start())
+            self.assertIsNone(executor.submit(lambda: None, control=True))
+            release.set()
+            wait(jobs, timeout=2)
+            self.assertTrue(executor.stop(timeout=1))
+            self.assertTrue(executor.start())
+            self.assertEqual(executor.submit(lambda: "new generation").result(1), "new generation")
+        finally:
+            release.set()
+            self.assertTrue(executor.stop(timeout=3))
+
+    def test_stop_cancels_real_kernel_queries_but_drains_protected_work(self):
+        import asyncio
+        import threading
+        from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
+        from tests.test_agent_kernel_transports import make_session
+
+        executor = adapter.TelegramAgentExecutor(max_queries=2, max_controls=1)
+        executor.start()
+        entered = threading.Event()
+        exited = threading.Event()
+        release_effect = threading.Event()
+
+        class SlowModel:
+            async def stream(self, request, *, cancellation):
+                entered.set()
+                try:
+                    await cancellation.wait()
+                    cancellation.raise_if_cancelled()
+                    yield  # never reached; this is an async generator
+                finally:
+                    exited.set()
+
+        session = make_session()
+        session.model = SlowModel()
+        transport = TelegramKernelTransport(session)
+        try:
+            def query():
+                return asyncio.run(transport.query(
+                    QueryEnvelope(owner="owner", session_id="session", message="slow"),
+                    cancellation=adapter.AGENT_CANCELLATION.get(),
+                ))
+            job = executor.submit(query)
+            self.assertTrue(entered.wait(1))
+            effect = executor.submit(lambda: release_effect.wait(3), control=True)
+            self.assertFalse(executor.stop(timeout=0.1))
+            self.assertEqual(job.result(1).status, "cancelled")
+            self.assertTrue(exited.is_set())
+            self.assertFalse(effect.done())
+            self.assertFalse(executor.start())
+            release_effect.set()
+            self.assertTrue(executor.stop(timeout=1))
+        finally:
+            release_effect.set()
+            executor.stop(timeout=3)
+
+    def test_registered_handlers_return_while_queries_run_and_controls_still_dispatch(self):
+        import threading
+        from app.bot import handlers
+        from tests.test_production import TelegramBotTests
+
+        executor = adapter.TelegramAgentExecutor(max_queries=2, max_controls=1)
+        bot = TelegramBotTests.FakeBot()
+        telebot = TelegramBotTests._telebot_types()
+        release = threading.Event()
+        entered = [threading.Event(), threading.Event()]
+        returned = [threading.Event(), threading.Event()]
+        controlled = threading.Event()
+        messages = [Message(text=f"slow{index}", message_id=11 + index) for index in range(2)]
+        callers = []
+        def query(bot, telebot, message):
+            entered[message.message_id - 11].set()
+            release.wait(3)
+        values = {"TG_CHAT_ID": "-100", "TG_AGENT_ALLOWED_USER_IDS": "7"}
+        try:
+            with patch.object(adapter, "AGENT_EXECUTOR", executor), patch.object(
+                handlers, "get", side_effect=lambda key, default="": values.get(key, default)
+            ), patch.object(adapter, "handle_agent_message", side_effect=query), patch.object(
+                adapter, "handle_agent_callback", side_effect=lambda *args: controlled.set()
+            ):
+                handlers._register_commands(bot, telebot)
+                handler = next(fn for filters, fn in bot.message_handlers if fn.__name__ == "wrapped" and filters.get("func") and filters["func"](messages[0]))
+                def receive(index):
+                    handler(messages[index])
+                    returned[index].set()
+                callers = [threading.Thread(target=receive, args=(index,)) for index in range(2)]
+                for caller in callers:
+                    caller.start()
+                self.assertTrue(all(event.wait(1) for event in entered))
+                self.assertTrue(all(event.wait(0.2) for event in returned), "TeleBot worker仍等待整个Agent回合")
+                call = Call("agk:c:plan_1234567890abcdef", Message(user_id=777))
+                callback = next(fn for filters, fn in bot.callback_handlers if filters["func"](call))
+                callback(call)
+                self.assertTrue(controlled.wait(1))
+                release.set()
+                self.assertTrue(executor.stop(timeout=2))
+        finally:
+            release.set()
+            for caller in callers:
+                caller.join(2)
+            executor.stop(timeout=3)
+
+    def test_real_confirmed_effect_survives_stop_timeout_and_blocks_bot_restart(self):
+        import asyncio
+        import threading
+        from app.bot import handlers
+        from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+        from app.agent.kernel.effects import PreparedEffect
+        from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+        from app.agent.kernel.pipeline import ToolPipeline
+        from app.agent.kernel.session import AgentSession
+        from app.agent.kernel.state import InMemorySessionStateStore
+        from app.agent.kernel.transports import EffectEnvelope, QueryEnvelope, TelegramKernelTransport
+        from tests.test_agent_kernel_core import ScriptedModel
+
+        entered, release, executed = threading.Event(), threading.Event(), threading.Event()
+        def execute(arguments, snapshot, context):
+            self.assertEqual(snapshot, "fixture")
+            entered.set()
+            self.assertTrue(release.wait(3))
+            executed.set()
+            return {"summary": "completed"}
+        tool = KernelToolSpec(
+            name="download.pause", domain="download", description="暂停下载", examples=("暂停下载",),
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            effect=ToolEffect.WRITE,
+            prepare=lambda *_: PreparedEffect(preview={"summary": "preview"}, snapshot_fingerprint="fixture"),
+            execute_confirmed=execute,
+        )
+        catalog = ToolCatalog([tool])
+        state = InMemorySessionStateStore()
+        model = ScriptedModel([[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("write", "download.pause", {}))]])
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        transport = TelegramKernelTransport(session)
+        preview = asyncio.run(transport.query(QueryEnvelope(owner="owner", session_id="session", message="暂停下载")))
+        executor = adapter.TelegramAgentExecutor()
+        executor.start()
+        try:
+            job = executor.submit(lambda: asyncio.run(transport.confirm(EffectEnvelope(
+                owner="owner", session_id="session", plan_id=preview.approval.plan_id,
+            ))), control=True)
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(executor.stop(timeout=0.02))
+            self.assertFalse(asyncio.run(transport.cancel(owner="owner", session_id="session")))
+            with patch.object(adapter, "AGENT_EXECUTOR", executor), patch.object(
+                handlers, "_configuration_complete", return_value=True
+            ):
+                self.assertFalse(handlers.start_bot())
+            self.assertFalse(job.done())
+            self.assertFalse(executed.is_set())
+            release.set()
+            self.assertEqual(job.result(2).status, "effect_completed")
+            self.assertTrue(executed.is_set())
+            self.assertTrue(executor.stop(timeout=1))
+        finally:
+            release.set()
+            executor.stop(timeout=3)

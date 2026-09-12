@@ -1263,6 +1263,20 @@ def _ensure_command_menu(bot) -> bool:
 
 
 def _register_commands(bot, telebot):
+    from app.bot.agent_adapter import AGENT_EXECUTOR
+
+    if not AGENT_EXECUTOR.start():
+        raise RuntimeError("上一代 Telegram Agent 任务尚未结束")
+
+    def submit_agent(function, *args, source, control=False):
+        if AGENT_EXECUTOR.submit(function, *args, control=control) is not None:
+            return
+        notice = "Media Agent 正忙或正在停止，请稍后重试。"
+        if getattr(source, "message", None) is not None:
+            bot.answer_callback_query(source.id, notice, show_alert=True)
+        else:
+            bot.reply_to(source, notice)
+
     def require_auth(handler):
         def wrapped(msg, *args, **kwargs):
             if _reject_unauthorized(bot, msg):
@@ -1356,7 +1370,7 @@ def _register_commands(bot, telebot):
     def cmd_agent_reset(msg):
         from app.bot.agent_adapter import handle_agent_reset
 
-        handle_agent_reset(bot, msg)
+        submit_agent(handle_agent_reset, bot, msg, source=msg, control=True)
 
     def matches_command(msg, command: str) -> bool:
         text = str(getattr(msg, "text", "") or "").strip()
@@ -1745,14 +1759,14 @@ def _register_commands(bot, telebot):
         if not url:
             from app.bot.agent_adapter import handle_agent_message
 
-            handle_agent_message(bot, telebot, msg)
+            submit_agent(handle_agent_message, bot, telebot, msg, source=msg)
             return
         try:
             route = route_download_url(url)
             if route == "web":
                 from app.bot.agent_adapter import handle_agent_message
 
-                handle_agent_message(bot, telebot, msg)
+                submit_agent(handle_agent_message, bot, telebot, msg, source=msg)
                 return
             if _reject_unauthorized_group_write(bot, msg):
                 return
@@ -1797,24 +1811,16 @@ def _register_commands(bot, telebot):
         _handle_write_confirmation_callback(bot, call, telebot)
 
     @bot.callback_query_handler(
-        func=lambda call: str(getattr(call, "data", "")).startswith("agk:")
+        func=lambda call: str(getattr(call, "data", "")).startswith(("agk:", "agp:"))
     )
     def choose_agent_action(call):
         if _reject_unauthorized(bot, call):
             return
-        from app.bot.agent_adapter import handle_agent_callback
+        from app.bot.agent_adapter import handle_agent_callback, handle_agent_patrol_callback
 
-        handle_agent_callback(bot, call, telebot)
-
-    @bot.callback_query_handler(
-        func=lambda call: str(getattr(call, "data", "")).startswith("agp:")
-    )
-    def choose_agent_patrol_action(call):
-        if _reject_unauthorized(bot, call):
-            return
-        from app.bot.agent_adapter import handle_agent_patrol_callback
-
-        handle_agent_patrol_callback(bot, call, telebot)
+        patrol = str(call.data).startswith("agp:")
+        handler = handle_agent_patrol_callback if patrol else handle_agent_callback
+        submit_agent(handler, bot, call, telebot, source=call, control=not patrol)
 
     @bot.callback_query_handler(
         func=lambda call: str(getattr(call, "data", "")).startswith("gys:")
@@ -3812,6 +3818,10 @@ def _start_bot_locked() -> bool:
             return False
         if not _configuration_complete():
             return False
+        from app.bot.agent_adapter import AGENT_EXECUTOR
+
+        if not AGENT_EXECUTOR.start():
+            return False
         stop_event = threading.Event()
         thread = threading.Thread(
             target=start_bot_blocking,
@@ -3852,6 +3862,9 @@ def _stop_bot_locked(timeout: float = 5.0, *, cancel_operations: bool = True) ->
         thread_stop.set()
     if recovery_stop is not None:
         recovery_stop.set()
+    from app.bot.agent_adapter import AGENT_EXECUTOR
+
+    agent_finished = AGENT_EXECUTOR.stop(timeout=timeout, cancel_queries=cancel_operations)
     if bot is not None:
         try:
             if cancel_operations:
@@ -3911,7 +3924,7 @@ def _stop_bot_locked(timeout: float = 5.0, *, cancel_operations: bool = True) ->
         shutdown_telegram_indexer_worker(timeout=timeout)
     except Exception as exc:
         logger.warning("停止 Telegram 资源站服务失败 type=%s", type(exc).__name__)
-    return thread_finished and recovery_finished
+    return thread_finished and recovery_finished and agent_finished
 
 
 def stop_bot(timeout: float = 5.0) -> bool:

@@ -123,3 +123,36 @@ class AgentKernelTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(TransportInputError):
             request.to_agent_input()
+
+class TelegramCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_requested_before_turn_start_is_not_lost(self):
+        import asyncio
+        from app.agent.kernel.state import CancellationToken
+        from app.agent.kernel.events import AgentEventType
+
+        session = make_session()
+        original = session.run
+        async def delayed_start(value):
+            await asyncio.sleep(0.025)
+            async for event in original(value):
+                yield event
+        session.run = delayed_start
+        class SlowModel:
+            async def stream(self, request, *, cancellation):
+                await cancellation.wait()
+                cancellation.raise_if_cancelled()
+                yield
+        session.model = SlowModel()
+        token = CancellationToken()
+        observed = []
+        async def observe(event):
+            observed.append(event.type)
+        task = asyncio.create_task(TelegramKernelTransport(session).query(
+            QueryEnvelope(owner="owner", session_id="stop-before-start", message="slow"),
+            cancellation=token, observe=observe,
+        ))
+        token.cancel("service_stopping")
+        view = await asyncio.wait_for(task, 1)
+        self.assertEqual(view.status, "cancelled")
+        self.assertIn(AgentEventType.TURN_STARTED, observed)
+        self.assertIn(AgentEventType.TURN_CANCELLED, observed)
