@@ -530,17 +530,6 @@ class DownloadTracker:
             return None
         return task_id if task_id > 0 else None
 
-    @staticmethod
-    def _reconcile_linked_local_media_task(local_task) -> None:
-        """已关联请求只跟随任务状态，不再次探测已被移动的下载路径。"""
-        status = str(getattr(local_task, "status", "") or "")
-        if status in {"completed", "failed", "requires_manual"}:
-            db.update_download_request_for_local_media_task(
-                int(local_task.id),
-                status,
-                error=str(getattr(local_task, "error", "") or ""),
-            )
-
     def _start_local_import(self, row, task) -> None:
         # 新来源配置优先走持久化调度器；此处只上报完成事件，不执行文件写入。
         from app.modules.local_media_scheduler import (
@@ -559,7 +548,8 @@ class DownloadTracker:
                     row, task, RuntimeError("已关联的本地整理任务不存在")
                 )
                 return
-            self._reconcile_linked_local_media_task(linked_task)
+            with db.get_conn() as conn:
+                db.reconcile_local_media_downloads(conn, task_id=linked_task_id)
             if str(linked_task.status) not in {"completed", "failed", "requires_manual"}:
                 scheduler.reload()
             return
@@ -590,7 +580,6 @@ class DownloadTracker:
                     row, task, RuntimeError("新建的本地整理任务不存在")
                 )
                 return
-            self._reconcile_linked_local_media_task(linked_task)
             return
         content_path = str(getattr(task, "content_path", "") or "")
         db.mark_download_request_local_media_skipped(

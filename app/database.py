@@ -848,6 +848,7 @@ def init_db() -> None:
                     "finished_at=COALESCE(finished_at,?) WHERE status='running'",
                     (timestamp,),
                 )
+            reconcile_local_media_downloads(conn)
             conn.execute(
                 "UPDATE download_requests SET organize_started=-1,organize_status='failed',"
                 "organize_error=CASE WHEN COALESCE(organize_error,'')='' "
@@ -2392,7 +2393,6 @@ from app.repositories.download_requests import (  # noqa: E402,F401
     renew_download_request_notification_lease,
     update_download_request,
     update_download_request_and_sync_media_admission,
-    update_download_request_for_local_media_task,
 )
 
 # ===== 媒体订阅、候选资源与下载准入 =====
@@ -4754,6 +4754,7 @@ from app.repositories.local_media import (  # noqa: E402,F401
     claim_local_media_task,
     claim_local_media_confirmation_task,
     update_local_media_task,
+    reconcile_local_media_downloads,
     add_local_media_task_item,
     list_local_media_task_items,
     add_local_media_operation_step,

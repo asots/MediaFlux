@@ -1403,6 +1403,8 @@ def link_download_request_to_local_media_task(
                 timestamp, timestamp, int(request_id),
             ),
         )
+        if cur.rowcount == 1:
+            _database().reconcile_local_media_downloads(conn, task_id=int(task_id))
         return cur.rowcount == 1
 
 
@@ -1435,45 +1437,6 @@ def mark_download_request_local_media_failed(
             ),
         )
         return cur.rowcount == 1
-
-
-def update_download_request_for_local_media_task(
-    task_id: int,
-    status: str,
-    *,
-    error: str = "",
-    resolve_manual: bool = False,
-) -> int:
-    """把本地媒体任务状态回写到原下载请求。
-
-    常规调度只允许更新尚未进入终态的空状态或 ``pending``。Telegram/Web
-    人工确认已经原子认领任务后，可以显式允许把 ``requires_manual`` 收敛为
-    ``completed`` 或 ``failed``，避免待确认状态永久残留在下载时间线中。
-    """
-    safe_status = str(status or "").strip()
-    if safe_status not in {"completed", "requires_manual", "planned", "failed"}:
-        raise ValueError("本地媒体回写状态无效")
-    eligible_statuses = ["", "pending"]
-    if resolve_manual and safe_status in {"completed", "failed"}:
-        eligible_statuses.append("requires_manual")
-    placeholders = ",".join("?" for _ in eligible_statuses)
-    timestamp = now()
-    completed_at = timestamp if safe_status in {"completed", "requires_manual", "failed"} else None
-    with get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE download_requests SET local_import_status=?,local_import_error=?,"
-            "local_import_completed_at=?,updated_at=? WHERE local_import_target=? "
-            f"AND COALESCE(local_import_status,'') IN ({placeholders})",
-            (
-                safe_status,
-                str(error or ""),
-                completed_at,
-                timestamp,
-                f"local-media-task:{int(task_id)}",
-                *eligible_statuses,
-            ),
-        )
-        return int(cur.rowcount)
 
 
 def _recover_legacy_pending_cancellations_conn(

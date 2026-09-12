@@ -2209,16 +2209,6 @@ def _execute_local_media_confirmation(
                 or "本地媒体仍需补充季集等信息"
             )
             raise ValueError(f"{reason}；请前往 Web 继续处理")
-        try:
-            db.update_download_request_for_local_media_task(
-                task_id, "completed", resolve_manual=True
-            )
-        except Exception as exc:
-            logger.warning(
-                "本地媒体确认完成状态回写失败 task=%s type=%s",
-                task_id,
-                type(exc).__name__,
-            )
         terminal_event = _local_confirmation_result_event(
             payload, candidate, result, actor=actor
         )
@@ -2253,15 +2243,6 @@ def _execute_local_media_confirmation(
                         error=message,
                     )
                     current = db.get_local_media_task(task_id, owner=current.owner)
-                if current is not None and current.status in {
-                    "failed", "requires_manual"
-                }:
-                    db.update_download_request_for_local_media_task(
-                        task_id,
-                        current.status,
-                        error=message,
-                        resolve_manual=current.status == "failed",
-                    )
             except Exception:
                 logger.warning(
                     "本地媒体确认失败状态保存异常 task=%s", task_id, exc_info=True

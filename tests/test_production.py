@@ -697,6 +697,11 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                 db.update_download_request(
                     request_id, qb_status="completed", status="completed"
                 )
+                source_id = db.create_local_media_source(
+                    name="linked-source", qb_profile="", qb_path_prefix="",
+                    local_root="/downloads", owner="admin",
+                )
+                task_id = db.create_local_media_task(source_id, "", "/downloads/Movie.mkv")
                 tracker = DownloadTracker()
                 scheduler = Mock()
 
@@ -704,13 +709,13 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     self.assertFalse(wake)
                     db.link_download_request_to_local_media_task(
                         request_id,
-                        77,
+                        task_id,
                         "/downloads/Movie.mkv",
                     )
-                    return 77
+                    return task_id
 
                 scheduler.enqueue_completed_torrent.side_effect = enqueue
-                linked_task = SimpleNamespace(id=77, status="waiting_stable", error="")
+                linked_task = SimpleNamespace(id=task_id, status="waiting_stable", error="")
                 with (
                     patch(
                         "app.modules.local_media_scheduler.get_local_media_scheduler",
@@ -726,13 +731,11 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     )
                 row = db.get_download_request(request_id)
                 self.assertEqual(row["local_import_status"], "pending")
-                self.assertEqual(row["local_import_target"], "local-media-task:77")
-                self.assertEqual(
-                    db.update_download_request_for_local_media_task(77, "completed"), 1
-                )
+                self.assertEqual(row["local_import_target"], f"local-media-task:{task_id}")
+                self.assertTrue(db.update_local_media_task(task_id, status="completed"))
                 self.assertFalse(
                     db.link_download_request_to_local_media_task(
-                        request_id, 77, "/downloads/Movie.mkv"
+                        request_id, task_id, "/downloads/Movie.mkv"
                     )
                 )
                 self.assertEqual(
@@ -749,25 +752,25 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
             with patch("app.database.DB_PATH", test_db):
                 db.init_db()
                 request_id, _ = db.create_download_request("linked-terminal", "magnet")
+                source_id = db.create_local_media_source(
+                    name="terminal-source", qb_profile="", qb_path_prefix="",
+                    local_root="/downloads", owner="admin",
+                )
+                task_id = db.create_local_media_task(source_id, "", "/downloads/Movie.mkv")
                 db.link_download_request_to_local_media_task(
                     request_id,
-                    77,
+                    task_id,
                     "/downloads/Movie.mkv",
                 )
                 tracker = DownloadTracker()
                 scheduler = Mock()
-                linked_task = SimpleNamespace(
-                    id=77,
-                    status="completed",
-                    error="",
-                )
+                # 模拟旧版本任务已结束但请求尚未回写的历史数据库。
+                with db.get_conn() as conn:
+                    conn.execute("UPDATE local_media_tasks SET status='completed' WHERE id=?", (task_id,))
                 with (
                     patch(
                         "app.modules.local_media_scheduler.get_local_media_scheduler",
                         return_value=scheduler,
-                    ),
-                    patch(
-                        "app.database.get_local_media_task", return_value=linked_task
                     ),
                 ):
                     tracker._start_local_import(

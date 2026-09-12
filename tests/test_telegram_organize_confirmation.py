@@ -1848,8 +1848,8 @@ class LocalMediaConfirmationTests(IsolatedDatabaseTestCase):
         self.assertTrue(db.link_download_request_to_local_media_task(
             request_id, self.task_id, "/downloads/Movie.2026.mkv"
         ))
-        db.update_download_request_for_local_media_task(
-            self.task_id, "requires_manual", error="匹配置信度不足"
+        db.update_local_media_task(
+            self.task_id, status="requires_manual", error="匹配置信度不足"
         )
         actions = self._actions()
         token = actions[0].callback_data.split(":")[1]
@@ -1915,8 +1915,8 @@ class LocalMediaConfirmationTests(IsolatedDatabaseTestCase):
         self.assertTrue(db.link_download_request_to_local_media_task(
             request_id, self.task_id, "/downloads/Movie.2026.mkv"
         ))
-        db.update_download_request_for_local_media_task(
-            self.task_id, "requires_manual", error="匹配置信度不足"
+        db.update_local_media_task(
+            self.task_id, status="requires_manual", error="匹配置信度不足"
         )
         actions = self._actions()
         token = actions[0].callback_data.split(":")[1]

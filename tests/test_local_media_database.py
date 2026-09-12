@@ -1,6 +1,7 @@
 """本地媒体来源、目标和任务数据库契约。"""
 from __future__ import annotations
 
+import sqlite3
 import threading
 import unittest
 
@@ -333,6 +334,322 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(db.list_local_media_tasks(owner="admin")), 1)
         self.assertEqual(db.list_local_media_tasks(owner="admin")[0].id, task_id)
 
+    def test_terminal_task_projects_legacy_local_import_states(self):
+        source_id = db.create_local_media_source(
+            name="terminal-projection", qb_profile="configured:qb",
+            qb_path_prefix="/downloads", local_root="/tmp/terminal-projection",
+            owner="admin",
+        )
+
+        for index, request_status in enumerate(("pending", "requires_manual", "failed")):
+            for task_status in ("completed", "failed", "requires_manual", "planned"):
+                with self.subTest(request_status=request_status, task_status=task_status):
+                    content_path = f"/tmp/terminal-projection/{index}-{task_status}.mkv"
+                    task_id = db.create_local_media_task(
+                        source_id, "", content_path, owner="admin", trigger="manual",
+                    )
+                    request_id, _ = db.create_download_request(
+                        f"terminal-projection-{index}-{task_status}", "magnet",
+                    )
+                    self.assertTrue(
+                        db.link_download_request_to_local_media_task(
+                            request_id, task_id, content_path,
+                        )
+                    )
+
+                    legacy_error = f"legacy-{request_status}"
+                    legacy_completed_at = f"legacy-{request_status}-completed-at"
+                    with db.get_conn() as conn:
+                        conn.execute(
+                            "UPDATE download_requests SET local_import_status=?,"
+                            "local_import_error=?,local_import_completed_at=? WHERE id=?",
+                            (request_status, legacy_error, legacy_completed_at, request_id),
+                        )
+
+                    task_error = f"task-{task_status}-error"
+                    task_completed_at = (
+                        None if task_status == "planned"
+                        else f"task-{task_status}-completed-at"
+                    )
+                    fields = {"status": task_status, "error": task_error}
+                    if task_completed_at is not None:
+                        fields["completed_at"] = task_completed_at
+                    self.assertTrue(
+                        db.update_local_media_task(task_id, owner="admin", **fields)
+                    )
+
+                    task = db.get_local_media_task(task_id, owner="admin")
+                    request = db.get_download_request(request_id)
+                    self.assertEqual(request["local_import_status"], task_status)
+                    self.assertEqual(request["local_import_error"], task_error)
+                    self.assertEqual(
+                        request["local_import_completed_at"], task_completed_at,
+                    )
+                    self.assertEqual(request["updated_at"], task.updated_at)
+
+    def test_reused_task_does_not_rewrite_historical_completed_or_cancelled_requests(self):
+        source_id = db.create_local_media_source(
+            name="terminal-history", qb_profile="configured:qb",
+            qb_path_prefix="/downloads", local_root="/tmp/terminal-history",
+            owner="admin",
+        )
+        first_request, _ = db.create_download_request("terminal-history-first", "magnet")
+        task_id, restarted = db.create_and_link_qb_local_media_task(
+            first_request, source_id, "HASH-TERMINAL-HISTORY",
+            "/tmp/terminal-history/Movie.mkv", owner="admin",
+        )
+        self.assertFalse(restarted)
+        first_completed_at = "2026-09-12 10:00:00"
+        self.assertTrue(db.update_local_media_task(
+            task_id,
+            owner="admin",
+            status="completed",
+            error="first terminal result",
+            completed_at=first_completed_at,
+        ))
+        db.update_download_request(
+            first_request,
+            status="completed",
+            completed_at="2026-09-12 10:01:00",
+        )
+
+        cancelled_request, _ = db.create_download_request(
+            "terminal-history-cancelled", "magnet",
+        )
+        self.assertTrue(db.link_download_request_to_local_media_task(
+            cancelled_request, task_id, "/tmp/terminal-history/Movie.mkv",
+        ))
+        db.update_download_request(
+            cancelled_request,
+            status="cancelled",
+            local_import_status="failed",
+            local_import_error="keep cancelled history",
+            local_import_completed_at="2026-09-12 10:02:00",
+            completed_at="2026-09-12 10:03:00",
+        )
+        historical_before = {
+            request_id: tuple(
+                db.get_download_request(request_id)[column]
+                for column in (
+                    "status", "local_import_status", "local_import_error",
+                    "local_import_completed_at", "completed_at", "updated_at",
+                )
+            )
+            for request_id in (first_request, cancelled_request)
+        }
+
+        successor_request, _ = db.create_download_request(
+            "terminal-history-successor", "magnet",
+        )
+        reused_id, restarted = db.create_and_link_qb_local_media_task(
+            successor_request, source_id, "hash-terminal-history",
+            "/tmp/terminal-history/readded/Movie.mkv", owner="admin",
+        )
+        self.assertEqual(reused_id, task_id)
+        self.assertTrue(restarted)
+        self.assertTrue(db.update_local_media_task(
+            task_id,
+            owner="admin",
+            status="completed",
+            error="successor terminal result",
+            completed_at="2026-09-12 10:04:00",
+        ))
+
+        historical_after = {
+            request_id: tuple(
+                db.get_download_request(request_id)[column]
+                for column in (
+                    "status", "local_import_status", "local_import_error",
+                    "local_import_completed_at", "completed_at", "updated_at",
+                )
+            )
+            for request_id in (first_request, cancelled_request)
+        }
+        self.assertEqual(historical_after, historical_before)
+
+    def test_wrong_owner_or_missing_task_does_not_project_download_request(self):
+        source_id = db.create_local_media_source(
+            name="projection-owner", qb_profile="", qb_path_prefix="",
+            local_root="/tmp/projection-owner", owner="admin",
+        )
+        task_id = db.create_local_media_task(
+            source_id, "", "/tmp/projection-owner/Movie.mkv", owner="admin",
+        )
+        request_id, _ = db.create_download_request("projection-owner-request", "magnet")
+        self.assertTrue(db.link_download_request_to_local_media_task(
+            request_id, task_id, "/tmp/projection-owner/Movie.mkv",
+        ))
+        columns = (
+            "status", "local_import_status", "local_import_error",
+            "local_import_completed_at", "updated_at",
+        )
+        before = tuple(db.get_download_request(request_id)[column] for column in columns)
+
+        self.assertFalse(db.update_local_media_task(
+            task_id, owner="other", status="completed", error="wrong owner",
+            completed_at="2026-09-12 11:00:00",
+        ))
+        self.assertFalse(db.update_local_media_task(
+            10**9, owner="admin", status="completed", error="missing task",
+            completed_at="2026-09-12 11:01:00",
+        ))
+
+        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "waiting_stable")
+        after = tuple(db.get_download_request(request_id)[column] for column in columns)
+        self.assertEqual(after, before)
+
+    def test_request_projection_failure_rolls_back_local_media_task_update(self):
+        source_id = db.create_local_media_source(
+            name="projection-rollback", qb_profile="", qb_path_prefix="",
+            local_root="/tmp/projection-rollback", owner="admin",
+        )
+        content_path = "/tmp/projection-rollback/Movie.mkv"
+        task_id = db.create_local_media_task(source_id, "", content_path, owner="admin")
+        request_id, _ = db.create_download_request("projection-rollback-request", "magnet")
+        self.assertTrue(db.link_download_request_to_local_media_task(
+            request_id, task_id, content_path,
+        ))
+        task_before = db.get_local_media_task(task_id, owner="admin")
+        request_before = db.get_download_request(request_id)
+        trigger_name = "abort_local_media_projection_test"
+        with db.get_conn() as conn:
+            conn.execute(
+                f"CREATE TRIGGER {trigger_name} "
+                "BEFORE UPDATE OF local_import_status,local_import_error,"
+                "local_import_completed_at ON download_requests "
+                f"WHEN NEW.local_import_target='local-media-task:{task_id}' "
+                "BEGIN SELECT RAISE(ABORT, 'injected request update failure'); END"
+            )
+        try:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "injected request update failure"):
+                db.update_local_media_task(
+                    task_id,
+                    owner="admin",
+                    status="completed",
+                    error="must rollback",
+                    completed_at="2026-09-12 12:00:00",
+                )
+        finally:
+            with db.get_conn() as conn:
+                conn.execute(f"DROP TRIGGER {trigger_name}")
+
+        task_after = db.get_local_media_task(task_id, owner="admin")
+        request_after = db.get_download_request(request_id)
+        self.assertEqual(
+            (task_after.status, task_after.error, task_after.completed_at, task_after.version),
+            (task_before.status, task_before.error, task_before.completed_at, task_before.version),
+        )
+        self.assertEqual(
+            tuple(request_after[column] for column in (
+                "local_import_status", "local_import_error",
+                "local_import_completed_at", "updated_at",
+            )),
+            tuple(request_before[column] for column in (
+                "local_import_status", "local_import_error",
+                "local_import_completed_at", "updated_at",
+            )),
+        )
+
+    def test_init_db_reconciles_legacy_terminal_tasks_idempotently(self):
+        source_id = db.create_local_media_source(
+            name="startup-projection", qb_profile="", qb_path_prefix="",
+            local_root="/tmp/startup-projection", owner="admin",
+        )
+        legacy_cases = (
+            ("completed", "pending", "legacy completed error", "2026-09-12 13:00:00"),
+            ("failed", "requires_manual", "legacy failed error", "2026-09-12 13:01:00"),
+            ("requires_manual", "failed", "legacy manual error", "2026-09-12 13:02:00"),
+        )
+        expected = []
+        for index, (task_status, request_status, task_error, completed_at) in enumerate(
+            legacy_cases
+        ):
+            content_path = f"/tmp/startup-projection/{index}.mkv"
+            task_id = db.create_local_media_task(
+                source_id, "", content_path, owner="admin", trigger="scan",
+            )
+            request_id, _ = db.create_download_request(
+                f"startup-projection-{index}", "magnet",
+            )
+            self.assertTrue(db.link_download_request_to_local_media_task(
+                request_id, task_id, content_path,
+            ))
+            task_updated_at = f"2026-09-12 13:0{index}:30"
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE local_media_tasks SET status=?,error=?,completed_at=?,updated_at=? "
+                    "WHERE id=?",
+                    (task_status, task_error, completed_at, task_updated_at, task_id),
+                )
+                conn.execute(
+                    "UPDATE download_requests SET local_import_status=?,"
+                    "local_import_error=?,local_import_completed_at=?,updated_at=? WHERE id=?",
+                    (request_status, f"stale-{index}", f"stale-{index}", "stale-updated", request_id),
+                )
+            expected.append((
+                request_id, task_status, task_error, completed_at, task_updated_at,
+            ))
+
+        unrelated_completed, _ = db.create_download_request(
+            "startup-projection-unrelated-completed", "magnet",
+        )
+        db.update_download_request(
+            unrelated_completed,
+            status="completed",
+            local_import_status="completed",
+            local_import_error="keep completed",
+            local_import_completed_at="keep completed at",
+            completed_at="keep root completed at",
+        )
+        unrelated_cancelled, _ = db.create_download_request(
+            "startup-projection-unrelated-cancelled", "magnet",
+        )
+        db.update_download_request(
+            unrelated_cancelled,
+            status="cancelled",
+            local_import_status="failed",
+            local_import_target="local-media-task:999999999",
+            local_import_error="keep cancelled",
+            local_import_completed_at="keep cancelled at",
+            completed_at="keep root cancelled at",
+        )
+        untouched_columns = (
+            "status", "local_import_status", "local_import_target",
+            "local_import_error", "local_import_completed_at", "completed_at", "updated_at",
+        )
+        untouched_before = {
+            request_id: tuple(db.get_download_request(request_id)[column] for column in untouched_columns)
+            for request_id in (unrelated_completed, unrelated_cancelled)
+        }
+
+        db.init_db()
+        for request_id, task_status, task_error, completed_at, task_updated_at in expected:
+            request = db.get_download_request(request_id)
+            self.assertEqual(
+                (request["local_import_status"], request["local_import_error"],
+                 request["local_import_completed_at"], request["updated_at"]),
+                (task_status, task_error, completed_at, task_updated_at),
+            )
+        untouched_after_first = {
+            request_id: tuple(db.get_download_request(request_id)[column] for column in untouched_columns)
+            for request_id in (unrelated_completed, unrelated_cancelled)
+        }
+        self.assertEqual(untouched_after_first, untouched_before)
+
+        db.init_db()
+        for request_id, task_status, task_error, completed_at, task_updated_at in expected:
+            request = db.get_download_request(request_id)
+            self.assertEqual(
+                (request["local_import_status"], request["local_import_error"],
+                 request["local_import_completed_at"], request["updated_at"]),
+                (task_status, task_error, completed_at, task_updated_at),
+            )
+        untouched_after_second = {
+            request_id: tuple(db.get_download_request(request_id)[column] for column in untouched_columns)
+            for request_id in (unrelated_completed, unrelated_cancelled)
+        }
+        self.assertEqual(untouched_after_second, untouched_before)
+
     def test_new_qb_request_transfers_hash_to_active_path_task(self):
         source_id = db.create_local_media_source(
             name="terminal-hash-transfer", qb_profile="configured:qb",
@@ -349,7 +666,6 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         db.update_local_media_task(
             terminal_id, owner="admin", status="completed", completed_at=db.now()
         )
-        db.update_download_request_for_local_media_task(terminal_id, "completed")
         active_id = db.create_local_media_task(
             source_id,
             "",
@@ -513,7 +829,6 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         db.update_local_media_task(
             task_id, owner="admin", status="completed", completed_at=db.now(),
         )
-        db.update_download_request_for_local_media_task(task_id, "completed")
 
         second_request, _ = db.create_download_request("qb-atomic-second", "magnet")
         reused_id, restarted = db.create_and_link_qb_local_media_task(

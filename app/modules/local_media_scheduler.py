@@ -551,9 +551,6 @@ class LocalMediaScheduler:
         db.update_local_media_task(
             task.id, owner=self.owner, status="failed", error=error,
         )
-        db.update_download_request_for_local_media_task(
-            task.id, "failed", error=error,
-        )
 
     def _claim_waiting_task(self, task) -> str | None:
         source = db.get_local_media_source(task.source_id, owner=self.owner)
@@ -618,16 +615,6 @@ class LocalMediaScheduler:
                 "本地媒体任务执行失败 task=%s type=%s",
                 task.id, type(exc).__name__,
             )
-            if current and current.status in terminal_statuses:
-                try:
-                    db.update_download_request_for_local_media_task(
-                        task.id, current.status, error=str(current.error or exc),
-                    )
-                except Exception as sync_exc:
-                    logger.error(
-                        "本地媒体失败状态回写异常 task=%s type=%s",
-                        task.id, type(sync_exc).__name__,
-                    )
             if not self._is_silent_task(task):
                 try:
                     notify_local_media_task(
@@ -663,16 +650,6 @@ class LocalMediaScheduler:
                 else None
             )
             self._complete_captured_task_result(task.id, captured_result)
-            try:
-                db.update_download_request_for_local_media_task(
-                    task.id, str(result.get("status") or "failed"),
-                    error=str(result.get("preview", {}).get("reason") or ""),
-                )
-            except Exception as sync_exc:
-                logger.error(
-                    "本地媒体完成状态回写异常 task=%s type=%s",
-                    task.id, type(sync_exc).__name__,
-                )
             if not self._is_silent_task(task):
                 try:
                     notify_local_media_task(task.id, result, owner=self.owner)

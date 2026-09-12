@@ -765,9 +765,6 @@ def create_and_link_qb_local_media_task(
         if request_row is None:
             raise LookupError("下载请求不存在")
         local_status = str(request_row["local_import_status"] or "")
-        if local_status not in {"", "pending"}:
-            raise ValueError("下载请求的本地入库状态已结束")
-
         source = conn.execute(
             "SELECT id FROM local_media_sources WHERE id=? AND owner=?",
             (int(source_id), safe_owner),
@@ -786,6 +783,15 @@ def create_and_link_qb_local_media_task(
             "FROM local_media_tasks WHERE source_id=? AND qb_hash=? AND owner=?",
             (int(source_id), normalized_hash, safe_owner),
         ).fetchone()
+        if local_status not in {"", "pending"}:
+            # 完成后的重复交付只确认既有绑定，不重开任务或改写历史请求。
+            if (
+                hash_task is not None
+                and request_row["local_import_target"] == f"local-media-task:{hash_task['id']}"
+                and _canonical_local_media_content_path(hash_task["content_path"]) == safe_path
+            ):
+                return int(hash_task["id"]), False
+            raise ValueError("下载请求的本地入库状态已结束")
         restarted = False
 
         if hash_task is None:
@@ -873,6 +879,7 @@ def create_and_link_qb_local_media_task(
         )
         if cur.rowcount != 1:
             raise ValueError("下载请求的本地入库状态已变化")
+        reconcile_local_media_downloads(conn, task_id=task_id)
         return task_id, restarted
 
 
@@ -1377,6 +1384,28 @@ def claim_local_media_confirmation_task(
         return cur.rowcount == 1
 
 
+def reconcile_local_media_downloads(
+    conn: sqlite3.Connection, *, task_id: int | None = None,
+) -> int:
+    """在任务事务内投影权威终态；启动时也用同一语句修复历史未收束请求。"""
+    completed_at = "CASE WHEN t.status='planned' THEN NULL ELSE COALESCE(t.completed_at,t.updated_at) END"
+    return conn.execute(
+        "UPDATE download_requests AS r SET local_import_status=t.status,"
+        "local_import_error=COALESCE(t.error,''),local_import_completed_at=" + completed_at + ","
+        "updated_at=t.updated_at FROM local_media_tasks AS t "
+        "WHERE t.id=CAST(substr(r.local_import_target,18) AS INTEGER) "
+        "AND r.local_import_target='local-media-task:' || t.id "
+        "AND COALESCE(r.status,'')!='cancelled' "
+        "AND COALESCE(r.local_import_status,'') IN ('','pending','requires_manual','failed','planned') "
+        "AND t.status IN ('completed','failed','requires_manual','planned') "
+        "AND (r.local_import_status IS NOT t.status "
+        "OR r.local_import_error IS NOT COALESCE(t.error,'') "
+        "OR r.local_import_completed_at IS NOT (" + completed_at + "))"
+        + (" AND t.id=?" if task_id is not None else ""),
+        (task_id,) if task_id is not None else (),
+    ).rowcount
+
+
 def update_local_media_task(task_id: int, *, owner: str = "admin", **fields) -> bool:
     from app.modules.local_media_models import LOCAL_TASK_STATUSES
 
@@ -1418,6 +1447,8 @@ def update_local_media_task(task_id: int, *, owner: str = "admin", **fields) -> 
             f"UPDATE local_media_tasks SET {', '.join(sets)} WHERE id=? AND owner=?",
             params,
         )
+        if cur.rowcount == 1:
+            reconcile_local_media_downloads(conn, task_id=int(task_id))
         return cur.rowcount == 1
 
 
