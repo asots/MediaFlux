@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from app.modules.local_path_mapping import assert_within
 from app.modules.organize import METADATA_EXTS, VIDEO_EXTS
@@ -167,11 +167,13 @@ class LocalFilesystemAdapter:
         item_limit: int = 20_000,
         depth_limit: int = 64,
         min_video_size: int = 1,
+        cache_directory_names: bool = False,
     ) -> None:
         self.allowed_root = assert_within(Path(allowed_root), Path(allowed_root))
         self.item_limit = max(1, int(item_limit))
         self.depth_limit = max(1, int(depth_limit))
         self.min_video_size = max(0, int(min_video_size))
+        self._directory_names: dict | None = {} if cache_directory_names else None
 
     @staticmethod
     def role_for(path: Path) -> str:
@@ -273,34 +275,51 @@ class LocalFilesystemAdapter:
         if not stat_module.S_ISDIR(start_info.st_mode):
             return False
 
-        walk_errors: list[OSError] = []
+        return any(is_video(candidate) for candidate in self._walk_files(start, strict=False))
 
-        def record_walk_error(exc: OSError) -> None:
-            walk_errors.append(exc)
+    def directory_entries(self, path: Path) -> tuple[Path, ...]:
+        """可选的请求内名称缓存；目录变化即失效，文件身份始终由消费者现读。"""
+        info = path.lstat()
+        identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+        cached = self._directory_names.get(path) if self._directory_names is not None else None
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+        entries = tuple(path.iterdir())
+        if self._directory_names is not None:
+            self._directory_names[path] = (identity, entries)
+        return entries
 
-        base_depth = len(start.parts)
+    def _walk_files(self, start: Path, *, strict: bool) -> Iterator[Path]:
+        """探测与完整扫描共用目录消费顺序、数量/深度预算与忽略规则。"""
+        stack = [(start, 0)]
         scanned = 0
-        for current_root, dirs, files in os.walk(
-            start, followlinks=False, onerror=record_walk_error,
-        ):
-            current = Path(current_root)
-            depth = len(current.parts) - base_depth
+        first_error = None
+        while stack:
+            current, depth = stack.pop()
+            if current.is_symlink():
+                continue
+            try:
+                entries = self.directory_entries(current)
+            except OSError as exc:
+                if strict:
+                    raise LocalStorageError(f"目录暂时不可完整读取: {start.name}") from exc
+                first_error = first_error or exc
+                continue
             if depth > self.depth_limit:
                 raise LocalScanLimitExceeded("目录扫描深度超过安全上限")
-            dirs[:] = [
-                name for name in dirs
-                if not is_ignored_local_media_directory(name)
-                and not (current / name).is_symlink()
-            ]
-            for name in files:
+            directories = []
+            for candidate in entries:
+                if candidate.is_dir():
+                    if not is_ignored_local_media_directory(candidate.name):
+                        directories.append(candidate)
+                    continue
                 scanned += 1
                 if scanned > self.item_limit:
                     raise LocalScanLimitExceeded("目录文件数量超过安全上限")
-                if is_video(current / name):
-                    return True
-        if walk_errors:
-            raise LocalStorageError(f"目录暂时不可完整读取: {start.name}") from walk_errors[0]
-        return False
+                yield candidate
+            stack.extend((child, depth + 1) for child in reversed(directories))
+        if first_error is not None:
+            raise LocalStorageError(f"目录暂时不可完整读取: {start.name}") from first_error
 
     def scan(
         self,
@@ -322,29 +341,7 @@ class LocalFilesystemAdapter:
                 start, sibling_batch=sibling_batch, new_inspection=new_inspection,
             )
         elif start.is_dir():
-            base_depth = len(start.parts)
-            def raise_walk_error(exc: OSError) -> None:
-                # 整理/清理计划依赖完整快照，不能把不可读子目录视作空目录。
-                raise LocalStorageError(f"目录暂时不可完整读取: {start.name}") from exc
-
-            for current_root, dirs, files in os.walk(
-                start, followlinks=False, onerror=raise_walk_error,
-            ):
-                current = Path(current_root)
-                depth = len(current.parts) - base_depth
-                if depth > self.depth_limit:
-                    raise LocalScanLimitExceeded("目录扫描深度超过安全上限")
-                safe_dirs: list[str] = []
-                for name in dirs:
-                    child = current / name
-                    if is_ignored_local_media_directory(name) or child.is_symlink():
-                        continue
-                    safe_dirs.append(name)
-                dirs[:] = safe_dirs
-                for name in files:
-                    candidates.append(current / name)
-                    if len(candidates) > self.item_limit:
-                        raise LocalScanLimitExceeded("目录文件数量超过安全上限")
+            candidates = list(self._walk_files(start, strict=True))
         else:
             raise LocalContentChanged("扫描路径不存在")
 

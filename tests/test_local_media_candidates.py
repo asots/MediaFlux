@@ -10,12 +10,125 @@ from unittest.mock import patch
 
 from app.modules.local_media_candidates import (
     discover_local_media_candidates,
+    discover_local_media_directory_candidates,
     move_candidate_to_trash,
 )
 from app.modules.local_storage import LocalFilesystemAdapter, LocalScanLimitExceeded
 
 
 class LocalMediaCandidateTests(unittest.TestCase):
+    def test_browser_first_video_does_not_probe_remote_depth_or_item_limit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="a5-boundary-") as raw:
+            root = Path(raw)
+            show = root / "Show"
+            remote = show / "Remote"
+            show.mkdir()
+            (show / "00-first.mkv").write_bytes(b"video")
+            remote.mkdir()
+
+            deep = remote
+            for index in range(4):
+                deep = deep / f"d{index}"
+                deep.mkdir()
+            (deep / "hidden.txt").write_text("remote")
+            (remote / "00-tail.txt").write_text("remote")
+            (remote / "01-tail.txt").write_text("remote")
+
+            original_init = LocalFilesystemAdapter.__init__
+            original_scandir = os.scandir
+            remote_scandir: list[Path] = []
+
+            def init(adapter, path, **kwargs):
+                kwargs.update(item_limit=1, depth_limit=1)
+                original_init(adapter, path, **kwargs)
+
+            def scandir(path):
+                candidate = Path(path)
+                if candidate == remote or remote in candidate.parents:
+                    remote_scandir.append(candidate)
+                return original_scandir(path)
+
+            source = SimpleNamespace(local_root=str(root))
+            with patch.object(LocalFilesystemAdapter, "__init__", init), patch.object(
+                os, "scandir", side_effect=scandir
+            ):
+                candidates, error, selected = discover_local_media_directory_candidates(source)
+
+            self.assertEqual(candidates, [show])
+            self.assertEqual(error, "")
+            self.assertEqual(selected, root)
+            self.assertEqual(
+                remote_scandir,
+                [],
+                "浏览命中首个视频后不得进入远端深度/数量超限子树",
+            )
+
+
+    def test_discovery_reuses_directory_names_without_rescanning_each_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            directory = root
+            for index in range(8):
+                directory /= f"Level{index}"
+                directory.mkdir()
+            videos = [directory / f"Episode{index:02}.mkv" for index in range(40)]
+            for video in videos:
+                video.write_bytes(b"video")
+            calls: dict[Path, int] = {}
+            original = os.scandir
+
+            def scandir(path):
+                selected = Path(path)
+                calls[selected] = calls.get(selected, 0) + 1
+                return original(path)
+
+            with patch("os.scandir", side_effect=scandir):
+                candidates, error = discover_local_media_candidates(
+                    SimpleNamespace(local_root=str(root))
+                )
+            self.assertEqual(error, "")
+            self.assertEqual(candidates, videos)
+            self.assertEqual(len(calls), 9)
+            self.assertEqual(set(calls.values()), {1})
+
+    def test_directory_listing_preserves_equal_casefold_entry_order(self) -> None:
+        from app.modules.local_media_candidates import discover_local_media_directory_candidates
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            directory = root / "Film.MKV"
+            directory.mkdir()
+            (directory / "Inside.mkv").write_bytes(b"video")
+            video = root / "film.mkv"
+            video.write_bytes(b"video")
+            expected = sorted(root.iterdir(), key=lambda item: item.name.casefold())
+            candidates, error, selected = discover_local_media_directory_candidates(
+                SimpleNamespace(local_root=str(root))
+            )
+            self.assertEqual((candidates, error, selected), (expected, "", root))
+
+    def test_discovery_preserves_root_error_summary_before_nested_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for relative in ("A/Good.mkv", "A/Blocked/Hidden.mkv", "B/Hidden.mkv", "C/Hidden.mkv", "D/Hidden.mkv", "Z/Hidden.mkv"):
+                video = root / relative
+                video.parent.mkdir(parents=True, exist_ok=True)
+                video.write_bytes(b"video")
+            blocked = {"A/Blocked", "B", "C", "D", "Z"}
+            original = os.scandir
+
+            def scandir(path):
+                if Path(path).relative_to(root).as_posix() in blocked:
+                    raise PermissionError("fixture")
+                return original(path)
+
+            with patch("os.scandir", side_effect=scandir):
+                candidates, error = discover_local_media_candidates(
+                    SimpleNamespace(local_root=str(root))
+                )
+            self.assertEqual(candidates, [root / "A/Good.mkv"])
+            self.assertEqual(error, "目录扫描不完整：目录暂时不可完整读取: B；目录暂时不可完整读取: C；目录暂时不可完整读取: D；目录暂时不可完整读取: Blocked")
+
     def test_discovery_filters_sample_only_beside_primary_video(self) -> None:
         with tempfile.TemporaryDirectory() as root_raw:
             root = Path(root_raw)

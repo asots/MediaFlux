@@ -17,6 +17,138 @@ from app.modules.local_storage import (
 
 
 class LocalStorageTests(unittest.TestCase):
+    def test_cached_root_entries_recheck_kind_before_descent(self) -> None:
+        for operation_name in ("contains_video", "scan"):
+            with self.subTest(operation=operation_name):
+                self._assert_root_entry_recheck(operation_name)
+
+
+    def _assert_root_entry_recheck(self, operation_name: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="a5-boundary-root-") as root_raw, tempfile.TemporaryDirectory(
+            prefix="a5-boundary-outside-"
+        ) as outside_raw:
+            root = Path(root_raw)
+            outside = Path(outside_raw)
+            replaced = root / "Volatile"
+            parked = root / "Volatile.original"
+            replaced.mkdir()
+            (outside / "outside.mkv").write_bytes(b"outside")
+            adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+
+            original_is_dir = Path.is_dir
+            original_scandir = os.scandir
+            external_scandir: list[Path] = []
+            swapped = False
+
+            def replace_before_kind_check(path: Path) -> bool:
+                nonlocal swapped
+                if path == replaced and not swapped:
+                    replaced.rename(parked)
+                    replaced.symlink_to(outside, target_is_directory=True)
+                    swapped = True
+                return original_is_dir(path)
+
+            def scandir(path):
+                candidate = Path(path)
+                resolved = candidate.resolve(strict=False)
+                if resolved == outside or outside in resolved.parents:
+                    external_scandir.append(resolved)
+                return original_scandir(path)
+
+            try:
+                with patch.object(Path, "is_dir", new=replace_before_kind_check), patch.object(
+                    os, "scandir", side_effect=scandir
+                ):
+                    result = getattr(adapter, operation_name)(root)
+            finally:
+                if replaced.is_symlink():
+                    replaced.unlink()
+                if parked.exists():
+                    parked.rename(replaced)
+
+            self.assertTrue(swapped, "未触发根层 entries 产生后的目录替换")
+            self.assertEqual(
+                external_scandir,
+                [],
+                "根层缓存的旧目录 kind 不得驱动源外 symlink 枚举",
+            )
+            if operation_name == "contains_video":
+                self.assertFalse(result)
+            else:
+                self.assertEqual(result, [])
+
+
+    def test_cached_path_rechecks_kind_on_next_consume(self) -> None:
+        for operation_name in ("contains_video", "scan"):
+            with self.subTest(operation=operation_name):
+                self._assert_next_consume_recheck(operation_name)
+
+
+    def _assert_next_consume_recheck(self, operation_name: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="a5-boundary-root-") as root_raw, tempfile.TemporaryDirectory(
+            prefix="a5-boundary-outside-"
+        ) as outside_raw:
+            root = Path(root_raw)
+            outside = Path(outside_raw)
+            container = root / "Container"
+            replaced = container / "CachedChild"
+            parked = container / "CachedChild.original"
+            container.mkdir()
+            replaced.mkdir()
+            (outside / "outside.mkv").write_bytes(b"outside")
+            adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+
+            self.assertFalse(adapter.contains_video(root))
+            replaced.rename(parked)
+            replaced.symlink_to(outside, target_is_directory=True)
+
+            original_scandir = os.scandir
+            external_scandir: list[Path] = []
+
+            def scandir(path):
+                candidate = Path(path)
+                resolved = candidate.resolve(strict=False)
+                if resolved == outside or outside in resolved.parents:
+                    external_scandir.append(resolved)
+                return original_scandir(path)
+
+            with patch.object(os, "scandir", side_effect=scandir):
+                result = getattr(adapter, operation_name)(root)
+
+            if replaced.is_symlink():
+                replaced.unlink()
+            if parked.exists():
+                parked.rename(replaced)
+
+            self.assertEqual(
+                external_scandir,
+                [],
+                "下一次消费不得信任缓存 path 的旧目录 kind",
+            )
+            if operation_name == "contains_video":
+                self.assertFalse(result)
+            else:
+                self.assertEqual(result, [])
+
+
+    def test_directory_name_cache_rechecks_names_and_in_place_video_sizes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+            self.assertFalse(adapter.contains_video(root))
+            video = root / "Movie.mkv"
+            video.touch()
+            self.assertFalse(adapter.contains_video(root))
+            video.write_bytes(b"video")
+            self.assertTrue(adapter.contains_video(root))
+            self.assertEqual([item.path for item in adapter.scan()], [video])
+            video.write_bytes(b"")
+            self.assertFalse(adapter.contains_video(root))
+            video.unlink()
+            replacement = root / "Other.mkv"
+            replacement.write_bytes(b"new video")
+            self.assertEqual([item.path for item in adapter.scan()], [replacement])
+
     def test_snapshot_detects_size_mtime_or_inode_change(self):
         with tempfile.TemporaryDirectory() as root_raw:
             root = Path(root_raw)
@@ -151,12 +283,7 @@ class LocalStorageTests(unittest.TestCase):
             with self.assertRaisesRegex(LocalContentChanged, "扫描路径不存在"):
                 adapter.contains_video(root / "Movie.mkv")
 
-            def failed_walk(_path, *, followlinks, onerror):
-                self.assertFalse(followlinks)
-                onerror(PermissionError("denied"))
-                return []
-
-            with patch("app.modules.local_storage.os.walk", side_effect=failed_walk):
+            with patch("app.modules.local_storage.os.scandir", side_effect=PermissionError("denied")):
                 with self.assertRaisesRegex(LocalStorageError, "目录暂时不可完整读取"):
                     adapter.contains_video(blocked)
 

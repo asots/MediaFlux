@@ -52,16 +52,21 @@ def _source_root(source) -> Path:
 
 def discover_local_media_candidates(source) -> tuple[list[Path], str]:
     """发现来源内可独立整理的视频单元，避免单集异常阻塞同目录其他媒体。"""
-    candidates, error, root = discover_local_media_directory_candidates(source)
-    if root is None:
+    root, selected, error = _select_source_directory(source)
+    if selected is None:
         return [], error
-
-    adapter = LocalFilesystemAdapter(root)
+    adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+    errors: list[str] = []
+    try:
+        candidates = _direct_media_entries(selected, adapter=adapter, errors=errors)
+    except LocalStorageError:
+        return [], "目录读取失败"
+    root_error = _discovery_error(errors)
+    errors = []
+    if root_error:
+        _append_discovery_error(errors, root_error)
     expanded: list[Path] = []
     visited: set[tuple[int, int]] = set()
-    errors: list[str] = []
-    if error:
-        _append_discovery_error(errors, error)
     for candidate in candidates:
         expanded.extend(
             _expand_media_candidate(
@@ -102,15 +107,14 @@ def _direct_media_entries(
     *,
     adapter: LocalFilesystemAdapter,
     errors: list[str],
-) -> tuple[list[Path], list[Path]]:
-    """返回目录中的直接视频与包含视频的直接子目录。"""
+) -> dict[Path, bool]:
+    """按原枚举顺序返回直接媒体项；值标明是否为包含视频的目录。"""
     try:
-        entries = sorted(directory.iterdir(), key=lambda item: item.name.casefold())
+        entries = sorted(adapter.directory_entries(directory), key=lambda item: item.name.casefold())
     except OSError as exc:
         raise LocalStorageError(f"目录暂时不可读取: {directory.name}") from exc
 
-    videos: list[Path] = []
-    directories: list[Path] = []
+    media_entries: dict[Path, bool] = {}
     for candidate in entries:
         if is_ignored_local_media_directory(candidate.name):
             continue
@@ -118,15 +122,13 @@ def _direct_media_entries(
             info = candidate.lstat()
             if stat_module.S_ISLNK(info.st_mode):
                 continue
-            if stat_module.S_ISDIR(info.st_mode):
-                if adapter.contains_video(candidate):
-                    directories.append(candidate)
-            elif stat_module.S_ISREG(info.st_mode) and adapter.contains_video(candidate):
-                videos.append(candidate)
+            is_directory = stat_module.S_ISDIR(info.st_mode)
+            if (is_directory or stat_module.S_ISREG(info.st_mode)) and adapter.contains_video(candidate):
+                media_entries[candidate] = is_directory
         except (LocalStorageError, OSError) as exc:
             _append_discovery_error(errors, exc)
             continue
-    return videos, directories
+    return media_entries
 
 
 def _expand_media_candidate(
@@ -166,7 +168,7 @@ def _expand_media_candidate(
             return [candidate]
 
     try:
-        direct_videos, media_directories = _direct_media_entries(
+        media_entries = _direct_media_entries(
             candidate,
             adapter=adapter,
             errors=errors,
@@ -180,8 +182,8 @@ def _expand_media_candidate(
     # 扫描任务以主视频为边界：无论外层是作品目录、Season 目录还是分类
     # 目录，都继续展开到具体视频。这样待确认只锁住问题单集，其他视频可
     # 独立完成；作品名、年份和 TMDB 标记仍可从 relative_path 的父目录继承。
-    expanded: list[Path] = list(direct_videos)
-    for child in media_directories:
+    expanded = [path for path, is_directory in media_entries.items() if not is_directory]
+    for child in (path for path, is_directory in media_entries.items() if is_directory):
         expanded.extend(
             _expand_media_candidate(
                 child,
@@ -194,10 +196,7 @@ def _expand_media_candidate(
     return expanded
 
 
-def discover_local_media_directory_candidates(
-    source, directory: Path | str | None = None,
-) -> tuple[list[Path], str, Path | None]:
-    """读取来源内指定目录的直接媒体子项，供登录后的本地条目浏览使用。"""
+def _select_source_directory(source, directory: Path | str | None = None):
     try:
         root = _source_root(source)
         selected_input = (
@@ -211,36 +210,28 @@ def discover_local_media_directory_candidates(
     except PathMappingError as exc:
         message = str(exc)
         if message == LEGACY_SOURCE_PATH_ERROR or "Docker 容器内绝对路径" in message:
-            return [], message, None
-        return [], "目录路径不安全", None
+            return None, None, message
+        return None, None, "目录路径不安全"
     if selected.is_symlink() or not selected.is_dir():
-        return [], "目录不存在或不可访问", None
-    try:
-        entries = sorted(selected.iterdir(), key=lambda item: item.name.casefold())
-    except OSError:
-        return [], "目录读取失败", None
-    adapter = LocalFilesystemAdapter(root)
-    candidates: list[Path] = []
+        return None, None, "目录不存在或不可访问"
+    return root, selected, ""
+
+
+def discover_local_media_directory_candidates(
+    source, directory: Path | str | None = None,
+) -> tuple[list[Path], str, Path | None]:
+    """读取来源内指定目录的直接媒体子项，供登录后的本地条目浏览使用。"""
+    root, selected, error = _select_source_directory(source, directory)
+    if selected is None:
+        return [], error, None
     errors: list[str] = []
-    for candidate in entries:
-        if is_ignored_local_media_directory(candidate.name):
-            continue
-        try:
-            info = candidate.lstat()
-            if stat_module.S_ISLNK(info.st_mode):
-                continue
-            if stat_module.S_ISDIR(info.st_mode):
-                if adapter.contains_video(candidate):
-                    candidates.append(candidate)
-            elif (
-                stat_module.S_ISREG(info.st_mode)
-                and adapter.contains_video(candidate)
-            ):
-                candidates.append(candidate)
-        except (LocalStorageError, OSError) as exc:
-            _append_discovery_error(errors, exc)
-            continue
-    return candidates, _discovery_error(errors), selected
+    try:
+        candidates = _direct_media_entries(
+            selected, adapter=LocalFilesystemAdapter(root), errors=errors,
+        )
+    except LocalStorageError:
+        return [], "目录读取失败", None
+    return list(candidates), _discovery_error(errors), selected
 
 
 def candidate_payload(
