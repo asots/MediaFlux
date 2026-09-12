@@ -488,9 +488,9 @@ def finish_provider_plan(
         ).rowcount
         if updated != 1:
             raise AgentToolError("Provider 写计划状态已变化", code="outcome_unknown")
-        _database().finalize_provider_action_history_for_plan(
+        _database().finalize_provider_action_history_for_plans(
             conn,
-            plan_ref=normalized,
+            plan_refs=(normalized,),
             status=normalized_status,
             error_code=persisted_error,
             timestamp=stamp,

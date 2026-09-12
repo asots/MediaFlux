@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import patch
@@ -1031,3 +1032,154 @@ def test_change_status_translates_writer_lock_failure(
 
     assert failure.value.code == "provider_unavailable"
     assert "lock directory" not in str(failure.value)
+
+
+def _create_running_provider_batch(count: int) -> list[str]:
+    refs = []
+    for index in range(count):
+        plan = create_provider_plan(
+            owner="batch-owner",
+            session_id=f"batch-session-{index}",
+            provider="demo",
+            profile_ref="configured:demo",
+            operation="demo.items.update",
+            risk="write",
+            arguments={},
+            target_snapshot={},
+            context_fingerprint=f"batch-context-{index}",
+        )
+        ref = plan["plan_ref"]
+        claim_provider_plan(
+            owner="batch-owner",
+            session_id=f"batch-session-{index}",
+            plan_ref=ref,
+            expected_context=f"batch-context-{index}",
+        )
+        _insert_provider_executing_audit(ref, f"batch-confirmation-{index}")
+        refs.append(ref)
+    return refs
+
+
+@pytest.mark.parametrize("count", [0, 1, 32])
+def test_provider_recovery_batch_preserves_history_and_is_idempotent(
+    isolated_provider_db,
+    count,
+):
+    refs = _create_running_provider_batch(count)
+    if refs:
+        # 同一计划的多个旧审计，以及旧数据中的小写/空白引用都应归并。
+        _insert_provider_executing_audit(f" {refs[0].lower()} ", "batch-duplicate")
+    malformed = ["broken-json", "[]", "null", '{"plan_ref":"PP-UNRELATED"}']
+    for index, payload in enumerate(malformed):
+        confirmation = f"batch-unrelated-{index}"
+        _insert_provider_executing_audit("PP-UNRELATED", confirmation)
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE agent_action_history SET safe_details=? WHERE confirmation_id=?",
+                (payload, confirmation),
+            )
+    with db.get_conn() as conn:
+        if refs:
+            conn.execute(
+                "UPDATE agent_provider_plans SET context_fingerprint='' WHERE plan_id=?",
+                (refs[-1],),
+            )
+        untouched = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM agent_action_history WHERE confirmation_id LIKE 'batch-unrelated-%' ORDER BY id"
+            )
+        ]
+        assert (
+            db.recover_interrupted_provider_plans(conn, timestamp="2026-09-12 00:00:00")
+            == count
+        )
+        plans = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM agent_provider_plans ORDER BY plan_id"
+            )
+        ]
+        assert len(plans) == max(0, count - 1)
+        assert all(row["status"] == "outcome_unknown" for row in plans)
+        history = [
+            dict(row)
+            for row in conn.execute("SELECT * FROM agent_action_history ORDER BY id")
+        ]
+        changed = [
+            row
+            for row in history
+            if not row["confirmation_id"].startswith("batch-unrelated-")
+        ]
+        assert len(changed) == count + bool(refs)
+        assert all(
+            (
+                row["status"],
+                row["ok"],
+                row["error_code"],
+                row["finished_at"],
+                row["elapsed_ms"],
+            )
+            == ("outcome_unknown", 0, "execution_interrupted", "2026-09-12 00:00:00", 0)
+            for row in changed
+        )
+        assert [
+            row
+            for row in history
+            if row["confirmation_id"].startswith("batch-unrelated-")
+        ] == untouched
+        assert db.recover_interrupted_provider_plans(conn, timestamp="later") == 0
+        assert [
+            dict(row)
+            for row in conn.execute("SELECT * FROM agent_action_history ORDER BY id")
+        ] == history
+        assert [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM agent_provider_plans ORDER BY plan_id"
+            )
+        ] == plans
+
+
+def test_provider_recovery_rolls_back_plans_when_history_update_fails(
+    isolated_provider_db,
+):
+    refs = _create_running_provider_batch(2)
+    with db.get_conn() as conn:
+        conn.execute("""CREATE TRIGGER reject_recovered_audit BEFORE UPDATE ON agent_action_history
+            BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="injected audit failure"):
+        with db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            db.recover_interrupted_provider_plans(conn, timestamp="2026-09-12 00:00:00")
+    with db.get_conn() as conn:
+        assert {
+            row["plan_id"]
+            for row in conn.execute(
+                "SELECT * FROM agent_provider_plans WHERE status='running'"
+            )
+        } == set(refs)
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM agent_action_history WHERE status='executing'"
+            ).fetchone()[0]
+            == 2
+        )
+
+
+def test_provider_recovery_scans_executing_history_once_per_batch(isolated_provider_db):
+    _create_running_provider_batch(32)
+    queries = []
+    with db.get_conn() as conn:
+        conn.set_trace_callback(queries.append)
+        assert (
+            db.recover_interrupted_provider_plans(conn, timestamp="2026-09-12 00:00:00")
+            == 32
+        )
+        conn.set_trace_callback(None)
+    scans = [
+        query
+        for query in queries
+        if query.startswith("SELECT id,safe_details FROM agent_action_history")
+    ]
+    assert len(scans) == 1

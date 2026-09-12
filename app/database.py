@@ -466,22 +466,22 @@ def _sync_missing_schema_columns(conn: sqlite3.Connection) -> None:
         mem.close()
 
 
-def finalize_provider_action_history_for_plan(
+def finalize_provider_action_history_for_plans(
     conn: sqlite3.Connection,
     *,
-    plan_ref: str,
+    plan_refs: Iterable[str],
     status: str,
     error_code: str,
     timestamp: str,
 ) -> int:
-    """把 Provider 计划终态投影到已经存在的确认审计。
+    """一次扫描把 Provider 计划批次的终态投影到现有确认审计。
 
     这里只更新现有 ``executing`` 行，绝不补插。这样 Provider 计划终态与
     审计在同一事务内收敛，同时不会在隐私清理后重新创建主体记录。
     """
-    normalized_plan = str(plan_ref or "").strip().upper()
+    normalized_plans = {str(ref or "").strip().upper() for ref in plan_refs} - {""}
     normalized_status = str(status or "").strip().casefold()
-    if not normalized_plan or normalized_status not in {
+    if not normalized_plans or normalized_status not in {
         "succeeded",
         "failed",
         "stale",
@@ -517,7 +517,7 @@ def finalize_provider_action_history_for_plan(
             continue
         if (
             isinstance(details, dict)
-            and str(details.get("plan_ref") or "").strip().upper() == normalized_plan
+            and str(details.get("plan_ref") or "").strip().upper() in normalized_plans
         ):
             history_ids.append(int(row["id"]))
     if not history_ids:
@@ -557,14 +557,13 @@ def recover_interrupted_provider_plans(
         "WHERE status='running'",
         (timestamp, timestamp),
     ).rowcount
-    for plan_id in running_plan_ids:
-        finalize_provider_action_history_for_plan(
-            conn,
-            plan_ref=plan_id,
-            status="outcome_unknown",
-            error_code="execution_interrupted",
-            timestamp=timestamp,
-        )
+    finalize_provider_action_history_for_plans(
+        conn,
+        plan_refs=running_plan_ids,
+        status="outcome_unknown",
+        error_code="execution_interrupted",
+        timestamp=timestamp,
+    )
     # 隐私清理已抹除上下文的运行计划只为等待旧 writer 收束；确认已无存活
     # 执行者后直接删除，避免重新保留主体数据。
     conn.execute("DELETE FROM agent_provider_plans WHERE context_fingerprint=''")
