@@ -2151,7 +2151,8 @@ def _parse_release_surface(
     guessed_season = _season_number(guessed.get("season"))
     if _SEASON_RANGE_TOKEN.search(source):
         guessed_season = None
-    if explicit_episode is None and _UNDERSCORE_DUAL_EPISODE_TOKEN.search(source):
+    # 编号形态可用于标题去噪，但可信季集只由 context 输出。
+    if context_mode and explicit_episode is None and _UNDERSCORE_DUAL_EPISODE_TOKEN.search(source):
         guessed_episode = None
         guessed_season = None
     untrusted_guessed_episode = _guessit_episode_is_untrusted(
@@ -2383,8 +2384,6 @@ def _parse_release_core(
                 "year": "",
                 "type": "tv" if release_season is not None or release_episode is not None else "movie",
                 "tmdb_id": explicit_tmdb_id,
-                "season": release_season,
-                "episode": release_episode,
             }
         else:
             release_surface = _parse_release_surface(
@@ -2395,8 +2394,6 @@ def _parse_release_core(
                 "year": str(release_surface["guessed_year"] or ""),
                 "type": str(release_surface["media_type"] or "movie"),
                 "tmdb_id": "",
-                "season": release_surface["season"],
-                "episode": release_surface["episode"],
             }
     return _ReleaseParseCore(context=context, release_fields=release_fields)
 

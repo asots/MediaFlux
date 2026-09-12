@@ -74,6 +74,46 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
                 self.assertEqual(tuple(getattr(result, key) for key in fields), expected_release)
                 self.assertEqual(tuple(getattr(result.context, key) for key in context_fields), expected_context)
 
+    def test_ambiguous_dual_numbers_preserve_title_without_authorizing_an_episode(self):
+        from tests.support import isolated_test_database
+
+        self.enterContext(isolated_test_database("ambiguous-release-title.db"))
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper("offline-fixture")
+        self.addCleanup(parser.close)
+        names = (
+            ("Title [19_91].mkv", "Title", "tv"),
+            ("Title [01_02].mkv", "Title", "tv"),
+            ("Example Show [19_91].mkv", "Example Show", "tv"),
+            ("[Encode] Example Show [19_91] [x264].mkv", "Example Show", "tv"),
+            # 技术规格数字不是可信集号，也不能因丢弃猜测而把原movie误判为tv。
+            ("Title [360_480].mkv", "Title 360 480", "movie"),
+        )
+        for filename, title, media_type in names:
+            for parent, season in (("", None), ("/TV/Title/Season 02", 2)):
+                with self.subTest(filename=filename, parent=parent):
+                    parsed = parser.parse_media(filename, parent)
+                    repeated = parser.parse_media(filename, parent)
+                    self.assertEqual(parsed.title, title)
+                    self.assertEqual(parsed.media_type, media_type)
+                    self.assertEqual((parsed.source_season, parsed.effective_season), (season, season))
+                    self.assertEqual((parsed.source_episode, parsed.effective_episode), (None, None))
+                    self.assertFalse(any(item.kind == "episode" for item in (*parsed.tokens, *parsed.evidence)))
+                    self.assertEqual(parsed, repeated)
+
+    def test_release_projection_does_not_duplicate_authoritative_positions(self):
+        scraper = self.recognition_module()
+        for filename, position in (
+            ("Title [19_91].mkv", (None, None)),
+            ("Title S02E03.mkv", (2, 3)),
+            ("Title.S02E03.tmdb-12345.mkv", (2, 3)),
+            ("Dune.Part.Two.tmdb-693134.mkv", (None, None)),
+        ):
+            with self.subTest(filename=filename):
+                core = scraper._parse_release_core(filename, include_release=True)
+                self.assertEqual(set(core.release_fields), {"title", "year", "type", "tmdb_id"})
+                self.assertEqual((core.context.season, core.context.episode), position)
+
     def test_redundant_filename_parser_and_module_wrapper_are_retired(self):
         scraper = self.recognition_module()
         self.assertFalse(hasattr(scraper.TMDBScraper, "_parse_filename_fields"))
