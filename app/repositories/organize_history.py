@@ -3,16 +3,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from types import ModuleType
-
-
-def _database() -> "ModuleType":
-    from app import database
-
-    return database
+from typing import Any
 
 
 _BUSINESS_LOG_FIELDS = (
@@ -23,7 +15,7 @@ _FINISH_FIELDS = {"status", "operation_type", "current_parent_id", "current_name
 
 
 def list_organize_operation_steps(log_id: int, limit: int = 300) -> list[sqlite3.Row]:
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_operation_steps WHERE log_id=? ORDER BY id DESC LIMIT ?",
             (log_id, max(1, min(int(limit or 300), 1000))),
@@ -37,13 +29,13 @@ def add_organize_operation_step(
     action: str,
     **fields,
 ) -> int:
-    timestamp = _database().now()
+    timestamp = db.now()
     before = fields.get("state_before")
     before_json = (
         json.dumps(_validated_snapshot(before), ensure_ascii=False, separators=(",", ":"))
         if before is not None else ""
     )
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO organize_operation_steps(log_id,operation_token,step_index,action,file_id,"
             "from_parent_id,from_name,to_parent_id,to_name,status,error,started_at,finished_at,state_before_json) "
@@ -69,10 +61,10 @@ def add_organize_operation_step(
 
 
 def finish_organize_operation_step(step_id: int, status: str, error: str = "") -> bool:
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE organize_operation_steps SET status=?,error=?,finished_at=? WHERE id=?",
-            (status, error, _database().now(), step_id),
+            (status, error, db.now(), step_id),
         )
         return cur.rowcount == 1
 
@@ -103,7 +95,7 @@ def _validated_snapshot(value: Any) -> dict[str, Any]:
 
 def capture_organize_business_snapshot(log_id: int) -> dict[str, Any]:
     """同一 SQLite 读快照中取得前像；不要把临时 busy 状态当成待恢复身份。"""
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN")
         log = conn.execute(
             f"SELECT {','.join(_BUSINESS_LOG_FIELDS)} FROM organize_log WHERE id=?", (int(log_id),),
@@ -122,7 +114,7 @@ def restore_organize_business_snapshot(log_id: int, snapshot: dict, **log_fields
     state = _validated_snapshot(snapshot)
     if set(log_fields) - _FINISH_FIELDS:
         raise ValueError("不允许用收尾字段覆盖业务前像")
-    database = _database()
+    database = db
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT id FROM organize_log WHERE id=?", (int(log_id),)).fetchone() is None:
@@ -152,7 +144,7 @@ def restore_organize_business_snapshot(log_id: int, snapshot: dict, **log_fields
 
 def list_latest_reversible_organize_steps(log_id: int) -> list[sqlite3.Row]:
     """回退使用完整操作集，不复用日志页最近300步的展示窗口。"""
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN")
         latest = conn.execute(
             "SELECT operation_token FROM organize_operation_steps "
@@ -174,10 +166,126 @@ def list_pending_organize_probe_steps(
     """完整恢复写意图；收尾可带成功步骤，作为跨进程的已提交事实。"""
     statuses = ("running", "interrupted", "success") if include_succeeded else ("running", "interrupted")
     placeholders = ",".join("?" for _ in statuses)
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_operation_steps WHERE log_id=? "
             "AND operation_token GLOB ? AND action='probe_rename' "
             f"AND status IN ({placeholders}) ORDER BY id DESC",
             (int(log_id), f"probe:{int(job_id)}:*", *statuses),
         ).fetchall()
+
+
+def _recover_after_restart(conn, timestamp: str) -> None:
+    """恢复整理确认、写审计与版本化运行结果；回执使用同一事务。"""
+    interrupted_confirmations = conn.execute(
+        "SELECT token,chat_id,directory_path,payload_json FROM organize_confirmations "
+        "WHERE status='running'"
+    ).fetchall()
+    for interrupted in interrupted_confirmations:
+        try:
+            stored_payload = json.loads(
+                str(interrupted["payload_json"] or "{}")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            stored_payload = {}
+        if not isinstance(stored_payload, dict):
+            stored_payload = {}
+        try:
+            message_id = int(stored_payload.get("_telegram_message_id") or 0)
+        except (TypeError, ValueError):
+            message_id = 0
+        event_json = json.dumps(
+            {
+                "title": "❌ Telegram 确认整理已中断",
+                "fields": [["目录", str(interrupted["directory_path"] or "/")]],
+                "lines": [],
+                "image_url": "",
+                "footer": "上次进程在执行期间中断，结果未确认。请重新执行整理生成新候选。",
+                "actions": [],
+                "layout": "relaxed",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        telegram_notifications._enqueue_confirmation_delivery(
+            conn, token=str(interrupted["token"] or ""), event_json=event_json,
+            chat_id=str(interrupted["chat_id"] or ""), message_id=message_id or None,
+            timestamp=timestamp,
+        )
+
+    conn.execute(
+        "UPDATE organize_confirmations SET status='failed',"
+        "error=CASE WHEN COALESCE(error,'')='' "
+        "THEN '上次进程在 Telegram 确认整理执行期间中断，请重新执行整理' "
+        "ELSE error END,completed_at=COALESCE(completed_at,?),"
+        "rollup_applied=0,updated_at=? WHERE status='running'",
+        (timestamp, timestamp),
+    )
+    # pending 候选由 Telegram 确认调度器统一过期并投递终态卡片；
+    # 这里提前改状态会让卡片与父任务汇总失去主动收口机会。
+    conn.execute(
+        "UPDATE organize_log SET status='interrupted',error=CASE "
+        "WHEN COALESCE(error,'')='' THEN '上次进程在云端写操作期间中断，必须重新核验快照' "
+        "ELSE error END,updated_at=? "
+        "WHERE status IN ('reorganizing','returning','reverting','deleting')",
+        (timestamp,),
+    )
+    conn.execute(
+        "UPDATE organize_operation_steps SET status='interrupted',"
+        "error=CASE WHEN COALESCE(error,'')='' THEN '进程中断，步骤结果需要人工核验' ELSE error END,"
+        "finished_at=COALESCE(finished_at,?) WHERE status='running'",
+        (timestamp,),
+    )
+    interrupted_organize_runs = conn.execute(
+        "SELECT id,result,error FROM task_runs "
+        "WHERE task_name='guangya_organize' AND status='running'"
+    ).fetchall()
+    if interrupted_organize_runs:
+        # 局部导入避免底层数据库模块在正常路径依赖整理实现；恢复时仍
+        # 复用唯一的版本化协议，禁止重新落回自由格式 result。
+        from app.modules.organize_results import read_organize_result
+
+        interrupted_message = "上次进程在整理任务运行期间中断"
+        for interrupted_run in interrupted_organize_runs:
+            try:
+                raw_result = json.loads(str(interrupted_run["result"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw_result = {}
+            normalized_result = read_organize_result(raw_result)
+            previous_error = str(
+                normalized_result.get("error") or interrupted_run["error"] or ""
+            ).strip()
+            if previous_error and previous_error != interrupted_message:
+                normalized_result["previous_error"] = previous_error
+            normalized_result["status"] = "failed"
+            normalized_result["error"] = interrupted_message
+            conn.execute(
+                "UPDATE task_runs SET status='failed',"
+                "finished_at=COALESCE(finished_at,?),result=?,"
+                "error=? "
+                "WHERE id=? AND status='running'",
+                (
+                    timestamp,
+                    json.dumps(
+                        normalized_result,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                    interrupted_message,
+                    int(interrupted_run["id"]),
+                ),
+            )
+    conn.execute(
+        "UPDATE organize_delete_audit SET status='interrupted',"
+        "error='上次进程在光鸭 provider 调用期间中断，结果未知，需人工核验',"
+        "provider_result='光鸭回收站结果未知，需人工核验',updated_at=? "
+        "WHERE status='pending'",
+        (timestamp,),
+    )
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402
+
+from app.repositories import telegram_notifications  # noqa: E402

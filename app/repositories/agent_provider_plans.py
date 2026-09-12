@@ -9,13 +9,11 @@ import re
 import secrets
 import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from app.agent.errors import AgentToolError
 from app.modules.web_secret import get_web_secret
 
-if TYPE_CHECKING:
-    from types import ModuleType
 
 _PLAN_RE = re.compile(r"^PP-[0-9A-F]{24}$")
 _ALLOWED_RISKS = {"low_write", "write", "danger"}
@@ -28,20 +26,6 @@ _MAX_TERMINAL_HISTORY_GLOBAL = 4_096
 _TERMINAL_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 
-def _database() -> ModuleType:
-    from app import database
-
-    return database
-
-
-def get_conn():
-    return _database().get_conn()
-
-
-def now() -> str:
-    return _database().now()
-
-
 def recover_orphaned_provider_plans_under_writer_lease() -> int:
     """收束所有已失去执行者的 running 计划。
 
@@ -49,11 +33,11 @@ def recover_orphaned_provider_plans_under_writer_lease() -> int:
     不存在仍可能完成这些计划的存活 writer，因此不会把真实运行中的动作误判
     为中断。
     """
-    stamp = now()
-    with get_conn() as conn:
+    stamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         return int(
-            _database().recover_interrupted_provider_plans(
+            db.recover_interrupted_provider_plans(
                 conn,
                 timestamp=stamp,
             )
@@ -185,13 +169,13 @@ def _invalidate_provider_plans(
     owner_digest: str,
     session_digest: str | None = None,
 ) -> dict[str, int]:
-    stamp = now()
+    stamp = db.now()
     scope = "owner_digest=?"
     scope_values: tuple[str, ...] = (owner_digest,)
     if session_digest is not None:
         scope += " AND session_digest=?"
         scope_values += (session_digest,)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         table_exists = conn.execute(
             "SELECT 1 FROM sqlite_master "
@@ -258,9 +242,9 @@ def create_provider_plan(
     if normalized_risk not in _ALLOWED_RISKS:
         raise ValueError("Provider 写计划风险等级无效")
     plan_ref = f"PP-{secrets.token_hex(12).upper()}"
-    stamp = now()
+    stamp = db.now()
     expiry = time.time() + max(30, min(int(ttl_seconds), 900))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute(
             "UPDATE agent_provider_plans SET status='stale',summary='写计划已过期',"
             "error_code='plan_expired',finished_at=COALESCE(finished_at,?),updated_at=? "
@@ -308,9 +292,9 @@ def create_provider_plan(
 def get_latest_prepared_provider_plan(*, owner: str, session_id: str) -> dict[str, Any]:
     """返回当前 owner/session 最新且未过期的 Provider 写计划。"""
     owner_digest, session_digest = _principal(owner, session_id)
-    stamp = now()
+    stamp = db.now()
     current_time = time.time()
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute(
             "UPDATE agent_provider_plans SET status='stale',summary='写计划已过期',"
             "error_code='plan_expired',finished_at=COALESCE(finished_at,?),updated_at=? "
@@ -336,8 +320,8 @@ def get_latest_prepared_provider_plan(*, owner: str, session_id: str) -> dict[st
 def get_provider_plan(*, owner: str, session_id: str, plan_ref: str) -> dict[str, Any]:
     owner_digest, session_digest = _principal(owner, session_id)
     normalized = _plan_id(plan_ref)
-    stamp = now()
-    with get_conn() as conn:
+    stamp = db.now()
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM agent_provider_plans WHERE owner_digest=? "
             "AND session_digest=? AND plan_id=?",
@@ -369,11 +353,11 @@ def claim_provider_plan(
 ) -> dict[str, Any]:
     owner_digest, session_digest = _principal(owner, session_id)
     normalized = _plan_id(plan_ref)
-    stamp = now()
+    stamp = db.now()
     current_time = time.time()
     deferred_error: AgentToolError | None = None
     claimed = None
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM agent_provider_plans WHERE owner_digest=? "
             "AND session_digest=? AND plan_id=?",
@@ -454,13 +438,13 @@ def finish_provider_plan(
     normalized_status = str(status or "").strip().casefold()
     if normalized_status not in _TERMINAL_STATUSES:
         raise ValueError("Provider 写计划终态无效")
-    stamp = now()
+    stamp = db.now()
     serialized_result = _json_object(result, field="result")
     safe_summary = " ".join(str(summary or "").split())[:_MAX_SUMMARY_LENGTH]
     safe_error = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_code or ""))[
         :_MAX_ERROR_CODE_LENGTH
     ]
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
             "SELECT context_fingerprint FROM agent_provider_plans "
@@ -488,7 +472,7 @@ def finish_provider_plan(
         ).rowcount
         if updated != 1:
             raise AgentToolError("Provider 写计划状态已变化", code="outcome_unknown")
-        _database().finalize_provider_action_history_for_plans(
+        db.finalize_provider_action_history_for_plans(
             conn,
             plan_refs=(normalized,),
             status=normalized_status,
@@ -500,3 +484,36 @@ def finish_provider_plan(
             "WHERE plan_id=? AND context_fingerprint=''",
             (normalized,),
         )
+
+
+def _recover_after_restart(conn, timestamp: str) -> None:
+    """只在无存活 writer 时恢复计划；prepared 过期检查不受 writer 占用影响。"""
+    conn.execute(
+        "UPDATE agent_action_history SET status='outcome_unknown',ok=0,"
+        "summary='Agent 受确认动作：结果待核对',"
+        "error_code='execution_interrupted',finished_at=?,elapsed_ms=0 "
+        "WHERE status='executing' AND tool_name<>'provider.change.execute'",
+        (timestamp,),
+    )
+    from app.modules.process_lock import CrossProcessLock
+
+    recovery_lock = CrossProcessLock(
+        "agent-provider-write", directory=db.resolve_db_path().parent
+    )
+    if recovery_lock.acquire(blocking=False):
+        try:
+            db.recover_interrupted_provider_plans(conn, timestamp=timestamp)
+        finally:
+            recovery_lock.release()
+
+    conn.execute(
+        "UPDATE agent_provider_plans SET status='stale',"
+        "summary='写计划已过期',error_code='plan_expired',"
+        "finished_at=COALESCE(finished_at,?),updated_at=? "
+        "WHERE status='prepared' AND expires_at<=?",
+        (timestamp, timestamp, time.time()),
+    )
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

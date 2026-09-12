@@ -4,32 +4,13 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from types import ModuleType
-
-
-def _database() -> "ModuleType":
-    """延迟取得数据库门面，保持测试数据库与连接/时间补丁兼容。"""
-    from app import database
-
-    return database
-
-
-def get_conn():
-    return _database().get_conn()
-
-
-def now() -> str:
-    return _database().now()
 
 
 def ensure_agent_library_patrol(*, next_run_at: str | None = None) -> sqlite3.Row:
     """幂等创建全库缺集巡检单例。"""
-    timestamp = now()
+    timestamp = db.now()
     due_at = str(next_run_at or timestamp)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO agent_library_patrol("
             "patrol_key,status,outcome,attempts,lease_generation,next_run_at,"
@@ -46,10 +27,10 @@ def ensure_agent_library_patrol(*, next_run_at: str | None = None) -> sqlite3.Ro
 
 def reschedule_agent_library_patrol(*, next_run_at: str | None = None) -> bool:
     """将非运行中的全库巡检重新排到指定时间，用于配置热加载。"""
-    timestamp = now()
+    timestamp = db.now()
     due_at = str(next_run_at or timestamp)
     ensure_agent_library_patrol(next_run_at=due_at)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol SET next_run_at=?,updated_at=? "
             "WHERE patrol_key='default' AND status IN ('pending','retry_wait')",
@@ -59,7 +40,7 @@ def reschedule_agent_library_patrol(*, next_run_at: str | None = None) -> bool:
 
 
 def get_agent_library_patrol() -> sqlite3.Row | None:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM agent_library_patrol WHERE patrol_key='default'"
         ).fetchone()
@@ -71,7 +52,7 @@ def cancel_agent_library_patrol_lease(
     expected_lease_generation: int | None = None,
 ) -> bool:
     """禁用巡检时释放运行租约，并递增 generation 使旧 worker 写入失效。"""
-    timestamp = now()
+    timestamp = db.now()
     due_at = str(next_run_at or timestamp)
     sql = (
         "UPDATE agent_library_patrol SET status='pending',"
@@ -84,7 +65,7 @@ def cancel_agent_library_patrol_lease(
     if expected_lease_generation is not None:
         sql += " AND lease_generation=?"
         params.append(max(0, int(expected_lease_generation)))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(sql, tuple(params))
         return cur.rowcount == 1
 
@@ -95,8 +76,8 @@ def claim_due_agent_library_patrol(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取到期的全库巡检，generation 用于隔离过期 worker。"""
-    timestamp = str(current_time or now())
-    with get_conn() as conn:
+    timestamp = str(current_time or db.now())
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
             conn.execute(
@@ -153,9 +134,9 @@ def continue_agent_library_patrol(
     }
     if not isinstance(parsed, dict) or set(parsed) != expected_keys:
         raise ValueError("全库巡检累计投影无效")
-    timestamp = now()
+    timestamp = db.now()
     started_at = str(cycle_started_at or timestamp)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
             "SELECT cycle_cursor_tmdb_id FROM agent_library_patrol "
@@ -204,8 +185,8 @@ def retry_agent_library_patrol_cycle(
     if status not in {"pending", "retry_wait"}:
         raise ValueError("全库巡检重试状态无效")
     safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol SET status=?,outcome='failed',"
             "attempts=?,next_run_at=?,error_type=?,cycle_updated_at=?,updated_at=? "
@@ -267,8 +248,8 @@ def update_agent_library_patrol(
         if not payload or len(payload.encode("utf-8")) > 32_768:
             raise ValueError("全库巡检通知载荷无效")
 
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT result_revision,result_fingerprint FROM agent_library_patrol "
@@ -337,7 +318,7 @@ def update_agent_library_patrol(
 
 
 def list_agent_library_patrol_notifications() -> list[sqlite3.Row]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM agent_library_patrol_notification_outbox ORDER BY id"
         ).fetchall()
@@ -349,8 +330,8 @@ def claim_due_agent_library_patrol_notification(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取一条到期通知；generation 隔离过期发送者。"""
-    timestamp = str(current_time or now())
-    with get_conn() as conn:
+    timestamp = str(current_time or db.now())
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
             conn.execute(
@@ -386,8 +367,8 @@ def claim_due_agent_library_patrol_notification(
 def complete_agent_library_patrol_notification(
     notification_id: int, *, expected_lease_generation: int, sent_at: str | None = None,
 ) -> bool:
-    timestamp = str(sent_at or now())
-    with get_conn() as conn:
+    timestamp = str(sent_at or db.now())
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol_notification_outbox "
             "SET status='sent',payload_json='',sent_at=?,last_error_type='',updated_at=? "
@@ -402,8 +383,8 @@ def release_agent_library_patrol_notification(
     next_attempt_at: str | None = None,
 ) -> bool:
     """无损释放尚未发送的通知租约；关闭 Agent 不消耗重试预算。"""
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol_notification_outbox "
             "SET status='retry_wait',next_attempt_at=?,last_error_type='',updated_at=? "
@@ -421,8 +402,8 @@ def retry_agent_library_patrol_notification(
     next_attempt_at: str, error_type: str = "",
 ) -> bool:
     safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol_notification_outbox "
             "SET status='retry_wait',attempts=MIN(attempts+1,100),"
@@ -440,8 +421,8 @@ def discard_agent_library_patrol_notification(
     notification_id: int, *, expected_lease_generation: int, error_type: str = "",
 ) -> bool:
     safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol_notification_outbox "
             "SET status='discarded',payload_json='',last_error_type=?,updated_at=? "
@@ -456,8 +437,8 @@ def discard_agent_library_patrol_notification(
 
 def discard_agent_library_patrol_notifications() -> int:
     """通知关闭时丢弃未发送积压，并使正在发送的旧租约失效。"""
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol_notification_outbox "
             "SET status='discarded',payload_json='',"
@@ -466,3 +447,17 @@ def discard_agent_library_patrol_notifications() -> int:
             (timestamp,),
         )
         return max(0, int(cur.rowcount))
+
+
+def _recover_after_restart(conn, timestamp: str) -> None:
+    """启动时收回巡检租约，不覆盖待执行与已结束状态。"""
+    conn.execute(
+        "UPDATE agent_library_patrol SET status='retry_wait',"
+        "lease_generation=lease_generation+1,"
+        "next_run_at=?,updated_at=? WHERE status='running'",
+        (timestamp, timestamp),
+    )
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

@@ -4,20 +4,12 @@ from __future__ import annotations
 import sqlite3
 
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from types import ModuleType
 
 _MAX_ATTEMPTS = 7
 _LEASE_SECONDS = 120
 _STAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-
-def _database() -> "ModuleType":
-    from app import database
-
-    return database
 
 
 def _future_stamp(delay_seconds: int, *, base_stamp: str = "") -> str:
@@ -50,7 +42,7 @@ def upsert_notification(
     payload = str(event_json or "").strip()
     if not key or not payload:
         return None
-    database = _database()
+    database = db
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -153,7 +145,7 @@ def upsert_notification(
 
 
 def get_notification(event_key: str) -> dict[str, Any] | None:
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM telegram_notification_outbox WHERE event_key=?",
             (str(event_key or ""),),
@@ -189,7 +181,7 @@ def invalidate_pending_download_notifications_conn(
 def claim_due_notifications(
     *, limit: int = 20, event_key: str = "",
 ) -> list[dict[str, Any]]:
-    database = _database()
+    database = db
     stamp = database.now()
     claimed: list[dict[str, Any]] = []
     with database.get_conn() as conn:
@@ -244,7 +236,7 @@ def complete_notification(
     claimed_revision: int,
     message_id: int = 0,
 ) -> bool:
-    database = _database()
+    database = db
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -286,7 +278,7 @@ def retry_notification(
     clear_message_id: bool = False,
 ) -> str:
     """重试当前 revision；迟到 worker 只能重新排队更新后的 revision。"""
-    database = _database()
+    database = db
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -353,7 +345,7 @@ def fail_notification(
     clear_message_id: bool = False,
 ) -> bool:
     """记录明确拒绝；迟到 worker 不得把更新后的 revision 一并判死。"""
-    database = _database()
+    database = db
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -405,7 +397,7 @@ def suppress_notification(
     claimed_revision: int,
     reason: str = "NotificationPolicyDisabled",
 ) -> bool:
-    database = _database()
+    database = db
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -455,7 +447,7 @@ def mark_outcome_unknown(
     message_id: int = 0,
     clear_message_id: bool = False,
 ) -> bool:
-    database = _database()
+    database = db
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -512,7 +504,7 @@ def recover_notifications() -> int:
     远端消息身份，进程中断时无法判断 Telegram 是否已接收，必须保留为
     ``outcome_unknown`` 供诊断，而不是制造重复通知。
     """
-    database = _database()
+    database = db
     stamp = database.now()
     with database.get_conn() as conn:
         cur = conn.execute(
@@ -531,7 +523,7 @@ def recover_notifications() -> int:
 
 def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
     """清理已送达/已抑制的旧事件；失败和结果未知保留更久便于核对。"""
-    database = _database()
+    database = db
     normal_cutoff = _future_stamp(-max(1, int(retention_days)) * 86400)
     diagnostic_cutoff = _future_stamp(-max(90, int(retention_days)) * 86400)
     with database.get_conn() as conn:
@@ -547,9 +539,71 @@ def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
 
 
 def pending_notification_count() -> int:
-    with _database().get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS total FROM telegram_notification_outbox "
             "WHERE status IN ('pending','retry_wait','sending')"
         ).fetchone()
         return int(row["total"] or 0)
+
+
+def _recover_after_restart(conn, timestamp: str) -> None:
+    """恢复可确定更新的消息；发送结果未知的新消息不得自动重放。"""
+    conn.execute(
+        "UPDATE organize_confirmation_delivery_outbox "
+        "SET status='retry_wait',lease_generation=lease_generation+1,"
+        "next_attempt_at=?,updated_at=? WHERE status='sending'",
+        (timestamp, timestamp),
+    )
+    conn.execute(
+        "UPDATE telegram_notification_outbox "
+        "SET status=CASE WHEN COALESCE(message_id,0)>0 "
+        "THEN 'retry_wait' ELSE 'outcome_unknown' END,"
+        "lease_generation=lease_generation+1,next_attempt_at=?,"
+        "last_error=CASE WHEN COALESCE(message_id,0)>0 "
+        "THEN 'ProcessInterrupted' ELSE 'DeliveryOutcomeUnknown' END,"
+        "updated_at=? WHERE status='sending'",
+        (timestamp, timestamp),
+    )
+    for table in ("agent_download_verification_notification_outbox", "agent_library_patrol_notification_outbox"):
+        conn.execute(
+            f"UPDATE {table} SET status='discarded',lease_generation=lease_generation+1,"
+            "payload_json='',last_error_type='DeliveryOutcomeUnknown',updated_at=? "
+            "WHERE status='sending'", (timestamp,),
+        )
+
+
+def _enqueue_confirmation_delivery(
+    conn: sqlite3.Connection,
+    *,
+    token: str,
+    event_json: str,
+    chat_id: str,
+    message_id: int | None,
+    timestamp: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO organize_confirmation_delivery_outbox("
+        "confirmation_token,event_json,chat_id,message_id,status,attempts,"
+        "lease_generation,next_attempt_at,last_error,sent_at,created_at,updated_at"
+        ") VALUES(?,?,?,?,'pending',0,0,?,'',NULL,?,?) "
+        "ON CONFLICT(confirmation_token) DO UPDATE SET "
+        "event_json=excluded.event_json,chat_id=excluded.chat_id,"
+        "message_id=excluded.message_id,status='pending',attempts=0,"
+        "lease_generation=organize_confirmation_delivery_outbox.lease_generation+1,"
+        "next_attempt_at=excluded.next_attempt_at,last_error='',sent_at=NULL,"
+        "updated_at=excluded.updated_at",
+        (
+            str(token or ""),
+            str(event_json or "{}"),
+            str(chat_id or ""),
+            int(message_id) if message_id else None,
+            timestamp,
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

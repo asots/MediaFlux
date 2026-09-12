@@ -18,7 +18,6 @@ from app.agent.durable_job_actions import (
 )
 from app.agent.library_patrol_progress import empty_patrol_projection
 from app.agent.models import ToolContext
-from app.repositories import agent_jobs as repo
 from tests.support import isolated_test_database
 
 OWNER = "r7-temporary-owner"
@@ -80,7 +79,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
             confirmation_checked = threading.Event()
             outcomes = {}
             failures = []
-            real_get_conn = repo.get_conn
+            real_get_conn = db.get_conn
             real_create = db.create_agent_job
 
             @contextmanager
@@ -129,7 +128,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
                 target=confirm_reuse, name="r7-confirm-existing-job"
             )
             with (
-                patch.object(repo, "get_conn", gated_connection),
+                patch.object(db, "get_conn", gated_connection),
                 patch.object(db, "create_agent_job", observed_create),
             ):
                 try:

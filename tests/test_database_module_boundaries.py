@@ -19,7 +19,7 @@ from tests.support import IsolatedDatabaseTestCase, isolated_test_database
 class DatabaseModuleImportTests(unittest.TestCase):
     def test_facade_exports_the_single_local_media_implementation(self):
         connection_helpers = {
-            "_database", "get_conn", "now", "is_interrupted_local_media_write_error",
+            "_recover_after_restart",  # 启动 hook 接收既有事务，不属于 CRUD 门面API。
         }
         for name, function in inspect.getmembers(local_media, inspect.isfunction):
             if function.__module__ != local_media.__name__ or name in connection_helpers:
@@ -45,6 +45,12 @@ class DatabaseModuleImportTests(unittest.TestCase):
             ("app.database", "app.database_migrations", "app.repositories.local_media"),
             ("app.repositories.local_media", "app.database_migrations", "app.database"),
             ("app.database_migrations", "app.database_schema", "app.database"),
+        )
+        orders += tuple(
+            (f"app.repositories.{name}", "app.database")
+            for name in ("agent_download_verification", "agent_jobs", "agent_library_patrol",
+                         "agent_provider_plans", "download_requests", "media_proxy",
+                         "organize_history", "rss", "strm", "telegram_notifications")
         )
         for order in orders:
             with self.subTest(order=order):
@@ -136,7 +142,8 @@ class LocalMediaRepositoryBoundaryTests(IsolatedDatabaseTestCase):
         self.assertEqual(db.resolve_db_path(), previous_path)
         self.assertEqual(local_media.list_local_media_sources(owner="boundary-switch"), [])
 
-    def test_interrupted_write_predicate_is_shared_with_startup_recovery(self):
-        with patch.object(db, "is_interrupted_local_media_write_error", return_value=True) as check:
-            self.assertTrue(local_media.is_interrupted_local_media_write_error("test-error"))
-        check.assert_called_once_with("test-error")
+    def test_repository_uses_the_canonical_owner_without_connection_shims(self):
+        self.assertIs(local_media.db, db)
+        for name in ("_database", "get_conn", "now", "is_interrupted_local_media_write_error"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(local_media, name))

@@ -225,7 +225,7 @@ class RSSAutoCancellationTests(unittest.TestCase):
         # 把自己的统计写入误认为用户修改配置。
         self.engine.parser = Mock(parse=Mock(return_value=[self._entry()]), last_error_code="")
         revision = rss_subscription_refresh_revision(db.get_rss_subscription(self.sid))
-        with patch("app.repositories.rss.now", return_value="2099-01-01 00:00:00"):
+        with patch("app.database.now", return_value="2099-01-01 00:00:00"):
             result = self.engine.auto_download(self.sid, expected_revision=revision)
         self.assertEqual(result.get("downloaded"), 1)
         self.assertFalse(result.get("conflict"))

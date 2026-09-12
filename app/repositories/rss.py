@@ -4,27 +4,9 @@ from __future__ import annotations
 import re
 import sqlite3
 import unicodedata
-from typing import TYPE_CHECKING, Iterable
+from typing import Iterable
 
 from app.modules.media_identity import normalize_tmdb_id
-
-if TYPE_CHECKING:
-    from types import ModuleType
-
-
-def _database() -> "ModuleType":
-    """延迟取得数据库门面，保持测试数据库与连接/时间补丁兼容。"""
-    from app import database
-
-    return database
-
-
-def get_conn():
-    return _database().get_conn()
-
-
-def now() -> str:
-    return _database().now()
 
 
 def add_rss_subscription(name: str, urls: str, exclude_keywords: str = "",
@@ -35,14 +17,14 @@ def add_rss_subscription(name: str, urls: str, exclude_keywords: str = "",
                          gy_target_dir: str = "", gy_target_dir_name: str = "",
                          *, media_tmdb_id: str = "", media_default_season: int = 1,
                          skip_existing_episodes: int = 0) -> int:
-    timestamp = now()
+    timestamp = db.now()
     normalized_tmdb_id = normalize_tmdb_id(media_tmdb_id) if media_tmdb_id else ""
     normalized_season = int(media_default_season)
     if not 0 <= normalized_season <= 100:
         raise ValueError("默认季号必须在 0 到 100 之间")
     if skip_existing_episodes and not normalized_tmdb_id:
         raise ValueError("启用媒体库去重前必须填写 TMDB ID")
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO rss_items(name,enabled,refresh_cron,refresh_interval_minutes,urls,parser,"
             "exclude_keywords,action,download_method,qb_save_path,gy_target_dir,gy_target_dir_name,created_at,updated_at) "
@@ -72,13 +54,13 @@ def _rss_subscription_select() -> str:
 
 
 def list_rss_subscriptions() -> list[sqlite3.Row]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(_rss_subscription_select() + " ORDER BY i.id ASC").fetchall()
 
 
 def list_enabled_rss_subscriptions() -> list[sqlite3.Row]:
     """返回全部启用订阅，供服务端受控批量刷新生成完整快照。"""
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             _rss_subscription_select() + " WHERE i.enabled=1 ORDER BY i.id ASC"
         ).fetchall()
@@ -86,7 +68,7 @@ def list_enabled_rss_subscriptions() -> list[sqlite3.Row]:
 
 def list_enabled_rss_subscription_safe_targets() -> list[dict[str, object]]:
     """返回全部启用订阅的公开序号与名称，不读取地址、过滤词或路径。"""
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         rows = conn.execute(
             "SELECT id,name FROM rss_items WHERE enabled=1 ORDER BY id ASC"
         ).fetchall()
@@ -101,7 +83,7 @@ def list_enabled_rss_subscription_safe_targets() -> list[dict[str, object]]:
 
 
 def get_rss_stats() -> dict[str, int]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         subscriptions = conn.execute(
             "SELECT COUNT(*) AS total, "
             "SUM(CASE WHEN enabled=1 AND refresh_interval_minutes>0 THEN 1 ELSE 0 END) AS active "
@@ -128,7 +110,7 @@ def get_rss_subscription(
         return connection.execute(
             _rss_subscription_select() + " WHERE i.id=?", (sub_id,)
         ).fetchone()
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return get_rss_subscription(sub_id, connection=conn)
 
 
@@ -142,7 +124,7 @@ def find_rss_subscriptions_by_normalized_name(
     if not target:
         return []
     safe_limit = max(1, min(int(limit or 1), 10))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         rows = conn.execute(
             "SELECT id,name FROM rss_items ORDER BY id ASC"
         ).fetchall()
@@ -228,18 +210,18 @@ def update_rss_subscription(
     """原子更新订阅；传入连接时复用调用方的事务与写锁。"""
     if not fields:
         return
-    timestamp = now()
+    timestamp = db.now()
     if connection is not None:
         _update_rss_subscription_in_connection(
             connection, sub_id, fields, timestamp=timestamp
         )
         return
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         _update_rss_subscription_in_connection(conn, sub_id, fields, timestamp=timestamp)
 
 
 def delete_rss_subscription(sub_id: int) -> None:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("DELETE FROM rss_entries WHERE rss_item_id=?", (sub_id,))
         conn.execute("DELETE FROM rss_items WHERE id=?", (sub_id,))
 
@@ -267,10 +249,10 @@ def add_rss_entry_with_media(
     skip_reason: str = "",
 ) -> dict[str, object]:
     """按 guid 与可信 media_key 去重写入，并保留可见跳过原因。"""
-    timestamp = now()
+    timestamp = db.now()
     normalized_key = str(media_key or "").strip()
     normalized_reason = str(skip_reason or "").strip()[:160]
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         duplicate_guid = conn.execute(
             "SELECT id FROM rss_entries WHERE rss_item_id=? AND guid=? LIMIT 1",
@@ -359,14 +341,14 @@ def list_rss_entries(
         raise ValueError("RSS 条目排序方式无效")
     sql += " LIMIT ?"
     params.append(max(1, int(limit)))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
 
 def purge_processed_rss_entries(retention_days: int = 7) -> int:
     """清理超过保留期的已处理 RSS 条目；未处理和失败条目不受影响。"""
     days = max(1, int(retention_days or 7))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM rss_entries WHERE COALESCE(processed,0)=1 "
             "AND processed_at IS NOT NULL "
@@ -379,8 +361,8 @@ def purge_processed_rss_entries(retention_days: int = 7) -> int:
 def recover_stale_submitting_rss_entries(stale_minutes: int = 15) -> int:
     """将超时且提交结果未知的 RSS 条目转为不可自动重试的人工核对状态。"""
     minutes = max(1, int(stale_minutes or 15))
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE rss_entries SET status='failed', processed=0, processed_at=NULL, "
             "failure_code='submission_outcome_unknown', failure_retryable=0, "
@@ -399,7 +381,7 @@ def get_rss_entries_by_ids(entry_ids: Iterable[int]) -> dict[int, sqlite3.Row]:
     if not ids:
         return {}
     result: dict[int, sqlite3.Row] = {}
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN")
         for offset in range(0, len(ids), 500):
             batch = ids[offset:offset + 500]
@@ -428,7 +410,7 @@ def get_pending_rss_qb_snapshot(
     """
     safe_limit = max(1, min(100, int(limit or 21)))
     normalized_default = str(default_method or "").strip().lower()
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT e.id,e.rss_item_id,e.title,e.status,e.processed,e.created_at,e.payload,"
             "COALESCE(i.download_method,'') AS download_method,"
@@ -468,7 +450,7 @@ def claim_pending_rss_qb_entries(
 
     ids = [item["id"] for item in expected]
     placeholders = ",".join("?" for _ in ids)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT e.id,e.rss_item_id,e.title,e.status,e.processed,e.created_at,e.payload,"
@@ -496,7 +478,7 @@ def claim_pending_rss_qb_entries(
         if current != expected:
             conn.rollback()
             return []
-        submitted_at = now()
+        submitted_at = db.now()
         cur = conn.execute(
             f"UPDATE rss_entries SET status='submitting', submitted_at=? "
             f"WHERE id IN ({placeholders}) AND status='pending' AND COALESCE(processed,0)=0",
@@ -515,7 +497,7 @@ def get_retryable_failed_rss_qb_snapshot(
     """返回 Agent 确认绑定所需的可安全重试 qB 失败条目快照。"""
     safe_limit = max(1, min(100, int(limit or 21)))
     normalized_default = str(default_method or "").strip().lower()
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT e.id,e.rss_item_id,e.title,e.status,e.processed,e.created_at,e.payload,"
             "e.failure_code,e.failure_retryable,e.retry_count,e.failed_at,"
@@ -566,7 +548,7 @@ def claim_retryable_failed_rss_qb_entries(
 
     ids = [item["id"] for item in expected]
     placeholders = ",".join("?" for _ in ids)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT e.id,e.rss_item_id,e.title,e.status,e.processed,e.created_at,e.payload,"
@@ -607,7 +589,7 @@ def claim_retryable_failed_rss_qb_entries(
         if current != expected:
             conn.rollback()
             return []
-        submitted_at = now()
+        submitted_at = db.now()
         cur = conn.execute(
             f"UPDATE rss_entries SET status='submitting', submitted_at=?, "
             "failure_code='', failure_retryable=0, failed_at=NULL, "
@@ -628,14 +610,14 @@ def claim_retryable_failed_rss_qb_entries(
 
 def claim_rss_entry(entry_id: int) -> bool:
     """原子认领条目，防止 Web/自动任务/TG 重复提交同一下载。"""
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE rss_entries SET status='submitting', submitted_at=?, "
             "retry_count=COALESCE(retry_count,0)+CASE WHEN status='failed' THEN 1 ELSE 0 END, "
             "failure_code='', failure_retryable=0, failed_at=NULL WHERE id=? "
             "AND COALESCE(processed,0)=0 AND (status='pending' OR "
             "(status='failed' AND COALESCE(failure_retryable,0)=1))",
-            (now(), entry_id),
+            (db.now(), entry_id),
         )
         return cur.rowcount == 1
 
@@ -663,8 +645,8 @@ def record_rss_entry_failure(entry_id: int, failure_code: str, retryable: bool) 
     if normalized not in _RSS_FAILURE_CODES:
         normalized = "unknown_failure"
         retryable = False
-    failed_at = now()
-    with get_conn() as conn:
+    failed_at = db.now()
+    with db.get_conn() as conn:
         conn.execute(
             "UPDATE rss_entries SET status='failed', processed=0, processed_at=NULL, "
             "submitted_at=?, failure_code=?, failure_retryable=?, failed_at=? WHERE id=?",
@@ -674,9 +656,9 @@ def record_rss_entry_failure(entry_id: int, failure_code: str, retryable: bool) 
 
 def update_rss_entry_status(entry_id: int, status: str) -> None:
     processed = 1 if status in ("downloaded", "skipped") else 0
-    processed_at = now() if processed else None
-    submitted_at = now() if status in ("submitting", "downloaded", "failed") else None
-    with get_conn() as conn:
+    processed_at = db.now() if processed else None
+    submitted_at = db.now() if status in ("submitting", "downloaded", "failed") else None
+    with db.get_conn() as conn:
         if status == "failed":
             conn.execute(
                 "UPDATE rss_entries SET status=?, processed=0, processed_at=NULL, "
@@ -702,8 +684,8 @@ def skip_pending_rss_entries(entry_ids: Iterable[int], reason: str) -> int:
         return 0
     message = str(reason or "命中排除关键词").strip()[:160]
     updated = 0
-    stamp = now()
-    with get_conn() as conn:
+    stamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         for offset in range(0, len(normalized), 500):
             batch = normalized[offset:offset + 500]
@@ -740,10 +722,10 @@ def update_rss_entries_processed(entry_ids: list[int], processed: bool) -> int:
         return 0
     placeholders = ",".join("?" for _ in ids)
     status = "skipped" if processed else "pending"
-    processed_at = now() if processed else None
+    processed_at = db.now() if processed else None
     allowed_statuses = ("pending", "failed", "skipped") if processed else ("failed", "skipped")
     allowed = ",".join("?" for _ in allowed_statuses)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE rss_entries SET processed=?, processed_at=?, status=?, "
             "failure_code='', failure_retryable=0, failed_at=NULL "
@@ -754,7 +736,7 @@ def update_rss_entries_processed(entry_ids: list[int], processed: bool) -> int:
             conn.execute(
                 f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
                 f"WHERE rss_entry_id IN ({placeholders})",
-                [now(), *ids],
+                [db.now(), *ids],
             )
         return cur.rowcount
 
@@ -796,8 +778,8 @@ def update_rss_entries_processed_snapshot(
     ids = [item["id"] for item in normalized]
     placeholders = ",".join("?" for _ in ids)
     target_status = "skipped" if processed else "pending"
-    processed_at = now() if processed else None
-    with get_conn() as conn:
+    processed_at = db.now() if processed else None
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT id,status,processed,created_at,failure_code,failure_retryable "
@@ -836,14 +818,14 @@ def update_rss_entries_processed_snapshot(
             conn.execute(
                 f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
                 f"WHERE rss_entry_id IN ({placeholders})",
-                [now(), *ids],
+                [db.now(), *ids],
             )
         return int(cur.rowcount or 0)
 
 
 def get_rss_manual_review_summary(sub_id: int) -> dict[str, int]:
     """汇总订阅仍未处理的终态失败，供调度告警跨轮次重试与恢复。"""
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT "
             "SUM(CASE WHEN failure_code IN "
@@ -868,7 +850,7 @@ def get_rss_diagnostic_summary(
     attention_limit: int = 20,
 ) -> dict:
     """返回 RSS Agent 所需的安全聚合；不读取或返回源 URL、标题、GUID、payload 或路径。"""
-    snapshot = current_time or now()
+    snapshot = current_time or db.now()
     stale_minutes = max(1, min(24 * 60, int(stale_submitting_minutes or 15)))
     backlog_hours = max(1, min(24 * 365, int(pending_backlog_hours or 24)))
     limit = max(1, min(100, int(attention_limit or 20)))
@@ -893,7 +875,7 @@ def get_rss_diagnostic_summary(
     )
     invalid_entry = f"COALESCE(({valid_entry}),0)=0"
 
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         subscription_row = conn.execute(
             "SELECT "
             "COUNT(*) AS total,"
@@ -1050,7 +1032,6 @@ def get_rss_diagnostic_summary(
     }
 
 
-
 def _query_rss_subscription_safe_summaries(
     current_time: str,
     *,
@@ -1083,7 +1064,7 @@ def _query_rss_subscription_safe_summaries(
         [int(subscription_id)] if subscription_id is not None else []
     )
 
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         total = (
             1
             if subscription_id is not None
@@ -1204,9 +1185,9 @@ def count_rss_downloaded_entries_since(
     hours: int = 24,
 ) -> int:
     """统计时间窗内全部订阅的成功下载数，不受摘要展示上限影响。"""
-    snapshot = current_time or now()
+    snapshot = current_time or db.now()
     bounded_hours = max(1, min(24 * 31, int(hours or 24)))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT COUNT(*) FROM rss_entries "
             "WHERE status='downloaded' AND COALESCE(processed,0)=1 "
@@ -1224,7 +1205,7 @@ def list_rss_subscription_safe_summaries(
     limit: int = 100,
 ) -> dict:
     """返回有界 RSS 订阅摘要；包含名称，不返回地址、过滤词、条目正文或路径。"""
-    snapshot = current_time or now()
+    snapshot = current_time or db.now()
     bounded_limit = max(1, min(100, int(limit or 100)))
     rows = _query_rss_subscription_safe_summaries(
         snapshot,
@@ -1246,7 +1227,7 @@ def get_rss_subscription_safe_summary(
 ) -> dict | None:
     """按精确 ID 返回单个安全摘要；找不到时返回 None。"""
     rows = _query_rss_subscription_safe_summaries(
-        current_time or now(),
+        current_time or db.now(),
         subscription_id=int(subscription_id),
         limit=1,
     )
@@ -1254,8 +1235,8 @@ def get_rss_subscription_safe_summary(
 
 
 def list_due_rss_subscriptions(current_time: str | None = None) -> list[sqlite3.Row]:
-    current_time = current_time or now()
-    with get_conn() as conn:
+    current_time = current_time or db.now()
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM rss_items WHERE enabled=1 AND refresh_interval_minutes>0 AND ("
             "last_refreshed_at IS NULL OR last_refreshed_at='' OR datetime(last_refreshed_at) IS NULL OR "
@@ -1263,3 +1244,20 @@ def list_due_rss_subscriptions(current_time: str | None = None) -> list[sqlite3.
             ") ORDER BY id",
             (current_time,),
         ).fetchall()
+
+
+def _recover_after_restart(conn, timestamp: str) -> None:
+    """仅收束超过十五分钟的未知提交结果，不自动重投外部请求。"""
+    conn.execute(
+        "UPDATE rss_entries SET status='failed', processed=0, processed_at=NULL, "
+        "failure_code='submission_outcome_unknown', failure_retryable=0, "
+        "failed_at=COALESCE(NULLIF(submitted_at,''),?) "
+        "WHERE status='submitting' "
+        "AND datetime(COALESCE(NULLIF(submitted_at,''),created_at)) "
+        "< datetime('now','localtime','-15 minutes')",
+        (timestamp,),
+    )
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

@@ -3,25 +3,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from types import ModuleType
 
 
-def _database() -> "ModuleType":
-    """延迟取得数据库门面，保持测试数据库与连接/时间补丁兼容。"""
-    from app import database
-
-    return database
-
-
-def get_conn():
-    return _database().get_conn()
-
-
-def now() -> str:
-    return _database().now()
 def enqueue_agent_download_verification(
     request_id: int,
     *,
@@ -35,8 +18,8 @@ def enqueue_agent_download_verification(
     chat_id: str = "",
 ) -> bool:
     """为已确认的缺集下载创建唯一、可恢复的自动复核任务。"""
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO agent_download_verifications("
             "request_id,title,tmdb_id,season,episode,as_of,library_name,owner,chat_id,status,result,attempts,"
@@ -57,7 +40,7 @@ def enqueue_agent_download_verification(
 
 
 def get_agent_download_verification(request_id: int) -> sqlite3.Row | None:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT request_id,title,tmdb_id,season,episode,as_of,library_name,owner,chat_id,status,result,attempts,"
             "lease_generation,next_check_at,last_checked_at,created_at,updated_at "
@@ -72,8 +55,8 @@ def claim_due_agent_download_verification(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取一个到期复核任务，避免并发 worker 重复审计。"""
-    timestamp = str(current_time or now())
-    with get_conn() as conn:
+    timestamp = str(current_time or db.now())
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
             conn.execute(
@@ -114,8 +97,8 @@ def renew_agent_download_verification_lease(
     renewed_at: str | None = None,
 ) -> bool:
     """续期正在运行的复核任务；租约变化后旧 worker 不得继续持有。"""
-    timestamp = str(renewed_at or now())
-    with get_conn() as conn:
+    timestamp = str(renewed_at or db.now())
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verifications SET updated_at=? "
             "WHERE request_id=? AND status='running' AND lease_generation=?",
@@ -145,11 +128,11 @@ def update_agent_download_verification(
         raise ValueError("自动复核结果无效")
     safe_attempts = max(0, min(int(attempts), 100))
     values: list[object] = [
-        status, status, result, safe_attempts, str(next_check_at or now()),
-        last_checked_at, now(), int(request_id),
+        status, status, result, safe_attempts, str(next_check_at or db.now()),
+        last_checked_at, db.now(), int(request_id),
         max(0, int(expected_lease_generation)),
     ]
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verifications SET status=?,"
             "title=CASE WHEN ? IN ('visible','attention') THEN '' ELSE title END,"
@@ -179,10 +162,10 @@ def finish_agent_download_verification(
     payload = str(payload_json or "").strip()
     if not payload or len(payload) > 4096:
         raise ValueError("自动复核通知载荷无效")
-    timestamp = now()
+    timestamp = db.now()
     due_at = str(next_check_at or timestamp)
     safe_attempts = max(0, min(int(attempts), 100))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "UPDATE agent_download_verifications SET status=?,title='',result=?,attempts=?,"
@@ -208,7 +191,7 @@ def finish_agent_download_verification(
 
 
 def list_agent_download_verification_notifications() -> list[sqlite3.Row]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM agent_download_verification_notification_outbox ORDER BY id"
         ).fetchall()
@@ -220,8 +203,8 @@ def claim_due_agent_download_verification_notification(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取一条下载核验通知；generation 隔离过期发送者。"""
-    timestamp = str(current_time or now())
-    with get_conn() as conn:
+    timestamp = str(current_time or db.now())
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
             conn.execute(
@@ -260,8 +243,8 @@ def complete_agent_download_verification_notification(
     expected_lease_generation: int,
     sent_at: str | None = None,
 ) -> bool:
-    timestamp = str(sent_at or now())
-    with get_conn() as conn:
+    timestamp = str(sent_at or db.now())
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verification_notification_outbox "
             "SET status='sent',payload_json='',sent_at=?,last_error_type='',updated_at=? "
@@ -281,8 +264,8 @@ def release_agent_download_verification_notification(
     next_attempt_at: str | None = None,
 ) -> bool:
     """无损释放尚未发送的通知租约；关闭 Agent 不消耗重试预算。"""
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verification_notification_outbox "
             "SET status='retry_wait',next_attempt_at=?,last_error_type='',updated_at=? "
@@ -303,8 +286,8 @@ def retry_agent_download_verification_notification(
     error_type: str = "",
 ) -> bool:
     safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verification_notification_outbox "
             "SET status='retry_wait',attempts=MIN(attempts+1,100),"
@@ -325,8 +308,8 @@ def discard_agent_download_verification_notification(
     error_type: str = "",
 ) -> bool:
     safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verification_notification_outbox "
             "SET status='discarded',payload_json='',last_error_type=?,updated_at=? "
@@ -341,8 +324,8 @@ def discard_agent_download_verification_notification(
 
 def discard_agent_download_verification_notifications() -> int:
     """通知关闭时丢弃未发送积压，并使正在发送的旧租约失效。"""
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verification_notification_outbox "
             "SET status='discarded',payload_json='',"
@@ -351,3 +334,17 @@ def discard_agent_download_verification_notifications() -> int:
             (timestamp,),
         )
         return max(0, int(cur.rowcount))
+
+
+def _recover_after_restart(conn, timestamp: str) -> None:
+    """启动时收回运行租约；新 generation 阻止旧执行者晚到提交。"""
+    conn.execute(
+        "UPDATE agent_download_verifications SET status='retry_wait',"
+        "lease_generation=lease_generation+1,"
+        "next_check_at=?,updated_at=? WHERE status='running'",
+        (timestamp, timestamp),
+    )
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

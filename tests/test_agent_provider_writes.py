@@ -856,7 +856,7 @@ def test_latest_provider_plan_uses_creation_order_with_second_precision_timestam
     }
     with (
         patch(
-            "app.repositories.agent_provider_plans.now",
+            "app.database.now",
             return_value="2026-09-01 12:00:00",
         ),
         patch(

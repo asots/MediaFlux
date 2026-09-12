@@ -134,7 +134,7 @@ class MediaProxyRepositoryTests(unittest.TestCase):
     def test_record_cleanup_runs_periodically_instead_of_on_every_write(self):
         with isolated_test_database("media-proxy-maintenance.db"):
             prune_key = (
-                f"{repository.resolve_db_path()}:"
+                f"{db.resolve_db_path()}:"
                 f"{repository.datetime.now().strftime('%Y-%m-%d')}"
             )
             with (
@@ -202,7 +202,7 @@ class MediaProxyRepositoryTests(unittest.TestCase):
                         status_code=302,
                         source="guangya",
                     )
-                    with repository.get_conn() as conn:
+                    with db.get_conn() as conn:
                         total = conn.execute(
                             "SELECT COUNT(*) AS total "
                             "FROM media_proxy_playback_records"

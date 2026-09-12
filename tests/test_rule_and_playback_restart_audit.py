@@ -136,7 +136,7 @@ with db.get_conn() as conn:
         self.assertEqual(rules.claim_due_rules(self.clock), [])
 
     def test_failed_playback_transaction_never_leaves_a_partial_session(self):
-        original = media_proxy.get_conn
+        original = db.get_conn
 
         @contextmanager
         def interrupted():
@@ -153,7 +153,7 @@ with db.get_conn() as conn:
             source="guangya",
         )
         with (
-            patch.object(media_proxy, "get_conn", interrupted),
+            patch.object(db, "get_conn", interrupted),
             self.assertRaisesRegex(RuntimeError, "before commit"),
         ):
             media_proxy.record_media_proxy_playback_attempt(**arguments)

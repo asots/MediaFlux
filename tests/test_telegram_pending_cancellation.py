@@ -131,7 +131,7 @@ socket.socket.connect = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("
 db.configure_database(sys.argv[1], test_mode=True)
 db.init_db()
 request, _ = db.create_download_request("process-cancel", "magnet", chat_id="100", user_id="9")
-actual = repository.get_conn
+actual = db.get_conn
 @contextmanager
 def exit_after_cancel_commit():
  with actual() as conn:
@@ -141,7 +141,7 @@ def exit_after_cancel_commit():
   os._exit(41)
 call = SimpleNamespace(id="cancel", data="tgc:opaque", from_user=SimpleNamespace(id=9), message=SimpleNamespace(chat=SimpleNamespace(id=100), message_id=23))
 store = SimpleNamespace(claim=lambda *a, **kw: {"operation":"download_request", "decision":"cancel", "value":{"request_id":request,"target":"qb"}})
-with patch("app.modules.telegram_write_confirmations.get_telegram_write_confirmation_store", return_value=store), patch.object(repository, "get_conn", exit_after_cancel_commit):
+with patch("app.modules.telegram_write_confirmations.get_telegram_write_confirmation_store", return_value=store), patch.object(db, "get_conn", exit_after_cancel_commit):
  handlers._handle_write_confirmation_callback(Mock(), call, SimpleNamespace())
 raise AssertionError("cancel commit window not reached")
 """

@@ -570,23 +570,6 @@ def recover_interrupted_provider_plans(
     return max(0, int(recovered or 0))
 
 
-def _recover_interrupted_provider_plans_on_startup(
-    conn: sqlite3.Connection, *, timestamp: str
-) -> None:
-    """启动时仅在没有存活 Provider writer 时执行一次非阻塞恢复。"""
-    from app.modules.process_lock import CrossProcessLock
-
-    recovery_lock = CrossProcessLock(
-        "agent-provider-write", directory=resolve_db_path().parent
-    )
-    if not recovery_lock.acquire(blocking=False):
-        return
-    try:
-        recover_interrupted_provider_plans(conn, timestamp=timestamp)
-    finally:
-        recovery_lock.release()
-
-
 def _try_acquire_local_media_recovery_lock():
     """仅在没有存活本地媒体 writer 时返回启动恢复 lease。"""
     from app.modules.process_lock import CrossProcessLock
@@ -601,6 +584,12 @@ def _try_acquire_local_media_recovery_lock():
 
 def init_db() -> None:
     """初始化首个正式数据库基线，并恢复上次异常中断的运行状态。"""
+    from app.repositories import (
+        agent_download_verification, agent_jobs, agent_library_patrol,
+        agent_provider_plans, download_requests, local_media, media_proxy,
+        organize_history, rss, strm,
+    )
+
     with _lock:
         database_existed = resolve_db_path().exists()
         conn = _connect()
@@ -647,325 +636,23 @@ def init_db() -> None:
                 "OR scan_interval_minutes<>10"
             )
             # 播放诊断保留期在启动时也执行，避免长期无新播放时旧媒体标识滞留。
-            conn.execute(
-                "DELETE FROM media_proxy_playback_records "
-                "WHERE created_at < datetime('now','-30 days','localtime')"
-            )
-            conn.execute(
-                "DELETE FROM media_proxy_playback_records WHERE id IN ("
-                "SELECT id FROM media_proxy_playback_records "
-                "ORDER BY id DESC LIMIT -1 OFFSET 10000"
-                ")"
-            )
-            conn.execute(
-                "DELETE FROM media_proxy_playback_sessions WHERE id NOT IN ("
-                "SELECT DISTINCT session_id FROM media_proxy_playback_records "
-                "WHERE session_id IS NOT NULL"
-                ")"
-            )
-            conn.execute(
-                "DELETE FROM agent_session_context WHERE expires_at<=?",
-                (time.time(),),
-            )
-            conn.execute(
-                "DELETE FROM agent_confirmations WHERE expires_at<=?",
-                (time.time(),),
-            )
-            conn.execute(
-                "DELETE FROM agent_action_leases WHERE expires_at<=?",
-                (time.time(),),
-            )
-            conn.execute(
-                "DELETE FROM telegram_agent_actions WHERE expires_at<=?",
-                (time.time(),),
-            )
+            media_proxy._prune_playback_history(conn, retained_rows=10000)
+            agent_jobs._purge_expired_runtime_state(conn)
             timestamp = now()
-            interrupted_confirmations = conn.execute(
-                "SELECT token,chat_id,directory_path,payload_json FROM organize_confirmations "
-                "WHERE status='running'"
-            ).fetchall()
-            for interrupted in interrupted_confirmations:
-                try:
-                    stored_payload = json.loads(
-                        str(interrupted["payload_json"] or "{}")
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    stored_payload = {}
-                if not isinstance(stored_payload, dict):
-                    stored_payload = {}
-                try:
-                    message_id = int(stored_payload.get("_telegram_message_id") or 0)
-                except (TypeError, ValueError):
-                    message_id = 0
-                event_json = json.dumps(
-                    {
-                        "title": "❌ Telegram 确认整理已中断",
-                        "fields": [["目录", str(interrupted["directory_path"] or "/")]],
-                        "lines": [],
-                        "image_url": "",
-                        "footer": "上次进程在执行期间中断，结果未确认。请重新执行整理生成新候选。",
-                        "actions": [],
-                        "layout": "relaxed",
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                conn.execute(
-                    "INSERT INTO organize_confirmation_delivery_outbox("
-                    "confirmation_token,event_json,chat_id,message_id,status,attempts,"
-                    "lease_generation,next_attempt_at,last_error,sent_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,'pending',0,0,?,'',NULL,?,?) "
-                    "ON CONFLICT(confirmation_token) DO UPDATE SET "
-                    "event_json=excluded.event_json,chat_id=excluded.chat_id,"
-                    "message_id=excluded.message_id,status='pending',attempts=0,"
-                    "lease_generation=organize_confirmation_delivery_outbox.lease_generation+1,"
-                    "next_attempt_at=excluded.next_attempt_at,last_error='',sent_at=NULL,"
-                    "updated_at=excluded.updated_at",
-                    (
-                        str(interrupted["token"] or ""),
-                        event_json,
-                        str(interrupted["chat_id"] or ""),
-                        message_id or None,
-                        timestamp,
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-            conn.execute(
-                "UPDATE organize_confirmations SET status='failed',"
-                "error=CASE WHEN COALESCE(error,'')='' "
-                "THEN '上次进程在 Telegram 确认整理执行期间中断，请重新执行整理' "
-                "ELSE error END,completed_at=COALESCE(completed_at,?),"
-                "rollup_applied=0,updated_at=? WHERE status='running'",
-                (timestamp, timestamp),
-            )
-            # pending 候选由 Telegram 确认调度器统一过期并投递终态卡片；
-            # 这里提前改状态会让卡片与父任务汇总失去主动收口机会。
-            conn.execute(
-                "UPDATE organize_log SET status='interrupted',error=CASE "
-                "WHEN COALESCE(error,'')='' THEN '上次进程在云端写操作期间中断，必须重新核验快照' "
-                "ELSE error END,updated_at=? "
-                "WHERE status IN ('reorganizing','returning','reverting','deleting')",
-                (timestamp,),
-            )
-            conn.execute(
-                "UPDATE organize_operation_steps SET status='interrupted',"
-                "error=CASE WHEN COALESCE(error,'')='' THEN '进程中断，步骤结果需要人工核验' ELSE error END,"
-                "finished_at=COALESCE(finished_at,?) WHERE status='running'",
-                (timestamp,),
-            )
-            interrupted_organize_runs = conn.execute(
-                "SELECT id,result,error FROM task_runs "
-                "WHERE task_name='guangya_organize' AND status='running'"
-            ).fetchall()
-            if interrupted_organize_runs:
-                # 局部导入避免底层数据库模块在正常路径依赖整理实现；恢复时仍
-                # 复用唯一的版本化协议，禁止重新落回自由格式 result。
-                from app.modules.organize_results import read_organize_result
-
-                interrupted_message = "上次进程在整理任务运行期间中断"
-                for interrupted_run in interrupted_organize_runs:
-                    try:
-                        raw_result = json.loads(str(interrupted_run["result"] or "{}"))
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        raw_result = {}
-                    normalized_result = read_organize_result(raw_result)
-                    previous_error = str(
-                        normalized_result.get("error") or interrupted_run["error"] or ""
-                    ).strip()
-                    if previous_error and previous_error != interrupted_message:
-                        normalized_result["previous_error"] = previous_error
-                    normalized_result["status"] = "failed"
-                    normalized_result["error"] = interrupted_message
-                    conn.execute(
-                        "UPDATE task_runs SET status='failed',"
-                        "finished_at=COALESCE(finished_at,?),result=?,"
-                        "error=? "
-                        "WHERE id=? AND status='running'",
-                        (
-                            timestamp,
-                            json.dumps(
-                                normalized_result,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                default=str,
-                            ),
-                            interrupted_message,
-                            int(interrupted_run["id"]),
-                        ),
-                    )
-            conn.execute(
-                "UPDATE task_runs SET status='failed',finished_at=COALESCE(finished_at,?),"
-                "error=CASE WHEN COALESCE(error,'')='' "
-                "THEN '上次进程在 STRM 同步期间中断' ELSE error END "
-                "WHERE task_name='strm_sync' AND status='running'",
-                (timestamp,),
-            )
-            conn.execute(
-                "UPDATE organize_delete_audit SET status='interrupted',"
-                "error='上次进程在光鸭 provider 调用期间中断，结果未知，需人工核验',"
-                "provider_result='光鸭回收站结果未知，需人工核验',updated_at=? "
-                "WHERE status='pending'",
-                (timestamp,),
-            )
-            conn.execute(
-                "UPDATE strm_failures SET status='open',"
-                "error=CASE WHEN COALESCE(error,'')='' "
-                "THEN '上次 STRM 重试进程中断，已释放为可重试' "
-                "ELSE '上次 STRM 重试进程中断，已释放为可重试；原错误：' "
-                "|| substr(error,1,350) END,"
-                "updated_at=?,resolved_at=NULL WHERE status='retrying'",
-                (timestamp,),
-            )
+            organize_history._recover_after_restart(conn, timestamp)
+            strm._recover_after_restart(conn, timestamp)
             # 启动恢复只能做一次 non-blocking writer 探测。另一个进程仍在
             # 整理时绝不能把它的活任务误判为 orphan；拿到锁后一直持有到本次
             # 初始化事务提交/回滚，避免恢复尚未提交时新 writer 抢先进入。
             local_media_recovery_lock = _try_acquire_local_media_recovery_lock()
-            if local_media_recovery_lock is not None:
-                conn.execute(
-                    "UPDATE local_media_tasks SET status='failed',"
-                    "error=CASE WHEN COALESCE(error,'')='' THEN ? ELSE error END,"
-                    "completed_at=COALESCE(completed_at,?),updated_at=? "
-                    "WHERE status IN ('recognizing','planned')",
-                    (_LOCAL_MEDIA_INTERRUPTED_PREWRITE_ERROR, timestamp, timestamp),
-                )
-                conn.execute(
-                    "UPDATE local_media_tasks SET status='requires_manual',"
-                    "error=CASE WHEN COALESCE(error,'')='' THEN ? "
-                    "ELSE ? || '；原错误：' || substr(error,1,350) END,"
-                    "completed_at=NULL,updated_at=? "
-                    "WHERE status IN ('moving','verifying','refreshing','rolling_back')",
-                    (
-                        f"{LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX}，文件及 qB 状态需人工核验",
-                        LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX,
-                        timestamp,
-                    ),
-                )
-                conn.execute(
-                    "UPDATE local_media_operation_steps SET status='failed',"
-                    "error=CASE WHEN COALESCE(error,'')='' THEN "
-                    "'进程中断，步骤结果需要人工核验' ELSE error END,"
-                    "finished_at=COALESCE(finished_at,?) WHERE status='running'",
-                    (timestamp,),
-                )
-            reconcile_local_media_downloads(conn)
-            conn.execute(
-                "UPDATE download_requests SET organize_started=-1,organize_status='failed',"
-                "organize_error=CASE WHEN COALESCE(organize_error,'')='' "
-                "THEN '上次进程在整理任务运行期间中断，需人工核验' ELSE organize_error END,"
-                "organize_finished_at=COALESCE(organize_finished_at,?),updated_at=? "
-                "WHERE organize_status='running'",
-                (timestamp, timestamp),
-            )
-            # 与置失败同事务授予启动凭据，兼容旧 work 的默认 -1。
-            # 只处理当前仍 active 的真实归属；已 failed 的同文本独立失败绝不补发。
-            from app.repositories.strm_request_ownership import _INTERRUPTION_PROOF
-
-            conn.execute(
-                "UPDATE strm_request_work SET failed_lease_generation=? "
-                "WHERE EXISTS(SELECT 1 FROM download_requests r "
-                "WHERE r.id=strm_request_work.request_id "
-                "AND r.strm_generation=strm_request_work.generation "
-                "AND COALESCE(r.organize_task_id,'')=strm_request_work.organize_task_id "
-                "AND r.strm_status IN ('pending','queued','running') "
-                "AND r.status NOT IN ('cancelled','resubmitted','failed'))",
-                (_INTERRUPTION_PROOF,),
-            )
-            conn.execute(
-                "UPDATE download_requests SET strm_status='failed',"
-                "strm_error=CASE WHEN COALESCE(strm_error,'')='' "
-                "THEN '上次进程在 STRM 同步或排队期间中断' ELSE strm_error END,"
-                "strm_finished_at=COALESCE(strm_finished_at,?),updated_at=? "
-                "WHERE strm_status IN ('pending','queued','running')",
-                (timestamp, timestamp),
-            )
-            from app.repositories.download_requests import (
-                _recover_interrupted_download_submissions_conn,
-            )
-
-            _recover_interrupted_download_submissions_conn(conn, timestamp)
-            conn.execute(
-                "UPDATE download_requests SET notification_delivery_status='retry_wait',"
-                "notification_lease_token='',notification_lease_expires_at=NULL,"
-                "notification_next_retry_at=?,updated_at=? "
-                "WHERE notification_delivery_status='sending'",
-                (timestamp, timestamp),
-            )
-            conn.execute(
-                "UPDATE agent_download_verifications SET status='retry_wait',"
-                "lease_generation=lease_generation+1,"
-                "next_check_at=?,updated_at=? WHERE status='running'",
-                (timestamp, timestamp),
-            )
-            conn.execute(
-                "UPDATE agent_library_patrol SET status='retry_wait',"
-                "lease_generation=lease_generation+1,"
-                "next_run_at=?,updated_at=? WHERE status='running'",
-                (timestamp, timestamp),
-            )
-            conn.execute(
-                "UPDATE agent_jobs SET "
-                "status=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE 'retry_wait' END,"
-                "lease_generation=lease_generation+1,next_run_at=?,"
-                "error_code=CASE WHEN cancel_requested=1 THEN '' ELSE 'ProcessInterrupted' END,"
-                "finished_at=CASE WHEN cancel_requested=1 THEN ? ELSE finished_at END,"
-                "updated_at=? WHERE status='running'",
-                (timestamp, timestamp, timestamp),
-            )
-            conn.execute(
-                "UPDATE organize_confirmation_delivery_outbox "
-                "SET status='retry_wait',lease_generation=lease_generation+1,"
-                "next_attempt_at=?,updated_at=? WHERE status='sending'",
-                (timestamp, timestamp),
-            )
-            conn.execute(
-                "UPDATE telegram_notification_outbox "
-                "SET status=CASE WHEN COALESCE(message_id,0)>0 "
-                "THEN 'retry_wait' ELSE 'outcome_unknown' END,"
-                "lease_generation=lease_generation+1,next_attempt_at=?,"
-                "last_error=CASE WHEN COALESCE(message_id,0)>0 "
-                "THEN 'ProcessInterrupted' ELSE 'DeliveryOutcomeUnknown' END,"
-                "updated_at=? WHERE status='sending'",
-                (timestamp, timestamp),
-            )
-            conn.execute(
-                "UPDATE agent_download_verification_notification_outbox "
-                "SET status='discarded',lease_generation=lease_generation+1,"
-                "payload_json='',last_error_type='DeliveryOutcomeUnknown',updated_at=? "
-                "WHERE status='sending'",
-                (timestamp,),
-            )
-            conn.execute(
-                "UPDATE agent_library_patrol_notification_outbox "
-                "SET status='discarded',lease_generation=lease_generation+1,"
-                "payload_json='',last_error_type='DeliveryOutcomeUnknown',updated_at=? "
-                "WHERE status='sending'",
-                (timestamp,),
-            )
-            conn.execute(
-                "UPDATE rss_entries SET status='failed', processed=0, processed_at=NULL, "
-                "failure_code='submission_outcome_unknown', failure_retryable=0, "
-                "failed_at=COALESCE(NULLIF(submitted_at,''),?) "
-                "WHERE status='submitting' "
-                "AND datetime(COALESCE(NULLIF(submitted_at,''),created_at)) "
-                "< datetime('now','localtime','-15 minutes')",
-                (timestamp,),
-            )
-            conn.execute(
-                "UPDATE agent_action_history SET status='outcome_unknown',ok=0,"
-                "summary='Agent 受确认动作：结果待核对',"
-                "error_code='execution_interrupted',finished_at=?,elapsed_ms=0 "
-                "WHERE status='executing' AND tool_name<>'provider.change.execute'",
-                (timestamp,),
-            )
-            _recover_interrupted_provider_plans_on_startup(conn, timestamp=timestamp)
-            conn.execute(
-                "UPDATE agent_provider_plans SET status='stale',"
-                "summary='写计划已过期',error_code='plan_expired',"
-                "finished_at=COALESCE(finished_at,?),updated_at=? "
-                "WHERE status='prepared' AND expires_at<=?",
-                (timestamp, timestamp, time.time()),
-            )
+            local_media._recover_after_restart(conn, timestamp, writer_available=local_media_recovery_lock is not None)
+            download_requests._recover_after_restart(conn, timestamp)
+            agent_download_verification._recover_after_restart(conn, timestamp)
+            agent_library_patrol._recover_after_restart(conn, timestamp)
+            agent_jobs._recover_after_restart(conn, timestamp)
+            telegram_notifications._recover_after_restart(conn, timestamp)
+            rss._recover_after_restart(conn, timestamp)
+            agent_provider_plans._recover_after_restart(conn, timestamp)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             conn.commit()
         except BaseException as exc:
@@ -3750,7 +3437,7 @@ def cancel_organize_confirmation(
                 "SELECT * FROM organize_confirmations WHERE id=?", (int(row["id"]),)
             ).fetchone()
             if enqueue_delivery and str(event_json or ""):
-                _enqueue_organize_confirmation_delivery(
+                telegram_notifications._enqueue_confirmation_delivery(
                     conn,
                     token=token,
                     event_json=event_json,
@@ -3818,7 +3505,7 @@ def expire_organize_confirmation_with_delivery(
         if cursor.rowcount != 1:
             return None
         if enqueue_delivery:
-            _enqueue_organize_confirmation_delivery(
+            telegram_notifications._enqueue_confirmation_delivery(
                 conn,
                 token=token,
                 event_json=event_json,
@@ -3932,38 +3619,6 @@ def release_organize_confirmation(
         )
 
 
-def _enqueue_organize_confirmation_delivery(
-    conn: sqlite3.Connection,
-    *,
-    token: str,
-    event_json: str,
-    chat_id: str,
-    message_id: int | None,
-    timestamp: str,
-) -> None:
-    conn.execute(
-        "INSERT INTO organize_confirmation_delivery_outbox("
-        "confirmation_token,event_json,chat_id,message_id,status,attempts,"
-        "lease_generation,next_attempt_at,last_error,sent_at,created_at,updated_at"
-        ") VALUES(?,?,?,?,'pending',0,0,?,'',NULL,?,?) "
-        "ON CONFLICT(confirmation_token) DO UPDATE SET "
-        "event_json=excluded.event_json,chat_id=excluded.chat_id,"
-        "message_id=excluded.message_id,status='pending',attempts=0,"
-        "lease_generation=organize_confirmation_delivery_outbox.lease_generation+1,"
-        "next_attempt_at=excluded.next_attempt_at,last_error='',sent_at=NULL,"
-        "updated_at=excluded.updated_at",
-        (
-            str(token or ""),
-            str(event_json or "{}"),
-            str(chat_id or ""),
-            int(message_id) if message_id else None,
-            timestamp,
-            timestamp,
-            timestamp,
-        ),
-    )
-
-
 def complete_organize_confirmation_with_delivery(
     token: str,
     *,
@@ -3991,7 +3646,7 @@ def complete_organize_confirmation_with_delivery(
 
         enqueue_confirmation_cleanup(conn, token=token, timestamp=timestamp)
         if enqueue_delivery:
-            _enqueue_organize_confirmation_delivery(
+            telegram_notifications._enqueue_confirmation_delivery(
                 conn,
                 token=token,
                 event_json=event_json,
@@ -4040,7 +3695,7 @@ def fail_organize_confirmation_with_delivery(
         if cursor.rowcount != 1:
             raise ValueError("确认操作不存在或已失效")
         if enqueue_delivery:
-            _enqueue_organize_confirmation_delivery(
+            telegram_notifications._enqueue_confirmation_delivery(
                 conn,
                 token=token,
                 event_json=event_json,
@@ -4885,3 +4540,6 @@ def claim_agent_action_lease(lease_key: str, *, ttl_seconds: int = 90) -> str | 
             (normalized, token, current + ttl, now()),
         )
         return token if cur.rowcount == 1 else None
+
+
+from app.repositories import telegram_notifications  # noqa: E402

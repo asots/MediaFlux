@@ -56,6 +56,25 @@ class PostprocessingTransactionTests(IsolatedDatabaseTestCase):
             deliveries = conn.execute("SELECT COUNT(*) FROM organize_confirmation_delivery_outbox").fetchone()[0]
         return status, intents, deliveries
 
+    def test_startup_recovery_is_one_transaction_and_rolls_back_every_domain(self) -> None:
+        from app.repositories import agent_provider_plans
+
+        original = agent_provider_plans._recover_after_restart
+        def interrupted(conn, timestamp):
+            self.assertTrue(conn.in_transaction)
+            original(conn, timestamp)
+            raise RuntimeError("fixture after last recovery owner")
+        with mock.patch.object(db, "get_conn", side_effect=AssertionError("nested connection")), mock.patch.object(
+            agent_provider_plans, "_recover_after_restart", side_effect=interrupted
+        ), self.assertRaisesRegex(RuntimeError, "last recovery owner"):
+            db.init_db()
+        self.assertEqual(self._state(), ("running", 0, 0))
+        with mock.patch.object(db, "get_conn", side_effect=AssertionError("nested connection")):
+            db.init_db()
+        self.assertEqual(self._state(), ("failed", 0, 1))
+        db.init_db()
+        self.assertEqual(self._state(), ("failed", 0, 1))
+
     def test_silent_confirmation_still_persists_identity_and_cleanup_intent(self) -> None:
         with mock.patch.object(reconcile, "enqueue_confirmation_cleanup", wraps=reconcile.enqueue_confirmation_cleanup) as enqueue:
             self._complete(enqueue_delivery=False)
@@ -92,8 +111,8 @@ class PostprocessingTransactionTests(IsolatedDatabaseTestCase):
 
     def test_receipt_failure_does_not_commit_half_finished_confirmation(self) -> None:
         with (
-            mock.patch.object(
-                db, "_enqueue_organize_confirmation_delivery", side_effect=RuntimeError("synthetic receipt failure"),
+            mock.patch(
+                "app.repositories.telegram_notifications._enqueue_confirmation_delivery", side_effect=RuntimeError("synthetic receipt failure"),
             ),
             self.assertRaisesRegex(RuntimeError, "receipt failure"),
         ):

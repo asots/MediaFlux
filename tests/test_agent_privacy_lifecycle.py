@@ -413,9 +413,10 @@ class AgentPrivacyLifecycleTests(IsolatedDatabaseTestCase):
         @contextmanager
         def observed_finish_connection():
             with original_get_conn() as connection:
-                yield _ObservedConnection(
-                    connection, before_execute=before_finish_execute
-                )
+                if threading.current_thread().name == "provider-purge-first-finisher":
+                    yield _ObservedConnection(connection, before_execute=before_finish_execute)
+                else:
+                    yield connection
 
         def run_finish() -> None:
             try:
@@ -432,7 +433,7 @@ class AgentPrivacyLifecycleTests(IsolatedDatabaseTestCase):
             target=run_finish, name="provider-purge-first-finisher", daemon=True
         )
         with patch(
-            "app.repositories.agent_provider_plans.get_conn",
+            "app.database.get_conn",
             new=observed_finish_connection,
         ):
             finisher.start()
@@ -562,10 +563,14 @@ class AgentPrivacyLifecycleTests(IsolatedDatabaseTestCase):
         purger = threading.Thread(
             target=run_purge, name=purge_thread_name, daemon=True
         )
-        with patch(
-            "app.repositories.agent_provider_plans.get_conn",
-            new=observed_finish_connection,
-        ), patch.object(db, "get_conn", new=observed_database_connection):
+        @contextmanager
+        def observed_connection():
+            factory = (observed_finish_connection if threading.current_thread() is finisher
+                       else observed_database_connection)
+            with factory() as connection:
+                yield connection
+
+        with patch.object(db, "get_conn", new=observed_connection):
             finisher.start()
             try:
                 finish_updated_gate.wait(timeout=5)

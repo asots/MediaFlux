@@ -1,7 +1,7 @@
 """本地媒体来源、归档目标、任务与写操作审计的数据访问。
 
 跨来源/目标配置以及下载请求/整理任务的写入保持同一连接、同一事务；
-连接、测试数据库隔离和启动恢复仍由 app.database 门面唯一持有。
+连接、测试数据库隔离和启动恢复事务仍由 app.database 门面唯一持有。
 """
 from __future__ import annotations
 
@@ -10,29 +10,6 @@ from pathlib import Path
 
 import sqlite3
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from types import ModuleType
-
-
-def _database() -> "ModuleType":
-    """延迟取得门面，复用运行期与测试的连接/时钟配置。"""
-    from app import database
-
-    return database
-
-
-def get_conn():
-    return _database().get_conn()
-
-
-def now() -> str:
-    return _database().now()
-
-
-def is_interrupted_local_media_write_error(error: object) -> bool:
-    return _database().is_interrupted_local_media_write_error(error)
 
 
 _LOCAL_MEDIA_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed"})
@@ -152,7 +129,7 @@ def _normalize_local_media_task_path(
         return
     conn.execute(
         "UPDATE local_media_tasks SET content_path=?,updated_at=? WHERE id=?",
-        (content_path, now(), int(row["id"])),
+        (content_path, db.now(), int(row["id"])),
     )
 
 
@@ -173,11 +150,11 @@ def _bind_qb_hash_to_active_local_media_task(
         conn.execute(
             "UPDATE local_media_tasks SET qb_hash=NULL,updated_at=? "
             "WHERE id=? AND status IN ('completed','failed')",
-            (now(), int(previous_hash_task_id)),
+            (db.now(), int(previous_hash_task_id)),
         )
     conn.execute(
         "UPDATE local_media_tasks SET qb_hash=?,content_path=?,updated_at=? WHERE id=?",
-        (qb_hash, content_path, now(), task_id),
+        (qb_hash, content_path, db.now(), task_id),
     )
     return task_id
 
@@ -209,8 +186,8 @@ def create_local_media_source(
         raise ValueError("本地媒体来源仅支持 move 或 preview_only")
     if safe_media_type not in {"auto", "movie", "tv", "nsfw"}:
         raise ValueError("本地媒体来源类型必须是 auto、movie、tv 或 nsfw")
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO local_media_sources(owner,name,qb_profile,qb_path_prefix,local_root,"
             "smb_user,smb_pass,"
@@ -309,8 +286,8 @@ def save_local_media_source_bundle(
                     "server_path": server_path,
                 }
             )
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if source_id is None:
             cur = conn.execute(
@@ -433,7 +410,7 @@ def save_local_media_source_bundle(
 def get_local_media_source(source_id: int, *, owner: str = "admin"):
     from app.modules.local_media_models import LocalMediaSource
 
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM local_media_sources WHERE id=? AND owner=?",
             (int(source_id), _local_media_owner(owner)),
@@ -449,7 +426,7 @@ def list_local_media_sources(*, owner: str = "admin", enabled_only: bool = False
     if enabled_only:
         sql += " AND enabled=1"
     sql += " ORDER BY id ASC"
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [LocalMediaSource.from_row(row) for row in rows]
 
@@ -490,8 +467,8 @@ def upsert_local_library_target(
         safe_server_path = MediaServerPathMapping(
             safe_path, safe_server_path
         ).server_prefix
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         source = conn.execute(
             "SELECT id FROM local_media_sources WHERE id=? AND owner=?",
             (int(source_id), safe_owner),
@@ -532,7 +509,7 @@ def list_local_library_targets(source_id: int | None = None, *, owner: str = "ad
     if source_id is not None:
         where += " AND source_id=?"
         params.append(int(source_id))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         rows = conn.execute(
             f"SELECT * FROM local_library_targets WHERE {where} ORDER BY source_id,category,id",
             params,
@@ -542,7 +519,7 @@ def list_local_library_targets(source_id: int | None = None, *, owner: str = "ad
 
 def list_local_library_bindings(*, owner: str = "admin") -> list[sqlite3.Row]:
     """在同一读快照中投影全部来源与归档绑定，避免逐来源 N+1 查询。"""
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT t.source_id,s.name AS source_name,t.category,t.path AS local_path,"
             "t.provider,t.library_id,t.library_name,t.server_path "
@@ -596,8 +573,8 @@ def replace_local_library_targets(
             }
         )
 
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         existing_source_ids = {
             int(row["id"])
@@ -651,9 +628,9 @@ def create_local_media_task(
     normalized_hash = str(qb_hash or "").strip().lower() or None
     if safe_trigger not in LOCAL_MEDIA_TRIGGERS:
         raise ValueError("不支持的本地媒体任务触发方式")
-    timestamp = now()
+    timestamp = db.now()
     token = str(operation_token or uuid.uuid4().hex)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         source = conn.execute(
             "SELECT id FROM local_media_sources WHERE id=? AND owner=?",
@@ -757,8 +734,8 @@ def create_and_link_qb_local_media_task(
     if not normalized_hash:
         raise ValueError("qB 任务标识不能为空")
 
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         request_row = conn.execute(
             "SELECT local_import_status,local_import_target FROM download_requests WHERE id=?",
@@ -888,7 +865,7 @@ def create_and_link_qb_local_media_task(
 def list_download_requests_for_local_media_task(task_id: int) -> list[sqlite3.Row]:
     """返回绑定到同一本地整理任务的下载事务。"""
     target = f"local-media-task:{int(task_id)}"
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM download_requests WHERE local_import_target=? ORDER BY id",
             (target,),
@@ -898,7 +875,7 @@ def list_download_requests_for_local_media_task(task_id: int) -> list[sqlite3.Ro
 def get_local_media_task(task_id: int, *, owner: str = "admin"):
     from app.modules.local_media_models import LocalMediaTask
 
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM local_media_tasks WHERE id=? AND owner=?",
             (int(task_id), _local_media_owner(owner)),
@@ -918,7 +895,7 @@ def list_local_media_tasks(*, owner: str = "admin", status: str = "", limit: int
         params.append(status)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(max(1, min(int(limit), 1000)))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [LocalMediaTask.from_row(row) for row in rows]
 
@@ -941,7 +918,7 @@ def list_local_media_qb_write_conflicts(qb_hashes: list[str]) -> list[sqlite3.Ro
     if len(normalized) > 200:
         raise ValueError("单次最多检查 200 个 qBittorrent 任务")
     placeholders = ",".join("?" for _ in normalized)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT id,qb_hash,status FROM local_media_tasks "
             f"WHERE lower(COALESCE(qb_hash,'')) IN ({placeholders}) "
@@ -955,7 +932,7 @@ def list_waiting_local_media_tasks(*, owner: str = "admin", limit: int = 500):
     """按进入顺序领取待处理任务，避免最新任务窗口长期饿死旧任务。"""
     from app.modules.local_media_models import LocalMediaTask
 
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM local_media_tasks WHERE owner=? AND status='waiting_stable' "
             "ORDER BY id ASC LIMIT ?",
@@ -983,7 +960,7 @@ def delete_local_media_tasks(
 
     placeholders = ",".join("?" for _ in normalized_ids)
     busy_placeholders = ",".join("?" for _ in LOCAL_BUSY_TASK_STATUSES)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         deleted = int(
             conn.execute(
                 f"DELETE FROM local_media_tasks WHERE owner=? AND id IN ({placeholders}) "
@@ -1011,7 +988,7 @@ def get_local_media_diagnostic_summary(
 ) -> dict[str, dict[str, int]]:
     """只读聚合本地媒体运行状态，不读取路径、标题、哈希或错误正文。"""
     safe_owner = _local_media_owner(owner)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         source_row = conn.execute(
             "SELECT COUNT(*) AS total,"
             "SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) AS enabled,"
@@ -1090,7 +1067,7 @@ def get_local_media_review_queue_summary(*, owner: str = "admin") -> dict[str, o
     age_sql = _local_media_age_bucket_sql(
         "COALESCE(NULLIF(updated_at,''),created_at,'')"
     )
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         total = int(
             conn.execute(
                 "SELECT COUNT(*) FROM local_media_tasks WHERE owner=? AND status='requires_manual'",
@@ -1126,7 +1103,7 @@ def get_local_media_history_summary(*, owner: str = "admin") -> dict[str, object
         "COALESCE(NULLIF(completed_at,''),NULLIF(updated_at,''),created_at,'')"
     )
     age_sql = _local_media_age_bucket_sql(timestamp_expression)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         total = int(
             conn.execute(
                 "SELECT COUNT(*) FROM local_media_tasks WHERE owner=? AND status IN ('completed','failed')",
@@ -1205,9 +1182,9 @@ def prepare_manual_local_media_task(
         raise ValueError("电影任务不能指定季数或集数")
     if normalized_type == "movie":
         normalized_numbering_mode = "auto"
-    timestamp = now()
+    timestamp = db.now()
     token = renew_local_media_operation_token()
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         source = conn.execute(
             "SELECT id FROM local_media_sources WHERE id=? AND owner=?",
@@ -1230,7 +1207,7 @@ def prepare_manual_local_media_task(
             content_path=safe_path,
         )
         if existing and existing["status"] in {"failed", "requires_manual"}:
-            if is_interrupted_local_media_write_error(existing["error"]):
+            if db.is_interrupted_local_media_write_error(existing["error"]):
                 raise ValueError("上次本地整理在写入期间中断，请先核验文件并通过任务重试确认")
             token = renew_local_media_operation_token(existing["operation_token"])
             task_id = int(existing["id"])
@@ -1296,8 +1273,8 @@ def claim_local_media_task(
 
     if expected not in LOCAL_TASK_STATUSES or next_status not in LOCAL_TASK_STATUSES:
         raise ValueError("不支持的本地媒体任务状态")
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE local_media_tasks SET status=?,attempts=attempts+1,version=version+1,"
             "confirmation_actor='',error='',updated_at=? WHERE id=? AND owner=? AND status=?",
@@ -1364,7 +1341,7 @@ def claim_local_media_confirmation_task(
         str(title or ""),
         str(year or ""),
         normalized_actor,
-        now(),
+        db.now(),
         int(task_id),
         _local_media_owner(owner),
         int(expected_version),
@@ -1373,7 +1350,7 @@ def claim_local_media_confirmation_task(
     if expected_digest:
         where += " AND snapshot_digest=?"
         params.append(expected_digest)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE local_media_tasks SET status='recognizing',attempts=attempts+1,"
             "recognition_summary='',rules_snapshot=?,tmdb_id=?,media_type=?,"
@@ -1443,8 +1420,8 @@ def update_local_media_task(task_id: int, *, owner: str = "admin", **fields) -> 
     if not sets:
         return False
     sets.extend(["version=version+1", "updated_at=?"])
-    params.extend([now(), int(task_id), _local_media_owner(owner)])
-    with get_conn() as conn:
+    params.extend([db.now(), int(task_id), _local_media_owner(owner)])
+    with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE local_media_tasks SET {', '.join(sets)} WHERE id=? AND owner=?",
             params,
@@ -1469,8 +1446,8 @@ def add_local_media_task_item(
     owner: str = "admin",
 ) -> int:
     safe_owner = _local_media_owner(owner)
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         task = conn.execute(
             "SELECT id FROM local_media_tasks WHERE id=? AND owner=?",
             (int(task_id), safe_owner),
@@ -1509,7 +1486,7 @@ def add_local_media_task_item(
 def list_local_media_task_items(
     task_id: int, *, owner: str = "admin"
 ) -> list[sqlite3.Row]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM local_media_task_items WHERE task_id=? AND owner=? ORDER BY id",
             (int(task_id), _local_media_owner(owner)),
@@ -1527,7 +1504,7 @@ def add_local_media_operation_step(
     owner: str = "admin",
 ) -> int:
     safe_owner = _local_media_owner(owner)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         task = conn.execute(
             "SELECT id FROM local_media_tasks WHERE id=? AND owner=?",
             (int(task_id), safe_owner),
@@ -1565,7 +1542,7 @@ def update_local_media_operation_step(
     safe_status = str(status or "").strip().lower()
     if safe_status not in {"pending", "running", "completed", "failed", "rolled_back"}:
         raise ValueError("不支持的本地媒体操作步骤状态")
-    timestamp = now()
+    timestamp = db.now()
     assignments = ["status=?", "error=?"]
     params: list[object] = [safe_status, str(error or "")[:1000]]
     if safe_status == "running":
@@ -1575,7 +1552,7 @@ def update_local_media_operation_step(
         assignments.append("finished_at=?")
         params.append(timestamp)
     params.append(int(step_id))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE local_media_operation_steps SET {', '.join(assignments)} WHERE id=?",
             params,
@@ -1586,7 +1563,7 @@ def update_local_media_operation_step(
 def list_local_media_operation_steps(
     task_id: int, *, owner: str = "admin"
 ) -> list[sqlite3.Row]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT steps.* FROM local_media_operation_steps AS steps "
             "JOIN local_media_tasks AS tasks ON tasks.id=steps.task_id "
@@ -1628,8 +1605,8 @@ def update_local_media_source(
     params = [value for _key, value in normalized_fields]
     sets.append("updated_at=?")
     safe_owner = _local_media_owner(owner)
-    params.extend([now(), int(source_id), safe_owner])
-    with get_conn() as conn:
+    params.extend([db.now(), int(source_id), safe_owner])
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
             "SELECT name,qb_profile,qb_path_prefix,local_root,enabled,media_type,mode "
@@ -1656,7 +1633,7 @@ def update_local_media_source(
 
 def delete_local_media_source(source_id: int, *, owner: str = "admin") -> bool:
     safe_owner = _local_media_owner(owner)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if _local_media_source_has_active_task(
             conn,
@@ -1741,7 +1718,7 @@ def reset_local_media_task(
         "version=version+1",
         "updated_at=?",
     ]
-    params: list[object] = ["", now()]
+    params: list[object] = ["", db.now()]
     if tmdb_id is not None:
         assignments.append("tmdb_id=?")
         params.append(str(tmdb_id or "").strip())
@@ -1761,7 +1738,7 @@ def reset_local_media_task(
         params.append(normalized_numbering_mode)
     safe_owner = _local_media_owner(owner)
     params.extend([int(task_id), safe_owner])
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
             "SELECT status,error,version,operation_token FROM local_media_tasks WHERE id=? AND owner=?",
@@ -1776,7 +1753,7 @@ def reset_local_media_task(
             expected_version is not None and int(current["version"]) != int(expected_version)
         ) or (safe_status is not None and current["status"] != safe_status):
             return False
-        if is_interrupted_local_media_write_error(current["error"]) and not bool(
+        if db.is_interrupted_local_media_write_error(current["error"]) and not bool(
             confirm_interrupted_write
         ):
             return False
@@ -1817,7 +1794,7 @@ def reset_local_media_task_if_current(
 def delete_local_library_target(
     source_id: int, category: str, *, owner: str = "admin"
 ) -> bool:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM local_library_targets WHERE source_id=? AND category=? AND owner=?",
             (
@@ -1827,3 +1804,39 @@ def delete_local_library_target(
             ),
         )
         return cur.rowcount == 1
+
+
+def _recover_after_restart(conn, timestamp: str, *, writer_available: bool) -> None:
+    """只在调用方持有 writer 锁时恢复任务；关联请求始终投影权威状态。"""
+    if writer_available:
+        conn.execute(
+            "UPDATE local_media_tasks SET status='failed',"
+            "error=CASE WHEN COALESCE(error,'')='' THEN ? ELSE error END,"
+            "completed_at=COALESCE(completed_at,?),updated_at=? "
+            "WHERE status IN ('recognizing','planned')",
+            (db._LOCAL_MEDIA_INTERRUPTED_PREWRITE_ERROR, timestamp, timestamp),
+        )
+        conn.execute(
+            "UPDATE local_media_tasks SET status='requires_manual',"
+            "error=CASE WHEN COALESCE(error,'')='' THEN ? "
+            "ELSE ? || '；原错误：' || substr(error,1,350) END,"
+            "completed_at=NULL,updated_at=? "
+            "WHERE status IN ('moving','verifying','refreshing','rolling_back')",
+            (
+                f"{db.LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX}，文件及 qB 状态需人工核验",
+                db.LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX,
+                timestamp,
+            ),
+        )
+        conn.execute(
+            "UPDATE local_media_operation_steps SET status='failed',"
+            "error=CASE WHEN COALESCE(error,'')='' THEN "
+            "'进程中断，步骤结果需要人工核验' ELSE error END,"
+            "finished_at=COALESCE(finished_at,?) WHERE status='running'",
+            (timestamp,),
+        )
+    reconcile_local_media_downloads(conn)
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

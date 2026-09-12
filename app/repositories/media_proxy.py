@@ -6,32 +6,8 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
 
 from app.modules.media_proxy_safety import safe_media_name
-
-
-if TYPE_CHECKING:
-    from types import ModuleType
-
-
-def _database() -> "ModuleType":
-    """延迟取得数据库门面，保持测试数据库、时间和路径补丁兼容。"""
-    from app import database
-
-    return database
-
-
-def get_conn():
-    return _database().get_conn()
-
-
-def now() -> str:
-    return _database().now()
-
-
-def resolve_db_path():
-    return _database().resolve_db_path()
 
 
 def add_media_proxy_instance(
@@ -48,8 +24,8 @@ def add_media_proxy_instance(
     trusted_proxy_cidrs_json: str = "[]",
     enabled: int = 1,
 ) -> int:
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO media_proxy_instances("
             "name,server_type,config_source,upstream_url,api_key,listen_host,listen_port,local_root,"
@@ -78,14 +54,14 @@ def add_media_proxy_instance(
 
 
 def list_media_proxy_instances() -> list[sqlite3.Row]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_proxy_instances ORDER BY id ASC"
         ).fetchall()
 
 
 def get_media_proxy_instance(instance_id: int) -> sqlite3.Row | None:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_proxy_instances WHERE id=?",
             (int(instance_id),),
@@ -108,8 +84,8 @@ def update_media_proxy_instance(instance_id: int, fields: dict) -> bool:
     if not sets:
         return False
     sets.append("updated_at=?")
-    values.extend([now(), int(instance_id)])
-    with get_conn() as conn:
+    values.extend([db.now(), int(instance_id)])
+    with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE media_proxy_instances SET {', '.join(sets)} WHERE id=?",
             values,
@@ -119,7 +95,7 @@ def update_media_proxy_instance(instance_id: int, fields: dict) -> bool:
 
 def delete_media_proxy_instance(instance_id: int) -> bool:
     normalized_id = int(instance_id)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute(
             "DELETE FROM media_proxy_playback_records WHERE instance_id=?",
             (normalized_id,),
@@ -145,8 +121,8 @@ def add_media_proxy_binding(
     local_relative_path: str = "",
     enabled: int = 1,
 ) -> int:
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO media_proxy_bindings("
             "instance_id,media_item_id,media_source_id,source_type,guangya_file_id,"
@@ -178,8 +154,8 @@ def create_media_proxy_binding(
     enabled: int = 1,
 ) -> sqlite3.Row:
     """在同一事务内创建并回读绑定，避免并发删除造成响应竞态。"""
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO media_proxy_bindings("
             "instance_id,media_item_id,media_source_id,source_type,guangya_file_id,"
@@ -207,7 +183,7 @@ def create_media_proxy_binding(
 
 
 def list_media_proxy_bindings(instance_id: int) -> list[sqlite3.Row]:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_proxy_bindings WHERE instance_id=? ORDER BY id ASC",
             (int(instance_id),),
@@ -219,7 +195,7 @@ def get_media_proxy_binding(
     media_item_id: str,
     media_source_id: str = "",
 ) -> sqlite3.Row | None:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         if media_source_id:
             row = conn.execute(
                 "SELECT * FROM media_proxy_bindings WHERE instance_id=? "
@@ -236,7 +212,7 @@ def get_media_proxy_binding(
 
 
 def delete_media_proxy_binding(binding_id: int, instance_id: int | None = None) -> bool:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         if instance_id is None:
             cur = conn.execute(
                 "DELETE FROM media_proxy_bindings WHERE id=?",
@@ -301,7 +277,7 @@ def _prune_media_proxy_playback_records(
         if record_write:
             _media_proxy_record_writes_since_prune += 1
         current_day = datetime.now().strftime("%Y-%m-%d")
-        prune_key = f"{resolve_db_path()}:{current_day}"
+        prune_key = f"{db.resolve_db_path()}:{current_day}"
         interval_due = _media_proxy_record_writes_since_prune >= interval
         if not interval_due and _last_media_proxy_record_prune_key == prune_key:
             return
@@ -312,18 +288,7 @@ def _prune_media_proxy_playback_records(
             1,
             int(_MEDIA_PROXY_RECORD_MAX_ROWS) - interval,
         )
-        conn.execute(
-            "DELETE FROM media_proxy_playback_records "
-            "WHERE created_at < datetime('now','-30 days','localtime')"
-        )
-        conn.execute(
-            "DELETE FROM media_proxy_playback_records WHERE id IN ("
-            "SELECT id FROM media_proxy_playback_records "
-            "ORDER BY id DESC LIMIT -1 OFFSET ?"
-            ")",
-            (trim_target,),
-        )
-        _delete_orphan_media_proxy_playback_sessions(conn)
+        _prune_playback_history(conn, retained_rows=trim_target)
         _last_media_proxy_record_prune_key = prune_key
         _media_proxy_record_writes_since_prune = 0
 
@@ -427,8 +392,8 @@ def record_media_proxy_playback_attempt(*, instance_id: int, route_class: str,
     source_id = _normalized_record_identity(media_source_id)
     safe_media_name = _normalized_record_media_name(media_name)
     file_id = _normalized_record_identity(guangya_file_id, 512)
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         _prune_media_proxy_playback_records(
             conn, record_write=True
         )
@@ -498,7 +463,7 @@ def _playback_filter_clauses(*, instance_id: int | None, status: str,
 @contextmanager
 def _playback_read_snapshot():
     """清理与多查询投影共用事务，维护跳过时也不混入后续播放写入。"""
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         _prune_media_proxy_playback_records(conn)
         if not conn.in_transaction:
             conn.execute("BEGIN")
@@ -644,7 +609,7 @@ def list_media_proxy_playback_sessions(*, instance_id: int | None = None,
 
 
 def clear_media_proxy_playback_records(instance_id: int | None = None) -> int:
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         if instance_id is None:
             cursor = conn.execute("DELETE FROM media_proxy_playback_records")
             conn.execute("DELETE FROM media_proxy_playback_sessions")
@@ -723,3 +688,22 @@ def get_media_proxy_playback_failure_summary(
         "last_seen_at": str(last["last_seen"] or "") if last else "",
         "coverage": "recorded_proxy_requests_only",
     }
+
+
+def _prune_playback_history(conn: sqlite3.Connection, *, retained_rows: int) -> None:
+    conn.execute(
+        "DELETE FROM media_proxy_playback_records "
+        "WHERE created_at < datetime('now','-30 days','localtime')"
+    )
+    conn.execute(
+        "DELETE FROM media_proxy_playback_records WHERE id IN ("
+        "SELECT id FROM media_proxy_playback_records "
+        "ORDER BY id DESC LIMIT -1 OFFSET ?"
+        ")",
+        (retained_rows,),
+    )
+    _delete_orphan_media_proxy_playback_sessions(conn)
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

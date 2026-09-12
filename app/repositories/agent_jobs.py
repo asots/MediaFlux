@@ -8,13 +8,12 @@ import json
 import re
 import secrets
 import sqlite3
-from typing import TYPE_CHECKING, Any
+import time
+from typing import Any
 
 from app.agent.errors import AgentToolError
 from app.modules.web_secret import get_web_secret
 
-if TYPE_CHECKING:
-    from types import ModuleType
 
 _ALLOWED_JOB_TYPES = {"library_episode_audit"}
 _ACTIVE_STATUSES = {"pending", "running", "retry_wait"}
@@ -24,20 +23,6 @@ _MAX_JSON_BYTES = 65_536
 _MAX_SUMMARY_LENGTH = 240
 _MAX_ERROR_CODE_LENGTH = 80
 _MAX_HISTORY_PER_OWNER = 50
-
-
-def _database() -> ModuleType:
-    from app import database
-
-    return database
-
-
-def get_conn():
-    return _database().get_conn()
-
-
-def now() -> str:
-    return _database().now()
 
 
 def agent_job_owner_digest(owner: str) -> str:
@@ -147,9 +132,9 @@ def create_agent_job(
     expected_id = (
         _safe_job_id(expected_active_job_id) if expected_active_job_id is not None else None
     )
-    timestamp = now()
+    timestamp = db.now()
 
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM agent_jobs WHERE owner_digest=? AND job_type=? "
@@ -207,7 +192,7 @@ def create_agent_job(
 def get_agent_job(*, owner: str, job_id: str) -> sqlite3.Row | None:
     owner_digest = agent_job_owner_digest(owner)
     safe_id = _safe_job_id(job_id)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return _select_job(conn, owner_digest=owner_digest, job_id=safe_id)
 
 
@@ -222,7 +207,7 @@ def list_agent_jobs(
         clause = " AND job_type=?"
         values.append(_safe_job_type(job_type))
     values.append(safe_limit)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return list(
             conn.execute(
                 "SELECT * FROM agent_jobs WHERE owner_digest=?"
@@ -243,7 +228,7 @@ def find_active_agent_job(
     owner_digest = agent_job_owner_digest(owner)
     safe_type = _safe_job_type(job_type)
     safe_dedupe = _safe_dedupe_key(dedupe_key)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM agent_jobs WHERE owner_digest=? AND job_type=? "
             "AND dedupe_key=? AND status IN ('pending','running','retry_wait') "
@@ -257,7 +242,7 @@ def find_latest_active_agent_job(
 ) -> sqlite3.Row | None:
     owner_digest = agent_job_owner_digest(owner)
     safe_type = _safe_job_type(job_type)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM agent_jobs WHERE owner_digest=? AND job_type=? "
             "AND status IN ('pending','running','retry_wait') "
@@ -274,8 +259,8 @@ def claim_due_agent_job(
 ) -> sqlite3.Row | None:
     """原子领取一个到期任务，并回收过期租约。"""
     safe_type = _safe_job_type(job_type)
-    timestamp = str(current_time or now())
-    with get_conn() as conn:
+    timestamp = str(current_time or db.now())
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
             conn.execute(
@@ -318,8 +303,8 @@ def renew_agent_job_lease(
 ) -> bool:
     """续期仍由当前 generation 持有的运行中租约。"""
     safe_id = _safe_job_id(job_id)
-    timestamp = str(renewed_at or now())
-    with get_conn() as conn:
+    timestamp = str(renewed_at or db.now())
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_jobs SET updated_at=? WHERE job_id=? AND status='running' "
             "AND lease_generation=? AND cancel_requested=0",
@@ -332,7 +317,7 @@ def is_agent_job_cancel_requested(
     job_id: str, *, expected_lease_generation: int
 ) -> bool:
     safe_id = _safe_job_id(job_id)
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         row = conn.execute(
             "SELECT cancel_requested FROM agent_jobs WHERE job_id=? "
             "AND status='running' AND lease_generation=?",
@@ -357,8 +342,8 @@ def continue_agent_job(
     safe_projection = _safe_json(projection_json, field="Agent 长任务投影")
     current = max(0, min(int(progress_current), 1_000_000))
     total = max(0, min(int(progress_total), 1_000_000))
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_jobs SET status='pending',checkpoint_json=?,projection_json=?,"
             "summary=?,error_code='',attempts=0,next_run_at=?,progress_current=?,"
@@ -391,10 +376,10 @@ def complete_agent_job(
 ) -> bool:
     safe_id = _safe_job_id(job_id)
     safe_projection = _safe_json(projection_json, field="Agent 长任务投影")
-    timestamp = str(finished_at or now())
+    timestamp = str(finished_at or db.now())
     current = max(0, min(int(progress_current), 1_000_000))
     total = max(0, min(int(progress_total), 1_000_000))
-    with get_conn() as conn:
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_jobs SET status='succeeded',projection_json=?,summary=?,"
             "error_code='',attempts=0,progress_current=?,progress_total=?,"
@@ -423,8 +408,8 @@ def release_agent_job_lease(
 ) -> bool:
     """总开关切换时释放运行租约，不消费重试预算或提交旧批次结果。"""
     safe_id = _safe_job_id(job_id)
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_jobs SET status='pending',lease_generation=lease_generation+1,"
             "next_run_at=?,summary=?,error_code='',updated_at=? WHERE job_id=? "
@@ -452,8 +437,8 @@ def fail_or_retry_agent_job(
     """按 max_attempts 决定重试或失败；返回实际状态。"""
     safe_id = _safe_job_id(job_id)
     safe_attempts = max(1, min(int(attempts), 100))
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT max_attempts,cancel_requested FROM agent_jobs WHERE job_id=? "
@@ -499,8 +484,8 @@ def cancel_agent_job(
     owner_digest = agent_job_owner_digest(owner)
     safe_type = _safe_job_type(job_type)
     safe_id = _safe_job_id(job_id) if job_id else ""
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if safe_id:
             row = _select_job(conn, owner_digest=owner_digest, job_id=safe_id)
@@ -540,8 +525,8 @@ def finalize_cancelled_agent_job(
     job_id: str, *, expected_lease_generation: int
 ) -> bool:
     safe_id = _safe_job_id(job_id)
-    timestamp = now()
-    with get_conn() as conn:
+    timestamp = db.now()
+    with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_jobs SET status='cancelled',summary='任务已取消',"
             "error_code='',finished_at=?,updated_at=? WHERE job_id=? "
@@ -549,3 +534,25 @@ def finalize_cancelled_agent_job(
             (timestamp, timestamp, safe_id, max(0, int(expected_lease_generation))),
         )
         return cur.rowcount == 1
+
+
+def _purge_expired_runtime_state(conn) -> None:
+    for table in ("agent_session_context", "agent_confirmations", "agent_action_leases", "telegram_agent_actions"):
+        conn.execute(f"DELETE FROM {table} WHERE expires_at<=?", (time.time(),))
+
+
+def _recover_after_restart(conn, timestamp: str) -> None:
+    """恢复运行租约；已有取消请求优先结束，不重新排队。"""
+    conn.execute(
+        "UPDATE agent_jobs SET "
+        "status=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE 'retry_wait' END,"
+        "lease_generation=lease_generation+1,next_run_at=?,"
+        "error_code=CASE WHEN cancel_requested=1 THEN '' ELSE 'ProcessInterrupted' END,"
+        "finished_at=CASE WHEN cancel_requested=1 THEN ? ELSE finished_at END,"
+        "updated_at=? WHERE status='running'",
+        (timestamp, timestamp, timestamp),
+    )
+
+
+# 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
+from app import database as db  # noqa: E402

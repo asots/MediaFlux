@@ -34,7 +34,7 @@ class MediaProxySnapshotAuditTests(IsolatedDatabaseTestCase):
 
     @contextmanager
     def _after_read(self, sql_prefix, callback):
-        original = repository.get_conn
+        original = db.get_conn
         state = {"fired": False}
 
         class Cursor:
@@ -74,7 +74,7 @@ class MediaProxySnapshotAuditTests(IsolatedDatabaseTestCase):
             with original() as conn:
                 yield Connection(conn)
 
-        with patch.object(repository, "get_conn", hooked):
+        with patch.object(db, "get_conn", hooked):
             yield
         self.assertTrue(state["fired"])
 
@@ -126,7 +126,7 @@ class MediaProxySnapshotAuditTests(IsolatedDatabaseTestCase):
         for index in range(105):
             self._record(session=f"fixture-{index}")
         statements = []
-        original = repository.get_conn
+        original = db.get_conn
 
         @contextmanager
         def traced():
@@ -134,7 +134,7 @@ class MediaProxySnapshotAuditTests(IsolatedDatabaseTestCase):
                 conn.set_trace_callback(statements.append)
                 yield conn
 
-        with patch.object(repository, "get_conn", traced):
+        with patch.object(db, "get_conn", traced):
             page = repository.list_media_proxy_playback_sessions(page=2, page_size=100)
         self.assertEqual(
             (page["total"], page["page"], page["page_size"]), (105, 2, 100)
