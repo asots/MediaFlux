@@ -56,7 +56,7 @@ class RSSGuangYaUnifiedDownloadTests(IsolatedDatabaseTestCase):
             gy_target_dir="target-id",
             gy_target_dir_name="动漫",
         )
-        entry_id = db.add_rss_entry(
+        entry_id = db.add_rss_entry_with_media(
             subscription_id,
             f"Episode {suffix}",
             f"guid-{suffix}",
@@ -64,7 +64,7 @@ class RSSGuangYaUnifiedDownloadTests(IsolatedDatabaseTestCase):
                 {"torrent_url": url or f"magnet:?xt=urn:btih:{infohash}"},
                 ensure_ascii=False,
             ),
-        )
+        )["id"]
         assert entry_id is not None
         return subscription_id, int(entry_id)
 

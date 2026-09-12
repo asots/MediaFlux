@@ -648,12 +648,12 @@ class DatabaseMigrationTests(unittest.TestCase):
             with patch("app.database.DB_PATH", test_db):
                 db.init_db()
                 sub_id = db.add_rss_subscription("Legacy", "https://example.com/rss")
-                entry_id = db.add_rss_entry(
+                entry_id = db.add_rss_entry_with_media(
                     sub_id,
                     "Interrupted submit",
                     "interrupted-guid",
                     payload='{"torrent_url":"magnet:?xt=legacy"}',
-                )
+                )["id"]
                 with db.get_conn() as conn:
                     conn.execute(
                         "UPDATE rss_entries SET status='submitting',"
@@ -5878,11 +5878,11 @@ class SecurityTests(InitializedWebTestCase):
             try:
                 db.init_db()
                 sub_id = db.add_rss_subscription("Demo", "https://example.com/rss")
-                old_processed = db.add_rss_entry(sub_id, "Old processed", "old")
-                recent_processed = db.add_rss_entry(
+                old_processed = db.add_rss_entry_with_media(sub_id, "Old processed", "old")["id"]
+                recent_processed = db.add_rss_entry_with_media(
                     sub_id, "Recent processed", "recent"
-                )
-                old_pending = db.add_rss_entry(sub_id, "Old pending", "pending")
+                )["id"]
+                old_pending = db.add_rss_entry_with_media(sub_id, "Old pending", "pending")["id"]
                 with db.get_conn() as conn:
                     conn.execute(
                         "UPDATE rss_entries SET status='downloaded',processed=1,processed_at='2026-07-01 00:00:00' WHERE id=?",

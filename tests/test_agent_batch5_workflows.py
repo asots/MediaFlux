@@ -81,18 +81,18 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             download_method="qb",
             qb_save_path="/private/rss",
         )
-        first = db.add_rss_entry(
+        first = db.add_rss_entry_with_media(
             sid,
             "公开标题 1",
             "SECRET-GUID-1",
             payload=json.dumps({"torrent_url": "magnet:?xt=urn:btih:PRIVATE1"}),
-        )
-        second = db.add_rss_entry(
+        )["id"]
+        second = db.add_rss_entry_with_media(
             sid,
             "公开标题 2",
             "SECRET-GUID-2",
             payload=json.dumps({"torrent_url": "magnet:?xt=urn:btih:PRIVATE2"}),
-        )
+        )["id"]
         assert first and second
         return (sid, int(first), int(second))
 

@@ -72,9 +72,9 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
             if url
             else "{}"
         )
-        entry_id = db.add_rss_entry(
+        entry_id = db.add_rss_entry_with_media(
             sub_id, f"Private Episode {index}", f"secret-guid-{index}", payload=payload
-        )
+        )["id"]
         assert entry_id is not None
         return entry_id
 

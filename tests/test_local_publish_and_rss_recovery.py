@@ -164,7 +164,7 @@ from app.modules.rss import RSSEngine
 sid = db.add_rss_subscription("Process backlog", "https://synthetic.invalid/feed")
 db.update_rss_subscription(sid, {"action":"download"})
 for n in range(451):
-    db.add_rss_entry(sid, f"Episode {n}", f"process:{n}")
+    db.add_rss_entry_with_media(sid, f"Episode {n}", f"process:{n}")
 submitted = []
 def complete(entry, **kwargs):
     submitted.append(int(entry["id"]))
@@ -196,7 +196,7 @@ os._exit(32)
         )
         db.update_rss_subscription(sid, {"action": "download"})
         for number in range(451):
-            db.add_rss_entry(sid, f"Episode {number}", f"backup:{number}")
+            db.add_rss_entry_with_media(sid, f"Episode {number}", f"backup:{number}")
         paths = runtime_paths(self.path)
         archive = backup.create_backup(paths)
         db.delete_rss_subscription(sid)

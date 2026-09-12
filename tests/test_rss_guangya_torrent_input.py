@@ -79,12 +79,12 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
             gy_target_dir="rss-target",
             gy_target_dir_name="RSS目标",
         )
-        entry = db.add_rss_entry(
+        entry = db.add_rss_entry_with_media(
             sub,
             "Movie Episode 1",
             "rss-guid",
             payload=json.dumps({"torrent_url": TORRENT_URL}),
-        )
+        )["id"]
         client = self.client()
         normalize = offline.GuangYaClient.normalize_offline_files
         with patch.object(offline, "GuangYaClient", return_value=client) as factory:

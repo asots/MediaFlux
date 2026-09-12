@@ -30,17 +30,20 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
         db.add_rss_subscription("disabled", "https://example.invalid/b", enabled=0, refresh_interval_minutes=10)
         db.add_rss_subscription("manual", "https://example.invalid/c", refresh_interval_minutes=0)
         entry_ids = [
-            db.add_rss_entry(active, f"entry-{index}", f"guid-{index}")
+            db.add_rss_entry_with_media(active, f"entry-{index}", f"guid-{index}")["id"]
             for index in range(5)
         ]
         for entry_id, status in zip(entry_ids, ["pending", "failed", "skipped", "submitting", "downloaded"]):
             db.update_rss_entry_status(int(entry_id), status)
         return active, [int(item) for item in entry_ids]
 
+    def test_entry_creation_exposes_only_the_media_aware_api(self) -> None:
+        self.assertFalse(hasattr(db, "add_rss_entry"))
+
     def test_duplicate_guid_insert_is_atomic_and_returns_none(self) -> None:
         sid = db.add_rss_subscription("dedupe", "https://example.invalid/dedupe")
-        first = db.add_rss_entry(sid, "first", "same-guid")
-        second = db.add_rss_entry(sid, "second", "same-guid")
+        first = db.add_rss_entry_with_media(sid, "first", "same-guid")["id"]
+        second = db.add_rss_entry_with_media(sid, "second", "same-guid")["id"]
 
         self.assertIsInstance(first, int)
         self.assertIsNone(second)
@@ -58,10 +61,10 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
 
     def test_rss_entries_sort_by_published_time_with_stable_fallback(self) -> None:
         sid = db.add_rss_subscription("sorted", "https://example.invalid/sorted")
-        newest = db.add_rss_entry(sid, "newest", "newest", "2026-08-15 12:00")
-        oldest = db.add_rss_entry(sid, "oldest", "oldest", "2026-08-13 12:00")
-        middle = db.add_rss_entry(sid, "middle", "middle", "2026-08-14 12:00")
-        unknown = db.add_rss_entry(sid, "unknown", "unknown", "not-a-date")
+        newest = db.add_rss_entry_with_media(sid, "newest", "newest", pub_date="2026-08-15 12:00")["id"]
+        oldest = db.add_rss_entry_with_media(sid, "oldest", "oldest", pub_date="2026-08-13 12:00")["id"]
+        middle = db.add_rss_entry_with_media(sid, "middle", "middle", pub_date="2026-08-14 12:00")["id"]
+        unknown = db.add_rss_entry_with_media(sid, "unknown", "unknown", pub_date="not-a-date")["id"]
 
         rows = db.list_rss_entries(sub_id=sid)
 

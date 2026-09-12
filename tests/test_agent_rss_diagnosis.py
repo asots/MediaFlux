@@ -84,15 +84,15 @@ class RssDiagnosisUnitTests(IsolatedDatabaseTestCase):
             refresh_interval_minutes=30,
         )
         db.update_rss_subscription(invalid_refresh, {"last_refreshed_at": "not-a-time"})
-        pending_old = db.add_rss_entry(scheduled, "old", "g-old")
-        pending_recent = db.add_rss_entry(scheduled, "recent", "g-recent")
-        submitting_old = db.add_rss_entry(scheduled, "sub-old", "g-sub-old")
-        submitting_recent = db.add_rss_entry(scheduled, "sub-recent", "g-sub-recent")
-        failed = db.add_rss_entry(manual, "failed", "g-failed")
-        downloaded = db.add_rss_entry(manual, "downloaded", "g-downloaded")
-        skipped = db.add_rss_entry(manual, "skipped", "g-skipped")
-        inconsistent = db.add_rss_entry(manual, "bad", "g-bad")
-        null_status = db.add_rss_entry(invalid_refresh, "null-status", "g-null-status")
+        pending_old = db.add_rss_entry_with_media(scheduled, "old", "g-old")["id"]
+        pending_recent = db.add_rss_entry_with_media(scheduled, "recent", "g-recent")["id"]
+        submitting_old = db.add_rss_entry_with_media(scheduled, "sub-old", "g-sub-old")["id"]
+        submitting_recent = db.add_rss_entry_with_media(scheduled, "sub-recent", "g-sub-recent")["id"]
+        failed = db.add_rss_entry_with_media(manual, "failed", "g-failed")["id"]
+        downloaded = db.add_rss_entry_with_media(manual, "downloaded", "g-downloaded")["id"]
+        skipped = db.add_rss_entry_with_media(manual, "skipped", "g-skipped")["id"]
+        inconsistent = db.add_rss_entry_with_media(manual, "bad", "g-bad")["id"]
+        null_status = db.add_rss_entry_with_media(invalid_refresh, "null-status", "g-null-status")["id"]
         assert all(
 
                 item is not None
@@ -180,7 +180,7 @@ class RssDiagnosisUnitTests(IsolatedDatabaseTestCase):
         sub_id = db.add_rss_subscription(
             name="nullable-enabled", urls="https://example.invalid/nullable", enabled=1
         )
-        entry_id = db.add_rss_entry(sub_id, "failed", "nullable-guid")
+        entry_id = db.add_rss_entry_with_media(sub_id, "failed", "nullable-guid")["id"]
         assert entry_id is not None
         _set_entry(entry_id, status="failed")
         with db.get_conn() as conn:
@@ -207,7 +207,7 @@ class RssDiagnosisUnitTests(IsolatedDatabaseTestCase):
             gy_target_dir="C:\\RSS_PATH_SECRET",
             gy_target_dir_name="RSS_PATH_SECRET",
         )
-        entry_id = db.add_rss_entry(
+        entry_id = db.add_rss_entry_with_media(
             sub_id,
             "RSS_TITLE_SECRET magnet:?xt=urn:btih:RSS_PAYLOAD_SECRET",
             "RSS_GUID_SECRET",
@@ -218,7 +218,7 @@ class RssDiagnosisUnitTests(IsolatedDatabaseTestCase):
                     "path": "/srv/RSS_PATH_SECRET",
                 }
             ),
-        )
+        )["id"]
         assert entry_id is not None
         _set_entry(entry_id, status="failed", created_at="2026-07-01 00:00:00")
         serialized = json.dumps(self._diagnose().to_dict(), ensure_ascii=False)
@@ -241,7 +241,7 @@ class RssDiagnosisUnitTests(IsolatedDatabaseTestCase):
             sub_id = db.add_rss_subscription(
                 name=f"sub-{index}", urls=f"https://example.invalid/{index}", enabled=1
             )
-            entry_id = db.add_rss_entry(sub_id, f"failed-{index}", f"guid-{index}")
+            entry_id = db.add_rss_entry_with_media(sub_id, f"failed-{index}", f"guid-{index}")["id"]
             assert entry_id is not None
             _set_entry(entry_id, status="failed")
         result = self._diagnose()

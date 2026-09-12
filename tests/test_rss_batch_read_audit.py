@@ -27,14 +27,14 @@ class RSSBatchReadAuditTests(unittest.TestCase):
     def entries(self, count):
         ids = []
         for n in range(count):
-            entry_id = db.add_rss_entry(
+            entry_id = db.add_rss_entry_with_media(
                 self.sid,
                 f"Episode {n}",
                 f"audit:{n}",
                 payload=json.dumps(
                     {"torrent_url": f"magnet:?xt=urn:btih:{n + 1:040x}"}
                 ),
-            )
+            )["id"]
             self.assertIsNotNone(entry_id)
             ids.append(entry_id)
         return ids

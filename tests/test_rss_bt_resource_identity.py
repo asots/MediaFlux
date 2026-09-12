@@ -114,12 +114,12 @@ class ContentIdentityAudit(_RSSFixture, unittest.TestCase):
                     gy_target_dir="target",
                     gy_target_dir_name="Same target",
                 )
-                entry = db.add_rss_entry(
+                entry = db.add_rss_entry_with_media(
                     sub,
                     "Example S01E01",
                     f"guid-{i}",
                     payload=json.dumps({"torrent_url": url}),
-                )
+                )["id"]
                 result = engine.download(entry)
                 self.assertTrue(result["ok"], result)
                 rows.append(result)

@@ -18,7 +18,7 @@ class DashboardAutomationSummaryTests(IsolatedDatabaseTestCase):
             name="停用订阅", urls="https://example.invalid/disabled", enabled=0
         )
         for index in range(3):
-            db.add_rss_entry(enabled_id, f"第 {index + 1} 集", f"guid-{index}")
+            db.add_rss_entry_with_media(enabled_id, f"第 {index + 1} 集", f"guid-{index}")
 
         summary = build_automation_summary()
 

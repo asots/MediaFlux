@@ -452,16 +452,16 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
         sid = self._subscription("historical-filter")
         db.update_rss_subscription(sid, {"exclude_keywords": "合集", "action": "download"})
         # 历史普通条目可能没有 rss_entry_media；过滤时也必须补写可解释原因。
-        excluded_id = db.add_rss_entry(
+        excluded_id = db.add_rss_entry_with_media(
             sid,
             "作品 合集 01-12",
             "excluded-guid",
-        )
-        accepted_id = db.add_rss_entry(
+        )["id"]
+        accepted_id = db.add_rss_entry_with_media(
             sid,
             "作品 S01E13",
             "accepted-guid",
-        )
+        )["id"]
         engine = RSSEngine()
         with patch.object(
             engine, "refresh", return_value={"total": 2, "new": 0, "skipped": 0}
@@ -528,7 +528,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
 
     def test_scheduler_retries_unresolved_alert_and_persists_delivery_signature(self):
         sid = self._subscription("scheduler-durable-alert")
-        entry_id = db.add_rss_entry(sid, "待核对资源", "durable-alert-guid")
+        entry_id = db.add_rss_entry_with_media(sid, "待核对资源", "durable-alert-guid")["id"]
         self.assertIsNotNone(entry_id)
         db.record_rss_entry_failure(int(entry_id), "qb_outcome_unknown", False)
         issue = {

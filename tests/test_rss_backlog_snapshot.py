@@ -21,7 +21,7 @@ class RSSBacklogSnapshotTests(unittest.TestCase):
             title = (
                 f"Episode {index}" if index < count - excluded else f"trailer {index}"
             )
-            db.add_rss_entry(self.sid, title, f"backlog:{index}")
+            db.add_rss_entry_with_media(self.sid, title, f"backlog:{index}")
 
     def run_round(self):
         engine = RSSEngine()
@@ -44,8 +44,8 @@ class RSSBacklogSnapshotTests(unittest.TestCase):
         self.seed(451)
         # 其它订阅和非 pending 条目不能计入此轮。
         other = db.add_rss_subscription("Other", "https://synthetic.invalid/other")
-        db.add_rss_entry(other, "Other entry", "other:1")
-        done = db.add_rss_entry(self.sid, "Already done", "done:1")
+        db.add_rss_entry_with_media(other, "Other entry", "other:1")
+        done = db.add_rss_entry_with_media(self.sid, "Already done", "done:1")["id"]
         db.update_rss_entry_status(done, "downloaded")
         self.assertEqual(self.run_round()["deferred"], 351)
 

@@ -52,12 +52,12 @@ class RSSQBUnifiedDownloadTests(IsolatedDatabaseTestCase):
 
     @staticmethod
     def _entry(sub_id: int, guid: str, url: str, *, processed: bool = False) -> int:
-        entry_id = db.add_rss_entry(
+        entry_id = db.add_rss_entry_with_media(
             sub_id,
             f"Episode {guid}",
             guid,
             payload=json.dumps({"torrent_url": url}),
-        )
+        )["id"]
         assert entry_id is not None
         if processed:
             db.update_rss_entry_status(entry_id, "downloaded")

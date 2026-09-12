@@ -382,26 +382,26 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
             urls="https://example.com/gy.xml",
             download_method="guangya",
         )
-        qb_entry = db.add_rss_entry(
+        qb_entry = db.add_rss_entry_with_media(
             qb_sub,
             "Legacy qB item",
             "legacy-qb",
             payload=json.dumps({"torrent_url": f"magnet:?xt=urn:btih:{infohash}"}),
-        )
-        gy_entry = db.add_rss_entry(
+        )["id"]
+        gy_entry = db.add_rss_entry_with_media(
             gy_sub,
             "Legacy GuangYa item",
             "legacy-gy",
             payload=json.dumps({"torrent_url": f"magnet:?xt=urn:btih:{infohash}"}),
-        )
-        uncertain_entry = db.add_rss_entry(
+        )["id"]
+        uncertain_entry = db.add_rss_entry_with_media(
             qb_sub,
             "Legacy uncertain item",
             "legacy-uncertain",
             payload=json.dumps({
                 "torrent_url": f"https://example.com/{uncertain_hash}.torrent"
             }),
-        )
+        )["id"]
         assert qb_entry is not None and gy_entry is not None
         assert uncertain_entry is not None
         db.update_rss_entry_status(qb_entry, "downloaded")
@@ -494,14 +494,14 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
         entry_ids: dict[str, int] = {}
         request_ids: dict[str, int] = {}
         for label, infohash in hashes.items():
-            entry_id = db.add_rss_entry(
+            entry_id = db.add_rss_entry_with_media(
                 subscription_id,
                 label,
                 f"legacy-{label}",
                 payload=json.dumps({
                     "torrent_url": f"magnet:?xt=urn:btih:{infohash}"
                 }),
-            )
+            )["id"]
             assert entry_id is not None
             entry_ids[label] = entry_id
             if label != "uncertain_qb":

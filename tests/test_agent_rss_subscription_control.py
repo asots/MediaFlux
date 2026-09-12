@@ -102,14 +102,14 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         self.assertEqual(int(db.get_rss_subscription(self.sid)["enabled"]), 1)
 
     def test_delete_is_cascaded_locally_and_stale_entry_count_conflicts(self):
-        db.add_rss_entry(self.sid, "PRIVATE_TITLE", "secret-guid")
+        db.add_rss_entry_with_media(self.sid, "PRIVATE_TITLE", "secret-guid")
         other = db.add_rss_subscription("Other", "https://other.invalid/rss")
-        db.add_rss_entry(other, "OTHER_TITLE", "other-guid")
+        db.add_rss_entry_with_media(other, "OTHER_TITLE", "other-guid")
         service = get_agent_service()
         prepared = service.prepare(
             "rss.delete_subscription", {"subscription_id": self.sid}, owner="owner"
         )
-        db.add_rss_entry(self.sid, "LATE_PRIVATE_TITLE", "late-guid")
+        db.add_rss_entry_with_media(self.sid, "LATE_PRIVATE_TITLE", "late-guid")
         conflict = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertEqual(conflict["result"]["status"], "conflict")
         self.assertIsNotNone(db.get_rss_subscription(self.sid))

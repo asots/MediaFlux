@@ -71,7 +71,7 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
 
     @staticmethod
     def _entry(sub_id: int, index: int, *, payload: str | None = None) -> int:
-        entry_id = db.add_rss_entry(
+        entry_id = db.add_rss_entry_with_media(
             sub_id,
             f"Private Episode {index}",
             f"secret-guid-{index}",
@@ -81,7 +81,7 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
                     "torrent_url": f"magnet:?xt=urn:btih:{index:040x}&dn=PRIVATESECRET{index}"
                 }
             ),
-        )
+        )["id"]
         assert entry_id is not None
         return entry_id
 

@@ -226,15 +226,6 @@ def delete_rss_subscription(sub_id: int) -> None:
         conn.execute("DELETE FROM rss_items WHERE id=?", (sub_id,))
 
 
-def add_rss_entry(sub_id: int, title: str, guid: str, pub_date: str = "",
-                  payload: str = "") -> int | None:
-    """兼容入口：普通 RSS 条目按 guid 原子去重。"""
-    result = add_rss_entry_with_media(
-        sub_id, title, guid, pub_date=pub_date, payload=payload
-    )
-    return int(result["id"]) if result.get("id") is not None else None
-
-
 def add_rss_entry_with_media(
     sub_id: int,
     title: str,

@@ -81,12 +81,12 @@ class RssSubscriptionSummaryTests(IsolatedDatabaseTestCase):
             qb_save_path=secret_values[4],
             gy_target_dir=secret_values[5],
         )
-        entry_id = db.add_rss_entry(
+        entry_id = db.add_rss_entry_with_media(
             subscription_id,
             "private-entry-title",
             secret_values[2],
             payload=secret_values[3],
-        )
+        )["id"]
         assert entry_id is not None
         _set_entry(entry_id, status="failed", created_at="2026-07-30 12:00:00")
         with patch("app.agent.rss_actions.db.now", return_value=_SNAPSHOT):
@@ -111,12 +111,12 @@ class RssSubscriptionSummaryTests(IsolatedDatabaseTestCase):
                 urls=f"https://example.invalid/{index}",
                 enabled=1,
             )
-            entry_id = db.add_rss_entry(
+            entry_id = db.add_rss_entry_with_media(
                 subscription_id,
                 f"entry-{index}",
                 f"guid-{index}",
                 payload="magnet:?xt=test",
-            )
+            )["id"]
             assert entry_id is not None
             _set_entry(
                 entry_id,
