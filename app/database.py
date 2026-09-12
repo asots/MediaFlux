@@ -2002,25 +2002,6 @@ def purge_agent_subject_data(
     return deleted
 
 
-def maintain_sqlite_database(*, incremental_pages: int = 200) -> dict[str, int | bool]:
-    """低频执行 SQLite planner 优化，并在 incremental 模式下回收空闲页。"""
-    pages = max(1, min(int(incremental_pages), 2000))
-    with get_conn() as conn:
-        conn.execute("PRAGMA optimize")
-        auto_vacuum = int(conn.execute("PRAGMA auto_vacuum").fetchone()[0])
-        freelist_before = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
-        vacuumed = auto_vacuum == 2 and freelist_before >= pages
-        if vacuumed:
-            conn.execute(f"PRAGMA incremental_vacuum({pages})")
-        freelist_after = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
-    return {
-        "optimized": True,
-        "incremental_vacuum": vacuumed,
-        "freelist_before": freelist_before,
-        "freelist_after": freelist_after,
-    }
-
-
 # ===== Agent 媒体库巡检 =====
 # 统一数据访问门面：巡检结果、版本与通知发件箱保持单事务一致性。
 # ===== Agent owner 隔离的可恢复长任务 =====

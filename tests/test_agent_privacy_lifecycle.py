@@ -221,9 +221,6 @@ class AgentPrivacyLifecycleTests(IsolatedDatabaseTestCase):
             )
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM organize_operation_jobs").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_missing_media_workflows").fetchone()[0], 1)
-        maintenance = db.maintain_sqlite_database(incremental_pages=1)
-        self.assertTrue(maintenance["optimized"])
-        self.assertGreaterEqual(maintenance["freelist_before"], maintenance["freelist_after"])
 
     def test_subject_purge_prevents_late_confirmation_audit_recreation(self):
         contract = {
