@@ -180,39 +180,17 @@ def play_gy(
 _PLAYGY_PATH = "/playgy/{file_id}/{etag}/{size}/{filename:path}"
 
 
-@router.get(
-    _PLAYGY_PATH,
-    name="proxy.play_gy_get",
-    operation_id="proxy_play_gy_get",
-)
-def play_gy_get(
-    file_id: str,
-    etag: str,
-    size: str,
-    filename: str,
-    request: Request,
-    v: str = "",
-    sig: str = "",
-    enc: str = "",
-):
-    return play_gy(
-        file_id,
-        etag,
-        size,
-        filename,
-        request=request,
-        v=v,
-        sig=sig,
-        enc=enc,
-    )
-
-
 @router.head(
     _PLAYGY_PATH,
     name="proxy.play_gy_head",
     operation_id="proxy_play_gy_head",
 )
-def play_gy_head(
+@router.get(
+    _PLAYGY_PATH,
+    name="proxy.play_gy_get",
+    operation_id="proxy_play_gy_get",
+)
+def play_gy_endpoint(
     file_id: str,
     etag: str,
     size: str,

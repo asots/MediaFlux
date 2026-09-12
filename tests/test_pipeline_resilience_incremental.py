@@ -637,6 +637,10 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(operations["get"]["operationId"], "proxy_play_gy_get")
         self.assertEqual(operations["head"]["operationId"], "proxy_play_gy_head")
+        routes = {route.name: route for route in playgy_router.routes}
+        self.assertIs(routes["proxy.play_gy_get"].endpoint, routes["proxy.play_gy_head"].endpoint)
+        self.assertEqual(routes["proxy.play_gy_get"].methods, {"GET"})
+        self.assertEqual(routes["proxy.play_gy_head"].methods, {"HEAD"})
 
     def test_strm_url_with_slash_identifier_reaches_proxy_with_original_identity(self):
         from app.routes.proxy import router as playgy_router
