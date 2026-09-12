@@ -159,6 +159,22 @@ class AgentKernelApiTests(unittest.TestCase):
             item.stop()
         self.client.close()
 
+    def test_capabilities_count_matches_the_visible_snapshot(self):
+        visible = types.SimpleNamespace(
+            name="demo.read", domain="demo", description="visible tool",
+            effect=types.SimpleNamespace(value="read"),
+        )
+        catalog = unittest.mock.Mock()
+        catalog.visible.return_value = (visible,)
+        catalog.__len__ = unittest.mock.Mock(return_value=3)
+        self.runtime.session.catalog = catalog
+        response = self.client.get("/api/agent/capabilities")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["count"], len(data["tools"]))
+        self.assertEqual([tool["name"] for tool in data["tools"]], ["demo.read"])
+        catalog.visible.assert_called_once_with({})
+
     def test_query_streams_canonical_ndjson_without_trace_replay_wrapper(self):
         response = self.client.post(
             "/api/agent/query",

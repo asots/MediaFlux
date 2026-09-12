@@ -108,20 +108,12 @@ async def capabilities(request: Request):
     try:
         _require_enabled()
         catalog = get_agent_kernel_runtime().session.catalog
-        return api_response(
-            {
-                "tools": [
-                    {
-                        "name": tool.name,
-                        "domain": tool.domain,
-                        "description": tool.description,
-                        "effect": tool.effect.value,
-                    }
-                    for tool in catalog.visible({})
-                ],
-                "count": len(catalog),
-            }
-        )
+        tools = [
+            {"name": tool.name, "domain": tool.domain,
+             "description": tool.description, "effect": tool.effect.value}
+            for tool in catalog.visible({})
+        ]
+        return api_response({"tools": tools, "count": len(tools)})
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
         return _error(exc)
 
