@@ -445,6 +445,63 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
 
 
 class TelegramAgentExecutorTests(unittest.TestCase):
+    def test_cancelled_job_does_not_kill_the_only_worker(self):
+        import asyncio
+        import threading
+
+        for failure in (RuntimeError("ordinary failure"), asyncio.CancelledError("cancelled query")):
+            with self.subTest(failure=type(failure).__name__):
+                executor = adapter.TelegramAgentExecutor(max_queries=1, max_controls=0)
+                release, completed = threading.Event(), threading.Event()
+                next_job = None
+                executor.start()
+                finish = executor._finished
+                def observe_finish(future):
+                    try:
+                        finish(future)
+                    finally:
+                        completed.set()
+                def fail():
+                    release.wait(2)
+                    raise failure
+                try:
+                    with patch.object(executor, "_finished", side_effect=observe_finish):
+                        failed = executor.submit(fail)
+                        release.set()
+                        with self.assertRaises(type(failure)) as caught:
+                            failed.result(1)
+                        self.assertIs(caught.exception, failure)
+                        self.assertTrue(completed.wait(1))
+                        next_job = executor.submit(lambda: "worker still available")
+                        self.assertEqual(next_job.result(1), "worker still available")
+                finally:
+                    release.set()
+                    if next_job is not None:
+                        next_job.cancel()
+                    self.assertTrue(executor.stop(timeout=2))
+
+    def test_already_terminal_future_never_leaks_through_submit(self):
+        import asyncio
+        from concurrent.futures import Future
+
+        executor = adapter.TelegramAgentExecutor(max_queries=1, max_controls=0)
+        executor.start()
+        try:
+            for outcome in ("success", "failure", "cancelled"):
+                with self.subTest(outcome=outcome):
+                    future = Future()
+                    if outcome == "success":
+                        future.set_result("done")
+                    elif outcome == "failure":
+                        future.set_exception(asyncio.CancelledError("cancelled query"))
+                    else:
+                        future.cancel()
+                    with patch.object(executor._pool, "submit", return_value=future):
+                        self.assertIs(executor.submit(lambda: None), future)
+                    self.assertEqual(executor.submit(lambda: "lease released").result(1), "lease released")
+        finally:
+            self.assertTrue(executor.stop(timeout=2))
+
     def test_queries_are_bounded_and_do_not_occupy_control_capacity(self):
         import threading
         from concurrent.futures import wait

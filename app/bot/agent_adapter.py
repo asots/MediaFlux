@@ -183,9 +183,7 @@ class TelegramAgentExecutor:
     def _finished(self, future: Future) -> None:
         with self._lock:
             self._jobs.pop(future, None)
-        try:
-            future.result()
-        except Exception as exc:
+        if not future.cancelled() and (exc := future.exception()) is not None:
             logger.warning("Telegram Agent 后台处理失败 type=%s", type(exc).__name__)
 
     def stop(self, *, timeout: float = 5.0, cancel_queries: bool = True) -> bool:
