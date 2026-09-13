@@ -106,7 +106,7 @@ class SettingsReviewTooltipsBrowserTests(unittest.TestCase):
 
     def test_loading_preserves_geometry_and_disabled_settings_still_expose_help(self):
         page, errors = self._page(390, {fixture.PARENT_KEY: "0"})
-        trigger = page.locator('[data-settings-tooltip="episodeResearchTooltip"]')
+        trigger = page.locator('[data-help-tooltip="episodeResearchTooltip"]')
         # 现有页面在配置加载前整体visibility:hidden，但布局占位必须稳定。
         expect(trigger).to_be_hidden()
         before = self._rect(trigger.locator("xpath=ancestor::div[contains(@class,'metadata-option')]"))

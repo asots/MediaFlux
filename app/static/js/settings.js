@@ -3,67 +3,6 @@
     const tabs=[...document.querySelectorAll('[data-settings-target]')];
     const panels=[...document.querySelectorAll('[data-settings-panel]')];
     const lockModal=createAppModal(document.getElementById('tmdbLocksModal'));
-    // 仅说明浮层，不加入配置字段；挂到body避免设置卡片overflow裁剪。
-    let activeHelp=null;
-    let helpHideTimer=null;
-    function closeSettingsHelp(){
-        clearTimeout(helpHideTimer);
-        activeHelp?.tip.removeAttribute('data-open');
-        activeHelp=null;
-    }
-    function openSettingsHelp(button,tip){
-        clearTimeout(helpHideTimer);
-        if(activeHelp?.button===button)return;
-        closeSettingsHelp();
-        const anchor=button.getBoundingClientRect();
-        const box=tip.getBoundingClientRect();
-        const margin=12;
-        const left=Math.max(margin,Math.min(anchor.left,document.documentElement.clientWidth-box.width-margin));
-        const below=anchor.bottom+8;
-        const top=below+box.height<=window.innerHeight-margin?below:Math.max(margin,anchor.top-box.height-8);
-        tip.style.left=`${left}px`;
-        tip.style.top=`${top}px`;
-        tip.setAttribute('data-open','');
-        activeHelp={button,tip,pinned:false};
-    }
-    function scheduleHelpClose(){
-        clearTimeout(helpHideTimer);
-        helpHideTimer=setTimeout(()=>{
-            if(activeHelp&&!activeHelp.pinned&&document.activeElement!==activeHelp.button)closeSettingsHelp();
-        },120);
-    }
-    form.querySelectorAll('[data-settings-tooltip]').forEach(button=>{
-        const tip=document.getElementById(button.dataset.settingsTooltip);
-        if(!tip)return;
-        document.body.append(tip);
-        button.addEventListener('pointerenter',event=>{
-            if(event.pointerType!=='touch')openSettingsHelp(button,tip);
-        });
-        button.addEventListener('pointerleave',scheduleHelpClose);
-        button.addEventListener('focus',()=>{
-            if(button.matches(':focus-visible'))openSettingsHelp(button,tip);
-        });
-        button.addEventListener('blur',()=>{
-            if(activeHelp?.button===button)closeSettingsHelp();
-        });
-        button.addEventListener('click',()=>{
-            if(activeHelp?.button===button&&activeHelp.pinned){closeSettingsHelp();return;}
-            openSettingsHelp(button,tip);
-            activeHelp.pinned=true;
-        });
-        tip.addEventListener('pointerenter',()=>clearTimeout(helpHideTimer));
-        tip.addEventListener('pointerleave',scheduleHelpClose);
-    });
-    document.addEventListener('pointerdown',event=>{
-        if(activeHelp&&!activeHelp.button.contains(event.target)&&!activeHelp.tip.contains(event.target))closeSettingsHelp();
-    });
-    document.addEventListener('keydown',event=>{
-        if(event.key==='Escape'&&activeHelp){event.preventDefault();closeSettingsHelp();}
-    });
-    document.addEventListener('scroll',event=>{
-        if(activeHelp&&!activeHelp.tip.contains(event.target))closeSettingsHelp();
-    },{capture:true,passive:true});
-    window.addEventListener('resize',closeSettingsHelp);
     const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const isAbortError=error=>error?.name==='AbortError';
     function createDraftRequestGate(readDraft,onInvalidate){

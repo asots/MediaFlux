@@ -401,6 +401,26 @@ svg { display: block; flex: 0 0 auto; }
 .theme-toggle[data-theme-mode="auto"] { color: var(--accent-2); }
 .theme-toggle[data-theme-mode="light"] { color: var(--warning); }
 .theme-toggle[data-theme-mode="dark"] { color: var(--accent); }
+/* 公共说明浮层；不占行高，触控与键盘仍可独立访问。 */
+.metadata-help-trigger {
+    display: inline-flex; align-items: center; justify-content: center; flex: 0 0 44px;
+    width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--radius-sm);
+    color: var(--text-muted); background: transparent; cursor: help;
+}
+.metadata-help-trigger svg { width: 16px; height: 16px; flex: none; }
+.metadata-help-trigger:hover { color: var(--text-primary); background: var(--bg-card-hover); }
+.metadata-help-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.metadata-help-tooltip {
+    position: fixed; z-index: 240; top: 0; left: 0; box-sizing: border-box;
+    width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto;
+    padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-md);
+    color: var(--text-secondary); background: var(--bg-elevated); box-shadow: var(--shadow);
+    font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; overscroll-behavior: contain;
+    visibility: hidden; pointer-events: none;
+}
+.metadata-help-tooltip[data-open] { visibility: visible; pointer-events: auto; }
+.metadata-help-tooltip > span { display: block; }
+.metadata-help-tooltip > span + span { margin-top: 8px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 #toggleSidebar { display: none; }
 .content { width: 100%; flex: 1; padding: clamp(18px, 2.6vw, 36px) clamp(20px, 3vw, 42px) clamp(28px, 4vw, 54px); animation: none; }

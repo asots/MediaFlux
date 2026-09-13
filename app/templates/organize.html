@@ -276,8 +276,11 @@
             </div>
             <div class="tmdb-regex-launch release-formats-launch">
                 <div>
-                    <strong>发布格式教学</strong>
-                    <span>推荐先让 Agent 帮我识别：贴真实样本，由 Agent 推导并先预览核对；不移动文件，也不替代 TMDB / 人工确认。</span>
+                    <div class="release-formats-launch-title">
+                        <strong>发布格式教学</strong>
+                        <button type="button" class="metadata-help-trigger" data-help-tooltip="releaseFormatTeachingTooltip" aria-label="发布格式教学说明" aria-describedby="releaseFormatTeachingTooltip"><i data-lucide="info" aria-hidden="true"></i></button>
+                        <span class="metadata-help-tooltip" id="releaseFormatTeachingTooltip" role="tooltip">推荐先让 Agent 帮我识别：贴真实样本，由 Agent 推导并先预览核对；不移动文件，也不替代 TMDB / 人工确认。</span>
+                    </div>
                     <span>需要已配置 Agent 模型；未配置时请先到 Agent 设置。</span>
                     <span class="preprocess-launch-summary" id="releaseFormatRuleSummary">打开后读取规则</span>
                 </div>
@@ -811,8 +814,14 @@
             <button type="button" class="icon-btn" data-modal-close title="关闭" aria-label="关闭发布格式教学"><i data-lucide="x"></i></button>
         </div>
 
-        <div class="release-formats-body tmdb-regex-body">
-            <aside class="release-formats-ledger tmdb-regex-ledger" aria-labelledby="releaseFormatsLedgerTitle">
+        <div class="rules-workbench-tabs release-formats-tabs" role="tablist" aria-label="发布格式教学工作区" hidden>
+            <button type="button" class="rules-workbench-tab active" id="releaseFormatsLedgerTab" role="tab" aria-selected="true" aria-controls="releaseFormatsLedgerPanel" data-rules-tab="ledger"><i data-lucide="list"></i><span>规则台账</span></button>
+            <button type="button" class="rules-workbench-tab" id="releaseFormatsEditorTab" role="tab" aria-selected="false" aria-controls="releaseFormatsEditorPanel" data-rules-tab="editor"><i data-lucide="square-pen"></i><span>样本教学</span></button>
+            <button type="button" class="rules-workbench-tab" id="releaseFormatsPreviewTab" role="tab" aria-selected="false" aria-controls="releaseFormatsPreviewPanel" data-rules-tab="preview"><i data-lucide="scan-search"></i><span>预览结果</span></button>
+        </div>
+
+        <div class="release-formats-body tmdb-regex-body rules-workbench-body">
+            <aside class="release-formats-ledger tmdb-regex-ledger" id="releaseFormatsLedgerPanel" role="tabpanel" aria-labelledby="releaseFormatsLedgerTab" data-rules-panel="ledger">
                 <div class="release-formats-ledger-toolbar tmdb-regex-toolbar release-formats-toolbar">
                     <div>
                         <strong id="releaseFormatsLedgerTitle">已保存规则</strong>
@@ -825,7 +834,7 @@
                 </div>
             </aside>
 
-            <section class="release-formats-workbench tmdb-regex-editor" aria-labelledby="releaseFormatsEditorTitle">
+            <section class="release-formats-workbench tmdb-regex-editor" id="releaseFormatsEditorPanel" role="tabpanel" aria-labelledby="releaseFormatsEditorTab" data-rules-panel="editor">
                 <div class="release-formats-editor-toolbar tmdb-regex-toolbar release-formats-toolbar">
                     <div>
                         <strong id="releaseFormatsEditorTitle">新建发布格式</strong>
@@ -834,137 +843,136 @@
                     <span class="preprocess-badge release-formats-ticket-badge" id="releaseFormatsTicketState">尚未预览</span>
                 </div>
 
-                <div class="release-formats-editor-columns">
-                    <form class="release-formats-form" id="releaseFormatsForm" novalidate>
-                        <div class="release-formats-editor-scroll tmdb-regex-editor-scroll">
-                            <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsBasicsTitle">
-                                <div class="release-formats-section-head tmdb-regex-editor-section-head">
-                                    <div><strong id="releaseFormatsBasicsTitle">规则基本信息</strong><span>名称用于复用与管理，不参与文件名匹配。</span></div>
-                                </div>
-                                <div class="release-formats-form-grid tmdb-regex-form-grid">
-                                    <label class="span-2 release-formats-field-wide">
-                                        <span>规则名称</span>
-                                        <input class="form-input" id="releaseFormatName" maxlength="120" required placeholder="例如：字幕组季度剧集">
-                                    </label>
-                                    <label>
-                                        <span>应用范围</span>
-                                        <select class="form-select" id="releaseFormatScope">
-                                            <option value="directory" selected>目录 · 当前父目录</option>
-                                            <option value="release">发布组 · 跨标题</option>
-                                        </select>
-                                    </label>
-                                    <label id="releaseFormatParentPathField" class="span-2 release-formats-field-wide">
-                                        <span>parent_path <b>目录范围必填</b></span>
-                                        <input class="form-input" id="releaseFormatParentPath" maxlength="4096" placeholder="例如：/downloads/anime/Show Name">
-                                    </label>
-                                </div>
-                                <div class="release-format-scope-note preprocess-safety-note" id="releaseFormatScopeNote" role="note">
-                                    <i data-lucide="map-pin"></i><span>目录范围只精确匹配规范化后的父目录上下文，不递归子目录。</span>
-                                </div>
-                            </section>
-
-                            <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsTemplateTitle">
-                                <div class="release-formats-section-head tmdb-regex-editor-section-head release-format-template-head">
-                                    <div><strong id="releaseFormatsTemplateTitle">字段模板</strong><span>只允许下列字段；其它字符会按字面量处理，不需要写正则。</span></div>
-                                    <button type="button" class="jump-btn" id="loadReleaseFormatExampleBtn"><i data-lucide="wand-sparkles"></i>载入教学示例</button>
-                                </div>
-                                <label class="release-format-template-label" for="releaseFormatTemplate"><span>模板文本</span><textarea class="form-input release-format-template" id="releaseFormatTemplate" maxlength="512" required spellcheck="false" placeholder="例如：{title} S{season}E{episode} {resolution}"></textarea></label>
-                                <div class="release-format-field-toolbar" role="toolbar" aria-label="插入模板字段">
-                                    <span>插入字段</span>
-                                    <button type="button" class="jump-btn release-format-field-button" data-release-field="title"><span>标题</span><code>{title}</code></button>
-                                    <button type="button" class="jump-btn release-format-field-button" data-release-field="episode"><span>集数</span><code>{episode}</code></button>
-                                    <button type="button" class="jump-btn release-format-field-button" data-release-field="season"><span>季号</span><code>{season}</code></button>
-                                    <button type="button" class="jump-btn release-format-field-button" data-release-field="version"><span>版本</span><code>{version}</code></button>
-                                    <button type="button" class="jump-btn release-format-field-button" data-release-field="resolution"><span>分辨率</span><code>{resolution}</code></button>
-                                    <button type="button" class="jump-btn release-format-field-button" data-release-field="checksum"><span>校验和</span><code>{checksum}</code></button>
-                                </div>
-                                <p class="release-format-template-help">{title} 与 {episode} 必须存在；字段不能相邻无分隔。选中文字后点击字段会替换选区。</p>
-                            </section>
-
-                            <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsExamplesTitle">
-                                <div class="release-formats-section-head tmdb-regex-editor-section-head release-formats-examples-head">
-                                    <div><strong id="releaseFormatsExamplesTitle">明确标注样本</strong><span>至少 2 个不同文件、不同集号；release 范围还要有 2 个不同标题。最多 8 条。</span></div>
-                                    <button type="button" class="jump-btn" id="addReleaseFormatExampleBtn"><i data-lucide="plus"></i>添加样本</button>
-                                </div>
-                                <div class="release-format-examples" id="releaseFormatExamples">
-                                    <div class="release-format-example tmdb-regex-editor-section" data-example-row>
-                                        <div class="release-format-example-head"><div><strong data-example-label>样本 01</strong><span>filename / title / episode / optional season</span></div><span class="release-format-example-result" data-example-result aria-live="polite">待预览</span><button type="button" class="icon-action" data-remove-example title="移除样本" aria-label="移除样本" disabled><i data-lucide="x"></i></button></div>
-                                        <div class="release-format-example-grid tmdb-regex-form-grid">
-                                            <label class="span-2 release-formats-field-wide"><span>filename</span><input class="form-input" data-example-field="filename" maxlength="1024" placeholder="Show.S01E01.1080p.mkv"></label>
-                                            <label><span>title</span><input class="form-input" data-example-field="title" maxlength="180" placeholder="Show"></label>
-                                            <label><span>episode</span><input class="form-input" data-example-field="episode" type="number" min="1" max="9999" step="1" inputmode="numeric" placeholder="1"></label>
-                                            <label><span>season <em>optional</em></span><input class="form-input" data-example-field="season" type="number" min="1" max="99" step="1" inputmode="numeric" placeholder="1"></label>
-                                        </div>
-                                    </div>
-                                    <div class="release-format-example tmdb-regex-editor-section" data-example-row>
-                                        <div class="release-format-example-head"><div><strong data-example-label>样本 02</strong><span>filename / title / episode / optional season</span></div><span class="release-format-example-result" data-example-result aria-live="polite">待预览</span><button type="button" class="icon-action" data-remove-example title="移除样本" aria-label="移除样本" disabled><i data-lucide="x"></i></button></div>
-                                        <div class="release-format-example-grid tmdb-regex-form-grid">
-                                            <label class="span-2 release-formats-field-wide"><span>filename</span><input class="form-input" data-example-field="filename" maxlength="1024" placeholder="Show.S01E02.1080p.mkv"></label>
-                                            <label><span>title</span><input class="form-input" data-example-field="title" maxlength="180" placeholder="Show"></label>
-                                            <label><span>episode</span><input class="form-input" data-example-field="episode" type="number" min="1" max="9999" step="1" inputmode="numeric" placeholder="2"></label>
-                                            <label><span>season <em>optional</em></span><input class="form-input" data-example-field="season" type="number" min="1" max="99" step="1" inputmode="numeric" placeholder="1"></label>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="release-format-release-note preprocess-safety-note" id="releaseFormatReleaseNote" role="note" hidden><i data-lucide="split"></i><span>release 范围用于跨标题复用；请在样本中填写至少两部不同作品的 title。它仍然只是命名格式规则，不会自动判断作品身份。</span></div>
-                                <template id="releaseFormatExampleTemplate">
-                                    <div class="release-format-example tmdb-regex-editor-section" data-example-row>
-                                        <div class="release-format-example-head"><div><strong data-example-label>样本</strong><span>filename / title / episode / optional season</span></div><span class="release-format-example-result" data-example-result aria-live="polite">待预览</span><button type="button" class="icon-action" data-remove-example title="移除样本" aria-label="移除样本"><i data-lucide="x"></i></button></div>
-                                        <div class="release-format-example-grid tmdb-regex-form-grid">
-                                            <label class="span-2 release-formats-field-wide"><span>filename</span><input class="form-input" data-example-field="filename" maxlength="1024" placeholder="Show.S01E03.1080p.mkv"></label>
-                                            <label><span>title</span><input class="form-input" data-example-field="title" maxlength="180" placeholder="Show"></label>
-                                            <label><span>episode</span><input class="form-input" data-example-field="episode" type="number" min="1" max="9999" step="1" inputmode="numeric" placeholder="3"></label>
-                                            <label><span>season <em>optional</em></span><input class="form-input" data-example-field="season" type="number" min="1" max="99" step="1" inputmode="numeric" placeholder="1"></label>
-                                        </div>
-                                    </div>
-                                </template>
-                            </section>
-
-                            <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsBatchTitle">
-                                <div class="release-formats-section-head tmdb-regex-editor-section-head">
-                                    <div><strong id="releaseFormatsBatchTitle">整批文件名预览</strong><span>每行一个文件名，最多 100 行；预览和保存都不会移动文件。</span></div>
-                                    <span class="release-format-count" id="releaseFormatFilenameCount">0 / 100</span>
-                                </div>
-                                <label class="release-format-template-label" for="releaseFormatFilenames"><span>filenames</span><textarea class="form-input release-format-filenames" id="releaseFormatFilenames" maxlength="60000" rows="7" placeholder="每行一个文件名，例如：Show.S01E01.1080p.mkv"></textarea></label>
-                            </section>
-                        </div>
-                        <div class="release-formats-editor-actions tmdb-regex-editor-actions">
-                            <span id="releaseFormatsFormState" role="status" aria-live="polite">填写规则并生成预览后才能保存。</span>
-                            <div class="release-formats-action-buttons">
-                                <button type="button" class="jump-btn release-format-action-button" id="previewReleaseFormatBtn"><i data-lucide="scan-search"></i>刷新预览</button>
-                                <button type="submit" class="btn btn-primary release-format-action-button" id="saveReleaseFormatBtn" disabled><i data-lucide="save"></i>保存并复用</button>
+                <form class="release-formats-form" id="releaseFormatsForm" novalidate>
+                    <div class="release-formats-editor-scroll tmdb-regex-editor-scroll">
+                        <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsBasicsTitle">
+                            <div class="release-formats-section-head tmdb-regex-editor-section-head">
+                                <div><strong id="releaseFormatsBasicsTitle">规则基本信息</strong><span>名称用于复用与管理，不参与文件名匹配。</span></div>
                             </div>
-                        </div>
-                    </form>
-
-                    <section class="release-formats-preview tmdb-regex-editor" aria-labelledby="releaseFormatsPreviewTitle">
-                        <div class="release-formats-preview-head tmdb-regex-toolbar release-formats-toolbar">
-                            <div><strong id="releaseFormatsPreviewTitle">预览结果</strong><span id="releaseFormatsPreviewState" role="status" aria-live="polite">等待输入</span></div>
-                            <span class="preprocess-badge release-format-readonly-badge"><i data-lucide="eye"></i>只读</span>
-                        </div>
-                        <div class="release-formats-summary" id="releaseFormatsSummary" aria-label="预览统计">
-                            <div><strong data-summary-key="total">0</strong><span>总数</span></div>
-                            <div><strong data-summary-key="matched">0</strong><span>命中</span></div>
-                            <div><strong data-summary-key="changed">0</strong><span>有变化</span></div>
-                            <div><strong data-summary-key="unmatched">0</strong><span>未匹配</span></div>
-                            <div><strong data-summary-key="blocked">0</strong><span>已阻止</span></div>
-                            <div><strong data-summary-key="conflicts">0</strong><span>冲突</span></div>
-                            <div><strong data-summary-key="regressions">0</strong><span>回退</span></div>
-                        </div>
-                        <div class="release-formats-preview-frame tmdb-regex-preview-frame" id="releaseFormatPreviewFrame" aria-busy="false">
-                            <div class="release-formats-preview-empty" id="releaseFormatPreviewEmpty"><i data-lucide="table-2"></i><strong>还没有预览结果</strong><span>填写样本与批量文件名后，点击“刷新预览”。</span></div>
-                            <div class="release-formats-preview-table-wrap" id="releaseFormatPreviewTableWrap" hidden>
-                                <table class="release-formats-preview-table">
-                                    <thead><tr><th>文件名</th><th>BEFORE</th><th>AFTER</th><th>状态 / 原因</th></tr></thead>
-                                    <tbody id="releaseFormatPreviewTable"></tbody>
-                                </table>
+                            <div class="release-formats-form-grid tmdb-regex-form-grid">
+                                <label class="span-2 release-formats-field-wide">
+                                    <span>规则名称</span>
+                                    <input class="form-input" id="releaseFormatName" maxlength="120" required placeholder="例如：字幕组季度剧集">
+                                </label>
+                                <label>
+                                    <span>应用范围</span>
+                                    <select class="form-select" id="releaseFormatScope">
+                                        <option value="directory" selected>目录 · 当前父目录</option>
+                                        <option value="release">发布组 · 跨标题</option>
+                                    </select>
+                                </label>
+                                <label id="releaseFormatParentPathField" class="span-2 release-formats-field-wide">
+                                    <span>parent_path <b>目录范围必填</b></span>
+                                    <input class="form-input" id="releaseFormatParentPath" maxlength="4096" placeholder="例如：/downloads/anime/Show Name">
+                                </label>
                             </div>
-                        </div>
-                        <div class="release-formats-warnings" id="releaseFormatWarnings" hidden></div>
-                        <div class="release-formats-preview-note settings-managed-note" id="releaseFormatsPreviewNote">模板匹配只提供 title / season / episode 等字段证据；未匹配、特殊篇和冲突会留在现有流程，不会被静默选择。</div>
-                    </section>
-                </div>
+                            <div class="release-format-scope-note preprocess-safety-note" id="releaseFormatScopeNote" role="note">
+                                <i data-lucide="map-pin"></i><span>目录范围只精确匹配规范化后的父目录上下文，不递归子目录。</span>
+                            </div>
+                        </section>
+
+                        <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsTemplateTitle">
+                            <div class="release-formats-section-head tmdb-regex-editor-section-head release-format-template-head">
+                                <div><strong id="releaseFormatsTemplateTitle">字段模板</strong><span>只允许下列字段；其它字符会按字面量处理，不需要写正则。</span></div>
+                                <button type="button" class="jump-btn" id="loadReleaseFormatExampleBtn"><i data-lucide="wand-sparkles"></i>载入教学示例</button>
+                            </div>
+                            <label class="release-format-template-label" for="releaseFormatTemplate"><span>模板文本</span><textarea class="form-input release-format-template" id="releaseFormatTemplate" maxlength="512" required spellcheck="false" placeholder="例如：{title} S{season}E{episode} {resolution}"></textarea></label>
+                            <div class="release-format-field-toolbar" role="toolbar" aria-label="插入模板字段">
+                                <span>插入字段</span>
+                                <button type="button" class="jump-btn release-format-field-button" data-release-field="title"><span>标题</span><code>{title}</code></button>
+                                <button type="button" class="jump-btn release-format-field-button" data-release-field="episode"><span>集数</span><code>{episode}</code></button>
+                                <button type="button" class="jump-btn release-format-field-button" data-release-field="season"><span>季号</span><code>{season}</code></button>
+                                <button type="button" class="jump-btn release-format-field-button" data-release-field="version"><span>版本</span><code>{version}</code></button>
+                                <button type="button" class="jump-btn release-format-field-button" data-release-field="resolution"><span>分辨率</span><code>{resolution}</code></button>
+                                <button type="button" class="jump-btn release-format-field-button" data-release-field="checksum"><span>校验和</span><code>{checksum}</code></button>
+                            </div>
+                            <p class="release-format-template-help">{title} 与 {episode} 必须存在；字段不能相邻无分隔。选中文字后点击字段会替换选区。</p>
+                        </section>
+
+                        <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsExamplesTitle">
+                            <div class="release-formats-section-head tmdb-regex-editor-section-head release-formats-examples-head">
+                                <div><strong id="releaseFormatsExamplesTitle">明确标注样本</strong><span>至少 2 个不同文件、不同集号；release 范围还要有 2 个不同标题。最多 8 条。</span></div>
+                                <button type="button" class="jump-btn" id="addReleaseFormatExampleBtn"><i data-lucide="plus"></i>添加样本</button>
+                            </div>
+                            <div class="release-format-examples" id="releaseFormatExamples">
+                                <div class="release-format-example tmdb-regex-editor-section" data-example-row>
+                                    <div class="release-format-example-head"><div><strong data-example-label>样本 01</strong><span>filename / title / episode / optional season</span></div><span class="release-format-example-result" data-example-result aria-live="polite">待预览</span><button type="button" class="icon-action" data-remove-example title="移除样本" aria-label="移除样本" disabled><i data-lucide="x"></i></button></div>
+                                    <div class="release-format-example-grid tmdb-regex-form-grid">
+                                        <label class="span-2 release-formats-field-wide"><span>filename</span><input class="form-input" data-example-field="filename" maxlength="1024" placeholder="Show.S01E01.1080p.mkv"></label>
+                                        <label><span>title</span><input class="form-input" data-example-field="title" maxlength="180" placeholder="Show"></label>
+                                        <label><span>episode</span><input class="form-input" data-example-field="episode" type="number" min="1" max="9999" step="1" inputmode="numeric" placeholder="1"></label>
+                                        <label><span>season <em>optional</em></span><input class="form-input" data-example-field="season" type="number" min="1" max="99" step="1" inputmode="numeric" placeholder="1"></label>
+                                    </div>
+                                </div>
+                                <div class="release-format-example tmdb-regex-editor-section" data-example-row>
+                                    <div class="release-format-example-head"><div><strong data-example-label>样本 02</strong><span>filename / title / episode / optional season</span></div><span class="release-format-example-result" data-example-result aria-live="polite">待预览</span><button type="button" class="icon-action" data-remove-example title="移除样本" aria-label="移除样本" disabled><i data-lucide="x"></i></button></div>
+                                    <div class="release-format-example-grid tmdb-regex-form-grid">
+                                        <label class="span-2 release-formats-field-wide"><span>filename</span><input class="form-input" data-example-field="filename" maxlength="1024" placeholder="Show.S01E02.1080p.mkv"></label>
+                                        <label><span>title</span><input class="form-input" data-example-field="title" maxlength="180" placeholder="Show"></label>
+                                        <label><span>episode</span><input class="form-input" data-example-field="episode" type="number" min="1" max="9999" step="1" inputmode="numeric" placeholder="2"></label>
+                                        <label><span>season <em>optional</em></span><input class="form-input" data-example-field="season" type="number" min="1" max="99" step="1" inputmode="numeric" placeholder="1"></label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="release-format-release-note preprocess-safety-note" id="releaseFormatReleaseNote" role="note" hidden><i data-lucide="split"></i><span>release 范围用于跨标题复用；请在样本中填写至少两部不同作品的 title。它仍然只是命名格式规则，不会自动判断作品身份。</span></div>
+                            <template id="releaseFormatExampleTemplate">
+                                <div class="release-format-example tmdb-regex-editor-section" data-example-row>
+                                    <div class="release-format-example-head"><div><strong data-example-label>样本</strong><span>filename / title / episode / optional season</span></div><span class="release-format-example-result" data-example-result aria-live="polite">待预览</span><button type="button" class="icon-action" data-remove-example title="移除样本" aria-label="移除样本"><i data-lucide="x"></i></button></div>
+                                    <div class="release-format-example-grid tmdb-regex-form-grid">
+                                        <label class="span-2 release-formats-field-wide"><span>filename</span><input class="form-input" data-example-field="filename" maxlength="1024" placeholder="Show.S01E03.1080p.mkv"></label>
+                                        <label><span>title</span><input class="form-input" data-example-field="title" maxlength="180" placeholder="Show"></label>
+                                        <label><span>episode</span><input class="form-input" data-example-field="episode" type="number" min="1" max="9999" step="1" inputmode="numeric" placeholder="3"></label>
+                                        <label><span>season <em>optional</em></span><input class="form-input" data-example-field="season" type="number" min="1" max="99" step="1" inputmode="numeric" placeholder="1"></label>
+                                    </div>
+                                </div>
+                            </template>
+                        </section>
+
+                        <section class="release-formats-section tmdb-regex-editor-section" aria-labelledby="releaseFormatsBatchTitle">
+                            <div class="release-formats-section-head tmdb-regex-editor-section-head">
+                                <div><strong id="releaseFormatsBatchTitle">整批文件名预览</strong><span>每行一个文件名，最多 100 行；预览和保存都不会移动文件。</span></div>
+                                <span class="release-format-count" id="releaseFormatFilenameCount">0 / 100</span>
+                            </div>
+                            <label class="release-format-template-label" for="releaseFormatFilenames"><span>filenames</span><textarea class="form-input release-format-filenames" id="releaseFormatFilenames" maxlength="60000" rows="7" placeholder="每行一个文件名，例如：Show.S01E01.1080p.mkv"></textarea></label>
+                        </section>
+                    </div>
+
+                </form>
             </section>
+
+            <section class="release-formats-preview tmdb-regex-editor" id="releaseFormatsPreviewPanel" role="tabpanel" aria-labelledby="releaseFormatsPreviewTab" data-rules-panel="preview">
+                <div class="release-formats-preview-head tmdb-regex-toolbar release-formats-toolbar">
+                    <div><strong id="releaseFormatsPreviewTitle">预览结果</strong><span id="releaseFormatsPreviewState" role="status" aria-live="polite">等待输入</span></div>
+                    <span class="preprocess-badge release-format-readonly-badge"><i data-lucide="eye"></i>只读</span>
+                </div>
+                <div class="release-formats-summary" id="releaseFormatsSummary" aria-label="预览统计">
+                    <div><strong data-summary-key="total">0</strong><span>总数</span></div>
+                    <div><strong data-summary-key="matched">0</strong><span>命中</span></div>
+                    <div><strong data-summary-key="changed">0</strong><span>有变化</span></div>
+                    <div><strong data-summary-key="unmatched">0</strong><span>未匹配</span></div>
+                    <div><strong data-summary-key="blocked">0</strong><span>已阻止</span></div>
+                    <div><strong data-summary-key="conflicts">0</strong><span>冲突</span></div>
+                    <div><strong data-summary-key="regressions">0</strong><span>回退</span></div>
+                </div>
+                <div class="release-formats-preview-frame tmdb-regex-preview-frame" id="releaseFormatPreviewFrame" aria-busy="false">
+                    <div class="release-formats-preview-empty" id="releaseFormatPreviewEmpty"><i data-lucide="table-2"></i><strong>还没有预览结果</strong><span>填写样本与批量文件名后，点击“刷新预览”。</span></div>
+                    <div class="release-formats-preview-table-wrap" id="releaseFormatPreviewTableWrap" hidden>
+                        <table class="release-formats-preview-table">
+                            <thead><tr><th>文件名</th><th>BEFORE</th><th>AFTER</th><th>状态 / 原因</th></tr></thead>
+                            <tbody id="releaseFormatPreviewTable"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="release-formats-warnings" id="releaseFormatWarnings" hidden></div>
+                <div class="release-formats-preview-note settings-managed-note" id="releaseFormatsPreviewNote">模板匹配只提供 title / season / episode 等字段证据；未匹配、特殊篇和冲突会留在现有流程，不会被静默选择。</div>
+            </section>
+        </div>
+        <div class="release-formats-editor-actions tmdb-regex-editor-actions">
+            <span id="releaseFormatsFormState" role="status" aria-live="polite">填写规则并生成预览后才能保存。</span>
+            <div class="release-formats-action-buttons">
+                <button type="button" class="jump-btn release-format-action-button" id="previewReleaseFormatBtn"><i data-lucide="scan-search"></i>刷新预览</button>
+                <button type="submit" form="releaseFormatsForm" class="btn btn-primary release-format-action-button" id="saveReleaseFormatBtn" disabled><i data-lucide="save"></i>保存并复用</button>
+            </div>
         </div>
     </div>
 </div>

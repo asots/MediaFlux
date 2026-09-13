@@ -6,6 +6,8 @@
     const openButton = $('openReleaseFormatsBtn');
     if (!modal || !openButton) return;
 
+    const workbench = window.createResponsiveRulesWorkbench(modal);
+
     const refs = {
         form: $('releaseFormatsForm'),
         name: $('releaseFormatName'),
@@ -330,7 +332,7 @@
 
     const display = (value) => value === undefined || value === null || value === '' ? '—' : String(value);
 
-    function evidence(record) {
+    function evidence(record, label) {
         const value = record && typeof record === 'object' ? record : {};
         const wrapper = node('div', 'release-format-preview-value');
         wrapper.append(
@@ -338,6 +340,7 @@
             node('small', '', `season: ${display(value.season)} · episode: ${display(value.episode)}`),
         );
         const cell = node('td');
+        cell.dataset.label = label;
         cell.append(wrapper);
         return cell;
     }
@@ -360,7 +363,7 @@
             const row = node('tr');
             row.append(
                 node('td', 'release-format-preview-filename', display(item?.filename)),
-                evidence(item?.before), evidence(item?.after), statusCell,
+                evidence(item?.before, '原识别'), evidence(item?.after, '教学后'), statusCell,
             );
             refs.table.append(row);
         });
@@ -418,12 +421,16 @@
     async function preview() {
         syncInputSnapshot();
         const input = collectInput();
-        if (!input.valid) return showValidation(input);
+        if (!input.valid) {
+            workbench.activate('editor');
+            return showValidation(input);
+        }
         const version = state.inputVersion;
         const inputFingerprint = fingerprint(input.payload);
         const serial = ++state.previewSerial;
         state.previewBusy = true;
         state.preview = null;
+        workbench.activate('preview');
         setTicket('预览中');
         setMessage('正在刷新预览，保留上一版结果…');
         text(refs.previewState, '正在刷新，上一版结果仍保留');
@@ -568,6 +575,7 @@
         setMessage('已复制为新草稿；保存会创建新规则或复用完全相同的格式，不会修改原规则。');
         text(refs.previewState, '等待重新预览');
         setTicket('尚未预览');
+        workbench.activate('editor', {resetScroll: true});
         refs.name.focus({preventScroll: true});
     }
 
@@ -754,11 +762,13 @@
     });
 
     openButton.addEventListener('click', (event) => {
-        lifecycle.open(event.currentTarget, {initialFocus: '#releaseFormatName'});
+        workbench.activate('ledger', {resetScroll: true});
+        lifecycle.open(event.currentTarget, {initialFocus: workbench.isMobile() ? '#releaseFormatsLedgerTab' : '#releaseFormatName'});
         if (!state.rulesLoaded) loadRules();
     });
     $('newReleaseFormatBtn').addEventListener('click', () => {
         resetEditor();
+        workbench.activate('editor', {resetScroll: true});
         refs.name.focus({preventScroll: true});
     });
     refs.preview.addEventListener('click', preview);

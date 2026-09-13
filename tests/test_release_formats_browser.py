@@ -189,23 +189,16 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
         errors: list[str] = []
         page = self.browser.new_page(viewport=viewport or {"width": 1280, "height": 900})
         page.on("pageerror", lambda error: errors.append(str(error)))
+        source = TEMPLATE.read_text(encoding="utf-8")
+        launch_start = source.index('<div class="organize-recognition-rule-grid">')
+        launch = source[launch_start:source.index('</section>', launch_start)]
         page.set_content(
             f"""<!doctype html>
 <html lang="zh-CN" data-theme="light">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="fixture-csrf"><base href="http://mediaflux.test/organize-rules"></head>
 <body class="organize-page organize-rules-page">
 <main>
-<div class="tmdb-regex-launch release-formats-launch">
-  <div>
-    <strong>发布格式教学</strong>
-    <span>推荐先让 Agent 帮我识别：贴真实样本，由 Agent 推导并先预览核对。</span>
-    <span>需要已配置 Agent 模型；未配置时请先到 Agent 设置。</span>
-  </div>
-  <div class="release-formats-launch-actions">
-    <a class="jump-btn release-formats-agent-launch" href="/agent#release-format-teaching">让 Agent 帮我识别</a>
-    <button type="button" class="jump-btn release-formats-manual-launch" id="openReleaseFormatsBtn">高级手动</button>
-  </div>
-</div>
+{launch}
 </main>
 {self.modal_fragment}
 </body></html>"""
@@ -226,6 +219,8 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
 
     @staticmethod
     def load_teaching_example(page) -> None:
+        if page.locator("#releaseFormatsEditorTab").is_visible():
+            page.locator("#releaseFormatsEditorTab").click()
         page.locator("#loadReleaseFormatExampleBtn").click()
         page.locator("#releaseFormatName").wait_for()
         assert page.locator("#releaseFormatTemplate").input_value() == "[Example-Team][{title}][track{episode}r{version}][{resolution}].mkv"
@@ -240,7 +235,7 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
         )
 
     @contextmanager
-    def real_app_page(self):
+    def real_app_page(self, *, touch: bool = False):
         from fastapi.testclient import TestClient
         from app.main import create_app
         from app.modules.recognition import formats
@@ -255,7 +250,7 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
                 "csrf_token": ReleaseFormatApiTests.csrf(login), "username": "admin", "password": "123456",
             }, follow_redirects=False)
             self.assertEqual(response.status_code, 302)
-            page = self.browser.new_page(viewport={"width": 1280, "height": 900})
+            page = self.browser.new_page(viewport={"width": 1280, "height": 900}, has_touch=touch)
             page.on("pageerror", lambda error: errors.append(str(error)))
 
             def serve(route):
@@ -620,6 +615,148 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
         finally:
             page.close()
         self.assertEqual(errors, [])
+
+    def test_mobile_tabs_keep_draft_and_preview_across_breakpoints(self):
+        for viewport in ({"width": 320, "height": 568}, {"width": 390, "height": 844},
+                         {"width": 768, "height": 1024}, {"width": 844, "height": 390}):
+            with self.subTest(viewport=viewport):
+                page, errors = self.make_page({"items": []}, viewport=viewport)
+                try:
+                    self.open_modal(page)
+                    self.assertEqual(page.locator("#releaseFormatsModal").get_attribute("data-rules-panel"), "ledger")
+                    self.assertEqual(page.locator("#releaseFormatsModal [data-rules-panel]:visible").count(), 1)
+                    self.load_teaching_example(page)
+                    draft = page.locator("#releaseFormatTemplate").input_value()
+                    page.locator("#previewReleaseFormatBtn").click()
+                    page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+                    self.assertTrue(page.locator("#releaseFormatsPreviewPanel").is_visible())
+                    rows = page.locator("#releaseFormatPreviewTable").inner_text()
+                    for selector in ("#saveReleaseFormatBtn", "#previewReleaseFormatBtn", "#releaseFormatsPreviewPanel"):
+                        box = page.locator(selector).bounding_box()
+                        self.assertGreater(box["height"], 40)
+                        self.assertGreaterEqual(box["y"], 0)
+                        self.assertLessEqual(box["y"] + box["height"], viewport["height"])
+                    self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), viewport["width"])
+                    self.assertGreater(page.locator("#releaseFormatPreviewFrame").bounding_box()["height"], 100)
+                    last = page.locator("#releaseFormatPreviewTable tr").last
+                    last.scroll_into_view_if_needed()
+                    panel = page.locator("#releaseFormatsPreviewPanel").bounding_box()
+                    self.assertLessEqual(last.bounding_box()["y"] + last.bounding_box()["height"], panel["y"] + panel["height"])
+                    page.locator("#releaseFormatsPreviewTab").focus()
+                    page.keyboard.press("ArrowLeft")
+                    self.assertEqual(page.evaluate("document.activeElement.id"), "releaseFormatsEditorTab")
+                    self.assertEqual(page.locator("#releaseFormatTemplate").input_value(), draft)
+                    page.set_viewport_size({"width": 1440, "height": 900})
+                    page.wait_for_function("() => document.querySelector('#releaseFormatsModal').dataset.rulesPanel === 'desktop'")
+                    self.assertEqual(page.locator("#releaseFormatsModal [data-rules-panel]:visible").count(), 3)
+                    page.set_viewport_size(viewport)
+                    page.wait_for_function("() => document.querySelector('#releaseFormatsModal').dataset.rulesPanel === 'editor'")
+                    page.locator("#releaseFormatsPreviewTab").click()
+                    self.assertEqual(page.locator("#releaseFormatPreviewTable").inner_text(), rows)
+                    page.locator("#saveReleaseFormatBtn").click()
+                    page.wait_for_function("() => document.querySelectorAll('.release-format-rule-card').length === 1")
+                    page.locator("#releaseFormatsLedgerTab").click()
+                    page.locator("[data-release-rule-select]").click()
+                    self.assertTrue(page.locator("#releaseFormatsEditorPanel").is_visible())
+                    self.assertEqual(page.locator("#releaseFormatTemplate").input_value(), draft)
+                    self.assertTrue(page.locator("#saveReleaseFormatBtn").is_disabled())
+                finally:
+                    page.close()
+                self.assertEqual(errors, [])
+
+    def test_mobile_preview_refresh_preserves_results_and_button_geometry(self):
+        page, errors = self.make_page({"items": [], "previewDelayMs": 200}, viewport={"width": 390, "height": 844})
+        try:
+            self.open_modal(page)
+            self.load_teaching_example(page)
+            page.locator("#previewReleaseFormatBtn").click()
+            page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+            frame = page.locator("#releaseFormatPreviewFrame")
+            table = page.locator("#releaseFormatPreviewTable")
+            rows = table.inner_text()
+            selectors = ("#saveReleaseFormatBtn", "#previewReleaseFormatBtn", "#releaseFormatPreviewFrame")
+            before = [page.locator(selector).bounding_box() for selector in selectors]
+            page.locator("#previewReleaseFormatBtn").click()
+            self.assertEqual(frame.get_attribute("aria-busy"), "true")
+            self.assertEqual(table.inner_text(), rows)
+            during = [page.locator(selector).bounding_box() for selector in selectors]
+            for actual, expected in zip(during, before):
+                for key in ("x", "y", "width", "height"):
+                    self.assertAlmostEqual(actual[key], expected[key], delta=0.5)
+            self.assertLessEqual(table.evaluate("e => e.scrollWidth"), frame.evaluate("e => e.clientWidth"))
+            page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+            for selector, expected in zip(selectors, before):
+                for key in ("x", "y", "width", "height"):
+                    self.assertAlmostEqual(page.locator(selector).bounding_box()[key], expected[key], delta=0.5)
+        finally:
+            page.close()
+        self.assertEqual(errors, [])
+
+    def test_real_page_four_cards_and_teaching_tooltip(self):
+        with self.real_app_page(touch=True) as (page, _client, errors):
+            page.goto("http://testserver/organize-rules")
+            cards = page.locator(".organize-recognition-rule-grid > .tmdb-regex-launch")
+            for width in (1280, 1440, 1920):
+                page.set_viewport_size({"width": width, "height": 1000})
+                boxes = cards.evaluate_all("els => els.map(e => {const r = e.getBoundingClientRect(); return {y:r.y,height:r.height}})")
+                self.assertEqual(len(boxes), 4)
+                self.assertEqual(len({round(box["y"]) for box in boxes}), 1)
+                self.assertEqual(len({round(box["height"]) for box in boxes}), 1)
+                self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
+            trigger = page.locator('[data-help-tooltip="releaseFormatTeachingTooltip"]')
+            tip = page.locator("#releaseFormatTeachingTooltip")
+            self.assertFalse(tip.is_visible())
+            self.assertNotIn("推荐先让 Agent", page.locator(".release-formats-launch").inner_text())
+            trigger.hover()
+            tip.wait_for(state="visible")
+            self.assertIn("不移动文件，也不替代 TMDB / 人工确认", tip.inner_text())
+            page.keyboard.press("Escape")
+            self.assertFalse(tip.is_visible())
+            page.set_viewport_size({"width": 390, "height": 844})
+            # 等待桌面侧栏的断点动画结束，再固定触点；不让自动滚动代替用户轻触。
+            page.wait_for_function("() => document.getAnimations().every(a => a.playState !== 'running')")
+            trigger.evaluate("e => e.scrollIntoView({block: 'center', behavior: 'instant'})")
+            page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+            anchor = trigger.bounding_box()
+            x, y = anchor["x"] + anchor["width"] / 2, anchor["y"] + anchor["height"] / 2
+            page.touchscreen.tap(x, y)
+            tip.wait_for(state="visible")
+            box = tip.bounding_box()
+            self.assertGreaterEqual(box["x"], 0)
+            self.assertLessEqual(box["x"] + box["width"], 390)
+            page.touchscreen.tap(x, y)
+            self.assertFalse(tip.is_visible())
+            page.touchscreen.tap(x, y)
+            tip.wait_for(state="visible")
+            page.touchscreen.tap(386, 4)
+            self.assertFalse(tip.is_visible())
+            self.assertEqual(errors, [])
+
+    def test_real_mobile_preview_save_and_knowledge_workbench(self):
+        from app.modules.recognition import formats
+
+        with self.real_app_page() as (page, _client, errors):
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.goto("http://testserver/organize-rules")
+            page.locator("#openRecognitionKnowledgeBtn").click()
+            page.locator("#recognitionKnowledgeEditorTab").click()
+            self.assertTrue(page.locator("#recognitionKnowledgeEditorPanel").is_visible())
+            page.keyboard.press("Escape")
+            self.open_modal(page)
+            page.locator("#newReleaseFormatBtn").click()
+            self.assertTrue(page.locator("#releaseFormatsEditorPanel").is_visible())
+            self.load_teaching_example(page)
+            page.locator("#previewReleaseFormatBtn").click()
+            page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+            self.assertTrue(page.locator("#releaseFormatsPreviewPanel").is_visible())
+            self.assertEqual(formats.list_rules(), [])
+            page.locator("#saveReleaseFormatBtn").click()
+            page.wait_for_function("() => document.querySelectorAll('.release-format-rule-card').length === 1")
+            self.assertEqual(len(formats.list_rules()), 1)
+            page.reload()
+            self.open_modal(page)
+            self.assertEqual(page.locator(".release-format-rule-card:visible").count(), 1)
+            self.assertEqual(errors, [])
 
     def test_template_scopes_script_to_rules_page_and_exposes_no_regex_editor(self):
         source = TEMPLATE.read_text(encoding="utf-8")

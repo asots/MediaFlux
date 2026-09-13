@@ -46,6 +46,138 @@
         });
     }
 
+    function initializeHelpTooltips() {
+        const triggers = [...document.querySelectorAll('[data-help-tooltip]')];
+        if (!triggers.length) return;
+        let activeHelp = null;
+        let helpHideTimer = null;
+        function closeHelpTooltip() {
+            clearTimeout(helpHideTimer);
+            activeHelp?.tip.removeAttribute('data-open');
+            activeHelp = null;
+        }
+        function openHelpTooltip(button, tip) {
+            clearTimeout(helpHideTimer);
+            if (activeHelp?.button === button) return;
+            closeHelpTooltip();
+            const anchor = button.getBoundingClientRect();
+            const box = tip.getBoundingClientRect();
+            const margin = 12;
+            const left = Math.max(margin, Math.min(anchor.left, document.documentElement.clientWidth - box.width - margin));
+            const below = anchor.bottom + 8;
+            const top = below + box.height <= window.innerHeight - margin
+                ? below
+                : Math.max(margin, anchor.top - box.height - 8);
+            tip.style.left = `${left}px`;
+            tip.style.top = `${top}px`;
+            tip.setAttribute('data-open', '');
+            activeHelp = {button, tip, pinned: false};
+        }
+        function scheduleHelpClose() {
+            clearTimeout(helpHideTimer);
+            helpHideTimer = setTimeout(() => {
+                if (activeHelp && !activeHelp.pinned && document.activeElement !== activeHelp.button) closeHelpTooltip();
+            }, 120);
+        }
+        triggers.forEach((button) => {
+            const tip = document.getElementById(button.dataset.helpTooltip);
+            if (!tip) return;
+            document.body.append(tip);
+            button.addEventListener('pointerenter', (event) => {
+                if (event.pointerType !== 'touch') openHelpTooltip(button, tip);
+            });
+            button.addEventListener('pointerleave', scheduleHelpClose);
+            button.addEventListener('focus', () => {
+                if (button.matches(':focus-visible')) openHelpTooltip(button, tip);
+            });
+            button.addEventListener('blur', () => {
+                if (activeHelp?.button === button) closeHelpTooltip();
+            });
+            button.addEventListener('click', () => {
+                if (activeHelp?.button === button && activeHelp.pinned) {
+                    closeHelpTooltip();
+                    return;
+                }
+                openHelpTooltip(button, tip);
+                activeHelp.pinned = true;
+            });
+            tip.addEventListener('pointerenter', () => clearTimeout(helpHideTimer));
+            tip.addEventListener('pointerleave', scheduleHelpClose);
+        });
+        document.addEventListener('pointerdown', (event) => {
+            if (activeHelp && !activeHelp.button.contains(event.target) && !activeHelp.tip.contains(event.target)) closeHelpTooltip();
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && activeHelp) {
+                event.preventDefault();
+                closeHelpTooltip();
+            }
+        });
+        document.addEventListener('scroll', (event) => {
+            if (activeHelp && !activeHelp.tip.contains(event.target)) closeHelpTooltip();
+        }, {capture: true, passive: true});
+        window.addEventListener('resize', closeHelpTooltip);
+    }
+
+    initializeHelpTooltips();
+
+    window.createResponsiveRulesWorkbench = function(modalElement){
+        if(!modalElement)return {activate(){},isMobile(){return false;}};
+        const tablist=modalElement.querySelector('.rules-workbench-tabs');
+        const tabs=Array.from(modalElement.querySelectorAll('[data-rules-tab]'));
+        const panels=Array.from(modalElement.querySelectorAll('[data-rules-panel]'));
+        const media=window.matchMedia('(max-width: 920px)');
+        let active=tabs.find(tab=>tab.classList.contains('active'))?.dataset.rulesTab||'ledger';
+        const apply=({focusTab=false,resetScroll=false}={})=>{
+            const mobile=media.matches;
+            tablist.hidden=!mobile;
+            tabs.forEach(tab=>{
+                const selected=tab.dataset.rulesTab===active;
+                tab.classList.toggle('active',selected);
+                tab.setAttribute('aria-selected',String(selected));
+                tab.tabIndex=selected?0:-1;
+            });
+            panels.forEach(panel=>{
+                const selected=panel.dataset.rulesPanel===active;
+                panel.hidden=mobile&&!selected;
+                if(mobile&&!selected)panel.setAttribute('aria-hidden','true');
+                else panel.removeAttribute('aria-hidden');
+            });
+            modalElement.dataset.rulesPanel=mobile?active:'desktop';
+            if(resetScroll){
+                const body=modalElement.querySelector('.rules-workbench-body');
+                const panel=panels.find(item=>item.dataset.rulesPanel===active);
+                if(body)body.scrollTop=0;
+                const scroller=panel?.querySelector('.tmdb-regex-table-frame,.tmdb-regex-editor-scroll');
+                if(scroller)scroller.scrollTop=0;
+            }
+            if(focusTab&&mobile)tabs.find(tab=>tab.dataset.rulesTab===active)?.focus({preventScroll:true});
+        };
+        const activate=(target,options={})=>{
+            if(!panels.some(panel=>panel.dataset.rulesPanel===target))return;
+            active=target;
+            apply(options);
+        };
+        tabs.forEach((tab,index)=>{
+            tab.addEventListener('click',()=>activate(tab.dataset.rulesTab));
+            tab.addEventListener('keydown',event=>{
+                let nextIndex=null;
+                if(event.key==='ArrowRight')nextIndex=(index+1)%tabs.length;
+                else if(event.key==='ArrowLeft')nextIndex=(index-1+tabs.length)%tabs.length;
+                else if(event.key==='Home')nextIndex=0;
+                else if(event.key==='End')nextIndex=tabs.length-1;
+                if(nextIndex===null)return;
+                event.preventDefault();
+                activate(tabs[nextIndex].dataset.rulesTab,{focusTab:true});
+            });
+        });
+        const onBreakpointChange=()=>apply();
+        if(typeof media.addEventListener==='function')media.addEventListener('change',onBreakpointChange);
+        else media.addListener(onBreakpointChange);
+        apply();
+        return {activate,isMobile:()=>media.matches};
+    };
+
     let secretInputSequence = 0;
 
     function paintSecretInput(input, button, visible) {

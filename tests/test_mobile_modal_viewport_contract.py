@@ -57,11 +57,11 @@ def test_rule_management_modals_expose_mobile_ledger_editor_tabs_and_single_row_
     script = (ROOT / "app/static/js/organize.js").read_text(encoding="utf-8")
 
     assert template.count('class="rules-workbench-tabs"') == 3
-    assert template.count('data-rules-tab="ledger"') == 3
-    assert template.count('data-rules-tab="editor"') == 3
-    assert template.count('data-rules-panel="ledger"') == 3
-    assert template.count('data-rules-panel="editor"') == 3
-    for prefix in ("preprocess", "recognitionKnowledge", "tmdbRegex"):
+    assert template.count('data-rules-tab="ledger"') == 4
+    assert template.count('data-rules-tab="editor"') == 4
+    assert template.count('data-rules-panel="ledger"') == 4
+    assert template.count('data-rules-panel="editor"') == 4
+    for prefix in ("preprocess", "recognitionKnowledge", "tmdbRegex", "releaseFormats"):
         assert f'id="{prefix}LedgerTab"' in template
         assert f'id="{prefix}EditorTab"' in template
         assert f'id="{prefix}LedgerPanel"' in template
@@ -72,8 +72,12 @@ def test_rule_management_modals_expose_mobile_ledger_editor_tabs_and_single_row_
     toolbar = template[toolbar_start:toolbar_end]
     assert toolbar.index('id="recognitionKnowledgeSearch"') < toolbar.index('id="recognitionKnowledgeFilter"') < toolbar.index('id="newRecognitionKnowledgeBtn"')
 
-    assert "function createResponsiveRulesWorkbench(modalElement)" in script
-    assert "panel.hidden=mobile&&!selected" in script
+    shared_script = (ROOT / "app/static/js/app.js").read_text(encoding="utf-8")
+    assert "window.createResponsiveRulesWorkbench" in shared_script
+    assert "panel.hidden=mobile&&!selected" in shared_script
+    assert "function createResponsiveRulesWorkbench(modalElement)" not in script
+    assert 'data-rules-panel="preview"' in template
+    assert 'data-rules-tab="preview"' in template
     assert "preprocessRulesWorkbench.activate('ledger',{resetScroll:true})" in script
     assert "recognitionKnowledgeWorkbench.activate('ledger',{resetScroll:true})" in script
     assert "regexRulesWorkbench.activate('ledger',{resetScroll:true})" in script

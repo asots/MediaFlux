@@ -79,63 +79,6 @@
     }
     const extensionEditors=isRules?{video:createExtensionEditor('video','r_video_exts'),metadata:createExtensionEditor('metadata','r_metadata_exts')}:{};
 
-    function createResponsiveRulesWorkbench(modalElement){
-        if(!modalElement)return {activate(){},isMobile(){return false;}};
-        const tablist=modalElement.querySelector('.rules-workbench-tabs');
-        const tabs=Array.from(modalElement.querySelectorAll('[data-rules-tab]'));
-        const panels=Array.from(modalElement.querySelectorAll('[data-rules-panel]'));
-        const media=window.matchMedia('(max-width: 920px)');
-        let active=tabs.find(tab=>tab.classList.contains('active'))?.dataset.rulesTab||'ledger';
-        const apply=({focusTab=false,resetScroll=false}={})=>{
-            const mobile=media.matches;
-            tablist.hidden=!mobile;
-            tabs.forEach(tab=>{
-                const selected=tab.dataset.rulesTab===active;
-                tab.classList.toggle('active',selected);
-                tab.setAttribute('aria-selected',String(selected));
-                tab.tabIndex=selected?0:-1;
-            });
-            panels.forEach(panel=>{
-                const selected=panel.dataset.rulesPanel===active;
-                panel.hidden=mobile&&!selected;
-                if(mobile&&!selected)panel.setAttribute('aria-hidden','true');
-                else panel.removeAttribute('aria-hidden');
-            });
-            modalElement.dataset.rulesPanel=mobile?active:'desktop';
-            if(resetScroll){
-                const body=modalElement.querySelector('.rules-workbench-body');
-                const panel=panels.find(item=>item.dataset.rulesPanel===active);
-                if(body)body.scrollTop=0;
-                const scroller=panel?.querySelector('.tmdb-regex-table-frame,.tmdb-regex-editor-scroll');
-                if(scroller)scroller.scrollTop=0;
-            }
-            if(focusTab&&mobile)tabs.find(tab=>tab.dataset.rulesTab===active)?.focus({preventScroll:true});
-        };
-        const activate=(target,options={})=>{
-            if(!panels.some(panel=>panel.dataset.rulesPanel===target))return;
-            active=target;
-            apply(options);
-        };
-        tabs.forEach((tab,index)=>{
-            tab.addEventListener('click',()=>activate(tab.dataset.rulesTab));
-            tab.addEventListener('keydown',event=>{
-                let nextIndex=null;
-                if(event.key==='ArrowRight')nextIndex=(index+1)%tabs.length;
-                else if(event.key==='ArrowLeft')nextIndex=(index-1+tabs.length)%tabs.length;
-                else if(event.key==='Home')nextIndex=0;
-                else if(event.key==='End')nextIndex=tabs.length-1;
-                if(nextIndex===null)return;
-                event.preventDefault();
-                activate(tabs[nextIndex].dataset.rulesTab,{focusTab:true});
-            });
-        });
-        const onBreakpointChange=()=>apply();
-        if(typeof media.addEventListener==='function')media.addEventListener('change',onBreakpointChange);
-        else media.addListener(onBreakpointChange);
-        apply();
-        return {activate,isMobile:()=>media.matches};
-    }
-
     const regexModalElement=document.getElementById('tmdbRegexRulesModal');
     const regexRulesModal=regexModalElement?createAppModal(regexModalElement):null;
     const regexRulesWorkbench=createResponsiveRulesWorkbench(regexModalElement);
