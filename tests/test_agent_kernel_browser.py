@@ -70,6 +70,7 @@ HTML = """
             <div class="agent-composer-header">
               <div class="agent-composer-actions">
                 <a class="agent-action-btn" id="agentSettings" href="#settings" aria-label="Agent 设置"><svg aria-hidden="true"></svg></a>
+                <button type="button" class="agent-action-btn agent-resume-session agent-release-format-guide" id="agentReleaseFormatGuide" aria-label="发布格式智能教学引导" hidden><span>智能教学</span></button>
                 <button type="button" class="agent-action-btn agent-resume-session" id="agentResumeLatestSession" disabled><span>继续上次</span></button>
               </div>
               <div class="agent-composer-actions-right">
@@ -221,7 +222,11 @@ class AgentKernelBrowserTests(unittest.TestCase):
         *,
         viewport: dict[str, int] | None = None,
         stored_session: str = "",
+        hash_fragment: str = "",
+        initial_prompt: str = "",
+        draft_text: str = "",
     ):
+        config = config or {"sessions": {"sessions": []}}
         page = self.browser.new_page(
             viewport=viewport or {"width": 1280, "height": 800}
         )
@@ -233,14 +238,35 @@ class AgentKernelBrowserTests(unittest.TestCase):
                 body=HTML,
             ),
         )
-        page.goto("http://mediaflux.test/agent")
+        page.goto(f"http://mediaflux.test/agent{hash_fragment}")
         page.add_style_tag(content=self.styles)
         if stored_session:
             page.evaluate(
                 "([key, value]) => localStorage.setItem(key, value)",
                 ["mediaflux.agent.kernel.session.v1", stored_session],
             )
-        page.evaluate(MOCK_FETCH, config or {"sessions": {"sessions": []}})
+            draft_scope = str((config.get("sessions") or {}).get("draft_scope") or "")
+            if draft_scope:
+                page.evaluate(
+                    "([key, value]) => localStorage.setItem(key, value)",
+                    [f"mediaflux.agent.kernel.session.v1.{draft_scope}", stored_session],
+                )
+        if initial_prompt:
+            page.locator("#agentPrompt").evaluate(
+                "(node, value) => { node.value = value; }", initial_prompt
+            )
+        if draft_text:
+            draft_scope = str((config.get("sessions") or {}).get("draft_scope") or "")
+            if not stored_session or not draft_scope:
+                raise ValueError("draft_text 测试需要 stored_session 与 draft_scope")
+            page.evaluate(
+                """([scope, sessionId, text]) => sessionStorage.setItem(
+                    `mediaflux.agent.drafts.v1.${scope}`,
+                    JSON.stringify({[sessionId]: {text, updated_at: Date.now()}})
+                )""",
+                [draft_scope, stored_session, draft_text],
+            )
+        page.evaluate(MOCK_FETCH, config)
         page.add_script_tag(content=self.source)
         page.wait_for_function(
             "() => window.__kernelCalls.some(call => call.url === '/api/agent/sessions')"
@@ -479,6 +505,168 @@ Season 1 / S01E01
         payload = json.loads(confirm_call["body"])
         self.assertEqual(payload["plan_id"], approval["plan_id"])
         self.assertEqual(payload["session_id"], SESSION_ID)
+
+    def test_release_format_teaching_prefills_human_prompt_without_sending(self) -> None:
+        page = self.make_page(
+            {"sessions": {"sessions": []}},
+            hash_fragment="#release-format-teaching",
+        )
+        prompt = page.locator("#agentPrompt")
+        page.wait_for_function(
+            "() => document.querySelector('#agentPrompt').value.includes('至少 2 个真实文件名')"
+        )
+        value = prompt.input_value()
+        self.assertIn("至少 2 个真实文件名", value)
+        self.assertIn("正确剧名", value)
+        self.assertIn("每个文件实际是第几集", value)
+        self.assertIn("所在目录", value)
+        self.assertIn("批量预览", value)
+        self.assertIn("确认保存", value)
+        self.assertIn("不要让我手动配置规则", value)
+        self.assertNotIn("DSL", value)
+        self.assertEqual(page.evaluate("() => location.hash"), "#release-format-teaching")
+        paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
+        self.assertNotIn("/api/agent/query", paths)
+
+    def test_release_format_teaching_keeps_existing_draft_and_offers_clickable_entry(self) -> None:
+        draft = "这是我已经写好的发布格式草稿，请不要替换。"
+        page = self.make_page(
+            {"sessions": {"sessions": []}},
+            hash_fragment="#release-format-teaching",
+            initial_prompt=draft,
+        )
+        guide = page.locator("#agentReleaseFormatGuide")
+        guide.wait_for(state="visible")
+        self.assertEqual(page.locator("#agentPrompt").input_value(), draft)
+        guide.click()
+        self.assertEqual(page.locator("#agentPrompt").input_value(), draft)
+        self.assertIn("已有草稿", guide.get_attribute("title") or "")
+        paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
+        self.assertNotIn("/api/agent/query", paths)
+
+    def test_release_format_teaching_does_not_replace_pending_approval(self) -> None:
+        approval = {
+            "plan_id": "plan-browser-release-teaching-0001",
+            "tool_name": "recognition.save_release_format",
+            "effect": "WRITE",
+            "preview": {"summary": "保存发布格式规则", "data": {"规则": "示例规则"}},
+            "result": {},
+            "expires_at": "2026-09-03T12:05:00+00:00",
+        }
+        page = self.make_page(
+            {
+                "sessions": {
+                    "sessions": [
+                        {
+                            "session_id": SESSION_ID,
+                            "title": "发布格式教学",
+                            "message_count": 2,
+                            "updated_at": "2026-09-03T12:00:00+00:00",
+                        }
+                    ]
+                },
+                "sessionDetails": {
+                    SESSION_ID: {
+                        "session_id": SESSION_ID,
+                        "messages": [
+                            {"role": "user", "content": "准备保存发布格式规则"},
+                            {"role": "assistant", "content": "已生成待确认计划。"},
+                        ],
+                        "pending_approval": approval,
+                    }
+                },
+            },
+            hash_fragment="#release-format-teaching",
+            stored_session=SESSION_ID,
+        )
+        card = page.locator(".agent-confirmation-card")
+        card.wait_for(state="visible")
+        guide = page.locator("#agentReleaseFormatGuide")
+        guide.wait_for(state="visible")
+        self.assertEqual(page.locator("#agentPrompt").input_value(), "")
+        guide.click()
+        self.assertTrue(card.is_visible())
+        self.assertEqual(page.locator("#agentPrompt").input_value(), "")
+        self.assertIn("待确认计划", guide.get_attribute("title") or "")
+        paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
+        self.assertNotIn("/api/agent/query", paths)
+        self.assertNotIn("/api/agent/actions/confirm", paths)
+        self.assertNotIn("/api/agent/actions/confirm/discard", paths)
+
+    def test_release_format_teaching_hashchange_and_refresh_are_idempotent(self) -> None:
+        draft_scope = "a" * 32
+        draft = "刷新前后都要保留的发布格式教学草稿。"
+        config = {
+            "sessions": {"sessions": [], "draft_scope": draft_scope},
+        }
+        page = self.make_page(
+            config,
+            hash_fragment="#release-format-teaching",
+            stored_session=SESSION_ID,
+            draft_text=draft,
+        )
+        guide = page.locator("#agentReleaseFormatGuide")
+        page.wait_for_function(
+            "() => document.querySelector('#agentPrompt').value === '刷新前后都要保留的发布格式教学草稿。'"
+        )
+        guide.wait_for(state="visible")
+        before = page.locator("#agentPrompt").input_value()
+        before_calls = len(page.evaluate("window.__kernelCalls"))
+        page.evaluate(
+            """() => {
+                history.replaceState(null, '', '#other');
+                window.dispatchEvent(new Event('hashchange'));
+                history.replaceState(null, '', '#release-format-teaching');
+                window.dispatchEvent(new Event('hashchange'));
+                window.dispatchEvent(new Event('hashchange'));
+            }"""
+        )
+        self.assertEqual(page.locator("#agentPrompt").input_value(), before)
+        self.assertTrue(guide.is_visible())
+        self.assertEqual(len(page.evaluate("window.__kernelCalls")), before_calls)
+
+        page.reload()
+        page.add_style_tag(content=self.styles)
+        page.evaluate(MOCK_FETCH, config)
+        page.add_script_tag(content=self.source)
+        page.wait_for_function(
+            "() => window.__kernelCalls.some(call => call.url === '/api/agent/sessions')"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('#agentPrompt').value === '刷新前后都要保留的发布格式教学草稿。'"
+        )
+        guide = page.locator("#agentReleaseFormatGuide")
+        guide.wait_for(state="visible")
+        self.assertEqual(page.locator("#agentPrompt").input_value(), before)
+        paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
+        self.assertNotIn("/api/agent/query", paths)
+
+    def test_release_format_teaching_guide_stays_inside_mobile_viewport(self) -> None:
+        page = self.make_page(
+            {"sessions": {"sessions": []}},
+            viewport={"width": 390, "height": 844},
+            hash_fragment="#release-format-teaching",
+            initial_prompt="已有一个需要保留的发布格式草稿。",
+        )
+        guide = page.locator("#agentReleaseFormatGuide")
+        guide.wait_for(state="visible")
+        layout = page.evaluate("""() => {
+            const composer = document.querySelector('.agent-composer').getBoundingClientRect();
+            const guide = document.querySelector('#agentReleaseFormatGuide').getBoundingClientRect();
+            return {
+                documentWidth: document.documentElement.scrollWidth,
+                bodyWidth: document.body.scrollWidth,
+                viewportWidth: window.innerWidth,
+                composerLeft: composer.left,
+                composerRight: composer.right,
+                guideLeft: guide.left,
+                guideRight: guide.right,
+            };
+        }""")
+        self.assertLessEqual(layout["documentWidth"], layout["viewportWidth"])
+        self.assertLessEqual(layout["bodyWidth"], layout["viewportWidth"])
+        self.assertGreaterEqual(layout["guideLeft"], layout["composerLeft"] - 0.5)
+        self.assertLessEqual(layout["guideRight"], layout["composerRight"] + 0.5)
 
     def test_empty_composer_centers_prompt_with_leading_action(self) -> None:
         page = self.make_page({"sessions": {"sessions": []}})

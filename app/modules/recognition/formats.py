@@ -136,7 +136,8 @@ def normalize_draft(value: object) -> dict[str, Any]:
     return {"name": name, "template": template, "scope": scope, "parent_path": parent}
 
 
-def _request(value: object) -> dict[str, Any]:
+def normalize_request(value: object) -> dict[str, Any]:
+    """Web 与 Agent 共用的样本、模板和批量输入校验。"""
     if not isinstance(value, dict) or set(value) - {"draft", "examples", "filenames", "preview_token", "confirmed"}:
         raise ValueError("教学请求字段无效")
     draft = normalize_draft(value.get("draft"))
@@ -385,7 +386,7 @@ def _receipt(request: dict, result: dict, registry: str) -> dict:
 
 
 def preview(value: object) -> dict:
-    request = _request(value)
+    request = normalize_request(value)
     stored, registry = _snapshot()
     result = _evaluate(request, stored)
     token = _signer().dumps(_receipt(request, result, registry)) if result["can_save"] else ""
@@ -395,7 +396,7 @@ def preview(value: object) -> dict:
 def save(value: Any) -> tuple[dict, bool]:
     from app import database as db
 
-    request = _request(value)
+    request = normalize_request(value)
     if value.get("confirmed") is not True:
         raise ValueError("请先预览并明确确认保存；不会执行文件整理")
     token = value.get("preview_token")

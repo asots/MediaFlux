@@ -23,6 +23,12 @@ PREFIX_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
 }
 
 TOOL_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
+    "recognition.preview_release_format": (
+        "发布格式教学", "识别错误", "识别错了", "集号识别错", "教你识别", "修订版", "字幕组格式", "先预览不要保存",
+    ),
+    "recognition.save_release_format": (
+        "记住发布格式", "保存识别规则", "学会以后自动识别", "复用这个格式", "教学确认",
+    ),
     "agent.capabilities": (
         "你是谁",
         "能做什么",

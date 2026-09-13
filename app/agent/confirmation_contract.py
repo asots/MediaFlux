@@ -13,6 +13,12 @@ CONTRACT_VERSION = 1
 
 # 文案只描述可观察影响，不包含参数、路径、URL、票据或服务端内部标识。
 _CONFIRMATION_COPY: dict[str, dict[str, str]] = {
+    "recognition.save_release_format": {
+        "action": "保存发布格式教学",
+        "object": "本次核对过的格式、样本和适用范围",
+        "impact": "只保存以后识别使用的字段规则，不立即扫描、改名或移动文件，不绑定作品身份或改变季集映射。",
+        "reversibility": "可在整理规则的高级手动配置中停用或删除；不会撤销既往整理结果。",
+    },
     "activity.follow": {
         "action": "活动跟踪开启",
         "object": "本次选定的活动跟踪规则",

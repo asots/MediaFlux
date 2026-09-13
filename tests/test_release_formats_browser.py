@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import os
 import unittest
 from pathlib import Path
@@ -193,7 +194,19 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
 <html lang="zh-CN" data-theme="light">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="fixture-csrf"><base href="http://mediaflux.test/organize-rules"></head>
 <body class="organize-page organize-rules-page">
-<main><button type="button" class="jump-btn" id="openReleaseFormatsBtn">教学与预览</button></main>
+<main>
+<div class="tmdb-regex-launch release-formats-launch">
+  <div>
+    <strong>发布格式教学</strong>
+    <span>推荐先让 Agent 帮我识别：贴真实样本，由 Agent 推导并先预览核对。</span>
+    <span>需要已配置 Agent 模型；未配置时请先到 Agent 设置。</span>
+  </div>
+  <div class="release-formats-launch-actions">
+    <a class="jump-btn release-formats-agent-launch" href="/agent#release-format-teaching">让 Agent 帮我识别</a>
+    <button type="button" class="jump-btn release-formats-manual-launch" id="openReleaseFormatsBtn">高级手动</button>
+  </div>
+</div>
+</main>
 {self.modal_fragment}
 </body></html>"""
         )
@@ -226,13 +239,13 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
             {"method": method, "path": path},
         )
 
-    def test_real_app_preview_save_reload_and_delete_roundtrip(self):
+    @contextmanager
+    def real_app_page(self):
         from fastapi.testclient import TestClient
         from app.main import create_app
         from app.modules.recognition import formats
-        from app.modules.scraper import _parse_release_core
         from tests.support import isolated_test_database
-        from tests.test_release_formats import ReleaseFormatApiTests, filename, PARENT
+        from tests.test_release_formats import ReleaseFormatApiTests
 
         errors = []
         with isolated_test_database(), TestClient(create_app()) as client:
@@ -258,29 +271,73 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
 
             page.route("**/*", serve)
             try:
-                page.goto("http://testserver/organize-rules")
-                self.open_modal(page)
-                self.load_teaching_example(page)
-                page.locator("#previewReleaseFormatBtn").click()
-                page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
-                self.assertFalse(page.locator("#releaseFormatPreviewEmpty").is_visible())
-                self.assertEqual(formats.list_rules(), [])
-                page.locator("#saveReleaseFormatBtn").click()
-                page.locator(".release-format-rule-card").wait_for()
-                self.assertEqual(len(formats.list_rules()), 1)
-                self.assertEqual(_parse_release_core(filename(15), PARENT).context.episode, 15)
-                page.reload()
-                self.open_modal(page)
-                self.assertEqual(page.locator(".release-format-rule-card").count(), 1)
-                page.locator('[data-release-action="delete"]').click()
-                page.locator("#appConfirmSubmit").click()
-                page.wait_for_function("() => document.querySelectorAll('.release-format-rule-card').length === 0")
-                self.assertEqual(formats.list_rules(), [])
-                self.assertIsNone(_parse_release_core(filename(15), PARENT).context.episode)
-                self.assertEqual(errors, [])
+                yield page, client, errors
             finally:
                 page.close()
                 formats.invalidate_cache()
+
+    def test_real_app_preview_save_reload_and_delete_roundtrip(self):
+        from app.modules.recognition import formats
+        from app.modules.scraper import _parse_release_core
+        from tests.test_release_formats import filename, PARENT
+
+        with self.real_app_page() as (page, _client, errors):
+            page.goto("http://testserver/organize-rules")
+            self.open_modal(page)
+            self.load_teaching_example(page)
+            page.locator("#previewReleaseFormatBtn").click()
+            page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+            self.assertFalse(page.locator("#releaseFormatPreviewEmpty").is_visible())
+            self.assertEqual(formats.list_rules(), [])
+            page.locator("#saveReleaseFormatBtn").click()
+            page.locator(".release-format-rule-card").wait_for()
+            self.assertEqual(len(formats.list_rules()), 1)
+            self.assertEqual(_parse_release_core(filename(15), PARENT).context.episode, 15)
+            page.reload()
+            self.open_modal(page)
+            self.assertEqual(page.locator(".release-format-rule-card").count(), 1)
+            page.locator('[data-release-action="delete"]').click()
+            page.locator("#appConfirmSubmit").click()
+            page.wait_for_function("() => document.querySelectorAll('.release-format-rule-card').length === 0")
+            self.assertEqual(formats.list_rules(), [])
+            self.assertIsNone(_parse_release_core(filename(15), PARENT).context.episode)
+            self.assertEqual(errors, [])
+
+    def test_agent_entry_previews_and_confirms_through_real_app(self):
+        from unittest.mock import patch
+        from app.agent.kernel.bootstrap import build_agent_kernel_runtime
+        from app.modules.recognition import formats
+        from app.modules.scraper import _parse_release_core
+        from tests.test_agent_release_format_kernel import TeachingModel, MESSAGE
+        from tests.test_release_formats import filename, PARENT, TEMPLATE
+
+        with self.real_app_page() as (page, _client, errors):
+            model = TeachingModel()
+            runtime = build_agent_kernel_runtime(model=model)
+            with patch("app.routes.agent_api.get_agent_kernel_runtime", return_value=runtime):
+                page.goto("http://testserver/organize-rules")
+                page.locator('a[href="/agent#release-format-teaching"]').click()
+                page.locator("#agentPrompt").wait_for(state="visible")
+                page.wait_for_function("() => document.querySelector('#agentPrompt').value.includes('发布格式教学')")
+                self.assertEqual(model.requests, [])
+                self.assertEqual(formats.list_rules(), [])
+                page.locator("#agentPrompt").fill(MESSAGE)
+                page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+                card = page.locator(".agent-confirmation-card")
+                card.wait_for()
+                self.assertIn("第13集", card.inner_text())
+                self.assertIn("星海航行", card.inner_text())
+                self.assertNotIn(TEMPLATE, card.inner_text())
+                self.assertNotIn(PARENT, card.inner_text())
+                self.assertEqual(formats.list_rules(), [])
+                page.set_viewport_size({"width": 390, "height": 844})
+                self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390)
+                card.locator("[data-effect-confirm]").click()
+                page.wait_for_function("() => document.querySelector('.agent-result-card')?.innerText.includes('已保存')")
+                self.assertEqual(len(formats.list_rules()), 1)
+                self.assertEqual(_parse_release_core(filename(15), PARENT).context.episode, 15)
+                self.assertEqual(len(model.requests), 2)
+                self.assertEqual(errors, [])
 
     def test_teaching_example_builds_fixed_preview_and_save_contract(self):
         response = _preview_response(
@@ -546,12 +603,35 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
             page.close()
         self.assertEqual(errors, [])
 
+    def test_recommended_agent_entry_keeps_manual_modal_trigger(self):
+        page, errors = self.make_page({"items": []})
+        try:
+            agent_entry = page.locator('a[href="/agent#release-format-teaching"]')
+            self.assertEqual(agent_entry.count(), 1)
+            self.assertEqual(agent_entry.get_attribute("href"), "/agent#release-format-teaching")
+            self.assertIn("让 Agent 帮我识别", agent_entry.inner_text())
+            self.assertIn("需要已配置 Agent 模型", page.locator(".release-formats-launch").inner_text())
+
+            manual_entry = page.locator("#openReleaseFormatsBtn")
+            self.assertEqual(manual_entry.count(), 1)
+            self.assertIn("高级手动", manual_entry.inner_text())
+            self.open_modal(page)
+            self.assertTrue(page.locator("#releaseFormatsModal").is_visible())
+        finally:
+            page.close()
+        self.assertEqual(errors, [])
+
     def test_template_scopes_script_to_rules_page_and_exposes_no_regex_editor(self):
         source = TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("<script src=\"{{ static_url('js/release-formats.js') }}\"></script>", source)
         scripts_block = source.split("{% block scripts %}", 1)[1].split("{% endblock %}", 1)[0]
         self.assertIn("{% if organize_view == 'rules' %}", scripts_block)
         self.assertIn('id="releaseFormatsModal"', source)
+        self.assertIn('href="/agent#release-format-teaching"', source)
+        self.assertIn("让 Agent 帮我识别", source)
+        self.assertIn("高级手动", source)
+        self.assertIn("需要已配置 Agent 模型", source)
+        self.assertEqual(source.count('id="openReleaseFormatsBtn"'), 1)
         self.assertEqual(source.count('data-release-field="'), 6)
         self.assertNotIn('data-release-field="regex"', source)
 

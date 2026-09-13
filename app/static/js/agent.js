@@ -22,12 +22,15 @@
     const nextActions = document.getElementById('agentStartActions');
     const resumeSlot = document.getElementById('agentStartResume');
     const composerActions = composer?.querySelector('.agent-composer-actions');
+    const releaseFormatGuide = document.getElementById('agentReleaseFormatGuide');
     const nextActionsStatus = document.getElementById('agentStartActionsStatus');
     const newRepliesButton = document.getElementById('agentNewReplies');
     const sessionSearch = document.getElementById('agentSessionSearch');
     const DRAFT_PREFIX = 'mediaflux.agent.drafts.v1.';
     const DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
     const MAX_DRAFTS = 20;
+    const RELEASE_FORMAT_TEACHING_HASH = '#release-format-teaching';
+    const RELEASE_FORMAT_TEACHING_DRAFT = '请帮我做发布格式教学。我会贴至少 2 个真实文件名，并说明正确剧名、每个文件实际是第几集、所在目录（有季号也会说明）。请帮我生成规则，先批量预览结果、未匹配和冲突，让我核对后再确认保存。请直接引导我，不要让我手动配置规则。';
 
     const SESSION_KEY = 'mediaflux.agent.kernel.session.v1';
     const LAYOUT_KEY = 'mediaflux.agent.kernel.layout.v1';
@@ -72,6 +75,8 @@
     let initialRestore = consoleNode?.dataset.initialRestore === 'true';
     let startupAttempt = 0;
     let startupController = null;
+    let releaseFormatTeachingReady = false;
+    const releaseFormatTeachingHandled = new Set();
 
     function createId(prefix) {
         let value = '';
@@ -192,6 +197,62 @@
         saveDraft();
         resizePrompt();
         promptInput.focus();
+        syncReleaseFormatTeachingGuide();
+    }
+
+    function releaseFormatTeachingIsActive() {
+        return window.location.hash === RELEASE_FORMAT_TEACHING_HASH;
+    }
+
+    function releaseFormatTeachingHasPendingApproval() {
+        return Boolean(transcript?.querySelector('.agent-confirmation-card:not(.is-expired)'));
+    }
+
+    function syncReleaseFormatTeachingGuide() {
+        if (!releaseFormatGuide) return;
+        const active = releaseFormatTeachingIsActive();
+        const draft = String(promptInput?.value || '').trim();
+        const hasConversation = Boolean(transcript?.childElementCount);
+        const hasPendingApproval = releaseFormatTeachingHasPendingApproval();
+        const needsEntry = active && (hasPendingApproval || (draft && draft !== RELEASE_FORMAT_TEACHING_DRAFT) || (!draft && hasConversation));
+        releaseFormatGuide.hidden = !needsEntry;
+        if (!needsEntry) return;
+        const label = hasPendingApproval
+            ? '当前有待确认计划；点击智能教学不会替换它'
+            : draft
+                ? '已有草稿；点击智能教学会保留原文'
+                : '把发布格式教学提示放入输入框';
+        releaseFormatGuide.title = label;
+        releaseFormatGuide.setAttribute('aria-label', label);
+    }
+
+    function offerReleaseFormatTeaching() {
+        if (!releaseFormatTeachingReady || !releaseFormatTeachingIsActive()) {
+            syncReleaseFormatTeachingGuide();
+            return;
+        }
+        const key = sessionId;
+        if (releaseFormatTeachingHandled.has(key)) {
+            syncReleaseFormatTeachingGuide();
+            return;
+        }
+        const draft = String(promptInput?.value || '').trim();
+        const hasConversation = Boolean(transcript?.childElementCount);
+        const hasPendingApproval = releaseFormatTeachingHasPendingApproval();
+        if (!draft && !hasConversation && !hasPendingApproval) fillDraft(RELEASE_FORMAT_TEACHING_DRAFT);
+        releaseFormatTeachingHandled.add(key);
+        if (releaseFormatTeachingHandled.size > 32) releaseFormatTeachingHandled.delete(releaseFormatTeachingHandled.values().next().value);
+        syncReleaseFormatTeachingGuide();
+    }
+
+    function chooseReleaseFormatTeachingGuide() {
+        if (!releaseFormatTeachingIsActive()) return;
+        if (releaseFormatTeachingHasPendingApproval()) {
+            announce(responseStatus, '当前会话有待确认计划，教学引导不会替换它；请先处理该计划。');
+            window.showToast?.('当前会话有待确认计划，教学引导不会替换它', 'warning');
+            return;
+        }
+        fillDraft(RELEASE_FORMAT_TEACHING_DRAFT);
     }
 
     function element(tag, className, text) {
@@ -1144,6 +1205,7 @@
                     confirmation: payload.plan.confirmation || {},
                     expires_at: payload.plan.expires_at || '',
                 });
+                syncReleaseFormatTeachingGuide();
             }
             break;
         case 'effect.completed':
@@ -1622,6 +1684,7 @@
         if (!approval?.plan_id) return;
         const view = appendMessage('assistant', {recovered: true});
         view.body.append(buildApproval(approval));
+        syncReleaseFormatTeachingGuide();
     }
 
     async function loadSession(targetId, {closeHistory = true, startup = false, signal = null} = {}) {
@@ -1657,6 +1720,7 @@
             followOutput = true;
             scrollToBottom(true);
             setConsoleEmpty(!transcript?.childElementCount);
+            offerReleaseFormatTeaching();
             if (closeHistory) closeHistoryRail();
             if (!startup) refreshSessions({quiet: true});
             return true;
@@ -1693,6 +1757,8 @@
         if (newRepliesButton) newRepliesButton.hidden = true;
         transcript?.replaceChildren();
         setConsoleEmpty(true);
+        releaseFormatTeachingReady = true;
+        offerReleaseFormatTeaching();
         promptInput?.focus();
         closeHistoryRail();
         refreshSessions({quiet: true});
@@ -1969,6 +2035,8 @@
             }
             stopInitialRestore();
             setConsoleEmpty(!transcript?.childElementCount);
+            releaseFormatTeachingReady = true;
+            offerReleaseFormatTeaching();
         } catch (_) {
             if (attempt !== startupAttempt) return;
             if (initialRestore && restoreNotice) {
@@ -1997,7 +2065,7 @@
         event.preventDefault();
         sendQuery(promptInput?.value || '');
     });
-    promptInput?.addEventListener('input', () => { resizePrompt(); saveDraft(); });
+    promptInput?.addEventListener('input', () => { resizePrompt(); saveDraft(); syncReleaseFormatTeachingGuide(); });
     transcript?.addEventListener('scroll', () => {
         followOutput = transcriptNearBottom();
         if (followOutput && newRepliesButton) newRepliesButton.hidden = true;
@@ -2014,6 +2082,7 @@
     newSessionButton?.addEventListener('click', startNewSession);
     document.getElementById('agentRestoreRetry')?.addEventListener('click', restoreInitialSession);
     document.getElementById('agentRestoreNew')?.addEventListener('click', startNewSession);
+    releaseFormatGuide?.addEventListener('click', chooseReleaseFormatTeachingGuide);
     resumeButton?.addEventListener('click', () => latestSessionId && loadSession(latestSessionId));
     historyButton?.addEventListener('click', openHistoryRail);
     historyRail?.addEventListener('cancel', (event) => {
@@ -2051,6 +2120,7 @@
     });
     window.visualViewport?.addEventListener('resize', syncViewportHeight, {passive: true});
     window.addEventListener('resize', syncViewportHeight, {passive: true});
+    window.addEventListener('hashchange', offerReleaseFormatTeaching);
 
     syncViewportHeight();
     resizePrompt();

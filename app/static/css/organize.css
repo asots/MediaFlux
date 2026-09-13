@@ -699,6 +699,11 @@ html[data-organize-rules-initial-tab="delivery"] #organizeRulesNav [data-tab-tar
 }
 
 .release-formats-launch span { overflow-wrap: anywhere; }
+.release-formats-launch-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.release-formats-launch-actions .jump-btn { width: auto; min-width: 0; white-space: nowrap; }
+.release-formats-agent-launch { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-border); }
+.release-formats-agent-launch:hover { color: var(--accent); background: var(--bg-card); border-color: var(--accent); }
+@media(max-width:620px){.release-formats-launch-actions{width:100%;flex-direction:column}.release-formats-launch-actions .jump-btn{width:100%}}
 
 .release-formats-dialog {
     width: min(1420px, 100%);

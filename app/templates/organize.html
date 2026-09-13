@@ -275,8 +275,16 @@
                 <button type="button" class="jump-btn" id="openRecognitionKnowledgeBtn"><i data-lucide="book-open-check"></i>管理识别词库</button>
             </div>
             <div class="tmdb-regex-launch release-formats-launch">
-                <div><strong>发布格式教学</strong><span>用真实文件名学习可复用的字段模板；只做命名证据预览，不移动文件，也不替代 TMDB / 人工确认。</span><span class="preprocess-launch-summary" id="releaseFormatRuleSummary">打开后读取规则</span></div>
-                <button type="button" class="jump-btn" id="openReleaseFormatsBtn"><i data-lucide="file-sliders"></i>教学与预览</button>
+                <div>
+                    <strong>发布格式教学</strong>
+                    <span>推荐先让 Agent 帮我识别：贴真实样本，由 Agent 推导并先预览核对；不移动文件，也不替代 TMDB / 人工确认。</span>
+                    <span>需要已配置 Agent 模型；未配置时请先到 Agent 设置。</span>
+                    <span class="preprocess-launch-summary" id="releaseFormatRuleSummary">打开后读取规则</span>
+                </div>
+                <div class="release-formats-launch-actions">
+                    <a class="jump-btn release-formats-agent-launch" href="/agent#release-format-teaching"><i data-lucide="bot"></i>让 Agent 帮我识别</a>
+                    <button type="button" class="jump-btn release-formats-manual-launch" id="openReleaseFormatsBtn"><i data-lucide="file-sliders"></i>高级手动</button>
+                </div>
             </div>
         </div>
 

@@ -19,9 +19,85 @@ from app.agent.configuration_management_actions import (
     source_mutation_arguments,
 )
 from app.agent.models import RiskLevel, ToolSpec
+from app.agent.release_format_actions import (
+    teaching_arguments,
+    preview_release_format,
+    prepare_release_format,
+    save_release_format_confirmed,
+)
 
 
 def register_specs(registry, **_dependencies) -> None:
+    teaching_schema = {
+        "type": "object",
+        "properties": {
+            "draft": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "template": {
+                        "type": "string", "maxLength": 512,
+                        "description": "由你生成而非要求用户填写。仅{title}/{episode}必填，{season}/{version}/{resolution}/{checksum}可选，其余字面匹配；保留分隔符和视频扩展名。",
+                    },
+                    "scope": {"type": "string", "enum": ["directory", "release"]},
+                    "parent_path": {
+                        "type": "string", "maxLength": 4096,
+                        "description": "目录范围使用用户明确提供或本轮工具核实的父目录上下文；本地完整路径、光鸭相对目录名。禁止猜测，跨目录release时填空字符串。",
+                    },
+                },
+                "required": ["name", "template", "scope", "parent_path"],
+                "additionalProperties": False,
+            },
+            "examples": {
+                "type": "array", "minItems": 2, "maxItems": 8,
+                "description": "用户明确标注的不同文件且至少两个不同原始集号。标题是原文件中的片名，不是译名；不能编造样本或把偏移后的编号当原集号。",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {"type": "string", "maxLength": 1024},
+                        "title": {"type": "string", "minLength": 1, "maxLength": 180},
+                        "episode": {"type": "integer", "minimum": 1, "maximum": 9999},
+                        "season": {"type": "integer", "minimum": 1, "maximum": 99},
+                    },
+                    "required": ["filename", "title", "episode"],
+                    "additionalProperties": False,
+                },
+            },
+            "filenames": {
+                "type": "array", "maxItems": 100,
+                "items": {"type": "string", "maxLength": 1024},
+                "description": "需要批量核对的真实文件名，不读文件内容；没有额外文件时为空数组。",
+            },
+        },
+        "required": ["draft", "examples", "filenames"],
+        "additionalProperties": False,
+    }
+    for save in (False, True):
+        name = "recognition.save_release_format" if save else "recognition.preview_release_format"
+        registry.register(ToolSpec(
+            name=name,
+            description=(
+                "用户要求记住或复用发布格式时，预检并创建一项保存确认，用户点击确认后才写入已有规则库。"
+                if save else
+                "识别错了或发布组集号混淆时，根据用户明确样本生成受限字段模板并批量预览；只读，不保存、不创建确认计划。"
+            ) + "缺少信息先询问，让用户补齐真实文件名、正确原始标题/集号及父目录；不要要求用户写模板，不编造标签。"
+                "默认仅此目录；跨目录需用户授权、固定发布前缀和不同标题样本。不是发布组别名知识、TMDB绑定或季集偏移。先报告真实标题/季集与冲突，不展示模板或票据；仅预览不能准备保存，工具保存成功前不能宣称已学会。",
+            risk=RiskLevel.WRITE if save else RiskLevel.READ,
+            requires_confirmation=save,
+            parameters=teaching_schema,
+            validator=teaching_arguments,
+            handler=None if save else preview_release_format,
+            context_confirmation_preparer=(
+                ToolSpec.context_free_confirmation_preparer(prepare_release_format) if save else None
+            ),
+            context_confirmed_handler=(
+                ToolSpec.context_free_confirmed_handler(save_release_format_confirmed) if save else None
+            ),
+            domains=("recognition", "config"),
+            related_tools=("recognition.preview_release_format" if save else "recognition.save_release_format",),
+            examples=("教你识别这个发布组的格式", "这些文件集号识别错了，r2是修订版不是第二集",
+                      "先批量预览，不要保存" if not save else "记住这个格式，以后自动识别"),
+        ))
     registry.register(
         ToolSpec(
             name="config.recognition_knowledge",

@@ -15,3 +15,5 @@
 {"id":"recent-playback","message":"查看一下我在 Jellyfin 最近播放了什么","required":["media.recently_played"]}
 {"id":"history-based-recommendation","message":"根据我最近播放和看过的内容，推荐一个不要重复的片单","required":["media.recently_played","discovery.recommend"]}
 {"id":"recently-added-media","message":"我的媒体库最近入库了什么内容","required":["media.recently_added"]}
+{"id": "release-format-teaching-preview", "message": "这些发布组文件集号识别错了，r2是修订版。帮我学习这个发布格式，先批量预览不要保存。", "required": ["recognition.preview_release_format"]}
+{"id": "release-format-teaching-remember", "message": "记住这个发布格式，让这些文件以后自动识别，先核对样本让我确认保存。", "required": ["recognition.preview_release_format", "recognition.save_release_format"]}

@@ -158,8 +158,8 @@ class ConfigurationManagementTests(IsolatedDatabaseTestCase):
         registry = Registry()
         automation_rules.register_specs(registry)
         configuration_management.register_specs(registry)
-        self.assertEqual(len(registry.specs), 14)
-        self.assertEqual(len({spec.name for spec in registry.specs}), 14)
+        self.assertEqual(len(registry.specs), 16)
+        self.assertEqual(len({spec.name for spec in registry.specs}), 16)
         for spec in registry.specs:
             if spec.risk.value != "read":
                 self.assertTrue(spec.requires_confirmation)
