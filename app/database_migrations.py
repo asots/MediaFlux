@@ -1532,6 +1532,14 @@ def _migrate_episode_research_cache_v30(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_recognition_format_rules_v31(conn: sqlite3.Connection) -> None:
+    """仅新增发布格式教学规则表；逐语句执行以保留协调器的备份和回滚边界。"""
+    from app.database_schema import _RECOGNITION_FORMAT_RULE_STATEMENTS
+
+    for statement in _RECOGNITION_FORMAT_RULE_STATEMENTS:
+        conn.execute(statement)
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1563,4 +1571,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     27: _migrate_postprocessing_recovery_v28,
     28: _migrate_download_resource_and_strm_ownership_v29,
     29: _migrate_episode_research_cache_v30,
+    30: _migrate_recognition_format_rules_v31,
 }

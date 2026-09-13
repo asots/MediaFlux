@@ -12,6 +12,7 @@ from app.modules.organize import OrganizeRules, Organizer, organize_rules_snapsh
 from app.modules.organize_postprocess import media_role, normalized_stem
 from app.modules.directory_scrape_errors import (
     DirectoryScrapeRequestError,
+    DirectoryScrapeConflictError,
     DirectoryScrapeStateError,
 )
 from app.modules.scraper import TMDBScraper
@@ -130,7 +131,7 @@ class DirectoryMediaInspector:
         ]
         visited: set[str] = set()
         scanned_entries = 0
-        parsed_dir = self._parse_for_rules(source.name, rules)
+        parsed_dir = self._parse_for_rules(source.name, rules, "")
 
         def scan(
             current_id: str,
@@ -156,7 +157,11 @@ class DirectoryMediaInspector:
                         else resolved_dir.name
                     )
                     directories.append(self._directory_snapshot(resolved_dir, child_rel))
-                    parsed_child = self._parse_for_rules(resolved_dir.name, rules)
+                    parsed_child = self._parse_for_rules(
+                        resolved_dir.name,
+                        rules,
+                        self._recognition_parent_path(source.name, relative_dir),
+                    )
                     child_season = self._optional_season(parsed_child.get("season"))
                     scan(
                         resolved_dir.file_id,
@@ -172,7 +177,11 @@ class DirectoryMediaInspector:
                     ):
                         continue
                     resolved = self._enrich_identity(item)
-                    parsed = self._parse_for_rules(resolved.name, rules)
+                    parsed = self._parse_for_rules(
+                        resolved.name,
+                        rules,
+                        self._recognition_parent_path(source.name, relative_dir),
+                    )
                     special_container = (
                         not rules.nsfw_exclusive and is_special_path(relative_dir)
                     )
@@ -398,7 +407,11 @@ class DirectoryMediaInspector:
         self._validate_target_outside_source(parent_id, target_id)
 
         resolved_source = self._enrich_identity(source)
-        parsed = self._parse_for_rules(resolved_source.name, rules)
+        parsed = self._parse_for_rules(
+            resolved_source.name,
+            rules,
+            self._direct_parent_context(resolved_source),
+        )
         videos = [self._snapshot(resolved_source, "video", "", parsed)]
         metadata_exts = self.organizer.metadata_exts(rules)
         subtitle_candidates: list[GuangYaFile] = []
@@ -472,9 +485,30 @@ class DirectoryMediaInspector:
             current_id = str(current.parent_id or "0")
         raise DirectoryScrapeStateError("归档目标目录层级异常")
 
-    def _parse(self, filename: str) -> dict[str, object]:
+    @staticmethod
+    def _recognition_parent_path(source_name: str, relative_dir: str = "") -> str:
+        """构造与目录刮削后续 match 相同的云端相对父目录上下文。"""
+        return "/".join(
+            str(value or "").replace("\\", "/").strip("/")
+            for value in (source_name, relative_dir)
+            if str(value or "").strip("/\\")
+        )
+
+    def _direct_parent_context(self, item: GuangYaFile) -> str:
+        """单文件检查只能安全取得所选文件的直接云端父目录名。"""
+        parent_id = str(item.parent_id or "0").strip()
+        if not parent_id or parent_id == "0":
+            return ""
+        parent = self.client.file_info(parent_id)
+        if parent is None or not parent.is_dir:
+            return ""
+        return str(parent.name or "").strip()
+
+    def _parse(self, filename: str, parent_path: str = "") -> dict[str, object]:
         try:
-            parsed = self.scraper.parse_media(filename)
+            parsed = self.scraper.parse_media(filename, parent_path, filename_only=True)
+            if parsed.context.cleaned_components.get("release_format_conflicts"):
+                raise DirectoryScrapeConflictError("发布格式存在冲突，请核对并停用冲突格式后重新检查")
             return {
                 "title": parsed.title,
                 "year": parsed.year,
@@ -496,10 +530,13 @@ class DirectoryMediaInspector:
         return normalize_code(identifier.code) if identifier is not None else ""
 
     def _parse_for_rules(
-        self, filename: str, rules: OrganizeRules,
+        self,
+        filename: str,
+        rules: OrganizeRules,
+        parent_path: str = "",
     ) -> dict[str, object]:
         if not rules.nsfw_exclusive:
-            return self._parse(filename)
+            return self._parse(filename, parent_path)
 
         # 成人专用来源不进入普通影视季集解析。番号末尾的数字（如 675）
         # 否则会被 guessit/通用解析器误判为 S06E75，并污染单文件检查。
@@ -517,7 +554,7 @@ class DirectoryMediaInspector:
                 source, rules.nsfw_strip_domains,
             ).strip(" ._@-[]()【】")
             if not title:
-                title = str(self._parse(filename).get("title") or "").strip()
+                title = str(self._parse(filename, parent_path).get("title") or "").strip()
         return {
             "title": title,
             "year": "",

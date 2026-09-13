@@ -192,6 +192,7 @@ python mediaflux.py support-bundle
   - [性能调优与大规模媒体库优化指南](docs/tutorials/07_性能调优与大规模媒体库优化指南.md)
   - [Agent 架构、配置与使用实战](docs/tutorials/08_Agent架构与使用实战.md)
   - [Agent 工具清单与 Provider 能力参考](docs/tutorials/09_Agent工具与能力参考.md)
+  - [发布格式教学：标注样本、批量预览与复用](docs/tutorials/10_发布格式教学.md)
 
 ---
 

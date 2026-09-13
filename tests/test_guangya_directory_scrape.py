@@ -180,7 +180,7 @@ class _ParsingScraper:
         }
 
     @classmethod
-    def parse_media(cls, filename: str, parent_path: str = "", match=None):
+    def parse_media(cls, filename: str, parent_path: str = "", match=None, *, filename_only=False):
         return release_parse_result(
             cls._fields(filename), filename=filename, parent_path=parent_path
         )
@@ -1553,7 +1553,7 @@ class _DirectoryScrapeTMDB:
             threshold=1.0,
         )
 
-    def parse_media(self, filename: str, parent_path: str = "", match=None):
+    def parse_media(self, filename: str, parent_path: str = "", match=None, *, filename_only=False):
         return release_parse_result(
             _ParsingScraper._fields(filename),
             filename=filename, parent_path=parent_path,
@@ -2379,8 +2379,8 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
     class SeasonScraper(_DirectoryScrapeTMDB):
         _parser = TMDBScraper()
 
-        def parse_media(self, filename: str, parent_path: str = "", match=None):
-            return self._parser.parse_media(filename, parent_path, match)
+        def parse_media(self, filename: str, parent_path: str = "", match=None, *, filename_only=False):
+            return self._parser.parse_media(filename, parent_path, match, filename_only=filename_only)
 
         def get_detail_with_credits(self, tmdb_id: str, media_type: str) -> dict:
             if media_type == "tv":
@@ -2849,8 +2849,8 @@ class SingleEpisodeOverrideTests(IsolatedDatabaseTestCase):
     class EpisodeScraper(_DirectoryScrapeTMDB):
         _parser = TMDBScraper()
 
-        def parse_media(self, filename: str, parent_path: str = "", match=None):
-            return self._parser.parse_media(filename, parent_path, match)
+        def parse_media(self, filename: str, parent_path: str = "", match=None, *, filename_only=False):
+            return self._parser.parse_media(filename, parent_path, match, filename_only=filename_only)
 
         def get_detail_with_credits(self, tmdb_id: str, media_type: str) -> dict:
             if media_type == "tv":

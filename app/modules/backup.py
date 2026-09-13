@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import tempfile
 import threading
 import uuid
@@ -615,6 +616,10 @@ def _recover_committed(paths: RuntimePaths, journal: dict[str, Any]) -> None:
         restored_database = restored_database or entry["name"] == "database/mediaflux.db"
     if restored_database:
         _cleanup_database_sidecars(paths)
+        formats = sys.modules.get("app.modules.recognition.formats")
+        invalidate_cache = getattr(formats, "invalidate_cache", None)
+        if callable(invalidate_cache):
+            invalidate_cache()
     _delete_restore_journal(paths)
 
 

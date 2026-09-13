@@ -1703,3 +1703,21 @@ _EPISODE_RESEARCH_CACHE_STATEMENTS = (
     "ON episode_research_cache(updated_at,cache_key)",
 )
 _SCHEMA += ";\n".join(_EPISODE_RESEARCH_CACHE_STATEMENTS) + ";\n"
+
+# 新建数据库与 30→31 正式迁移共用同一份 DDL，避免约束漂移。
+_RECOGNITION_FORMAT_RULE_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS recognition_format_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signature TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        template TEXT NOT NULL,
+        scope TEXT NOT NULL CHECK(scope IN ('directory','release')),
+        parent_path TEXT NOT NULL DEFAULT '',
+        examples_json TEXT NOT NULL DEFAULT '[]',
+        disabled INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN(0,1)),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+)
+_SCHEMA += ";\n".join(_RECOGNITION_FORMAT_RULE_STATEMENTS) + ";\n"

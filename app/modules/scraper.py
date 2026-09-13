@@ -2286,14 +2286,19 @@ def _parse_release_surface(
 
 def _parse_release_core(
     filename: str, parent_path: str = "", *, include_release: bool = False,
+    _format_rules: list[dict] | None = None, filename_only: bool = False,
 ) -> _ReleaseParseCore:
     """构造一次事实解析，并按需提供 release 领域投影。"""
     raw_name = str(filename or "")
-    raw_parent_path = str(parent_path or "")
+    raw_parent_path = "" if filename_only else str(parent_path or "")
     parse_name = _strip_explicit_tmdb_markers(raw_name)
     parse_parent_path = _strip_explicit_tmdb_markers_from_path(raw_parent_path)
     filename_stem = strip_media_file_suffix(parse_name)
     surface = _parse_release_surface(filename_stem, context_mode=True)
+    from app.modules.recognition.formats import apply_to_surface
+
+    apply_to_surface(surface, raw_name, str(parent_path or ""), rules=_format_rules)
+    format_fields = surface.get("format_fields")
     guessed = surface["info"]
     filename_title = str(surface["filename_title"] or "")
     cleaned = dict(surface["cleaned"] or {})
@@ -2315,7 +2320,7 @@ def _parse_release_core(
         filename_title = release_title_candidates[0]
         filename_is_generic = False
     primary_edition = _PRIMARY_TRAILING_RELEASE_EDITION_NOISE.search(filename_title)
-    if primary_edition:
+    if primary_edition and not format_fields:
         shortened_title = _PRIMARY_TRAILING_RELEASE_EDITION_NOISE.sub(
             "", filename_title
         ).strip(" ._-—–:：")
@@ -2395,6 +2400,10 @@ def _parse_release_core(
                 "type": str(release_surface["media_type"] or "movie"),
                 "tmdb_id": "",
             }
+        if format_fields:
+            release_fields["type"] = "tv"
+            if not explicit_tmdb_id:
+                release_fields["title"] = format_fields["title"]
     return _ReleaseParseCore(context=context, release_fields=release_fields)
 
 
@@ -4773,6 +4782,8 @@ class TMDBScraper:
         context: RecognitionContext, processed, fields: dict[str, object],
     ) -> tuple[ReleaseParseEvidence, ...]:
         evidence: list[ReleaseParseEvidence] = []
+        for rule_name in context.cleaned_components.get("release_formats", []):
+            evidence.append(ReleaseParseEvidence("format_rule", "release_format", rule_name, 1.0))
         if context.filename_title:
             evidence.append(ReleaseParseEvidence(
                 "title", "filename", context.filename_title, 1.0,
@@ -4811,12 +4822,13 @@ class TMDBScraper:
 
     def parse_media(
         self, filename: str, parent_path: str = "", match: MatchResult | None = None,
+        *, filename_only: bool = False,
     ) -> ReleaseParseResult:
-        """一次性生成标题、原始季集、有效季集与可审计证据。"""
-        core = _parse_release_core(filename, parent_path, include_release=True)
+        """生成统一解析结果；目录组检查只采文件独立证据，父目录仍限定格式作用域。"""
+        core = _parse_release_core(filename, parent_path, include_release=True, filename_only=filename_only)
         context = core.context
         fields = dict(core.release_fields or {})
-        processed = self.prepare_recognition(filename, parent_path, _core=core)
+        processed = self.prepare_recognition(filename, context.parent_path, _core=core)
         effective_season = processed.season
         effective_episode = processed.episode
         if match is not None and match.preprocess_evaluated:
@@ -7575,6 +7587,12 @@ class TMDBScraper:
         # 先在原始输入上解析投影，但不改变显式 ID、人工锁和管理员规则的优先级。
         processed = self.prepare_recognition(filename, parent_path, _core=core)
 
+        if raw_context.cleaned_components.get("release_format_conflicts"):
+            return self._attach_preprocess(MatchResult(
+                media_type="tv", need_confirm=True, status="low_confidence",
+                matched_by="release_format_conflict", threshold=1.0,
+                error="发布格式之间或与明确季集编号冲突，请核对并停用冲突格式",
+            ), processed)
         if filename_tmdb_conflict or parent_tmdb_conflict:
             result = MatchResult(
                 media_type=hint or parsed.get("type") or "",

@@ -149,8 +149,8 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
 
         expected_signatures = {
             "parse_media": (
-                ("self", "filename", "parent_path", "match"),
-                {"parent_path": "", "match": None},
+                ("self", "filename", "parent_path", "match", "filename_only"),
+                {"parent_path": "", "match": None, "filename_only": False},
             ),
             "parse_source_position": (
                 ("self", "filename", "parent_path"),
@@ -166,6 +166,11 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
                     default,
                     f"{method_name}.{parameter_name}",
                 )
+
+        self.assertEqual(
+            inspect.signature(scraper.TMDBScraper.parse_media).parameters["filename_only"].kind,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
 
     def test_release_parse_diagnostic_keeps_source_and_effective_positions(self):
         scraper = self.recognition_module()

@@ -123,6 +123,7 @@ jobs:
               "tests.test_metadata_settings_alignment_browser",
               "tests.test_guangya_directory_scrape_browser",
               "tests.test_guangya_directory_scrape_ui",
+              "tests.test_release_formats_browser",
               "tests.test_media_profile_in_place_ui",
               "tests.test_navigation_discovery_ui",
               "tests.test_window_viewport_inset",

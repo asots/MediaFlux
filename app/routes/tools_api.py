@@ -452,6 +452,66 @@ def _validate_tmdb_regex_target(
     }
 
 
+# 发布格式教学复用唯一解析链；这里只负责认证与HTTP错误边界。
+@router.get("/release-formats")
+def list_release_formats_api(request: Request):
+    require_api_login(request)
+    from app.modules.recognition import formats
+
+    return api_response({"items": formats.list_rules()})
+
+
+@router.post("/release-formats/preview")
+def preview_release_format_api(request: Request, data: dict = Body(...)):
+    require_api_login(request)
+    from app.modules.recognition import formats
+
+    try:
+        return api_response(formats.preview(data))
+    except ValueError as exc:
+        return api_error(str(exc), 400)
+
+
+@router.post("/release-formats")
+def save_release_format_api(request: Request, data: dict = Body(...)):
+    require_api_login(request)
+    from app.modules.recognition import formats
+
+    try:
+        item, created = formats.save(data)
+        return api_response({"item": item, "created": created}, 201 if created else 200)
+    except formats.FormatConflict as exc:
+        return api_error(str(exc), 409)
+    except ValueError as exc:
+        return api_error(str(exc), 400)
+
+
+@router.put("/release-formats/{rule_id}")
+def change_release_format_api(request: Request, rule_id: int = Path(..., ge=1), data: dict = Body(...)):
+    require_api_login(request)
+    from app.modules.recognition import formats
+
+    try:
+        return api_response(formats.change(rule_id, data))
+    except formats.FormatConflict as exc:
+        return api_error(str(exc), 409)
+    except ValueError as exc:
+        return api_error(str(exc), 400)
+
+
+@router.delete("/release-formats/{rule_id}")
+def delete_release_format_api(request: Request, rule_id: int = Path(..., ge=1), data: dict = Body(...)):
+    require_api_login(request)
+    from app.modules.recognition import formats
+
+    try:
+        return api_response(formats.change(rule_id, data, delete=True))
+    except formats.FormatConflict as exc:
+        return api_error(str(exc), 409)
+    except ValueError as exc:
+        return api_error(str(exc), 400)
+
+
 @router.get("/recognition-preprocess-rules")
 def list_recognition_preprocess_rules_api(request: Request):
     require_api_login(request)
