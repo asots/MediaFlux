@@ -196,7 +196,9 @@ class WindowViewportInsetContractTests(unittest.TestCase):
             for width, height in ((768, 1024), (820, 1180), (1041, 941), (1180, 820), (1440, 900)):
                 page.set_viewport_size({"width": width, "height": height})
                 page.evaluate("document.documentElement.style.setProperty('--mf-window-bottom-inset', '0px')")
-                page.wait_for_timeout(450)
+                page.wait_for_function(
+                    "() => document.getAnimations().every(animation => animation.playState !== 'running')"
+                )
                 result = page.evaluate(
                     """
                     async () => {
@@ -207,7 +209,7 @@ class WindowViewportInsetContractTests(unittest.TestCase):
                         const buttonRect = button.getBoundingClientRect();
                         const closedSidebarTransform = getComputedStyle(sidebar).transform;
                         sidebar.classList.add('open');
-                        await new Promise((resolve) => setTimeout(resolve, 450));
+                        await Promise.all(sidebar.getAnimations().map(animation => animation.finished));
                         const logoutRect = document.querySelector('.logout').getBoundingClientRect();
                         const openSidebarRect = sidebar.getBoundingClientRect();
                         sidebar.classList.remove('open');
@@ -288,7 +290,9 @@ class WindowViewportInsetContractTests(unittest.TestCase):
             for width, height in ((768, 1024), (820, 1180), (1180, 820), (1440, 900)):
                 page.set_viewport_size({"width": width, "height": height})
                 page.evaluate("document.documentElement.style.setProperty('--mf-window-bottom-inset', '0px')")
-                page.wait_for_timeout(450)
+                page.wait_for_function(
+                    "() => document.getAnimations().every(animation => animation.playState !== 'running')"
+                )
                 results.append(
                     page.evaluate(
                         """
