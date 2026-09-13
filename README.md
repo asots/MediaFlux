@@ -4,9 +4,11 @@
 
 <br/>
 
-**自动化家庭媒体整理与 STRM 流转中心**
+# MediaFlux：光鸭云盘整理、STRM 生成与 302 反代
 
-*RSS 订阅 · Telegram 交互 · qBittorrent · 光鸭云盘 · TMDB 刮削整理 · STRM 直链 · Jellyfin / Emby 媒体库刷新*
+**面向 Jellyfin / Emby 的自托管媒体自动化工具，也支持本地媒体整理与 AI Agent。**
+
+*光鸭云盘 · TMDB 识别整理 · STRM 增量同步 · 302 直链播放 · qBittorrent · RSS · Telegram*
 
 <br/>
 
@@ -14,7 +16,7 @@
 
 <br/>
 
-[快速开始](#快速开始) • [项目由来](#项目由来) • [功能概览](#功能概览) • [工作流程](docs/tutorials/00_自动化流转全景与工作流程.md) • [部署指南](docs/部署指南.md) • [配置教程](docs/配置教程.md) • [常见问题](docs/常见问题.md) • [免责声明](docs/免责声明.md)
+[快速开始](#快速开始) • [光鸭整理与 302 播放教程](docs/tutorials/01_Jellyfin与Emby媒体库及STRM播放实战.md) • [功能概览](#功能概览) • [工作流程](docs/tutorials/00_自动化流转全景与工作流程.md) • [部署指南](docs/部署指南.md) • [配置教程](docs/配置教程.md) • [常见问题](docs/常见问题.md) • [免责声明](docs/免责声明.md)
 
 </div>
 
@@ -22,25 +24,41 @@
 
 ## 项目简介
 
-**MediaFlux** 是一个为家庭媒体中心打造的自动化整理与流转工具。它将 RSS 追番、磁力下载、云盘转存、TMDB 刮削重命名、STRM 生成以及 Jellyfin/Emby 媒体库刷新串成一条自动运行的流水线。
+**MediaFlux** 是一个 MIT 开源的自托管家庭媒体自动化项目，可完成 **光鸭云盘影视整理、TMDB 识别与重命名、STRM 文件生成，以及 Emby / Jellyfin 302 反代播放**。如果你想把光鸭中的影视整理成 Jellyfin / Emby 可读取的媒体库，可以从下面的完整教程开始。
 
-日常追番或下载影视时，MediaFlux 能自动把下载好的文件整理进标准媒体库；如果使用光鸭云盘存储，它还能生成 `.strm` 文件供播放器通过 302 直链直接播放，不消耗本地服务器的转码 CPU 和出口带宽。
+它也支持 qBittorrent 本地下载与媒体整理、RSS 订阅、Telegram 交互和 AI Agent，不要求所有媒体都存储在云盘。
 
-> 💡 **全链路工作流程全景**：点击查阅 [《自动化流转全景与工作流程指南》](docs/tutorials/00_自动化流转全景与工作流程.md)，了解任务下发、下载调度、刮削整理、STRM 增量同步与 302 直链播放的完整执行链路。
+> **English:** MediaFlux is an MIT-licensed, self-hosted media automation tool for Jellyfin and Emby. It supports Guangya cloud drive organization, TMDB metadata matching, STRM generation, and a media reverse proxy with HTTP 302 direct playback where supported. It also integrates qBittorrent, RSS, Telegram, and an AI agent.
 
----
+### 从光鸭云盘到播放器
+
+```text
+光鸭云盘文件
+  → TMDB 识别与整理预览 → 确认后归档
+  → STRM 增量同步 → Jellyfin / Emby 扫描媒体库
+  → 播放器连接 MediaFlux 媒体反代 → 协商播放链路
+```
+
+**[阅读完整教程：光鸭云盘影视整理、STRM 生成与 Emby/Jellyfin 302 反代](docs/tutorials/01_Jellyfin与Emby媒体库及STRM播放实战.md)** —— 包含准备条件、配置步骤、界面截图、挂载与端口说明，以及如何验证实际播放链路。
+
+> **302 的边界：** 当光鸭媒体和客户端满足直放条件时，视频数据由播放器直接向云盘 CDN 获取，MediaFlux 不中继持续的视频流。兼容中继仍会使用 MediaFlux 的带宽；HLS、转封装或转码由 Jellyfin / Emby 协商处理，不能保证所有客户端、所有文件都返回 302。
+
+### 按你的需求开始
+
+| 你要解决的问题 | 推荐入口 |
+| --- | --- |
+| 整理光鸭云盘影视，生成 STRM 并接入 Emby / Jellyfin 302 反代 | [光鸭整理到播放的完整教程](docs/tutorials/01_Jellyfin与Emby媒体库及STRM播放实战.md) |
+| qBittorrent 下载完成后整理本地文件并刷新媒体库 | [本地媒体整理与 qBittorrent 联动](docs/tutorials/03_本地媒体安全移动与qBittorrent联动实战.md) |
+| 通过 RSS 订阅与过滤规则自动接收更新 | [Mikan 追番与标签过滤](docs/tutorials/02_Mikan全自动追番与标签过滤实战.md) |
+| 用自然语言查询、预览并确认媒体操作 | [Agent 配置与使用](docs/tutorials/08_Agent架构与使用实战.md) |
+
+MediaFlux 负责媒体进入库前的自动化流转及播放入口协商，**不替代 Jellyfin / Emby 本身，也不提供媒体内容**。首次使用建议先部署并跑通少量样本，再开启自动整理或订阅任务。
 
 ## 项目由来
 
-每一个媒体折腾党大概都经历过类似的“折腾之痛”：
+MediaFlux 起源于将本地下载、光鸭云盘和 Jellyfin / Emby 串联使用时的维护需求：希望减少多工具之间的手动交接，让下载、识别、整理、STRM 同步和媒体库刷新有统一的状态与排错入口。
 
-1. **工具链断裂与 API 异常**：早先一直使用 NASTool 进行追番与媒体整理，但在 qBittorrent 升级到 5.2 之后，因底层 API 变动经常抛出异常，自动化流水线频频断流。
-2. **大容量上云的契机**：后来发现了性价比极高的光鸭云盘（108 元 500TB），便将本地占满机械硬盘的影视库全量搬迁至云端。但随之而来的问题是：如何让 Jellyfin / Emby 在不消耗本地服务器 CPU 转码和出口下行带宽的情况下，高速、稳定地直接播放云端影视？
-3. **前人项目的启发与局限**：在探索云盘流转方案时，发现了优秀的开源项目 [TgtoDrive](https://github.com/walkingddd/TgtoDrive)（特别致敬原作者的开源探索！）；同时光鸭云盘Python 客户端 [guangyaclient (DDSRem-Dev/guangyaclient)](https://github.com/DDSRem-Dev/guangyaclient) 为底层的稳定通讯提供了关键基石。但在后续深入使用中，把 Jellyfin 升级到12.X版本后，遇到了一些 API 不兼容与整理流转方面的断层。
-
-面对这一连串割裂的痛点，与其在各个工具的修补缝合中反复折腾，不如从零构建一套现代化、高可用、且对本地与云端均具备事务保障的完整流转体系。
-
-于是 **MediaFlux** 诞生了——它原生支持最新版 qBittorrent、完美适配 Jellyfin / Emby 最新接口，并将 TMDB 严格刮削、光鸭云盘 302 直链秒播、防误删增量索引、Telegram 交互和全平台部署融为一体，让家庭媒体自动化真正变得稳定、省心、开箱即用。
+项目参考了 [TgtoDrive](https://github.com/walkingddd/TgtoDrive) 的开源探索，以及 [guangyaclient](https://github.com/DDSRem-Dev/guangyaclient) 的光鸭云盘 Python 客户端实现，感谢相关作者的工作。
 
 > [!CAUTION]
 > 本项目仅供 Python 编程学习、技术研究与个人合法家庭媒体资产归档整理使用。
@@ -57,7 +75,8 @@
 ### 2. TMDB 刮削与识别
 - **精准匹配**：结合标题清洗、年份约束、拼音匹配与结构化解析，支持电影、剧集分季以及特别篇（`Specials`/`S00E##`）标准化归档。
 - **待确认机制**：识别置信度较低的内容自动进入人工待确认列表，避免误归档。
-- **自定义规则与映射锁**：支持自定义正则重命名规则；对特殊命名源支持一次锁定、后续永久精准匹配。
+- **规则与映射锁**：支持识别预处理、TMDB 强制匹配规则与映射锁，对指定来源复用已确认的识别结果。
+- **发布格式教学**：用真实样本标注标题与季集字段，先批量预览，再保存复用；也可让 Agent 辅助推导。教学规则不替代 TMDB 身份匹配与人工确认，详见[发布格式教学](docs/tutorials/10_发布格式教学.md)。
 
 ### 3. 本地媒体安全整理
 - **多目录支持**：支持配置多个下载源目录和媒体库目录，可由 qB 下载完成自动触发，也可在 Web / Telegram 手动发起整理。
@@ -67,7 +86,7 @@
 ### 4. 光鸭云盘与 STRM 302 直链
 - **免 Key 登录**：Web 端直接手机验证码登录，Token 本地保存并自动定时刷新。
 - **云端文件管理**：支持文件树浏览、秒传转存、分享解析、批量改名和移动。
-- **302 直链播放**：Jellyfin/Emby 读取本地 `.strm` 文件，MediaFlux 提供短时签名并 302 重定向到云盘 CDN 直链，播放不耗本地服务器 CPU 与出口带宽。
+- **媒体反代与播放协商**：Jellyfin / Emby 读取本地 `.strm` 文件，MediaFlux 对符合条件的光鸭媒体返回短时签名的 CDN 直链；不适合真 302 的场景使用兼容中继或保留上游 HLS / 转码链路。
 - **增量同步与防误删**：基于本地 SQLite 索引增量维护 STRM，网络抖动或远端异常时自动熔断，防止误删本地媒体库。
 
 ### 5. 媒体探索（实验性）
@@ -183,7 +202,7 @@ python mediaflux.py support-bundle
 - 🗺️ [**项目全链路拓扑图**](docs/项目全链路拓扑图.md)：从启动、入口、下载、识别、整理到 STRM 播放、刷新、通知和恢复的完整流转图。
 - 🎬 [**进阶教程专区**](docs/tutorials/)：
   - [自动化流转全景与工作流程](docs/tutorials/00_自动化流转全景与工作流程.md)
-  - [Jellyfin / Emby 与 STRM 直链播放实战](docs/tutorials/01_Jellyfin与Emby媒体库及STRM播放实战.md)
+  - [光鸭云盘影视整理、STRM 生成与 Emby/Jellyfin 302 反代](docs/tutorials/01_Jellyfin与Emby媒体库及STRM播放实战.md)
   - [Mikan 蜜柑全自动追番与过滤实战](docs/tutorials/02_Mikan全自动追番与标签过滤实战.md)
   - [本地媒体安全移动与 qB 联动实战](docs/tutorials/03_本地媒体安全移动与qBittorrent联动实战.md)
   - [云盘大容量归档与冲突策略实战](docs/tutorials/04_云盘大容量影视归档与冲突策略实战.md)
@@ -218,7 +237,7 @@ python mediaflux.py support-bundle
 
 MediaFlux 的诞生与演进离不开开源社区优秀项目与开发者的探索，特别鸣谢以下项目与维护者：
 
-- [DDSRem-Dev/guangyaclient](https://github.com/DDSRem-Dev/guangyaclient)：为光鸭云盘的高效底层通讯、免 Key 验证码登录与 Token 管理提供了优秀的官方客户端 SDK 支持。
+- [DDSRem-Dev/guangyaclient](https://github.com/DDSRem-Dev/guangyaclient)：为光鸭云盘的高效底层通讯、免 Key 验证码登录与 Token 管理提供了 Python 客户端实现参考。
 - [walkingddd/TgtoDrive](https://github.com/walkingddd/TgtoDrive)：在云盘流转与早期 STRM 模式的探索上带来了宝贵的架构启发。
 - [qBittorrent](https://www.qbittorrent.org/) / [Jellyfin](https://jellyfin.org/) / [Emby](https://emby.media/)：为现代家庭媒体生态提供了强大的基础底座。
 - [LINUX.DO](https://linux.do)：一个友好的技术社区。
