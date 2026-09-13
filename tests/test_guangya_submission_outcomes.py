@@ -153,6 +153,44 @@ class GuangYaSubmissionOutcomeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "请求已失效"):
                 _submit_guangya(row)
 
+    def test_public_failure_keeps_content_rejection_without_raw_provider_details(self):
+        for succeeded in ([], ["qb"]):
+            for error in (
+                "文件违规",
+                "guangya: 文件违规",
+                "guangya: 光鸭任务创建失败: 文件违规 <b>private</b> "
+                "https://private.example/file?token=secret magnet:?xt=urn:btih:private",
+            ):
+                with self.subTest(succeeded=succeeded, error=error):
+                    summary = public_dispatch_summary({
+                        "succeeded": succeeded, "failed": ["guangya"], "error": error,
+                    })
+                    self.assertEqual(summary["error"], "光鸭返回：文件违规")
+                    self.assertEqual(summary["status"], "partial" if succeeded else "failed")
+                    self.assertEqual(summary["succeeded"], succeeded)
+                    self.assertEqual(summary["failed"], ["guangya"])
+                    self.assertEqual(summary["ok"], bool(succeeded))
+                    self.assertEqual(public_dispatch_summary(summary), summary)
+                    self.assertNotIn("private", json.dumps(summary))
+                    self.assertNotIn("secret", json.dumps(summary))
+
+    def test_content_rejection_does_not_override_unknown_or_duplicate_outcome(self):
+        for outcome in (
+            {"outcome_unknown": True},
+            {"review_required": True},
+            {"status": "manual_review"},
+            {"duplicate": True, "existing_status": "submitted"},
+        ):
+            with self.subTest(outcome=outcome):
+                summary = public_dispatch_summary({
+                    "succeeded": [], "failed": ["guangya"],
+                    "error": "guangya: 文件违规", **outcome,
+                })
+                self.assertEqual(summary["status"], "duplicate" if outcome.get("duplicate") else "manual_review")
+                self.assertNotIn("文件违规", summary["error"])
+                if not outcome.get("duplicate"):
+                    self.assertIn("勿直接重复提交", summary["error"])
+
     def test_public_failure_distinguishes_torrent_from_magnet_resolution(self):
         summary = public_dispatch_summary({
             "ok": False,

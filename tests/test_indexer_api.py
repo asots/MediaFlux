@@ -749,39 +749,42 @@ class IndexerAPITests(unittest.TestCase):
     def test_download_exposes_known_guangya_failure_without_internal_details(self):
         headers = self.authenticate()
         service = FakeIndexerService()
-        with patch(
-            "app.routes.indexers_api.get_indexer_service",
-            return_value=service,
-        ), patch(
-            "app.indexers.downloads.normalize_download_url",
-            return_value=SimpleNamespace(kind="magnet", title="Demo", source_value="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", torrent_data=None),
-        ), patch(
-            "app.indexers.downloads.create_request",
-            return_value={"id": 31, "created": True},
-        ), patch(
-            "app.indexers.downloads.dispatch_request",
-            return_value={
-                "ok": False,
-                "status": "failed",
-                "succeeded": [],
-                "failed": ["guangya"],
-                "error": (
-                    "guangya: 资源中没有符合下载规则的文件：解析器标记为排除 "
-                    "magnet:?xt=urn:btih:secret https://indexer.example/demo.torrent"
-                ),
-            },
+        for reason, expected in (
+            ("资源中没有符合下载规则的文件", "光鸭未找到符合下载规则的文件"),
+            ("文件违规", "光鸭返回：文件违规"),
         ):
-            response = self.client.post(
-                "/api/indexers/download",
-                json={"result_id": "opaque-result", "target": "guangya"},
-                headers=headers,
-            )
+            with self.subTest(reason=reason):
+                with patch(
+                    "app.routes.indexers_api.get_indexer_service",
+                    return_value=service,
+                ), patch(
+                    "app.indexers.downloads.normalize_download_url",
+                    return_value=SimpleNamespace(kind="magnet", title="Demo", source_value="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", torrent_data=None),
+                ), patch(
+                    "app.indexers.downloads.create_request",
+                    return_value={"id": 31, "created": True},
+                ), patch(
+                    "app.indexers.downloads.dispatch_request",
+                    return_value={
+                        "ok": False,
+                        "status": "failed",
+                        "succeeded": [],
+                        "failed": ["guangya"],
+                        "error": f"guangya: {reason}：解析器标记为排除 "
+                        "magnet:?xt=urn:btih:secret https://indexer.example/demo.torrent",
+                    },
+                ):
+                    response = self.client.post(
+                        "/api/indexers/download",
+                        json={"result_id": "opaque-result", "target": "guangya"},
+                        headers=headers,
+                    )
 
-        self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["error"], "光鸭未找到符合下载规则的文件")
-        self.assertNotIn("magnet:", response.text)
-        self.assertNotIn("indexer.example", response.text)
-        self.assertNotIn("解析器标记为排除", response.text)
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.json()["error"], expected)
+                self.assertNotIn("magnet:", response.text)
+                self.assertNotIn("indexer.example", response.text)
+                self.assertNotIn("解析器标记为排除", response.text)
 
     def test_download_preserves_unknown_submission_as_manual_review(self):
         headers = self.authenticate()

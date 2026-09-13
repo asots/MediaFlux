@@ -21,6 +21,7 @@ from app.agent.kernel.state import (
 )
 from app.bot import handlers
 from app.modules import download_dispatcher as dispatcher
+from app.routes import downloads_api
 from tests.support import isolated_test_database
 
 
@@ -81,6 +82,99 @@ class TelegramDownloadResultBoundaryTests(unittest.TestCase):
                 if raw.get("outcome_unknown"):
                     self.assertIn("勿直接重复提交", text)
                     self.assertNotIn("\n失败:", text)
+
+    def test_guangya_explicit_rejection_keeps_raw_reason_for_web_and_public_receipt(self) -> None:
+        request_id = self._request()
+        bot = SimpleNamespace(edit_message_text=Mock())
+        with patch.object(dispatcher, "_submit_guangya", return_value={
+            "ok": False, "error": "文件违规",
+        }) as backend:
+            handlers._dispatch_download_callback(bot, "100", "1", request_id, "guangya")
+
+        backend.assert_called_once()
+        row = db.get_download_request(request_id)
+        self.assertEqual(row["gy_status"], "failed")
+        self.assertEqual(row["error"], "guangya: 文件违规")
+        text = bot.edit_message_text.call_args.args[0]
+        self.assertIn(f"请求: #{request_id}", text)
+        self.assertIn("原因: 光鸭返回：文件违规", text)
+
+        stages = downloads_api._attention_stages(row)
+        guangya_stage = next(stage for stage in stages if stage["key"] == "guangya")
+        self.assertEqual(guangya_stage["error"], "文件违规")
+
+    def test_partial_download_retries_only_telegram_receipt_and_keeps_qb_success(self) -> None:
+        request_id = self._request()
+        private_url = "https://private.example/download?token=fixture-token"
+        private_token = "fixture-private-token"
+        bot = SimpleNamespace(edit_message_text=Mock(side_effect=[RuntimeError("fake TG"), None]))
+        with patch.object(dispatcher, "_submit_qb", return_value={
+            "ok": True, "task_id": "a" * 40,
+        }) as qb_backend, patch.object(dispatcher, "_submit_guangya", return_value={
+            "ok": False,
+            "error": f"文件违规；url={private_url}；token={private_token}",
+        }) as guangya_backend:
+            handlers._dispatch_download_callback(bot, "100", "1", request_id, "both")
+
+        qb_backend.assert_called_once()
+        guangya_backend.assert_called_once()
+        row = db.get_download_request(request_id)
+        self.assertEqual(row["qb_status"], "submitted")
+        self.assertEqual(row["gy_status"], "failed")
+        self.assertIn(private_url, row["error"])
+        self.assertIn(private_token, row["error"])
+
+        calls = bot.edit_message_text.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1], "TG 重发必须复用同一业务回执")
+        text = calls[-1].args[0]
+        self.assertIn("<b>下载任务部分提交</b>", text)
+        self.assertIn(f"请求: #{request_id}", text)
+        self.assertIn("成功: qBittorrent", text)
+        self.assertIn("失败: 光鸭云盘", text)
+        self.assertIn("原因: 光鸭返回：文件违规", text)
+        self.assertNotIn(private_url, text)
+        self.assertNotIn(private_token, text)
+
+    def test_unknown_guangya_error_uses_web_details_but_unknown_result_stays_manual_review(self) -> None:
+        request_id = self._request()
+        private_url = "https://private.example/detail?token=unknown-fixture"
+        private_token = "unknown-private-token"
+        private_error = f"provider rejected request url={private_url} token={private_token}"
+        bot = SimpleNamespace(edit_message_text=Mock())
+        with patch.object(dispatcher, "_submit_guangya", return_value={
+            "ok": False, "error": private_error,
+        }) as backend:
+            handlers._dispatch_download_callback(bot, "100", "1", request_id, "guangya")
+
+        backend.assert_called_once()
+        text = bot.edit_message_text.call_args.args[0]
+        self.assertIn("<b>下载提交失败</b>", text)
+        self.assertIn("光鸭提交失败", text)
+        self.assertIn(f"请到 Web 下载页查看请求 #{request_id} 的详细原因。", text)
+        self.assertNotIn(private_url, text)
+        self.assertNotIn(private_token, text)
+
+        unknown_bot = SimpleNamespace(edit_message_text=Mock())
+        with patch.object(dispatcher, "dispatch_request", return_value={
+            "ok": False,
+            "succeeded": [],
+            "failed": ["guangya"],
+            "outcome_unknown": True,
+            "error": private_error,
+        }) as dispatch:
+            handlers._dispatch_download_callback(
+                unknown_bot, "100", "1", request_id, "guangya"
+            )
+
+        dispatch.assert_called_once_with(request_id, "guangya")
+        unknown_text = unknown_bot.edit_message_text.call_args.args[0]
+        self.assertIn("<b>下载提交结果待核对</b>", unknown_text)
+        self.assertIn("勿直接重复提交", unknown_text)
+        self.assertNotIn("光鸭提交失败", unknown_text)
+        self.assertNotIn("请到 Web 下载页查看请求 #", unknown_text)
+        self.assertNotIn(private_url, unknown_text)
+        self.assertNotIn(private_token, unknown_text)
 
     def test_tracker_failure_does_not_change_or_block_receipt(self) -> None:
         self.tracker.reload.side_effect = RuntimeError("fake tracker")

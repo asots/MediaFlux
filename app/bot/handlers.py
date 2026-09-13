@@ -2828,7 +2828,10 @@ def _dispatch_download_callback(
         label = "未确认成功" if status == "manual_review" else "失败"
         text += f"\n{label}: " + "、".join(labels[item] for item in summary["failed"])
     if summary["error"]:
-        text += "\n" + html.escape(summary["error"])
+        label = "原因: " if status in {"failed", "partial"} else ""
+        text += "\n" + label + html.escape(summary["error"])
+        if summary["error"] in {"光鸭提交失败", "下载提交失败", "部分下载目标提交失败"}:
+            text += f"\n请到 Web 下载页查看请求 #{request_id} 的详细原因。"
     if succeeded:
         try:
             text += "\n" + _download_follow_up_text(succeeded)

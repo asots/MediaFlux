@@ -436,6 +436,7 @@ def _public_guangya_failure(error: str) -> str:
     if http_failure:
         return f"光鸭资源解析请求失败（HTTP {http_failure.group(1)}）"
     rules = (
+        ("文件违规", "光鸭返回：文件违规"),
         ("光鸭资源解析请求超时", "光鸭资源解析请求超时"),
         ("光鸭资源解析网络异常", "光鸭资源解析网络异常"),
         ("光鸭资源解析响应无效", "光鸭资源解析响应无效"),
@@ -487,19 +488,14 @@ def public_dispatch_summary(result: dict[str, Any]) -> dict[str, Any]:
             "下载后端提交结果未知，请先核对下载器，勿直接重复提交"
         )
     elif succeeded and failed:
-        status = "partial"
-        if failed == ["guangya"]:
-            error = _public_guangya_failure(str(result.get("error") or ""))
-        else:
-            error = "部分下载目标提交失败"
+        status, error = "partial", "部分下载目标提交失败"
     elif succeeded:
         status, error = "submitted", ""
     else:
-        status = "failed"
-        if failed == ["guangya"]:
-            error = _public_guangya_failure(str(result.get("error") or ""))
-        else:
-            error = "下载提交失败"
+        status, error = "failed", "下载提交失败"
+
+    if status in {"partial", "failed"} and failed == ["guangya"]:
+        error = _public_guangya_failure(str(result.get("error") or ""))
 
     summary = {
         "ok": status in {"submitted", "partial"},
