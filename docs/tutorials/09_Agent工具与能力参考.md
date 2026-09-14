@@ -112,7 +112,7 @@
 | `library.search_missing_episode_resources` | READ | 先确认指定季集属于已播缺集，再按当前身份保存的资源偏好排序；本次 preference_overrides 优先于长期偏好（空数组/0/any 可取消对应约束），不会自动下载。 |
 | `library.search_missing_season_resources` | READ | 先完整核对指定季度，再搜索最多 3 个已播缺集并按当前身份保存的资源偏好排序；本次 preference_overrides 优先，不会自动下载。 |
 | `library.missing_media_workflows` | READ | 查看当前用户最近缺集补库流程的安全状态；只返回剧名、季集、阶段、目标类型与是否已建立下载任务，不返回资源句柄、磁力、URL、路径或凭据。 |
-| `library.check_updates` | READ | 核对某部媒体是否有更新；剧集比较 TMDB 已播普通集与 Jellyfin / Emby 本地收录，电影核对本地存在性并提供需人工判断的资源站跟进。 |
+| `library.check_updates` | READ | 单部或批量核对最多 20 部媒体；默认刷新 Jellyfin / Emby 库存，对照 TMDB 已播季集。逐部保留缺集、无已播缺集、歧义与不可用状态；不代表全网资源发布进度。 |
 | `library.audit_library_episodes` | READ | 有界枚举已配置媒体服务器中的剧集，并按可靠 TMDB 映射巡检截至指定日期的已播缺集。 |
 | `library.start_episode_audit` | WRITE | 在用户确认后创建可恢复、可查询进度、可取消的后台全库剧集完整性检查。 |
 | `library.patrol_status` | READ | 查询最近一次后台全库缺集巡检的安全摘要；不会触发巡检、资源搜索或下载。 |

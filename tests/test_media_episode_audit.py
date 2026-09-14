@@ -9,6 +9,7 @@ from app.agent.episode_audit import (
     invalidate_episode_audit_cache,
     reset_episode_audit_cache_for_tests,
 )
+from app.agent.update_actions import check_library_updates
 from app.clients.base import SeriesCandidate, SeriesEpisodeInventory, SeriesSearchResult
 from app.discovery.models import ProviderNotConfigured, ProviderUnavailable
 from app.services import _series_source_payload
@@ -235,6 +236,45 @@ class EpisodeAuditTests(unittest.TestCase):
         ])
         self.assertFalse(result.data["resource_followups_truncated"])
 
+    def test_latest_episode_numbers_are_not_local_episode_count(self):
+        fake = _FakeTMDB()
+        fake.details = {
+            "name": "The Show",
+            "first_air_date": "2026-01-01",
+            "seasons": [{"season_number": 1}, {"season_number": 2}],
+        }
+        fake.seasons = {
+            1: {
+                "episodes": [
+                    {"episode_number": 1, "air_date": "2026-07-01"},
+                    {"episode_number": 2, "air_date": "2026-07-08"},
+                ]
+            },
+            2: {
+                "episodes": [
+                    {"episode_number": 1, "air_date": "2026-07-15"}
+                ]
+            },
+        }
+        with patch(
+            "app.agent.episode_audit.inspect_series_episode_sources",
+            return_value=[_ready([(1, 1), (2, 1)])],
+        ), patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+            result = audit_series_episodes(dict(self.arguments))
+
+        self.assertEqual(result.status, "updates_available")
+        self.assertEqual(result.data["local_episode_count"], 2)
+        self.assertEqual(
+            result.data["latest_local"], {"season": 2, "episode": 1}
+        )
+        self.assertEqual(
+            result.data["latest_aired"], {"season": 2, "episode": 1}
+        )
+        self.assertEqual(result.data["missing_count"], 1)
+        self.assertEqual(
+            result.data["missing_sample"], [{"season": 1, "episode": 2}]
+        )
+
     def test_exact_target_beyond_missing_sample_is_still_verified(self):
         fake = _FakeTMDB()
         fake.details = {
@@ -457,6 +497,59 @@ class EpisodeAuditTests(unittest.TestCase):
             audit_series_episodes(dict(self.arguments))
             audit_series_episodes(dict(self.arguments))
         inspect.assert_called_once()
+
+    def test_check_updates_refreshes_inventory_but_plain_audit_cache_still_reuses(self):
+        inventory = [(1, 1)]
+
+        def inspect_inventory(*_args, **_kwargs):
+            return [_ready(list(inventory))]
+
+        with patch(
+            "app.agent.episode_audit.inspect_series_episode_sources",
+            side_effect=inspect_inventory,
+        ) as inspect, patch(
+            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+        ):
+            first = audit_series_episodes(dict(self.arguments))
+            self.assertEqual(first.status, "updates_available")
+            self.assertEqual(first.data["local_episode_count"], 1)
+
+            # 普通 audit 仍应命中旧缓存，而不是因为媒体库存变化自行绕过缓存。
+            inventory[:] = [(1, 1), (1, 2), (2, 1)]
+            cached = audit_series_episodes(dict(self.arguments))
+            self.assertEqual(cached.status, "updates_available")
+            self.assertEqual(cached.data["local_episode_count"], 1)
+            self.assertEqual(inspect.call_count, 1)
+
+            # check_updates 默认 refresh=True：先失效目标缓存，再读取新库存。
+            refreshed = check_library_updates(
+                {
+                    "query": "The Show",
+                    "media_type": "tv",
+                    "tmdb_id": "",
+                    "season": None,
+                    "as_of": "2026-08-01",
+                }
+            )
+            self.assertEqual(refreshed.status, "up_to_date")
+            self.assertEqual(refreshed.data["local_episode_count"], 3)
+            self.assertEqual(inspect.call_count, 2)
+
+            # refresh=False 允许复用刚得到的缓存，即使临时库存再次变化。
+            inventory[:] = [(1, 1)]
+            reused = check_library_updates(
+                {
+                    "query": "The Show",
+                    "media_type": "tv",
+                    "tmdb_id": "",
+                    "season": None,
+                    "as_of": "2026-08-01",
+                    "refresh": False,
+                }
+            )
+            self.assertEqual(reused.status, "up_to_date")
+            self.assertEqual(reused.data["local_episode_count"], 3)
+            self.assertEqual(inspect.call_count, 2)
 
 
 class TMDBSeasonPathTests(unittest.TestCase):

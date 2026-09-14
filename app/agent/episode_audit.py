@@ -484,7 +484,11 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
         local = {item for item in local if item[0] == arguments["season"]}
     missing = sorted(expected - local)
     sample = [{"season": season, "episode": episode} for season, episode in missing[:_MAX_MISSING_SAMPLE]]
+    latest_local = max(local) if local else None
+    latest_aired = max(expected) if expected else None
     data.update({
+        "latest_local": dict(zip(("season", "episode"), latest_local)) if latest_local else None,
+        "latest_aired": dict(zip(("season", "episode"), latest_aired)) if latest_aired else None,
         "title": str(details.get("name") or (ready[0].get("selected") or {}).get("name") or arguments["query"]),
         "expected_aired": len(expected),
         "local_episode_count": len(local),

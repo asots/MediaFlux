@@ -157,16 +157,34 @@ def _library_episode_audit_arguments(arguments: dict[str, Any]) -> dict[str, Any
 
 
 def _library_update_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    _reject_extra(arguments, {"query", "media_type", "tmdb_id", "season", "as_of"})
+    _reject_extra(arguments, {"query", "queries", "media_type", "tmdb_id", "season", "as_of", "refresh"})
+    refresh = arguments.get("refresh", True)
+    if not isinstance(refresh, bool):
+        raise AgentToolError("refresh 必须是布尔值")
+    if "queries" in arguments:
+        if set(arguments) & {"query", "tmdb_id", "season"}:
+            raise AgentToolError("queries 批量查询不能同时指定 query、tmdb_id 或 season；歧义项请单独核对")
+        queries = arguments["queries"]
+        if not isinstance(queries, list) or not 1 <= len(queries) <= 20:
+            raise AgentToolError("queries 必须包含 1 到 20 个剧名或片名")
+        shared = {key: value for key, value in arguments.items() if key != "queries"}
+        items = [_library_update_arguments({**shared, "query": query}) for query in queries]
+        distinct = {}
+        for item in items:
+            distinct.setdefault(item["query"].casefold(), item["query"])
+        return {
+            "queries": list(distinct.values()), "media_type": items[0]["media_type"],
+            "as_of": items[0]["as_of"], "refresh": refresh,
+        }
     media_type = arguments.get("media_type", "auto")
     if not isinstance(media_type, str) or media_type not in {"auto", "tv", "movie"}:
         raise AgentToolError("media_type 必须是 auto、tv 或 movie")
     normalized = _episode_audit_arguments(
-        {key: value for key, value in arguments.items() if key != "media_type"}
+        {key: value for key, value in arguments.items() if key not in {"media_type", "refresh"}}
     )
     if media_type == "movie" and normalized.get("season") is not None:
         raise AgentToolError("电影更新核对不支持 season 参数")
-    normalized["media_type"] = media_type
+    normalized.update(media_type=media_type, refresh=refresh)
     return normalized
 
 

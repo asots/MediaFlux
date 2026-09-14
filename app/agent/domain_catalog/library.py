@@ -114,8 +114,8 @@ def register_specs(
             description=(
                 "在已配置的 Jellyfin / Emby 媒体库中搜索一个具体标题；适合单片核对，"
                 "并在可用时返回已校验的 open_url。"
-                "已有 TMDB 身份清单或多部片单时必须使用 library.batch_presence，"
-                "不要逐部重复调用本工具。"
+                "已有 TMDB 身份清单核对存在性用 library.batch_presence；"
+                "多部剧更新核对直接用 library.check_updates 的 queries，不要逐部重复搜索。"
             ),
             risk=RiskLevel.READ,
             domains=("library", "media_identity"),
@@ -311,9 +311,11 @@ def register_specs(
         ToolSpec(
             name="library.check_updates",
             description=(
-                "核对某部媒体是否有更新；剧集比较 TMDB 已播普通集与 Jellyfin / Emby 本地收录，"
-                "电影核对本地存在性并提供需人工判断的资源站跟进。该结果用于本地/TMDB 对照，"
-                "不能替代官方平台的实时更新公告。"
+                "单部或一次批量核对最多20部媒体更新：单部传query，多部/片单/关注列表传queries，"
+                "无需先逐部library.search或取得TMDB ID。默认刷新实际媒体库库存，‘再查一次’应沿用"
+                "上下文中的片单重新调用，不得复述上次进度。剧集对照TMDB已播季集，电影核对本地存在性。"
+                "逐部报告缺集、无已播缺集或待确认；集数数量不等于最新集号，不能猜测绝对集与季集映射。"
+                "这不是全网资源发布或官方实时公告；需要下载候选时再检索资源，不得把单站失败当作全网无更新。"
             ),
             risk=RiskLevel.READ,
             domains=("library", "official_progress"),
@@ -321,9 +323,13 @@ def register_specs(
             freshness="live",
             parameters={
                 "type": "object",
-                "required": ["query"],
+                "anyOf": [{"required": ["query"]}, {"required": ["queries"]}],
                 "properties": {
                     "query": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "queries": {"type": "array", "minItems": 1, "maxItems": 20,
+                                "items": {"type": "string", "minLength": 1, "maxLength": 120}},
+                    "refresh": {"type": "boolean", "default": True,
+                                "description": "默认重新读取当前库存；只有显式false才允许复用短时审计缓存"},
                     "media_type": {"type": "string", "enum": ["auto", "tv", "movie"]},
                     "tmdb_id": {"type": "string", "pattern": "^[0-9]{1,10}$"},
                     "season": {"type": "integer", "minimum": 1, "maximum": 100},
@@ -333,8 +339,11 @@ def register_specs(
             },
             handler=check_library_updates,
             validator=_library_update_arguments,
+            related_tools=("library.search_missing_episode_resources", "indexer.search_resources"),
             examples=(
                 "检查《某剧》有没有更新",
+                "媒体库中的这十部国漫都有更新吗",
+                "再检查一下刚才那些剧的更新",
                 "这部剧最新播到哪里而本地有多少",
             ),
         )

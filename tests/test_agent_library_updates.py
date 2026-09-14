@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.agent.domain_catalog.shared import _library_update_arguments
+from app.agent.errors import AgentToolError
+from app.agent.kernel.projection import DefaultProjector
 from app.agent.models import Evidence, ToolResult
 from app.agent.update_actions import check_library_updates
 
@@ -26,6 +32,114 @@ def _audit_result(*, status: str = "updates_available") -> ToolResult:
             Evidence("media_servers+tmdb", "安全审计", "2026-08-01T10:00:00+08:00")
         ],
     )
+
+
+def _query_audit_result(query: str, *, status: str) -> ToolResult:
+    """为批量核对提供完整、可扁平化的单项审计 DTO。"""
+    missing = (
+        [{"season": 1, "episode": 2}]
+        if status == "updates_available"
+        else []
+    )
+    return ToolResult(
+        ok=status in {"updates_available", "up_to_date", "comparison_unavailable"},
+        status=status,
+        summary={
+            "updates_available": "发现 1 集已播但本地尚未收录",
+            "up_to_date": "截至指定日期，已播普通剧集均已收录",
+            "ambiguous": "媒体库命中多个同名剧集，暂不做猜测",
+            "unavailable": "媒体服务器暂时不可用，无法完成剧集审计",
+            "comparison_unavailable": "本地条目存在，但版本比较不可用",
+        }[status],
+        data={
+            "query": query,
+            "title": query,
+            "tmdb_id": "12345" if status in {"updates_available", "up_to_date"} else "",
+            "local_episode_count": 2 if status != "unavailable" else None,
+            "expected_aired": 3 if status != "unavailable" else None,
+            "missing_count": len(missing) if status != "unavailable" else None,
+            "latest_local": {"season": 1, "episode": 3}
+            if status != "unavailable"
+            else None,
+            "latest_aired": {"season": 1, "episode": 3}
+            if status != "unavailable"
+            else None,
+            "missing_sample": missing,
+            "missing_sample_truncated": False,
+        },
+    )
+
+
+class LibraryUpdateArgumentTests(unittest.TestCase):
+    def test_single_or_bounded_batch_queries_are_normalized_without_changing_order(self):
+        single = _library_update_arguments(
+            {
+                "query": "  黑镜  ",
+                "media_type": "tv",
+                "as_of": "2026-08-01",
+            }
+        )
+        self.assertEqual(single["query"], "黑镜")
+        self.assertNotIn("queries", single)
+        self.assertEqual(single["media_type"], "tv")
+        self.assertEqual(single["as_of"], "2026-08-01")
+        self.assertTrue(single["refresh"])
+
+        queries = ["  合成剧一  ", "合成剧二", "合成剧一", "合成剧三"]
+        batch = _library_update_arguments(
+            {
+                "queries": queries,
+                "media_type": "auto",
+                "as_of": "2026-08-01",
+            }
+        )
+        self.assertEqual(batch["queries"], ["合成剧一", "合成剧二", "合成剧三"])
+        self.assertNotIn("query", batch)
+        self.assertEqual(batch["media_type"], "auto")
+        self.assertEqual(batch["as_of"], "2026-08-01")
+        self.assertTrue(batch["refresh"])
+
+        twenty = [f"边界剧集 {index:02d}" for index in range(20)]
+        normalized = _library_update_arguments(
+            {"queries": twenty, "media_type": "tv", "as_of": "2026-08-01"}
+        )
+        self.assertEqual(normalized["queries"], twenty)
+
+    def test_update_argument_boundaries_types_refresh_and_mutual_exclusion(self):
+        self.assertFalse(
+            _library_update_arguments(
+                {
+                    "query": "黑镜",
+                    "media_type": "tv",
+                    "as_of": "2026-08-01",
+                    "refresh": False,
+                }
+            )["refresh"]
+        )
+
+        invalid_arguments = [
+            {"queries": [f"剧集 {index:02d}" for index in range(21)]},
+            {"queries": []},
+            {"queries": "不是列表"},
+            {"queries": ["有效", 2]},
+            {"queries": [""]},
+            {"query": ""},
+            {"query": ["不是字符串"]},
+            {"query": "单项", "queries": ["批量"]},
+            {"queries": ["批量"], "tmdb_id": "12345"},
+            {"queries": ["批量"], "season": 1},
+        ]
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(AgentToolError):
+                    _library_update_arguments(arguments)
+
+        for invalid_refresh in (0, 1, "true", "false", None, []):
+            with self.subTest(refresh=invalid_refresh):
+                with self.assertRaises(AgentToolError):
+                    _library_update_arguments(
+                        {"query": "黑镜", "refresh": invalid_refresh}
+                    )
 
 
 class LibraryUpdateActionTests(unittest.TestCase):
@@ -340,3 +454,220 @@ class LibraryUpdateActionTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "cannot_determine")
         self.assertIn("无法可靠判断", result.summary)
+
+    def test_batch_checks_ten_queries_in_order_with_bounded_concurrency_and_safe_errors(self):
+        titles = [f"合成剧集 {index:02d}" for index in range(1, 11)]
+        status_by_query = {
+            titles[0]: "updates_available",
+            titles[1]: "updates_available",
+            titles[2]: "updates_available",
+            titles[3]: "up_to_date",
+            titles[4]: "up_to_date",
+            titles[5]: "up_to_date",
+            titles[6]: "ambiguous",
+            titles[7]: "ambiguous",
+            titles[8]: "unavailable",
+        }
+        state_lock = threading.Lock()
+        seen_queries: list[str] = []
+        active = 0
+        max_active = 0
+
+        def audit_side_effect(arguments):
+            nonlocal active, max_active
+            query = arguments["query"]
+            with state_lock:
+                seen_queries.append(query)
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                # 给并发窗口留出确定的观测时间；不访问真实媒体库或资源站。
+                time.sleep(0.01)
+                if query == titles[-1]:
+                    raise RuntimeError("secret token at http://user:pass@private.invalid")
+                return _query_audit_result(query, status=status_by_query[query])
+            finally:
+                with state_lock:
+                    active -= 1
+
+        with patch(
+            "app.agent.update_actions.audit_series_episodes",
+            side_effect=audit_side_effect,
+        ) as audit:
+            result = check_library_updates(
+                {
+                    "queries": titles,
+                    "media_type": "tv",
+                    "as_of": "2026-08-01",
+                    "refresh": False,
+                }
+            )
+
+        self.assertEqual(audit.call_count, 10)
+        self.assertCountEqual(seen_queries, titles)
+        self.assertGreaterEqual(max_active, 2)
+        self.assertLessEqual(max_active, 3)
+        self.assertTrue(result.ok, "只要至少一个单项可判定，批量 ok 应取 any(single.ok)")
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.data["as_of"], "2026-08-01")
+        self.assertIsInstance(result.data["checked_at"], str)
+        self.assertTrue(result.data["checked_at"])
+        self.assertEqual(
+            result.data["check_definition"],
+            "library_inventory_vs_tmdb_not_resource_release_availability",
+        )
+        self.assertEqual(
+            result.data["counts"],
+            {
+                "requested": 10,
+                "updates_available": 3,
+                "up_to_date": 3,
+                "uncertain": 4,
+            },
+        )
+
+        items = result.data["items"]
+        self.assertEqual([item["query"] for item in items], titles)
+        self.assertEqual(
+            [item["status"] for item in items[:-1]],
+            [status_by_query[query] for query in titles[:-1]],
+        )
+        required_item_keys = {
+            "query",
+            "title",
+            "status",
+            "ok",
+            "summary",
+            "tmdb_id",
+            "local_episode_count",
+            "expected_aired",
+            "missing_count",
+            "latest_local",
+            "latest_aired",
+            "missing_sample",
+        }
+        for item in items:
+            with self.subTest(query=item["query"]):
+                self.assertTrue(required_item_keys <= item.keys())
+        failed = items[-1]
+        self.assertFalse(failed["ok"])
+        self.assertIsNone(failed["missing_count"])
+        self.assertIsNone(failed["local_episode_count"])
+        self.assertNotIn(failed["status"], {"updates_available", "up_to_date"})
+        public_result = str(result.to_dict())
+        self.assertNotIn("secret token", public_result)
+        self.assertNotIn("private.invalid", public_result)
+        self.assertNotIn("user:pass", public_result)
+
+    def test_batch_status_is_success_when_every_item_is_determinable(self):
+        titles = ["可判定剧一", "可判定剧二"]
+        with patch(
+            "app.agent.update_actions.audit_series_episodes",
+            side_effect=lambda arguments: _query_audit_result(
+                arguments["query"], status="up_to_date"
+            ),
+        ):
+            result = check_library_updates(
+                {
+                    "queries": titles,
+                    "media_type": "tv",
+                    "as_of": "2026-08-01",
+                    "refresh": False,
+                }
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.data["counts"]["uncertain"], 0)
+        self.assertEqual(
+            [item["status"] for item in result.data["items"]],
+            ["up_to_date", "up_to_date"],
+        )
+
+    def test_batch_limits_missing_sample_and_default_projector_keeps_twenty_items(self):
+        titles = [f"投影剧集 {index:02d}" for index in range(1, 21)]
+        all_missing = [{"season": 1, "episode": episode} for episode in range(1, 8)]
+
+        def audit_side_effect(arguments):
+            result = _query_audit_result(
+                arguments["query"], status="updates_available"
+            )
+            result.data.update(
+                {
+                    "local_episode_count": 0,
+                    "expected_aired": 7,
+                    "missing_count": 7,
+                    "latest_local": None,
+                    "latest_aired": {"season": 1, "episode": 7},
+                    "missing_sample": list(all_missing),
+                    "missing_sample_truncated": True,
+                }
+            )
+            return result
+
+        with patch(
+            "app.agent.update_actions.audit_series_episodes",
+            side_effect=audit_side_effect,
+        ):
+            result = check_library_updates(
+                {
+                    "queries": titles,
+                    "media_type": "tv",
+                    "as_of": "2026-08-01",
+                    "refresh": False,
+                }
+            )
+
+        items = result.data["items"]
+        self.assertEqual(len(items), 20)
+        self.assertEqual([item["query"] for item in items], titles)
+        for item in items:
+            with self.subTest(query=item["query"]):
+                self.assertLessEqual(len(item["missing_sample"]), 5)
+                self.assertTrue(item["missing_sample_truncated"])
+
+        projected = json.loads(DefaultProjector().project(result).model_content)
+        self.assertEqual(len(projected["data"]["items"]), 20)
+        self.assertEqual([item["query"] for item in projected["data"]["items"]], titles)
+
+    def test_movie_comparison_unavailable_counts_as_uncertain_in_batch(self):
+        titles = ["电影甲", "电影乙"]
+
+        def movie_sources(query, *, limit):
+            self.assertEqual(limit, 50)
+            return [
+                {
+                    "server_type": "jellyfin",
+                    "server_name": "测试媒体库",
+                    "items": [
+                        SimpleNamespace(
+                            type="Movie",
+                            name=query,
+                            display_name=query,
+                            year="2024",
+                        )
+                    ],
+                    "error": "",
+                }
+            ]
+
+        with patch(
+            "app.agent.update_actions.search_media_servers",
+            side_effect=movie_sources,
+        ):
+            result = check_library_updates(
+                {
+                    "queries": titles,
+                    "media_type": "movie",
+                    "as_of": "2026-08-01",
+                    "refresh": False,
+                }
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.data["counts"]["uncertain"], 2)
+        self.assertEqual(
+            [item["status"] for item in result.data["items"]],
+            ["comparison_unavailable", "comparison_unavailable"],
+        )

@@ -1,14 +1,18 @@
 """媒体更新核对：剧集审计已播集，电影核对本地存在性并给出安全资源跟进。"""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import re
 import unicodedata
 from datetime import datetime
 from typing import Any
 
-from app.agent.episode_audit import audit_series_episodes
+from app.agent.episode_audit import audit_series_episodes, invalidate_episode_audit_cache
 from app.agent.models import Evidence, ToolResult
 from app.services import search_media_servers
+from app.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _now() -> str:
@@ -199,8 +203,61 @@ def _check_movie_updates(arguments: dict[str, Any]) -> ToolResult:
     )
 
 
+def _batch_update_item(arguments: dict[str, Any]) -> dict[str, Any]:
+    """每部使用同一紧凑响应；无法读取的计数为None，不能伪装成零缺集。"""
+    try:
+        result = check_library_updates(arguments)
+    except Exception as exc:
+        logger.warning("批量更新核对单项失败 type=%s", type(exc).__name__)
+        result = ToolResult(ok=False, status="unavailable", summary="本部查询失败，暂时无法判断更新")
+    data = result.data
+    row = {
+        "query": arguments["query"], "title": _safe_movie_title(data.get("title") or arguments["query"]),
+        "ok": result.ok, "status": result.status, "summary": result.summary[:160],
+        "checked_at": result.evidence[-1].collected_at if result.evidence else _now(),
+        "tmdb_id": data.get("tmdb_id", ""),
+    }
+    for key in ("expected_aired", "local_episode_count", "missing_count", "latest_local", "latest_aired"):
+        row[key] = data.get(key)
+    for key in ("media_type", "season", "local_match_status", "exact_match_count", "possible_match_count"):
+        if key in data:
+            row[key] = data[key]
+    missing = data.get("missing_sample", [])
+    row["missing_sample"] = missing[:5]
+    row["missing_sample_truncated"] = bool(data.get("missing_sample_truncated") or len(missing) > 5)
+    row["sources"] = [
+        {key: source[key] for key in ("server_type", "server_name", "status", "truncated") if key in source}
+        for source in data.get("sources", [])
+    ]
+    return row
+
+
 def check_library_updates(arguments: dict[str, Any]) -> ToolResult:
-    """核对媒体更新；剧集检查缺集，电影提供本地存在性与安全资源跟进。"""
+    """单部与批量共用同一审计链；更新检查默认刷新库存，而不是复述旧缓存。"""
+    if "queries" in arguments:
+        shared = {key: value for key, value in arguments.items() if key != "queries"}
+        items = [{**shared, "query": query} for query in arguments["queries"]]
+        with ThreadPoolExecutor(max_workers=min(3, len(items)), thread_name_prefix="library-updates") as pool:
+            rows = list(pool.map(_batch_update_item, items))
+        updates = sum(row["status"] == "updates_available" for row in rows)
+        current = sum(row["status"] == "up_to_date" for row in rows)
+        uncertain = len(rows) - updates - current
+        return ToolResult(
+            ok=any(row["ok"] for row in rows), status="partial" if uncertain else "success",
+            summary=f"已核对 {len(rows)} 部：{updates} 部存在已播缺集，{current} 部无已播缺集，{uncertain} 部待确认",
+            data={
+                "as_of": arguments["as_of"], "checked_at": min(row["checked_at"] for row in rows),
+                "refresh": arguments.get("refresh", True), "resource_search_status": "not_checked",
+                "check_definition": "library_inventory_vs_tmdb_not_resource_release_availability",
+                "counts": {"requested": len(rows), "updates_available": updates, "up_to_date": current, "uncertain": uncertain},
+                "items": rows,
+            },
+            evidence=[Evidence("media_servers+tmdb", "逐部核对实际库内季集与 TMDB 已播记录；不确定项不判为无更新。", _now())],
+            suggestions=[
+                "按作品逐行汇总，保留待确认/不可用项；最新季集位置不等于已收录集数，不能擅自换算总集号。",
+                "本次未检索资源站，也不证明官方平台实时进度；需要发布候选时再使用现有资源检索能力。",
+            ],
+        )
     media_type = arguments.get("media_type", "auto")
     if media_type == "movie":
         return _check_movie_updates(arguments)
@@ -211,6 +268,8 @@ def check_library_updates(arguments: dict[str, Any]) -> ToolResult:
         "season": arguments.get("season"),
         "as_of": arguments["as_of"],
     }
+    if arguments.get("refresh", True):
+        invalidate_episode_audit_cache(audit_arguments)
     result = audit_series_episodes(audit_arguments)
     result.data = dict(result.data)
     result.data.update({
