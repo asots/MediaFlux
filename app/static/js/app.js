@@ -71,7 +71,7 @@
             tip.style.left = `${left}px`;
             tip.style.top = `${top}px`;
             tip.setAttribute('data-open', '');
-            activeHelp = {button, tip, pinned: false};
+            activeHelp = {button, tip, anchor, pinned: false};
         }
         function scheduleHelpClose() {
             clearTimeout(helpHideTimer);
@@ -94,12 +94,9 @@
                 if (activeHelp?.button === button) closeHelpTooltip();
             });
             button.addEventListener('click', () => {
-                if (activeHelp?.button === button && activeHelp.pinned) {
-                    closeHelpTooltip();
-                    return;
-                }
                 openHelpTooltip(button, tip);
-                activeHelp.pinned = true;
+                if (activeHelp.pinned) closeHelpTooltip();
+                else activeHelp.pinned = true;
             });
             tip.addEventListener('pointerenter', () => clearTimeout(helpHideTimer));
             tip.addEventListener('pointerleave', scheduleHelpClose);
@@ -113,8 +110,9 @@
                 closeHelpTooltip();
             }
         });
-        document.addEventListener('scroll', (event) => {
-            if (activeHelp && !activeHelp.tip.contains(event.target)) closeHelpTooltip();
+        document.addEventListener('scroll', () => {
+            const anchor = activeHelp?.button.getBoundingClientRect();
+            if (anchor && (anchor.top !== activeHelp.anchor.top || anchor.left !== activeHelp.anchor.left)) closeHelpTooltip();
         }, {capture: true, passive: true});
         window.addEventListener('resize', closeHelpTooltip);
     }

@@ -104,6 +104,45 @@ class SettingsReviewTooltipsBrowserTests(unittest.TestCase):
                 self.assertEqual(page.evaluate("collectConfigFields(document.getElementById('settings-panel-metadata'))"), {})
                 self.assertEqual(errors, [])
 
+    def test_mobile_auto_scroll_click_keeps_help_open_after_browser_frames(self):
+        for width in (320, 390):
+            with self.subTest(width=width):
+                page, errors = self._ready(width)
+                page.evaluate("window.scrollTo(0, 0)")
+                page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                trigger = page.locator('[data-help-tooltip="episodeResearchTooltip"]')
+                trigger.click()
+                page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                self.assertGreater(page.evaluate("scrollY"), 0)
+                expect(page.locator("#episodeResearchTooltip")).to_be_visible()
+                self._bounded(page, page.locator("#episodeResearchTooltip"))
+                self.assertEqual(page.evaluate("window.__settingsWrites"), [])
+                self.assertEqual(errors, [])
+                page.close()
+
+    def test_scroll_events_close_help_only_when_the_trigger_actually_moves(self):
+        page, errors = self._ready(390)
+        trigger = page.locator('[data-help-tooltip="episodeResearchTooltip"]')
+        trigger.scroll_into_view_if_needed()
+        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        trigger.click()
+        tip = page.locator("#episodeResearchTooltip")
+        expect(tip).to_be_visible()
+        page.evaluate("document.dispatchEvent(new Event('scroll'))")
+        expect(tip).to_be_visible()
+        tip.dispatch_event("scroll")
+        expect(tip).to_be_visible()
+        page.evaluate("window.scrollBy(0, -30)")
+        expect(tip).to_be_hidden()
+        page.keyboard.press("Tab")
+        trigger.focus()
+        expect(tip).to_be_visible()
+        trigger.press("Escape")
+        expect(tip).to_be_hidden()
+        self.assertEqual(page.evaluate("window.__settingsWrites"), [])
+        self.assertEqual(errors, [])
+        page.close()
+
     def test_loading_preserves_geometry_and_disabled_settings_still_expose_help(self):
         page, errors = self._page(390, {fixture.PARENT_KEY: "0"})
         trigger = page.locator('[data-help-tooltip="episodeResearchTooltip"]')
