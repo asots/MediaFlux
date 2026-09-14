@@ -2443,6 +2443,64 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
                 self.assertNotIn("KTXP", queries)
                 self.assertNotIn("Nekomoe kissaten", queries)
 
+    def test_classified_bilingual_releases_use_chinese_identity_and_keep_source_positions(self):
+        scraper = self.recognition_module()
+        parser = scraper.TMDBScraper("offline-fixture")
+        cases = (
+            ("光阴之外", "Beyond Time's Gaze", "2025", (37, 38, 39), None, "GB][4K HEVC 10Bit"),
+            ("仙逆", "Renegade Immortal", "2023", (157,), None, "AVC][GB][1080P"),
+            ("完美世界", "Perfect World", "2021", (232, 233), None, "AVC][GB][1080P"),
+            ("凡人修仙传 慕兰之战", "Fan Ren Xiu Xian Zhuan", "2026", (15,), None, "AVC][GB][1080P"),
+            ("师兄啊师兄", "My Senior Brother is Too Steady", "2023", (158,), None, "GB][4K HEVC 10Bit"),
+            ("牧神记", "Tales of Qin Mu", "2024", (100,), None, "AVC][GB][1080P"),
+            ("大主宰", "The Great Ruler Ⅱ", "2026", (37, 38), 2, "HEVC][GB][4K"),
+            ("沧元图", "The Demon Hunter Ⅲ", "2026", (24, 25), 3, "GB][4K HEVC 10Bit"),
+        )
+        for title, alias, year, episodes, season, tags in cases:
+            release_title = f"{title} 第{season}季" if season else title
+            for episode in episodes:
+                filename = f"[GM-Team][国漫][{release_title}][{alias}][{year}][{episode:02d}][{tags}].mp4"
+                with self.subTest(filename=filename):
+                    context = scraper.extract_recognition_context(filename)
+                    self.assertEqual(parser.clean_title(filename), title)
+                    self.assertEqual(context.normalized_title, title)
+                    self.assertEqual((context.season, context.episode), (season, episode))
+                    self.assertEqual(context.filename_year, year)
+                    self.assertEqual(scraper.generate_query_variants(context)[0], title)
+                    self.assertIn(alias, context.title_variants)
+                    self.assertEqual(_parse_fields(parser, filename)["title"], title)
+                    self.assertEqual(scraper._explicit_animation_source_marker(context), "国漫")
+                    score = scraper.score_candidate(context, {"id": 1001, "name": title, "original_name": title,
+                        "first_air_date": f"{year}-01-01", "media_type": "tv", "genre_ids": [16]})
+                    self.assertNotIn("distinctive_title_tokens_missing", score.rejected_constraints)
+
+    def test_classification_requires_structured_release_and_does_not_erase_real_titles(self):
+        scraper = self.recognition_module()
+        cases = (
+            ("[国漫] 国漫的未来 (2026).mp4", "国漫的未来"),
+            ("国漫时代.2026.1080p.mkv", "国漫时代"),
+            ("[Other-Team][国漫][国漫时代 第2季][Animation Age II][2026][03][1080P].mkv", "国漫时代"),
+            ("[Other-Team][国漫][86 不存在的战区][Eighty Six][2026][03][1080P].mkv", "86 不存在的战区"),
+        )
+        for filename, title in cases:
+            with self.subTest(filename=filename):
+                context = scraper.extract_recognition_context(filename)
+                self.assertIn(title, context.normalized_title)
+                if filename.startswith("[Other-Team]"):
+                    self.assertEqual(context.normalized_title, title)
+                else:
+                    self.assertEqual(scraper._explicit_animation_source_marker(context), "")
+
+    def test_resource_tags_accept_bracket_boundaries_without_matching_title_substrings(self):
+        scraper = self.recognition_module()
+        for wrapper in ("[{}]", "【{}】", "({})", "（{}）"):
+            with self.subTest(wrapper=wrapper):
+                tags = scraper.TMDBScraper.parse_resource_tags("Show." + wrapper.format("4K HEVC 10Bit") + ".mp4")
+                self.assertEqual(tags["resolution"], "2160p")
+                self.assertEqual(tags["video_codec"], "H.265")
+        self.assertEqual(scraper.TMDBScraper.parse_resource_tags("[Studio4Kids] Show 1080p.mkv")["resolution"], "1080p")
+        self.assertEqual(scraper.TMDBScraper.parse_resource_tags("[Studio4Kids] Show.mkv")["resolution"], "")
+
     def test_bracketed_release_year_is_not_treated_as_season(self):
         scraper = self.recognition_module()
         filename = (
@@ -2837,6 +2895,31 @@ def _merged_four_season_timeline() -> dict:
 
 
 class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
+    def test_classified_animation_release_rejects_live_action_homonym_without_relaxing_gates(self):
+        scraper = self.recognition_module()
+        filename = "[GM-Team][国漫][大主宰 第2季][The Great Ruler Ⅱ][2026][38][HEVC][GB][4K].mp4"
+        candidates = [{"id": identity, "name": "大主宰", "original_name": "大主宰",
+                       "first_air_date": "2026-01-01", "media_type": "tv", "genre_ids": [genre]}
+                      for identity, genre in ((2001, 18), (2002, 16))]
+        details = {str(item["id"]): {**item, "genres": [{"id": item["genre_ids"][0]}],
+                    "alternative_titles": {"results": [{"title": "The Great Ruler"}]},
+                    "seasons": [{"season_number": 2, "episode_count": 40}]} for item in candidates}
+        for available, expected in ((candidates, "2002"), (candidates[:1], "")):
+            with self.subTest(expected=expected):
+                parser = scraper.TMDBScraper(_DeterministicClient(available, details))
+                self.addCleanup(parser.close)
+                result = parser.deterministic_recognize(filename, "source")
+                evidence = result.metadata["content_kind_evidence"]
+                self.assertEqual(evidence["marker"], "国漫")
+                if expected:
+                    self.assertEqual(result.tmdb_id, expected)
+                    self.assertEqual(result.status, "matched")
+                    self.assertTrue(evidence["verified"])
+                    self.assertEqual(evidence["filtered_non_animation_candidates"], 1)
+                else:
+                    self.assertTrue(result.need_confirm)
+                    self.assertEqual(result.threshold_decision["reason"], "animation_evidence_mismatch")
+
     def test_explicit_donghua_marker_selects_animation_homonym_for_all_samples(self):
         scraper_module = self.recognition_module()
         shared_alias = "Ever Night"

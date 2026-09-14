@@ -382,6 +382,7 @@ _CHECKSUM_SUFFIX = re.compile(
 )
 _TMDB_ANIMATION_GENRE_ID = 16
 _EXPLICIT_DONGHUA_MARKER = re.compile(r"(?i)(?<![a-z0-9])donghua(?![a-z0-9])")
+_CLASSIFIED_ANIMATION_KINDS = frozenset({"国漫", "國漫", "日漫", "美漫", "韩漫", "韓漫", "动漫", "動漫", "动画", "動畫"})
 _YEAR_TOKEN = re.compile(
     r"(?<![\dxX])((?:19|20)\d{2})(?!\d|[xX]\d{3,4})"
 )
@@ -1669,6 +1670,37 @@ def _non_destructive_release_title_candidates(
         "language_tags": [],
         "release_versions": [],
     }
+    bracket_segments = list(_BRACKETED_SEGMENT.finditer(source))
+    for match in bracket_segments:
+        content = match.group(1).strip()
+        if _RELEASE_KIND_VERSION_BRACKET.fullmatch(content):
+            components["media_kinds"].append(content)
+            revision = re.search(r"(?i)\bv\d{1,3}\b", content)
+            if revision:
+                components["release_versions"].append(revision.group(0))
+        elif _RELEASE_LANGUAGE_BRACKET.fullmatch(content):
+            components["language_tags"].append(content)
+    # 发布组 + 分类 + 中文作品/篇章 + 英文别名 + 年份 + 规格构成明确字段链。
+    # 只在该结构成立时分离分类与别名；不把“国漫”等词加入全局删词表，
+    # 也不裁掉中文标题中的篇章或续作数字。原始季集仍由位置解析器决定。
+    parts = [match.group(1).strip() for match in bracket_segments]
+    if (len(parts) >= 6 and not source[:bracket_segments[0].start()].strip()
+            and not source[bracket_segments[-1].end():].strip()
+            and not any(source[a.end():b.start()].strip() for a, b in zip(bracket_segments, bracket_segments[1:]))
+            and parts[1] in _CLASSIFIED_ANIMATION_KINDS
+            and re.search(r"[\u3040-\u30ff\u3400-\u9fff]", parts[2])
+            and re.search(r"[A-Za-z]", parts[3]) and not re.search(r"[\u3040-\u30ff\u3400-\u9fff]", parts[3])
+            and re.fullmatch(r"(?:19|20)\d{2}", parts[4])
+            and any(_IMPLICIT_SEASON_TECHNICAL_EVIDENCE.search(part) for part in parts[5:])):
+        primary = re.sub(r"\s+", " ", _strip_season_tokens(parts[2])).strip(" ._-")
+        if primary and not _low_information_query(primary):
+            components["media_kinds"].append(parts[1])
+            if not _is_release_prefix(parts[0], source[bracket_segments[0].end():].lstrip()):
+                components["candidate_release_groups"].append(parts[0])
+            return _unique_text((primary, parts[3])), {
+                key: _unique_text(values) for key, values in components.items()
+            }
+
     structured_position = _STRUCTURED_EPISODE_POSITION.search(source)
     compact_position = _parse_release_x_position(source)
     position_start = min(
@@ -1693,7 +1725,6 @@ def _non_destructive_release_title_candidates(
     # 方括号链也常承载清晰的 ``[发布组][作品名][集号/范围][规格]`` 结构。
     # 只在作品名后的相邻括号明确包含集号时抽取，避免把多个标题副标题括号
     # 任意拆开；该候选尤其能防止“集标题 + PGS”等尾部噪声覆盖系列主标题。
-    bracket_segments = list(_BRACKETED_SEGMENT.finditer(source))
     for index, current in enumerate(bracket_segments[:-1]):
         following_match = bracket_segments[index + 1]
         # ``【国漫】仙逆【第04集】`` 的作品名位于两个括号之间，不能把前一
@@ -1795,15 +1826,6 @@ def _non_destructive_release_title_candidates(
             candidates.insert(0, projected)
             components["candidate_release_groups"].append(group_name)
 
-    for match in _BRACKETED_SEGMENT.finditer(source):
-        content = match.group(1).strip()
-        if _RELEASE_KIND_VERSION_BRACKET.fullmatch(content):
-            components["media_kinds"].append(content)
-            revision = re.search(r"(?i)\bv\d{1,3}\b", content)
-            if revision:
-                components["release_versions"].append(revision.group(0))
-        elif _RELEASE_LANGUAGE_BRACKET.fullmatch(content):
-            components["language_tags"].append(content)
     return _unique_text(candidates), {
         key: _unique_text(values) for key, values in components.items()
     }
@@ -2414,6 +2436,9 @@ def extract_recognition_context(filename: str, parent_path: str = "") -> Recogni
 
 def _explicit_animation_source_marker(context: RecognitionContext) -> str:
     """返回发布源明确声明的动画证据；普通标题和类型猜测不参与。"""
+    for kind in (context.cleaned_components or {}).get("media_kinds", ()):
+        if kind in _CLASSIFIED_ANIMATION_KINDS:
+            return kind
     values = (
         str(context.filename or ""),
         str(context.parent_path or ""),
@@ -4966,7 +4991,8 @@ class TMDBScraper:
     @staticmethod
     def parse_resource_tags(filename: str) -> dict[str, str]:
         """仅从文件名中提取可验证的发布规格，不猜测缺失信息。"""
-        text = str(filename or "")
+        raw = str(filename or "")
+        text = re.sub(r"[\[\]【】()（）]", " ", raw)
 
         def first(patterns: tuple[tuple[str, str], ...]) -> str:
             for pattern, label in patterns:
@@ -5021,7 +5047,7 @@ class TMDBScraper:
         ):
             if re.search(pattern, text, re.IGNORECASE) and label not in audio:
                 audio.append(label)
-        stem = text.rsplit(".", 1)[0]
+        stem = raw.rsplit(".", 1)[0]
         release_group_match = _tail_release_group(stem)
         release_group = release_group_match[0] if release_group_match else ""
         return {
