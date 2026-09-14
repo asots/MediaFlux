@@ -102,6 +102,21 @@ def attach_resource_candidate_reference(
     return result
 
 
+def merge_resource_candidate_references(selections: list[tuple[ToolReference, dict[str, Any]]], *, status: str) -> ToolReference:
+    """组合既有已核验候选，保留私有句柄和核验上下文；不重新解析发布名或签发下载授权。"""
+    candidates = [{**deepcopy(candidate), "position": position} for position, (_ref, candidate) in enumerate(selections, 1)]
+    snapshot = {"search_id": new_resource_search_id(), "search_status": status, "candidates": candidates}
+    if not selections or validate_safe_resource_snapshot(snapshot) is None:
+        raise ValueError("invalid combined resource candidates")
+    if all("_private_items" in reference.value for reference, _candidate in selections):
+        snapshot.update({
+            "_private_version": _PRIVATE_REFERENCE_VERSION,
+            "_private_items": [deepcopy(reference.value["_private_items"][candidate["position"] - 1])
+                               for reference, candidate in selections],
+        })
+    return ToolReference("resource_candidates", snapshot, ttl_seconds=min(reference.ttl_seconds for reference, _candidate in selections))
+
+
 def restore_resource_candidate_reference(value: Any) -> dict[str, Any] | None:
     """校验并恢复可执行候选；兼容切换前仅含安全快照的短期引用。"""
     legacy = validate_safe_resource_snapshot(value)

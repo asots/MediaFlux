@@ -386,7 +386,7 @@ def test_candidate_projection_is_allowlisted_and_current_view_restores(store):
         assert set(view) == {"ref", "selection_ref", "expires_at", "items", "turn_id", "recommended_positions", "target", "target_source", "targets"}
         assert view["expires_at"] > time.time()
         item = view["items"][0]
-        assert set(item) == {"position", "title", "site_name", "size_text", "tags", "reasons", "warnings", "coverage"}
+        assert set(item) == {"position", "title", "site_name", "size_text", "tags", "reasons", "warnings", "coverage", "media_title", "media_scope", "requested_episode"}
         assert item["tags"] == {"audio": "Atmos", "resolution": "2160p"}
         assert item["reasons"] == ["精确匹配"] and item["warnings"] == ["需要人工确认"]
         assert view["selection_ref"] != view["ref"]
@@ -782,3 +782,29 @@ def test_listing_sql_sorts_only_small_keys_and_explicitly_opens_read_transaction
     assert ordered.partition("FROM")[0].strip() == "SELECT session_digest"
     assert any(sql.strip() == "BEGIN" for sql in statements)
     assert "LIMIT" not in ordered, "不能在 HMAC 核验之前截断有效名额"
+
+
+def test_verified_cross_series_recommendations_keep_identity_and_global_positions():
+    from app.agent.kernel.ux_selection import _recommend, candidate_item
+
+    names = ["光阴之外", "择日飞升", "大主宰", "牧神记", "沧元图", "一斩苍穹"]
+    items = [candidate_item({
+        "title": f"{name}.S01E08.2160p", "_verification_context": {"title": name, "season": 1, "episode": 8},
+    }, position) for position, name in enumerate(names, 1)]
+    assert _recommend(items) == [1, 2, 3, 4, 5, 6]
+    assert [item["media_title"] for item in items] == names
+    assert all(item["requested_episode"] == [1, 8] for item in items)
+    assert all(candidate_item(item, item["position"]) == item for item in items)
+    alternatives = [*items, candidate_item({
+        "title": "光阴之外.S01E08.1080p", "_verification_context": {"title": names[0], "season": 1, "episode": 8},
+    }, 7)]
+    assert _recommend(alternatives) == [1, 2, 3, 4, 5, 6]
+
+
+def test_same_title_different_tmdb_id_are_distinct_recommendation_scopes():
+    from app.agent.kernel.ux_selection import _recommend, candidate_item
+    items = [candidate_item({"title": "同名剧.S01E01", "_verification_context": {
+        "title": "同名剧", "tmdb_id": str(identity), "season": 1, "episode": 1,
+    }}, position) for position, identity in enumerate((111, 222), 1)]
+    assert _recommend(items) == [1, 2]
+    assert [item["media_scope"] for item in items] == ["tmdb:111", "tmdb:222"]

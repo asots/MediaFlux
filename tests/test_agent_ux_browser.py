@@ -458,6 +458,27 @@ class AgentUXBrowserTests(unittest.TestCase):
                 self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 1)
                 self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
 
+    def test_cross_series_same_episode_keeps_titles_and_does_not_warn_overlap(self):
+        view = candidate_view()
+        names = ['光阴之外', '择日飞升', '大主宰', '牧神记', '沧元图', '一斩苍穹']
+        view['recommended_positions'] = list(range(1, 7))
+        view['items'] = [{'position': pos, 'title': f'{name}.S01E08.2160p',
+                          'media_title': name, 'requested_episode': [1, 8], 'coverage': [1, 8, 8],
+                          'site_name': '测试站点', 'size_text': '1 GB', 'tags': {}, 'reasons': [], 'warnings': []}
+                         for pos, name in enumerate(names, 1)]
+        for viewport in ({'width': 1280, 'height': 800}, {'width': 390, 'height': 844}):
+            with self.subTest(viewport=viewport):
+                page = self.page({'queryEvents': events_for_candidates(view)}, viewport=viewport)
+                page.locator('#agentPrompt').fill('找这六部缺集的资源')
+                page.locator('#agentSend').click()
+                page.wait_for_selector('.agent-candidate-select:not([disabled])')
+                self.assertEqual(page.locator('.agent-candidate-recommendation li').count(), 6)
+                text = page.locator('.agent-candidate-recommendation').inner_text()
+                self.assertTrue(all(name in text for name in names))
+                self.assertIn('预览下载 6 项', page.locator('.agent-candidate-select').inner_text())
+                self.assertNotIn('重叠', page.locator('.agent-candidates-note').inner_text())
+                self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
+
     def test_legacy_single_card_protocol_is_readonly(self):
         view = candidate_view()
         view.pop('selection_ref')

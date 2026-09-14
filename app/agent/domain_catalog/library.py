@@ -245,15 +245,21 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="library.search_missing_season_resources",
-            description="先完整核对指定季度，再搜索最多 3 个已播缺集并按当前身份保存的资源偏好排序；本次 preference_overrides 优先，不会自动下载。",
+            description="单部按query/season核对；多部缺集找资源必须一次传items（最多12部/季），无需逐部重搜。每部最多搜索3个已播缺集，按偏好选可核验覆盖候选，统一最多12项全局编号和一个resource_candidates_ref，随后一次ingest.submit预检整批。未覆盖/季集映射未知/站点失败逐部报告，不等于全网无资源；不自动下载。",
             risk=RiskLevel.READ,
             domains=("resource_search", "library"),
             source_kind="resource_index",
             freshness="realtime",
             parameters={
                 "type": "object",
-                "required": ["query", "season"],
+                "anyOf": [{"required": ["query", "season"]}, {"required": ["items"]}],
                 "properties": {
+                    "items": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
+                        "type": "object", "required": ["query", "season"], "additionalProperties": False,
+                        "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 120},
+                                       "season": {"type": "integer", "minimum": 1, "maximum": 100},
+                                       "tmdb_id": {"type": "string", "pattern": "^[0-9]{1,10}$"},
+                                       "library_name": {"type": "string", "maxLength": 80}}}},
                     "preference_overrides": {
                         "type": "object",
                         "properties": RESOURCE_PREFERENCE_PROPERTIES,
@@ -339,7 +345,7 @@ def register_specs(
             },
             handler=check_library_updates,
             validator=_library_update_arguments,
-            related_tools=("library.search_missing_episode_resources", "indexer.search_resources"),
+            related_tools=("library.search_missing_season_resources", "library.search_missing_episode_resources"),
             examples=(
                 "检查《某剧》有没有更新",
                 "媒体库中的这十部国漫都有更新吗",

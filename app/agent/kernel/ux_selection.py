@@ -97,6 +97,19 @@ def _target_options(owner: str) -> dict[str, Any]:
 
 def _recommend(items: list[dict[str, Any]]) -> list[int]:
     """仅以明确集数范围推荐互补项；无法证明覆盖关系时只推荐首项。"""
+    if all(item.get("media_title") and item.get("requested_episode") for item in items):
+        covered: set[tuple[str, int, int]] = set()
+        selected = []
+        for item in items:
+            title = item["media_scope"]
+            season, episode = item["requested_episode"]
+            if (title, season, episode) in covered:
+                continue
+            selected.append(item["position"])
+            coverage = item.get("coverage")
+            start, end = (coverage[1], coverage[2]) if coverage and coverage[0] == season and coverage[1] <= episode <= coverage[2] else (episode, episode)
+            covered.update((title, season, number) for number in range(start, end + 1))
+        return selected
     scopes = {
         re.split(r"(?i)s\d{1,2}\s*e\d|[\[(【]\s*\d+\s*[-~～–—]", item["title"], maxsplit=1)[0].strip(" ._-[]").casefold()
         for item in items if item.get("coverage")
@@ -141,6 +154,16 @@ def candidate_item(value: Mapping[str, Any], position: int) -> dict[str, Any]:
     title = sanitize_resource_title(value.get("title")) or f"候选 {position}"
     season, start, end = extract_release_episode_range(title)
     coverage = [season, start, end] if start and end and end - start < 1000 else None
+    verification = value.get("_verification_context")
+    verification = verification if isinstance(verification, dict) else {}
+    requested = [verification.get("season"), verification.get("episode")] if verification else value.get("requested_episode")
+    if not (isinstance(requested, list) and len(requested) == 2
+            and type(requested[0]) is int and 1 <= requested[0] <= 100
+            and type(requested[1]) is int and 1 <= requested[1] <= 1000):
+        requested = None
+    media_title = display_text(verification.get("title") or value.get("media_title"), limit=120)
+    media_scope = (f"tmdb:{verification['tmdb_id']}" if verification.get("tmdb_id")
+                   else display_text(value.get("media_scope"), limit=140) or media_title)
     quality = value.get("quality")
     quality = quality if isinstance(quality, dict) else value
     tags = quality.get("tags")
@@ -148,6 +171,9 @@ def candidate_item(value: Mapping[str, Any], position: int) -> dict[str, Any]:
         "position": position,
         "title": title,
         "coverage": coverage,
+        "media_title": media_title,
+        "media_scope": media_scope,
+        "requested_episode": requested,
         "site_name": display_text(value.get("site_name"), limit=80),
         "size_text": display_text(value.get("size_text"), limit=32),
         "tags": {

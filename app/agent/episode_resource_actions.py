@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 import unicodedata
 from datetime import date, datetime
 from typing import Any
@@ -17,7 +18,7 @@ from app.agent.indexer_actions import (
 from app.agent.indexer_actions import search_arguments as indexer_search_arguments
 from app.agent.media_preference_policy import validate_resource_preference_overrides
 from app.agent.models import Evidence, ToolResult
-from app.agent.recent_resource_candidates import attach_resource_candidate_reference
+from app.agent.recent_resource_candidates import attach_resource_candidate_reference, merge_resource_candidate_references
 from app.agent.resource_recommendation import rank_episode_search
 from app.indexers.runtime import get_indexer_service
 
@@ -130,6 +131,21 @@ def missing_episode_resource_arguments(arguments: dict[str, Any]) -> dict[str, A
 
 
 def missing_season_resource_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    if "items" in arguments:
+        _reject_extra(arguments, {"items", "as_of", "sites", "max_episodes", "limit_per_episode", "preference_overrides"})
+        raw = arguments["items"]
+        if not isinstance(raw, list) or not 1 <= len(raw) <= 12:
+            raise AgentToolError("items 必须包含 1 到 12 部/季")
+        shared = {key: value for key, value in arguments.items() if key != "items"}
+        items = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                raise AgentToolError("items 每项必须是作品对象")
+            _reject_extra(item, {"query", "tmdb_id", "season", "library_name"})
+            normalized = missing_season_resource_arguments({**shared, **item})
+            key = (normalized["query"].casefold(), normalized.get("tmdb_id"), normalized["season"], normalized.get("library_name"))
+            items.setdefault(key, normalized)
+        return {"items": list(items.values())}
     _reject_extra(
         arguments,
         {
@@ -394,6 +410,8 @@ _MISSING_SEASON_SEARCH_DEADLINE_SECONDS = 30.0
 def search_missing_season_resources(
     arguments: dict[str, Any], *, preferences: dict[str, Any] | None = None,
 ) -> ToolResult:
+    if "items" in arguments:
+        return _search_missing_resource_batch(arguments["items"], preferences=preferences)
     deadline_at = time.monotonic() + _MISSING_SEASON_SEARCH_DEADLINE_SECONDS
     audit_arguments: dict[str, Any] = {
         "query": arguments["query"],
@@ -572,3 +590,71 @@ def search_missing_season_resources(
         ),
         result_store=get_indexer_service().result_store,
     )
+
+
+def _search_missing_resource_batch(items: list[dict[str, Any]], *, preferences: dict[str, Any] | None) -> ToolResult:
+    """复用单季检索与其已核验私有候选，仅选每个缺集的最佳可证明覆盖项。"""
+    def search(item):
+        try:
+            return search_missing_season_resources(item, preferences=preferences)
+        except Exception:
+            return ToolResult(False, "unavailable", "本部资源检索未完成，不能判断是否有资源")
+
+    with ThreadPoolExecutor(max_workers=min(3, len(items)), thread_name_prefix="missing-resources") as pool:
+        results = list(pool.map(search, items))
+    selections, public_items, groups, by_id = [], [], [], {}
+    for arguments, result in zip(items, results):
+        data = result.data
+        reference = next((ref for ref in result.references if ref.kind == "resource_candidates"), None)
+        candidates = reference.value["candidates"] if reference is not None else []
+        verification = data.get("verification") or {}
+        identity = str(verification.get("tmdb_id") or arguments.get("tmdb_id") or arguments["query"])
+        group = {
+            "query": arguments["query"], "season": arguments["season"], "ok": result.ok,
+            "status": result.status, "summary": result.summary[:160], "positions": [], "uncovered_episodes": [],
+            "missing_total": data.get("missing_total"), "remaining": data.get("remaining", 0),
+            "sites_succeeded": [], "errors": [],
+        }
+        for episode in data.get("episodes", []):
+            target = (episode["season"], episode["episode"])
+            searched = episode.get("search") or {}
+            group["sites_succeeded"] = sorted(set(group["sites_succeeded"]) | set(searched.get("sites_succeeded", [])))
+            group["errors"].extend(searched.get("errors", [])[:3])
+            eligible_ids = [item.get("result_id") for item in searched.get("items", [])
+                            if (item.get("quality") or {}).get("eligible")
+                            and (item.get("quality") or {}).get("match") in {"exact_episode", "episode_pack"}
+                            and (item.get("quality") or {}).get("confidence") in {"high", "medium"}]
+            best = next((candidate for result_id in eligible_ids for candidate in candidates
+                         if candidate["result_id"] == result_id), None)
+            prior = by_id.get(best["result_id"]) if best else None
+            if best is None or (prior and prior[1] != identity) or (not prior and len(selections) >= 12):
+                group["uncovered_episodes"].append({"season": target[0], "episode": target[1],
+                    "reason": "candidate_limit" if best and not prior and len(selections) >= 12 else
+                              ("needs_review" if searched.get("items") else "no_match") if episode.get("ok") else "unavailable"})
+                continue
+            if prior:
+                position = prior[0]
+            else:
+                position = len(selections) + 1
+                by_id[best["result_id"]] = (position, identity)
+                selections.append((reference, best))
+                public_items.append({key: value for key, value in best.items() if not key.startswith("_")})
+                public_items[-1].update(position=position, media_title=arguments["query"])
+            if position not in group["positions"]:
+                group["positions"].append(position)
+        group["errors"] = group["errors"][:3]
+        if group["uncovered_episodes"] or group["remaining"]:
+            group["status"] = "partial" if group["positions"] else "needs_review" if result.ok else result.status
+        groups.append(group)
+    partial = any(not group["ok"] or group["uncovered_episodes"] or group["remaining"] for group in groups)
+    status = "partial" if partial else "success" if selections else "empty"
+    result = ToolResult(
+        any(item.ok for item in results), status,
+        f"已核对 {len(groups)} 部/季，{sum(bool(g['positions']) for g in groups)} 部有可核验候选，共 {len(selections)} 项；未覆盖项请逐部核对",
+        data={"groups": groups, "items": public_items, "recommended_positions": list(range(1, len(selections) + 1))},
+        suggestions=["全局候选编号对应同一快照，下载全部已找到资源时一次预检全部推荐位置；未覆盖不等于全网没有资源。",
+                     "季集映射不明确、来源失败或候选上限截断时，不得宣称全部缺集都已找到；本工具不提交下载。"],
+    )
+    if selections:
+        result.references.append(merge_resource_candidate_references(selections, status=status))
+    return result

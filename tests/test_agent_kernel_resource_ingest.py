@@ -7,6 +7,8 @@ import json
 import unittest
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from app.agent.domain_catalog import build_tool_specs
@@ -28,6 +30,7 @@ from app.agent.recent_resource_candidates import (
     RecentResourceCandidateStore,
     new_resource_search_id,
     safe_resource_snapshot,
+    validate_safe_resource_snapshot,
 )
 
 
@@ -190,6 +193,190 @@ def _runtime(model):
     return session, pipeline, state
 
 
+_MULTI_WORKS = (
+    ("光阴之外", "1001"),
+    ("择日飞升", "1002"),
+    ("大主宰", "1003"),
+    ("牧神记", "1004"),
+    ("沧元图", "1005"),
+    ("一斩苍穹", "1006"),
+    ("无匹配作品", "1007"),
+)
+
+
+def _multi_search_items() -> list[dict[str, Any]]:
+    return [
+        {"query": title, "season": 1, "tmdb_id": tmdb_id}
+        for title, tmdb_id in _MULTI_WORKS
+    ]
+
+
+def _multi_work_candidate(
+    position: int,
+    title: str,
+    tmdb_id: str,
+) -> dict[str, Any]:
+    release_range = (
+        "S01E07-08"
+        if position == 1
+        else "S01E08-09"
+        if position == 6
+        else "S01E08"
+    )
+    match = "episode_pack" if position in {1, 6} else "exact_episode"
+    result_id = f"multi-work-candidate-{position:02d}"
+    return {
+        "position": position,
+        "season": 1,
+        "episode": 8,
+        "episode_label": "S01E08",
+        "result_id": result_id,
+        "title": f"{title}.{release_range}.2160p.WEB-DL",
+        "site_id": "fixture-indexer",
+        "site_name": "离线索引夹具",
+        "rank": position,
+        "score": 100 - position,
+        "confidence": "high",
+        "match": match,
+        "download_state": "ready",
+        "reasons": ["已核验媒体库缺集"],
+        "warnings": [],
+        "tags": {"resolution": "2160p"},
+        "_verification_context": {
+            "title": title,
+            "tmdb_id": tmdb_id,
+            "season": 1,
+            "episode": 8,
+            "as_of": "2026-09-13",
+        },
+    }
+
+
+def _multi_work_search_result() -> ToolResult:
+    candidates = [
+        _multi_work_candidate(position, title, tmdb_id)
+        for position, (title, tmdb_id) in enumerate(_MULTI_WORKS[:6], start=1)
+    ]
+    search_id = new_resource_search_id()
+    snapshot = {
+        "search_id": search_id,
+        "search_status": "partial",
+        "candidates": candidates,
+    }
+    # 这是领域层交给 Kernel 的合法脱敏候选快照；私有核验上下文只留在
+    # owner/session 绑定引用中，不放入公开模型字段或伪造任何生产凭据。
+    assert validate_safe_resource_snapshot(snapshot) == snapshot
+    public_items = [
+        {
+            key: candidate[key]
+            for key in (
+                "result_id",
+                "title",
+                "site_id",
+                "site_name",
+                "download_state",
+            )
+        }
+        | {"download_kinds": ["magnet"]}
+        for candidate in candidates
+    ]
+    queries = [
+        {
+            "query": title,
+            "season": 1,
+            "tmdb_id": tmdb_id,
+            "verified_missing": True,
+            "matched": index <= 6,
+            "candidate_count": int(index <= 6),
+        }
+        for index, (title, tmdb_id) in enumerate(_MULTI_WORKS, start=1)
+    ]
+    return ToolResult(
+        True,
+        "partial",
+        "已核验 7 部作品：6 部找到已验证候选，1 部无匹配",
+        data={
+            "items": public_items,
+            "queries": queries,
+            "matched": 6,
+            "unmatched": 1,
+        },
+        references=[ToolReference("resource_candidates", snapshot)],
+    )
+
+
+def _model_json_field(request: ModelRequest, field: str) -> Any:
+    prefix = f"{field}="
+    for message in reversed(request.messages):
+        if message.role != "tool":
+            continue
+        for line in message.content.splitlines():
+            if line.startswith(prefix):
+                return json.loads(line.partition("=")[2])
+    raise AssertionError(f"{field} missing from model history")
+
+
+class MultiWorkSearchThenAnswerModel:
+    def __init__(self) -> None:
+        self.round = 0
+        self.requests: list[ModelRequest] = []
+        self.search_arguments: dict[str, Any] = {}
+
+    async def stream(
+        self, request: ModelRequest, *, cancellation
+    ) -> AsyncIterator[ModelEvent]:
+        self.requests.append(request)
+        cancellation.raise_if_cancelled()
+        await asyncio.sleep(0)
+        if self.round == 0:
+            self.round += 1
+            self.search_arguments = {"items": _multi_search_items()}
+            yield ModelEvent(
+                ModelEventType.TOOL_CALL_COMPLETED,
+                tool_call=ModelToolCall(
+                    "search-multi-1",
+                    "library.search_missing_season_resources",
+                    self.search_arguments,
+                ),
+            )
+            yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+            return
+        yield ModelEvent(ModelEventType.TEXT_DELTA, text="已完成七部作品的缺集核对。")
+        yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+
+
+class DownloadAllFromRecommendationModel:
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+        self.candidate_numbers: list[dict[str, Any]] = []
+        self.recommended_ingest_arguments: dict[str, Any] = {}
+        self.submitted_arguments: dict[str, Any] = {}
+
+    async def stream(
+        self, request: ModelRequest, *, cancellation
+    ) -> AsyncIterator[ModelEvent]:
+        self.requests.append(request)
+        cancellation.raise_if_cancelled()
+        await asyncio.sleep(0)
+        self.candidate_numbers = _model_json_field(request, "candidate_numbers")
+        self.recommended_ingest_arguments = _model_json_field(
+            request, "recommended_ingest_arguments"
+        )
+        # 不重新计算或硬编码 positions；模拟模型把 Kernel 给出的整批建议
+        # 原样复制，只按本轮用户意图把 target 改成显式的光鸭。
+        self.submitted_arguments = dict(self.recommended_ingest_arguments)
+        self.submitted_arguments["target"] = "guangya"
+        yield ModelEvent(
+            ModelEventType.TOOL_CALL_COMPLETED,
+            tool_call=ModelToolCall(
+                "submit-multi-1",
+                "ingest.submit",
+                self.submitted_arguments,
+            ),
+        )
+        yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+
+
 class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.agent.indexer_candidate_actions.submit_resource_confirmed")
     @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
@@ -301,3 +488,271 @@ class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
             if event.type is AgentEventType.EFFECT_APPROVAL_REQUIRED
         )
         self.assertTrue(followup_model.resource_candidates_ref.startswith("ref_"))
+
+
+    async def test_multi_work_search_recommendation_batch_preview_and_confirm_is_idempotent(
+        self,
+    ) -> None:
+        search_model = MultiWorkSearchThenAnswerModel()
+        resource_store = RecentResourceCandidateStore()
+        ingest_store = AgentIngestSessionStore()
+        specs = {
+            spec.name: spec
+            for spec in build_tool_specs(resource_store, ingest_store)
+        }
+        # 仅模拟外部检索结果；输入校验、候选引用、预检与确认使用真实实现。
+        search_spec = replace(
+            specs["library.search_missing_season_resources"],
+            context_handler=lambda _arguments, _context: _multi_work_search_result(),
+        )
+        catalog = catalog_from_tool_specs(
+            (search_spec, specs["ingest.submit"])
+        )
+        state = InMemorySessionStateStore()
+        pipeline = ToolPipeline(catalog=catalog, state_store=state)
+        first_session = AgentSession(
+            model=search_model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(),
+            pipeline=pipeline,
+            state_store=state,
+        )
+
+        first_events = await _collect(
+            first_session.run(
+                AgentInput(
+                    message="先核对七部作品的季度缺集资源",
+                    owner="multi-owner",
+                    session_id="multi-session",
+                )
+            )
+        )
+        self.assertFalse(
+            any(event.type is AgentEventType.TOOL_FAILED for event in first_events)
+        )
+        self.assertEqual(len(search_model.search_arguments["items"]), 7)
+        search_event = next(
+            event
+            for event in first_events
+            if event.type is AgentEventType.TOOL_COMPLETED
+            and event.payload["tool"]
+            == "library.search_missing_season_resources"
+        )
+        search_public = search_event.payload["result"]
+        candidate_view = search_public["candidate_view"]
+        state_view = (
+            await state.load(owner="multi-owner", session_id="multi-session")
+        ).metadata["ux_candidate_view"]
+        candidate_ref = candidate_view["ref"]
+        self.assertEqual(candidate_ref, state_view["ref"])
+        self.assertEqual(candidate_ref, candidate_view["ref"])
+        self.assertIn("1 部无匹配", search_public["summary"])
+        self.assertEqual(
+            [item["position"] for item in candidate_view["items"]],
+            list(range(1, 7)),
+        )
+        self.assertEqual(candidate_view["recommended_positions"], list(range(1, 7)))
+        self.assertEqual(
+            [item["media_title"] for item in candidate_view["items"]],
+            [title for title, _tmdb_id in _MULTI_WORKS[:6]],
+        )
+        self.assertEqual(candidate_view["items"][0]["coverage"], [1, 7, 8])
+        self.assertEqual(candidate_view["items"][5]["coverage"], [1, 8, 9])
+        self.assertTrue(
+            all(
+                item["requested_episode"] == [1, 8]
+                for item in candidate_view["items"]
+            )
+        )
+
+        download_model = DownloadAllFromRecommendationModel()
+        followup = AgentSession(
+            model=download_model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(),
+            pipeline=pipeline,
+            state_store=state,
+        )
+        capture_calls: list[dict[str, Any]] = []
+        candidate_ids = [
+            f"multi-work-candidate-{position:02d}" for position in range(1, 7)
+        ]
+
+        def fake_capture(arguments: dict[str, Any]) -> dict[str, Any]:
+            result_ids = list(arguments["result_ids"])
+            capture_calls.append(
+                {"result_ids": result_ids, "target": arguments["target"]}
+            )
+            items = [
+                SimpleNamespace(
+                    site_id="fixture-indexer",
+                    site_name="离线索引夹具",
+                    title=f"已核验资源 {result_id}",
+                    download_state="ready",
+                    download_kinds=("magnet",),
+                )
+                for result_id in result_ids
+            ]
+            return {
+                "enabled": True,
+                "service": object(),
+                "items": items,
+                "resources": [
+                    {
+                        "result_id": result_id,
+                        "site_id": item.site_id,
+                        "site_name": item.site_name,
+                        "title": item.title,
+                        "download_state": item.download_state,
+                        "download_kinds": ["magnet"],
+                    }
+                    for result_id, item in zip(result_ids, items)
+                ],
+                "readiness": {"guangya": True},
+                "fingerprint": "fixture-batch-context",
+            }
+
+        def fake_download(
+            _service: object, result_id: str, target: str, **_kwargs: Any
+        ) -> dict[str, Any]:
+            return {
+                "result_id": result_id,
+                "request_id": 8_000 + candidate_ids.index(result_id),
+                "target": target,
+                "status": "submitted",
+                "ok": True,
+                "handled": True,
+                "succeeded": [target],
+                "failed": [],
+                "duplicate": False,
+                "error": "",
+            }
+
+        with (
+            patch(
+                "app.agent.indexer_actions._capture_submit_resource_batch",
+                side_effect=fake_capture,
+            ) as capture_batch,
+            patch(
+                "app.indexers.downloads.download_indexer_result",
+                side_effect=fake_download,
+            ) as download_result,
+            patch(
+                "app.agent.ingest_actions._receiving_folders",
+                return_value=( ["光鸭：测试接收目录"], "fixture-destination"),
+            ),
+        ):
+            followup_events = await _collect(
+                followup.run(
+                    AgentInput(
+                        message="下载全部六部到光鸭",
+                        owner="multi-owner",
+                        session_id="multi-session",
+                    )
+                )
+            )
+            self.assertFalse(
+                any(
+                    event.type is AgentEventType.TOOL_FAILED
+                    for event in followup_events
+                )
+            )
+            self.assertEqual(
+                [
+                    (
+                        item["position"],
+                        item.get("media_title"),
+                        item.get("requested_episode"),
+                    )
+                    for item in download_model.candidate_numbers
+                ],
+                [
+                    (
+                        item["position"],
+                        item.get("media_title"),
+                        item.get("requested_episode"),
+                    )
+                    for item in candidate_view["items"]
+                ],
+            )
+            self.assertEqual(
+                download_model.recommended_ingest_arguments,
+                {
+                    "source_type": "resource_candidates",
+                    "resource_candidates_ref": candidate_ref,
+                    "positions": list(range(1, 7)),
+                    "target": "preferred",
+                },
+            )
+            self.assertEqual(
+                download_model.submitted_arguments,
+                {
+                    "source_type": "resource_candidates",
+                    "resource_candidates_ref": candidate_ref,
+                    "positions": list(range(1, 7)),
+                    "target": "guangya",
+                },
+            )
+            self.assertEqual(
+                sum(
+                    event.type is AgentEventType.TOOL_STARTED
+                    and event.payload.get("tool") == "ingest.submit"
+                    for event in followup_events
+                ),
+                1,
+            )
+            approval = next(
+                event
+                for event in followup_events
+                if event.type is AgentEventType.EFFECT_APPROVAL_REQUIRED
+            )
+            plan = approval.payload["plan"]
+            preview_data = plan["preview"]["data"]
+            self.assertEqual(preview_data["count"], 6)
+            self.assertEqual(
+                [item["position"] for item in preview_data["resources"]],
+                list(range(1, 7)),
+            )
+            self.assertEqual(
+                capture_calls[0],
+                {"result_ids": candidate_ids, "target": "guangya"},
+            )
+            capture_batch.assert_called()
+            download_result.assert_not_called()
+
+            confirmed_events = await _collect(
+                followup.confirm(
+                    owner="multi-owner",
+                    session_id="multi-session",
+                    plan_id=plan["plan_id"],
+                )
+            )
+            self.assertTrue(
+                any(
+                    event.type is AgentEventType.EFFECT_COMPLETED
+                    for event in confirmed_events
+                )
+            )
+            executed_ids = [
+                call.args[1] for call in download_result.call_args_list
+            ]
+            self.assertEqual(executed_ids, candidate_ids)
+            self.assertEqual(
+                [call.args[2] for call in download_result.call_args_list],
+                ["guangya"] * 6,
+            )
+
+            repeated_confirm_events = await _collect(
+                followup.confirm(
+                    owner="multi-owner",
+                    session_id="multi-session",
+                    plan_id=plan["plan_id"],
+                )
+            )
+            self.assertFalse(
+                any(
+                    event.type is AgentEventType.EFFECT_COMPLETED
+                    for event in repeated_confirm_events
+                )
+            )
+            self.assertEqual(download_result.call_count, 6)

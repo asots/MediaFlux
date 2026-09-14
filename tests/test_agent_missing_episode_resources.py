@@ -556,3 +556,56 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertEqual(result.data["remaining"], 2)
         self.assertTrue(result.data["truncated"])
         self.assertTrue(any("耗时上限" in item for item in result.suggestions))
+
+
+class MultiWorkResourceTests(unittest.TestCase):
+    def test_batch_validation_is_bounded_and_single_contract_is_reused(self):
+        args = missing_season_resource_arguments({"items": [{"query": " 示例剧 ", "season": 1}, {"query": "示例剧", "season": 1}]})
+        self.assertEqual(len(args["items"]), 1)
+        self.assertIn("as_of", args["items"][0])
+        for raw in ([], ["bad"], [{"query": "剧", "season": 0}], [{"query": "剧", "season": 1}] * 13):
+            with self.subTest(raw=raw), self.assertRaises(AgentToolError):
+                missing_season_resource_arguments({"items": raw})
+        with self.assertRaises(AgentToolError):
+            missing_season_resource_arguments({"items": [{"query": "剧", "season": 1}], "query": "另一部"})
+
+    def test_seven_work_batch_keeps_six_private_candidates_and_deduplicates_pack(self):
+        from types import SimpleNamespace
+        from app.agent.recent_resource_candidates import restore_resource_candidate_reference, validate_safe_resource_snapshot
+        from app.indexers.models import IndexerItem
+        names = ["光阴之外", "择日飞升", "大主宰", "牧神记", "沧元图", "一斩苍穹", "东大高武学院"]
+        stored = {}
+        service = SimpleNamespace(result_store=SimpleNamespace(get=lambda key: stored[key], restore=Mock()))
+        args = missing_season_resource_arguments({"items": [{"query": name, "season": 1} for name in names], "as_of": "2026-08-01"})
+        def audit(arguments):
+            result = _audit_result(missing=[{"season": 1, "episode": e} for e in ((8, 9) if arguments["query"] == names[0] else (8,))])
+            result.data.update(title=arguments["query"], tmdb_id=str(1000 + names.index(arguments["query"])))
+            return result
+        def search(arguments, **_kwargs):
+            name = next(name for name in names if arguments["title"].startswith(name))
+            index = names.index(name)
+            if index == 6:
+                return _search_result(items=[])
+            result_id = f"batch-resource-{index:02d}-0000"
+            title = name + (".S01E08-09.1080p" if index == 0 else ".S01E08.1080p")
+            stored[result_id] = IndexerItem("nyaa", "测试站点", title, result_id=result_id, download_state="ready", download_kinds=("magnet",), magnet="magnet:?xt=urn:btih:" + "a" * 40)
+            return _search_result(items=[{"result_id": result_id, "title": title, "site_id": "nyaa", "site_name": "测试站点", "download_state": "ready", "download_kinds": ["magnet"]}])
+        with patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit), patch(
+            "app.agent.episode_resource_actions.search_resources", side_effect=search
+        ), patch("app.agent.episode_resource_actions.get_indexer_service", return_value=service):
+            result = search_missing_season_resources(args)
+        self.assertEqual(len(result.data["groups"]), 7)
+        self.assertEqual(result.data["recommended_positions"], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(result.data["groups"][0]["positions"], [1])
+        self.assertFalse(result.data["groups"][0]["uncovered_episodes"])
+        self.assertEqual(result.data["groups"][-1]["positions"], [])
+        self.assertEqual(result.data["groups"][-1]["uncovered_episodes"][0]["reason"], "no_match")
+        reference = result.references[0]
+        self.assertEqual(len(reference.value["_private_items"]), 6)
+        with patch("app.indexers.runtime.get_indexer_service", return_value=service):
+            restored = restore_resource_candidate_reference(reference.value)
+        self.assertIsNotNone(validate_safe_resource_snapshot(restored))
+        self.assertEqual(service.result_store.restore.call_count, 6)
+        self.assertEqual([c["_verification_context"]["title"] for c in restored["candidates"]], names[:6])
+        self.assertNotIn("magnet:", str(result.to_dict()))
+        self.assertNotIn("_verification_context", str(result.to_dict()))

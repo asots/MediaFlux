@@ -1811,7 +1811,8 @@
             ? `${range[0] ? `S${String(range[0]).padStart(2, '0')} · ` : ''}${String(range[1]).padStart(2, '0')}–${String(range[2]).padStart(2, '0')} 集`
             : clipText(item.title, 48);
         const specs = ['resolution', 'effect', 'media'].map(key => item.tags?.[key]).filter(value => typeof value === 'string' && value.trim() && !coverage.toLowerCase().includes(value.toLowerCase()));
-        return `#${item.position} · ${coverage}${specs.length ? ` · ${specs.join(' / ')}` : ''}`;
+        const title = clipText(item.media_title || item.title, 48);
+        return `#${item.position} · ${title}${coverage !== title ? ` · ${coverage}` : ''}${specs.length ? ` · ${specs.join(' / ')}` : ''}`;
     }
 
     function syncCandidateButtons() {
@@ -1833,7 +1834,7 @@
                 const [season, start, end] = item.coverage;
                 if (!Number.isInteger(start) || !Number.isInteger(end) || end - start > 1000) continue;
                 for (let ep = start; ep <= end; ep++) {
-                    const key = `${season}:${ep}`;
+                    const key = `${item.media_scope || item.media_title || ''}:${season}:${ep}`;
                     if (occupied.has(key)) overlap = true;
                     occupied.add(key);
                 }
