@@ -242,7 +242,7 @@ def check_library_updates(arguments: dict[str, Any]) -> ToolResult:
         updates = sum(row["status"] == "updates_available" for row in rows)
         current = sum(row["status"] == "up_to_date" for row in rows)
         uncertain = len(rows) - updates - current
-        return ToolResult(
+        result = ToolResult(
             ok=any(row["ok"] for row in rows), status="partial" if uncertain else "success",
             summary=f"已核对 {len(rows)} 部：{updates} 部存在已播缺集，{current} 部无已播缺集，{uncertain} 部待确认",
             data={
@@ -258,6 +258,20 @@ def check_library_updates(arguments: dict[str, Any]) -> ToolResult:
                 "本次未检索资源站，也不证明官方平台实时进度；需要发布候选时再使用现有资源检索能力。",
             ],
         )
+        # 公共结果保留来源明细；模型复用同一事实，仅去掉重复长描述和服务器名称。
+        model_rows = []
+        for row in rows:
+            compact = {key: value for key, value in row.items() if key not in {"summary", "sources"}}
+            compact["sources"] = [
+                {"server_type": kind, "status": status, "truncated": truncated}
+                for kind, status, truncated in sorted({
+                    (source.get("server_type", ""), source.get("status", "unavailable"), bool(source.get("truncated")))
+                    for source in row["sources"]
+                })
+            ]
+            model_rows.append(compact)
+        result.model_data = {**result.data, "items": model_rows}
+        return result
     media_type = arguments.get("media_type", "auto")
     if media_type == "movie":
         return _check_movie_updates(arguments)

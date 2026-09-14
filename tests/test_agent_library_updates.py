@@ -630,6 +630,26 @@ class LibraryUpdateActionTests(unittest.TestCase):
         self.assertEqual(len(projected["data"]["items"]), 20)
         self.assertEqual([item["query"] for item in projected["data"]["items"]], titles)
 
+    def test_twenty_long_titles_keep_every_fact_under_model_projection_budget(self):
+        titles = [f"第{i:02d}部" + "长标题样本" * 23 for i in range(20)]
+        def audit(arguments):
+            result = _query_audit_result(arguments["query"], status="updates_available")
+            result.summary = "存在已播缺集，请结合实际媒体库版本及季集编号核对。" * 6
+            result.data["sources"] = [{"server_type": "jellyfin", "server_name": f"服务器{i}" + "媒体资料" * 16,
+                                       "status": "ready", "truncated": False} for i in range(3)]
+            result.data["missing_sample"] = [{"season": 1, "episode": n} for n in range(3, 8)]
+            return result
+        with patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
+            result = check_library_updates(_library_update_arguments({"queries": titles, "as_of": "2026-08-01"}))
+        self.assertGreater(len(json.dumps(result.to_dict(), ensure_ascii=False)), 24_000)
+        projected = DefaultProjector().project(result).model_content
+        model = json.loads(projected)
+        self.assertLess(len(projected), 24_000)
+        self.assertEqual([item["query"] for item in model["data"]["items"]], titles)
+        self.assertTrue(all(item["latest_local"] for item in model["data"]["items"]))
+        self.assertFalse(model.get("truncated"))
+        self.assertEqual(len(result.data["items"][0]["sources"]), 3)
+
     def test_movie_comparison_unavailable_counts_as_uncertain_in_batch(self):
         titles = ["电影甲", "电影乙"]
 
