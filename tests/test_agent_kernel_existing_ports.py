@@ -41,6 +41,28 @@ async def context_for(state, *, owner="owner", session="session"):
 
 
 class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
+    async def test_post_write_verifier_keeps_failed_outcome_and_receipt(self):
+        for status in ("conflict", "outcome_unknown"):
+            with self.subTest(status=status):
+                domain_result = ToolResult(False, status, "最终状态未确认", data={"receipt": "safe-receipt"}, error="请先核验而非重试")
+                spec = ToolSpec(name="config.test_write", description="测试配置写入", risk=RiskLevel.WRITE,
+                    parameters={"type": "object", "properties": {}, "additionalProperties": False},
+                    validator=lambda arguments: arguments, requires_confirmation=True,
+                    context_confirmation_preparer=lambda _args, _ctx: (ToolResult(True, "ready", "预检"), "fingerprint"),
+                    context_confirmed_handler=lambda _args, _snapshot, _ctx: domain_result,
+                    post_write_verifier=lambda _args, result: result)
+                catalog = catalog_from_tool_specs([spec])
+                state = InMemorySessionStateStore()
+                pipeline = ToolPipeline(catalog=catalog, state_store=state)
+                context = await context_for(state)
+                preview = await pipeline.execute(spec.name, {}, context=context)
+                outcome = await pipeline.execute_confirmed(preview.effect_plan.plan_id, context=context)
+                public = outcome.outcome.public_content
+                self.assertFalse(public["ok"])
+                self.assertEqual(public["status"], status)
+                self.assertEqual(public["data"]["receipt"], "safe-receipt")
+                self.assertEqual(public["error"], "请先核验而非重试")
+
     async def test_all_existing_atomic_tools_can_be_declared_to_kernel(self) -> None:
         catalog = catalog_from_tool_specs(build_tool_specs())
         self.assertEqual(len(catalog), len(build_tool_specs()))

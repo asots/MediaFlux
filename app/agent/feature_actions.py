@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -404,35 +404,23 @@ def verify_feature_state_write(
     result: ToolResult,
 ) -> ToolResult:
     """回读持久化快照；不返回配置键、原始值或部署路径。"""
+    if not result.ok:
+        return result
     definition = _FEATURES[arguments["feature"]]
     _snapshot, values = config.read_env_snapshot(config.ENV_FILE)
     expected = "1" if arguments["enabled"] else "0"
     verified = values.get(definition.key) == expected
-    data = dict(result.data)
-    data["verification_state"] = "verified" if verified else "pending"
-    suggestions = list(result.suggestions)
-    evidence = list(result.evidence)
-    if verified:
-        evidence.append(
-            Evidence(
-                "server_configuration",
-                "已从服务端持久化配置快照回读目标功能状态；未返回配置键或配置值。",
-                _now(),
-            )
-        )
-    else:
-        message = "配置写入已提交，但持久化回读尚未确认目标状态；请刷新设置页复核。"
-        if message not in suggestions:
-            suggestions.append(message)
-    return ToolResult(
-        ok=True,
-        status=result.status,
-        summary=result.summary,
-        data=data,
-        evidence=evidence,
-        suggestions=suggestions,
-        error="",
-    )
+    data = {**result.data, "verification_state": "verified" if verified else "pending"}
+    if not verified:
+        message = "已提交但最终状态待核验，请先查看配置而非直接重试"
+        return replace(result, ok=False, status="outcome_unknown",
+                       summary=message, error=message + "。", data=data)
+    evidence = [*result.evidence, Evidence(
+        "server_configuration",
+        "已从服务端持久化配置快照回读目标功能状态；未返回配置键或配置值。",
+        _now(),
+    )]
+    return replace(result, data=data, evidence=evidence, error="")
 
 
 def set_feature_state_confirmed(

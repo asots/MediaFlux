@@ -14,8 +14,10 @@ from app.agent.indexer_config_actions import (
     indexer_sites_arguments,
     prepare_indexer_sites_confirmation,
     summarize_indexer_sites,
+    verify_indexer_sites_write,
 )
-from app.agent.models import RiskLevel
+from app.agent.kernel.public_view import format_public_result
+from app.agent.models import Evidence, RiskLevel, ToolReference, ToolResult
 from app.indexers.config import (
     build_indexer_site_updates,
     normalize_indexer_site_ids,
@@ -141,3 +143,104 @@ class IndexerSiteConfigUnitTests(unittest.TestCase):
             )
             self.assertTrue(summary.data["search_enabled"])
             self.assertEqual(len(context), 64)
+
+    def test_post_write_verification_preserves_failure_without_readback(self):
+        result = ToolResult(
+            ok=False,
+            status="conflict",
+            summary="配置已被其他操作修改，请重新预检",
+            data={"receipt": "indexer-receipt", "site_count": 2},
+            evidence=[Evidence("test", "original evidence", "now")],
+            suggestions=["original suggestion"],
+            error="配置已变化。",
+            references=[ToolReference("config_receipt", "indexer-receipt")],
+            effect_metadata={"receipt_id": "indexer-receipt"},
+        )
+        with patch.object(config, "read_env_snapshot") as readback:
+            checked = verify_indexer_sites_write(
+                {"site_ids": ["nyaa", "tpb"], "enable_search": True}, result
+            )
+
+        self.assertIs(checked, result)
+        readback.assert_not_called()
+        self.assertEqual(checked.to_dict(), result.to_dict())
+
+    def test_post_write_verification_reports_pending_as_unknown(self):
+        evidence = [Evidence("test", "original evidence", "now")]
+        result = ToolResult(
+            ok=True,
+            status="completed",
+            summary="已保存 2 个资源站点",
+            data={"receipt": "indexer-receipt", "site_count": 2},
+            evidence=evidence,
+            references=[ToolReference("config_receipt", "indexer-receipt")],
+            effect_metadata={"receipt_id": "indexer-receipt"},
+        )
+        with patch.object(
+            config,
+            "read_env_snapshot",
+            return_value=(
+                b"persisted",
+                {
+                    "INDEXER_ENABLED_SITES": "nyaa",
+                    "INDEXER_SUKEBEI_ENABLED": "0",
+                    "INDEXER_SEARCH_ENABLED": "1",
+                },
+            ),
+        ):
+            checked = verify_indexer_sites_write(
+                {"site_ids": ["nyaa", "tpb"], "enable_search": True}, result
+            )
+
+        self.assertFalse(checked.ok)
+        self.assertEqual(checked.status, "outcome_unknown")
+        self.assertEqual(checked.data["verification_state"], "pending")
+        self.assertEqual(checked.data["receipt"], "indexer-receipt")
+        self.assertEqual(checked.evidence, evidence)
+        self.assertIs(checked.references, result.references)
+        self.assertIs(checked.effect_metadata, result.effect_metadata)
+        self.assertIn("已提交", checked.summary)
+        self.assertIn("待核验", checked.error)
+        self.assertIn("请先查看配置而非直接重试", checked.error)
+        public = format_public_result(checked.to_dict())
+        self.assertTrue(public.startswith("❌ "))
+        self.assertNotIn("✅", public)
+        self.assertIn("请先查看配置而非直接重试", public)
+
+    def test_post_write_verification_keeps_matching_success(self):
+        evidence = [Evidence("test", "original evidence", "now")]
+        result = ToolResult(
+            ok=True,
+            status="completed",
+            summary="已保存 2 个资源站点",
+            data={"receipt": "indexer-receipt", "site_count": 2},
+            evidence=evidence,
+            references=[ToolReference("config_receipt", "indexer-receipt")],
+            effect_metadata={"receipt_id": "indexer-receipt"},
+        )
+        with patch.object(
+            config,
+            "read_env_snapshot",
+            return_value=(
+                b"persisted",
+                {
+                    "INDEXER_ENABLED_SITES": "nyaa,tpb",
+                    "INDEXER_SUKEBEI_ENABLED": "0",
+                    "INDEXER_SEARCH_ENABLED": "1",
+                },
+            ),
+        ):
+            checked = verify_indexer_sites_write(
+                {"site_ids": ["nyaa", "tpb"], "enable_search": True}, result
+            )
+
+        self.assertTrue(checked.ok)
+        self.assertEqual(checked.status, "completed")
+        self.assertEqual(checked.summary, result.summary)
+        self.assertEqual(checked.data["verification_state"], "verified")
+        self.assertEqual(checked.data["receipt"], "indexer-receipt")
+        self.assertEqual(checked.evidence[:1], evidence)
+        self.assertEqual(len(checked.evidence), len(evidence) + 1)
+        self.assertIs(checked.references, result.references)
+        self.assertIs(checked.effect_metadata, result.effect_metadata)
+        self.assertTrue(format_public_result(checked.to_dict()).startswith("✅ "))

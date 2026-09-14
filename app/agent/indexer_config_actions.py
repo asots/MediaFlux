@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -377,31 +378,19 @@ def verify_indexer_sites_write(
     result: ToolResult,
 ) -> ToolResult:
     """回读资源站点白名单的持久化结果，不暴露内部配置内容。"""
+    if not result.ok:
+        return result
     expected = _requested_updates(arguments)
     _snapshot, values = config.read_env_snapshot(config.ENV_FILE)
     verified = all(values.get(key) == value for key, value in expected.items())
-    data = dict(result.data)
-    data["verification_state"] = "verified" if verified else "pending"
-    suggestions = list(result.suggestions)
-    evidence = list(result.evidence)
-    if verified:
-        evidence.append(
-            Evidence(
-                "server_configuration",
-                "已从服务端持久化配置快照回读资源站点选择；未返回配置键或配置值。",
-                _now(),
-            )
-        )
-    else:
-        message = "站点选择已提交，但持久化回读尚未确认完整结果；请刷新设置页复核。"
-        if message not in suggestions:
-            suggestions.append(message)
-    return ToolResult(
-        ok=True,
-        status=result.status,
-        summary=result.summary,
-        data=data,
-        evidence=evidence,
-        suggestions=suggestions,
-        error="",
-    )
+    data = {**result.data, "verification_state": "verified" if verified else "pending"}
+    if not verified:
+        message = "已提交但最终状态待核验，请先查看配置而非直接重试"
+        return replace(result, ok=False, status="outcome_unknown",
+                       summary=message, error=message + "。", data=data)
+    evidence = [*result.evidence, Evidence(
+        "server_configuration",
+        "已从服务端持久化配置快照回读资源站点选择；未返回配置键或配置值。",
+        _now(),
+    )]
+    return replace(result, data=data, evidence=evidence, error="")

@@ -287,7 +287,10 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
             raise _safe_error(
                 exc, fallback_code="post_write_verification_failed"
             ) from exc
-        return _assert_success(verified, code="post_write_verification_failed")
+        if not isinstance(verified, ToolResult):
+            raise ToolPipelineError("领域能力返回无效结果", code="invalid_tool_result")
+        # 与 execute_confirmed 一致：保留可信失败/未知 DTO，由 Kernel 发布真实终态和回执。
+        return verified
 
     return KernelToolSpec(
         name=spec.name,
