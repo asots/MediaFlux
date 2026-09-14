@@ -702,6 +702,11 @@ class LibraryUpdateActionTests(unittest.TestCase):
                 events = await asyncio.wait_for(task, 3)
                 self.assertEqual(events[-1].type, AgentEventType.TURN_CANCELLED)
                 self.assertEqual(len(reads), 3)
+                saved = await state.load(owner="cancel-owner", session_id="cancel-batch")
+                tool = next(item for item in saved.conversation if item["role"] == "tool")
+                rows = json.loads(tool["content"])["data"]["items"]
+                self.assertEqual(sum(row["status"] == "up_to_date" for row in rows), 3)
+                self.assertEqual(sum(row["status"] == "cancelled" for row in rows), 7)
             finally:
                 release.set()
                 if not task.done():

@@ -327,6 +327,20 @@ class AgentSession:
         lease: PublicationLease | None = None
         token: CancellationToken | None = None
         factory: EventFactory | None = None
+        checkpoint: Callable[..., Awaitable[None]] | None = None
+
+        async def preserve_checkpoint() -> None:
+            if checkpoint is None:
+                return
+            try:
+                await checkpoint(close_pending=True)
+            except StalePublicationError:
+                return
+            except Exception as exc:  # noqa: BLE001 - 故障收尾不能遮蔽原始错误
+                logger.warning(
+                    "Agent 故障检查点写回失败 type=%s", type(exc).__name__
+                )
+
         try:
             validated_selection = None
             candidate_context = None
@@ -381,15 +395,44 @@ class AgentSession:
                     messages = self._restore_messages(state)
                     current_user_index = len(messages)
                     messages.append(ModelMessage(role="user", content=contextual_message))
+                    active_calls: tuple[ModelToolCall, ...] = ()
+                    completed_call_ids: set[str] = set()
+                    started_call_id = ""
+
+                    async def persist_conversation(*, close_pending: bool = False) -> None:
+                        checkpoint_messages = list(messages)
+                        if close_pending:
+                            for call in active_calls:
+                                if call.call_id in completed_call_ids:
+                                    continue
+                                started = call.call_id == started_call_id
+                                checkpoint_messages.append(
+                                    self._tool_error_message(
+                                        call,
+                                        ToolPipelineError(
+                                            "工具执行被中断，结果未知"
+                                            if started else "本调用未执行",
+                                            code="result_unknown" if started else "not_executed",
+                                        ),
+                                    )
+                                )
+                        await self.state_store.commit(
+                            lease,
+                            conversation=self._persisted_conversation(
+                                checkpoint_messages,
+                                current_user_index=current_user_index,
+                                original_message=agent_input.message,
+                                reply_context=agent_input.reply_context,
+                                prior_conversation=state.conversation,
+                            ),
+                        )
+
                     # 输入接纳和持久化必须位于同一个 start window，不能等事件发布：
                     # journal/observer 可能挂起，此时下一条追问已取得新 generation。
                     # 这里只写通过凭据检测的用户输入，迟到的模型/工具仍不得提交。
                     if not sensitive_input:
-                        await self.state_store.commit(lease, conversation=self._persisted_conversation(
-                            messages, current_user_index=current_user_index,
-                            original_message=agent_input.message, reply_context=agent_input.reply_context,
-                            prior_conversation=state.conversation,
-                        ))
+                        checkpoint = persist_conversation
+                        await persist_conversation()
             factory = EventFactory(
                 session_id=agent_input.session_id,
                 turn_id=lease.turn_id,
@@ -479,15 +522,7 @@ class AgentSession:
             async def finish_answer(answer: str, status: str, reason: str, model_calls: int) -> None:
                 """正常回答与预算收尾共用一次持久化/终态发布，不丢失工具调用协议。"""
                 messages.append(ModelMessage(role="assistant", content=answer))
-                await self.state_store.commit(
-                    lease,
-                    conversation=self._persisted_conversation(
-                        messages,
-                        current_user_index=current_user_index,
-                        original_message=agent_input.message, reply_context=agent_input.reply_context,
-                        prior_conversation=state.conversation,
-                    ),
-                )
+                await persist_conversation()
                 await publish(AgentEventType.TURN_COMPLETED, {
                     "status": status, "answer": answer, "finish_reason": reason,
                     "usage": total_usage, "model_calls": model_calls, "tool_calls": total_tool_calls,
@@ -645,13 +680,18 @@ class AgentSession:
                         "本轮工具预算不足，本批调用均未执行" if over_tool_budget or tool_budget_blocked else "最终汇总轮次不再执行工具",
                         code="tool_budget_exceeded" if over_tool_budget or tool_budget_blocked else "not_executed_final_round",
                     )
+                    active_calls = tuple(calls)
+                    completed_call_ids.clear()
+                    started_call_id = ""
                     messages.append(ModelMessage(role="assistant", content=assistant_text, tool_calls=tuple(calls)))
                     for call in calls:
+                        messages.append(self._tool_error_message(call, error))
+                        completed_call_ids.add(call.call_id)
                         await publish(AgentEventType.TOOL_FAILED, {
                             "call_id": call.call_id, "tool": call.name,
                             "label": public_tool_label(call.name), "code": error.code, "message": str(error),
                         })
-                        messages.append(self._tool_error_message(call, error))
+                    active_calls = ()
                     if over_tool_budget and not final_synthesis_round and round_index + 1 < self.limits.max_model_rounds:
                         tool_budget_blocked = True
                         continue
@@ -668,6 +708,9 @@ class AgentSession:
                     return
                 if calls:
                     total_tool_calls += len(calls)
+                    active_calls = tuple(calls)
+                    completed_call_ids.clear()
+                    started_call_id = ""
                     messages.append(
                         ModelMessage(
                             role="assistant",
@@ -684,6 +727,8 @@ class AgentSession:
                                 "该工具不在本轮候选能力中",
                                 code="tool_not_available",
                             )
+                            messages.append(self._tool_error_message(call, error))
+                            completed_call_ids.add(call.call_id)
                             await publish(
                                 AgentEventType.TOOL_FAILED,
                                 {
@@ -694,7 +739,6 @@ class AgentSession:
                                     "message": str(error),
                                 },
                             )
-                            messages.append(self._tool_error_message(call, error))
                             continue
                         tool = self.catalog.get(call.name)
                         canonical_call = ModelToolCall(
@@ -727,6 +771,7 @@ class AgentSession:
                             )
                             discovery.context["reference_kinds"] = tuple(current_state.ref_kinds)
                         try:
+                            started_call_id = call.call_id
                             result = await self.pipeline.execute(
                                 canonical_call.name,
                                 canonical_call.arguments,
@@ -736,6 +781,8 @@ class AgentSession:
                             if tool.name == DISCOVERY_TOOL:
                                 # 仅撤销本次失败的发现，不能丢掉同批之前成功的结果。
                                 discovery.restore(discovery_checkpoint)
+                            messages.append(self._tool_error_message(call, exc))
+                            completed_call_ids.add(call.call_id)
                             await publish(
                                 AgentEventType.TOOL_FAILED,
                                 {
@@ -746,12 +793,20 @@ class AgentSession:
                                     "message": str(exc),
                                 },
                             )
-                            messages.append(self._tool_error_message(call, exc))
                             continue
                         if tool.name == DISCOVERY_TOOL and result.outcome.public_content.get("ok") is False:
                             discovery.restore(discovery_checkpoint)
                         if result.effect_plan is not None:
                             plan = result.effect_plan
+                            messages.append(
+                                ModelMessage(
+                                    role="tool",
+                                    content=result.outcome.model_message(),
+                                    tool_call_id=call.call_id,
+                                    tool_name=call.name,
+                                )
+                            )
+                            completed_call_ids.add(call.call_id)
                             await publish(
                                 AgentEventType.EFFECT_APPROVAL_REQUIRED,
                                 {
@@ -762,14 +817,6 @@ class AgentSession:
                                     "result": dict(result.outcome.public_content),
                                 },
                             )
-                            messages.append(
-                                ModelMessage(
-                                    role="tool",
-                                    content=result.outcome.model_message(),
-                                    tool_call_id=call.call_id,
-                                    tool_name=call.name,
-                                )
-                            )
                             # Provider 已被要求禁止并行工具，但兼容服务仍可能
                             # 违规一次返回多个调用。写操作在此暂停等待人工确认，
                             # 后续调用必须明确闭合为“未执行”，不能留下缺少
@@ -779,6 +826,12 @@ class AgentSession:
                                     "前序写操作需要人工确认，本调用未执行",
                                     code="not_executed_after_approval",
                                 )
+                                messages.append(
+                                    self._tool_error_message(
+                                        deferred_call, deferred_error
+                                    )
+                                )
+                                completed_call_ids.add(deferred_call.call_id)
                                 await publish(
                                     AgentEventType.TOOL_FAILED,
                                     {
@@ -791,20 +844,8 @@ class AgentSession:
                                         "message": str(deferred_error),
                                     },
                                 )
-                                messages.append(
-                                    self._tool_error_message(
-                                        deferred_call, deferred_error
-                                    )
-                                )
-                            await self.state_store.commit(
-                                lease,
-                                conversation=self._persisted_conversation(
-                                    messages,
-                                    current_user_index=current_user_index,
-                                    original_message=agent_input.message, reply_context=agent_input.reply_context,
-                                    prior_conversation=state.conversation,
-                                ),
-                            )
+                            active_calls = ()
+                            await persist_conversation()
                             await publish(
                                 AgentEventType.TURN_COMPLETED,
                                 {
@@ -816,6 +857,17 @@ class AgentSession:
                                 },
                             )
                             return
+                        messages.append(
+                            ModelMessage(
+                                role="tool",
+                                content=result.outcome.model_message(),
+                                tool_call_id=call.call_id,
+                                tool_name=call.name,
+                            )
+                        )
+                        completed_call_ids.add(call.call_id)
+                        # 完成事实在对外通知、进入下一项I/O之前落盘；新追问才能继承本批前半段。
+                        await persist_conversation(close_pending=True)
                         await publish(
                             AgentEventType.TOOL_COMPLETED,
                             {
@@ -826,14 +878,8 @@ class AgentSession:
                                 "result": dict(result.outcome.public_content),
                             },
                         )
-                        messages.append(
-                            ModelMessage(
-                                role="tool",
-                                content=result.outcome.model_message(),
-                                tool_call_id=call.call_id,
-                                tool_name=call.name,
-                            )
-                        )
+                    active_calls = ()
+                    await persist_conversation()
                     additions = discovery.consume()
                     if additions:
                         # 只在完整工具批次之后更新Schema；同一模型批次不能猜新工具名绕过初选。
@@ -860,6 +906,7 @@ class AgentSession:
             # 单模型轮次等边界没有额外汇总调用机会，仍保留本轮已执行事实。
             await finish_answer(budget_notice, "partial", "model_round_budget_exceeded", self.limits.max_model_rounds)
         except (asyncio.CancelledError, StalePublicationError) as exc:
+            await preserve_checkpoint()
             if factory is not None:
                 event = factory.create(
                     AgentEventType.TURN_CANCELLED,
@@ -895,6 +942,7 @@ class AgentSession:
                 await self.journal.append(event, owner=agent_input.owner)
             await queue.put(event)
         except ToolPipelineError as exc:
+            await preserve_checkpoint()
             failure_factory = factory or EventFactory(
                 session_id=agent_input.session_id,
                 turn_id=secrets.token_urlsafe(12),
@@ -908,6 +956,7 @@ class AgentSession:
                 await self.journal.append(event, owner=agent_input.owner)
             await queue.put(event)
         except ModelProviderError as exc:
+            await preserve_checkpoint()
             logger.warning("Agent model provider failed type=%s", type(exc).__name__)
             failure_factory = factory or EventFactory(
                 session_id=agent_input.session_id,
@@ -925,6 +974,7 @@ class AgentSession:
                 await self.journal.append(event, owner=agent_input.owner)
             await queue.put(event)
         except Exception as exc:  # noqa: BLE001 - final turn fault boundary
+            await preserve_checkpoint()
             logger.error("Agent turn failed type=%s", type(exc).__name__)
             failure_factory = factory or EventFactory(
                 session_id=agent_input.session_id,

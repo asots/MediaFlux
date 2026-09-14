@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 import unittest
@@ -1098,6 +1099,213 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["execute"], 1)
         self.assertIn(AgentEventType.EFFECT_FAILED, [event.type for event in replay])
 
+    async def test_completed_read_survives_provider_failure_for_rebuilt_session(self) -> None:
+        class FailsAfterRead(ScriptedModel):
+            async def stream(self, request, *, cancellation):
+                if self.requests:
+                    self.requests.append(request)
+                    raise ModelProviderError("simulated upstream timeout")
+                async for event in super().stream(request, cancellation=cancellation):
+                    yield event
+
+        catalog = ToolCatalog([
+            read_tool(
+                "library.status",
+                handler=lambda _arguments, _context: {
+                    "summary": "第一部已检查",
+                    "data": {"proof": "completed-fact-unique-7788"},
+                },
+            )
+        ])
+        state = InMemorySessionStateStore()
+        model = FailsAfterRead([
+            [
+                ModelEvent(
+                    ModelEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ModelToolCall("read-1", "library.status", {}),
+                ),
+                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+            ]
+        ])
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=1, maximum=1),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+        )
+
+        events = await collect(
+            session.run(
+                AgentInput(
+                    message="查询媒体库第一部",
+                    owner="owner-1",
+                    session_id="session-1",
+                )
+            )
+        )
+        self.assertEqual(events[-1].type, AgentEventType.TURN_FAILED)
+        self.assertEqual(events[-1].payload["code"], "model_provider_error")
+
+        saved = await state.load(owner="owner-1", session_id="session-1")
+        assistant = next(item for item in saved.conversation if item.get("tool_calls"))
+        results = [
+            item for item in saved.conversation if item.get("role") == "tool"
+        ]
+        self.assertEqual(
+            {call["call_id"] for call in assistant["tool_calls"]},
+            {item["tool_call_id"] for item in results},
+        )
+        self.assertIn("completed-fact-unique-7788", results[0]["content"])
+
+        rebuilt_model = ScriptedModel([
+            [
+                ModelEvent(ModelEventType.TEXT_DELTA, text="可以基于已保存事实继续。"),
+                ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+            ]
+        ])
+        rebuilt = AgentSession(
+            model=rebuilt_model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=1, maximum=1),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+        )
+        continued = await collect(
+            rebuilt.run(
+                AgentInput(
+                    message="继续",
+                    owner="owner-1",
+                    session_id="session-1",
+                )
+            )
+        )
+        self.assertEqual(continued[-1].type, AgentEventType.TURN_COMPLETED)
+        history = "\n".join(item.content for item in rebuilt_model.requests[0].messages)
+        self.assertIn("completed-fact-unique-7788", history)
+
+    async def test_cancelled_batch_preserves_outcome_and_closes_tool_protocol(self) -> None:
+        second_started = asyncio.Event()
+
+        async def second_read(_arguments, context):
+            second_started.set()
+            while not context.cancellation.cancelled:
+                await asyncio.sleep(0)
+            context.cancellation.raise_if_cancelled()
+
+        catalog = ToolCatalog([
+            read_tool(
+                "library.first",
+                description="读取第一项",
+                examples=("检查一批",),
+                handler=lambda _arguments, _context: {
+                    "summary": "第一项完成",
+                    "data": {"proof": "batch-first-7788"},
+                },
+            ),
+            read_tool(
+                "library.second",
+                description="读取第二项",
+                examples=("检查一批",),
+                handler=second_read,
+            ),
+        ])
+        state = InMemorySessionStateStore()
+        model = ScriptedModel([
+            [
+                ModelEvent(
+                    ModelEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ModelToolCall("first-call", "library.first", {}),
+                ),
+                ModelEvent(
+                    ModelEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ModelToolCall("second-call", "library.second", {}),
+                ),
+                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+            ]
+        ])
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=2, maximum=2),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+        )
+        task = asyncio.create_task(
+            collect(
+                session.run(
+                    AgentInput(
+                        message="检查一批",
+                        owner="owner-1",
+                        session_id="session-1",
+                    )
+                )
+            )
+        )
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+        self.assertTrue(
+            await session.cancel(owner="owner-1", session_id="session-1")
+        )
+        events = await asyncio.wait_for(task, timeout=1)
+        self.assertEqual(events[-1].type, AgentEventType.TURN_CANCELLED)
+
+        saved = await state.load(owner="owner-1", session_id="session-1")
+        assistant = next(item for item in saved.conversation if item.get("tool_calls"))
+        call_ids = {call["call_id"] for call in assistant["tool_calls"]}
+        results = [
+            item for item in saved.conversation if item.get("role") == "tool"
+        ]
+        self.assertEqual(call_ids, {item["tool_call_id"] for item in results})
+        first_result = next(item for item in results if item["tool_call_id"] == "first-call")
+        second_result = next(item for item in results if item["tool_call_id"] == "second-call")
+        self.assertIn("batch-first-7788", first_result["content"])
+        self.assertIn("result_unknown", second_result["content"])
+        self.assertIn('"ok":false', second_result["content"])
+
+    async def test_sensitive_input_cancelled_before_failure_is_not_persisted(self) -> None:
+        secret = "api_key=sk-ThisIsAFakeCredential1234567890"
+        cancelled: list[bool] = []
+
+        class CancellingJournal:
+            async def append(self, event, *, owner):
+                del owner
+                if event.type is AgentEventType.TURN_STARTED:
+                    cancelled.append(
+                        await session.cancel(
+                            owner="owner-1", session_id="session-1"
+                        )
+                    )
+
+        catalog = ToolCatalog([read_tool("agent.status", domain="agent")])
+        state = InMemorySessionStateStore()
+        model = ScriptedModel([])
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=1, maximum=1),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+            journal=CancellingJournal(),
+        )
+
+        events = await collect(
+            session.run(
+                AgentInput(
+                    message=secret,
+                    owner="owner-1",
+                    session_id="session-1",
+                )
+            )
+        )
+
+        self.assertEqual(cancelled, [True])
+        self.assertEqual(events[0].type, AgentEventType.TURN_STARTED)
+        self.assertEqual(events[-1].type, AgentEventType.TURN_CANCELLED)
+        self.assertEqual(model.requests, [])
+        saved = await state.load(owner="owner-1", session_id="session-1")
+        self.assertEqual(saved.conversation, [])
+        self.assertNotIn(secret, str(events))
+
     async def test_context_hard_limit_fails_before_provider_call(self) -> None:
         catalog = ToolCatalog([read_tool("library.status")])
         state = InMemorySessionStateStore()
@@ -1974,3 +2182,107 @@ class LatestWinsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old_events[-1].type, AgentEventType.TURN_CANCELLED)
         saved = await state.load(owner="owner", session_id="same")
         self.assertEqual(saved.conversation[-1]["content"], "new")
+
+    async def test_followup_during_second_read_sees_the_completed_first_read(self):
+        second_started = asyncio.Event()
+        observed = []
+        async def wait_read(_arguments, context):
+            second_started.set()
+            await context.cancellation.wait()
+            context.cancellation.raise_if_cancelled()
+        class Model:
+            async def stream(self, request, *, cancellation):
+                if request.messages[-1].content == "检查两个":
+                    for name in ("library.first", "library.second"):
+                        yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(name, name, {}))
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+                else:
+                    observed.append(any("first-fact-5678" in message.content for message in request.messages))
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text="继续处理")
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+        catalog = ToolCatalog([read_tool("library.first", handler=lambda *_: {"summary": "first-fact-5678"}),
+                               read_tool("library.second", handler=wait_read)])
+        state = InMemorySessionStateStore()
+        session = AgentSession(model=Model(), catalog=catalog, retriever=CapabilityRetriever(minimum=2, maximum=2),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        previous = asyncio.create_task(collect(session.run(AgentInput(owner="owner", session_id="overlap", message="检查两个"))))
+        try:
+            await asyncio.wait_for(second_started.wait(), 2)
+            await collect(session.run(AgentInput(owner="owner", session_id="overlap", message="继续")))
+            await asyncio.wait_for(previous, 2)
+            self.assertEqual(observed, [True])
+        finally:
+            if not previous.done():
+                previous.cancel()
+
+    async def test_late_read_checkpoint_cannot_replace_new_turn(self) -> None:
+        checkpoint_started = asyncio.Event()
+        release_checkpoint = asyncio.Event()
+
+        class DelayedCheckpointStore(InMemorySessionStateStore):
+            async def commit(self, lease, *, conversation=None, updates=()):
+                if conversation and any(
+                    item.get("tool_call_id") == "old-read"
+                    for item in conversation
+                ):
+                    checkpoint_started.set()
+                    await release_checkpoint.wait()
+                return await super().commit(
+                    lease, conversation=conversation, updates=updates
+                )
+
+        class ReplacingModel:
+            async def stream(self, request, *, cancellation):
+                del cancellation
+                if request.messages[-1].content == "old":
+                    yield ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("old-read", "library.status", {}),
+                    )
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+                else:
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text="new")
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+
+        catalog = ToolCatalog([
+            read_tool(
+                "library.status",
+                handler=lambda _arguments, _context: {
+                    "summary": "旧回合读取完成",
+                    "data": {"proof": "old-fact-must-not-win"},
+                },
+            )
+        ])
+        state = DelayedCheckpointStore()
+        session = AgentSession(
+            model=ReplacingModel(),
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=1, maximum=1),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+        )
+        old_task = asyncio.create_task(
+            collect(
+                session.run(
+                    AgentInput(message="old", owner="owner-1", session_id="session-1")
+                )
+            )
+        )
+        await asyncio.wait_for(checkpoint_started.wait(), timeout=1)
+        try:
+            new_events = await collect(
+                session.run(
+                    AgentInput(message="new", owner="owner-1", session_id="session-1")
+                )
+            )
+        finally:
+            release_checkpoint.set()
+        old_events = await asyncio.wait_for(old_task, timeout=1)
+
+        self.assertEqual(new_events[-1].payload["answer"], "new")
+        self.assertEqual(old_events[-1].type, AgentEventType.TURN_CANCELLED)
+        saved = await state.load(owner="owner-1", session_id="session-1")
+        self.assertEqual(saved.conversation[-1]["content"], "new")
+        self.assertNotIn(
+            "old-fact-must-not-win", json.dumps(saved.conversation, ensure_ascii=False)
+        )
