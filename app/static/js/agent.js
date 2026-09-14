@@ -1252,7 +1252,15 @@
                 while (lineEnd >= 0) {
                     const line = buffer.slice(0, lineEnd).trim();
                     buffer = buffer.slice(lineEnd + 1);
-                    if (line) consume(JSON.parse(line));
+                    if (line) {
+                        const event = JSON.parse(line);
+                        consume(event);
+                        if (['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)) {
+                            // 业务终态已经持久化，不等待HTTP EOF，更不能让迟到Abort覆盖结果。
+                            reader.cancel().catch(() => {});
+                            return;
+                        }
+                    }
                     lineEnd = buffer.indexOf('\n');
                 }
                 if (done) break;

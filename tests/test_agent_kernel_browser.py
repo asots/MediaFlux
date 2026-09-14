@@ -123,9 +123,14 @@ MOCK_FETCH = r"""
     let streamController = null;
     let index = 0;
     const stream = new ReadableStream({
+      cancel() {
+        if (timer !== null) window.clearTimeout(timer);
+        streamController = null;
+      },
       start(controller) {
         streamController = controller;
         const push = () => {
+          if (!streamController) return;
           if (index < events.length) {
             controller.enqueue(encoder.encode(`${JSON.stringify(events[index])}\n`));
             index += 1;
@@ -335,6 +340,24 @@ class AgentKernelBrowserTests(unittest.TestCase):
         self.assertIn("回复继续", page.locator(".agent-narrative").inner_text())
         self.assertEqual(page.locator(".agent-retry-draft").count(), 0)
         self.assertEqual(page.locator(".agent-streaming, .is-interrupted").count(), 0)
+
+    def test_terminal_answer_releases_composer_without_waiting_for_http_eof(self):
+        for status in ("success", "partial"):
+            with self.subTest(status=status):
+                page = self.make_page({"sessions": {"sessions": []}, "holdQueryOpen": True, "queryEvents": [
+                    _event(1, "turn.started", {"kind": "query"}),
+                    _event(2, "turn.completed", {"status": status, "answer": "已保留完整结果 DONE7788"}),
+                    _event(3, "turn.failed", {"message": "不应覆盖终态的迟到错误"}),
+                ]})
+                page.locator("#agentPrompt").fill("核对媒体库")
+                page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+                page.locator(".agent-narrative").wait_for()
+                page.locator("#agentStop").wait_for(state="hidden")
+                page.locator("#agentPrompt").fill("下一条消息")
+                self.assertTrue(page.locator("#agentSend").is_enabled())
+                self.assertIn("DONE7788", page.locator(".agent-message-assistant").inner_text())
+                self.assertEqual(page.locator(".agent-retry-draft, .agent-cancelled, .is-interrupted").count(), 0)
+                self.assertFalse(any("/cancel" in call["url"] for call in page.evaluate("window.__kernelCalls")))
 
     def test_assistant_markdown_is_rendered_as_safe_semantic_dom(self) -> None:
         answer = """# 国漫推荐
