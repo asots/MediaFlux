@@ -10,11 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from app.agent.model_context_budget import (
-    bounded_model_messages,
-    compact_tool_content,
-    estimated_tokens,
-)
+from app.agent.model_context_budget import bounded_model_messages
 from app.agent.public_safety import public_tool_label
 from app.concurrency import CrossLoopAsyncLock
 from app.sensitive_data import contains_sensitive_credential
@@ -341,6 +337,16 @@ class AgentSession:
                     "Agent 故障检查点写回失败 type=%s", type(exc).__name__
                 )
 
+        async def failure(code: str, message: str) -> None:
+            failure_factory = factory or EventFactory(
+                session_id=agent_input.session_id, turn_id=secrets.token_urlsafe(12),
+                request_id=agent_input.request_id,
+            )
+            event = failure_factory.create(AgentEventType.TURN_FAILED, {"code": code, "message": message})
+            if self.journal is not None:
+                await self.journal.append(event, owner=agent_input.owner)
+            await queue.put(event)
+
         try:
             validated_selection = None
             candidate_context = None
@@ -583,10 +589,7 @@ class AgentSession:
                 answer = "" if plan else format_public_result(dict(result.outcome.public_content))
                 if answer:
                     messages.append(ModelMessage(role="assistant", content=answer))
-                await self.state_store.commit(lease, conversation=self._persisted_conversation(
-                    messages, current_user_index=current_user_index, original_message=agent_input.message, reply_context=agent_input.reply_context,
-                    prior_conversation=state.conversation,
-                ))
+                await persist_conversation()
                 await publish(AgentEventType.TURN_COMPLETED, {
                     "status": "approval_required" if plan else "success", "answer": answer,
                     "plan_id": plan.plan_id if plan else "", "usage": {}, "model_calls": 0, "tool_calls": 1,
@@ -621,11 +624,13 @@ class AgentSession:
                     )
                 request = ModelRequest(
                     system_prompt=request_system_prompt,
-                    messages=self._bounded_model_messages(
+                    messages=bounded_model_messages(
                         messages,
                         history_end=current_user_index,
                         tool_definitions=request_tools,
                         system_prompt=request_system_prompt,
+                        context_window_tokens=self.limits.context_window_tokens,
+                        output_tokens=self.limits.effective_output_tokens,
                     ),
                     tools=request_tools,
                     max_output_tokens=self.limits.effective_output_tokens,
@@ -926,68 +931,18 @@ class AgentSession:
                 {"code": "selection_invalid", "message": str(exc)},
             ))
         except SessionBusyError:
-            busy_factory = factory or EventFactory(
-                session_id=agent_input.session_id,
-                turn_id=secrets.token_urlsafe(12),
-                request_id=agent_input.request_id,
-            )
-            event = busy_factory.create(
-                AgentEventType.TURN_FAILED,
-                {
-                    "code": "effect_in_progress",
-                    "message": "已确认的写操作正在执行，请等待完成后再继续。",
-                },
-            )
-            if self.journal is not None:
-                await self.journal.append(event, owner=agent_input.owner)
-            await queue.put(event)
+            await failure("effect_in_progress", "已确认的写操作正在执行，请等待完成后再继续。")
         except ToolPipelineError as exc:
             await preserve_checkpoint()
-            failure_factory = factory or EventFactory(
-                session_id=agent_input.session_id,
-                turn_id=secrets.token_urlsafe(12),
-                request_id=agent_input.request_id,
-            )
-            event = failure_factory.create(
-                AgentEventType.TURN_FAILED,
-                {"code": exc.code, "message": str(exc)},
-            )
-            if self.journal is not None:
-                await self.journal.append(event, owner=agent_input.owner)
-            await queue.put(event)
+            await failure(exc.code, str(exc))
         except ModelProviderError as exc:
             await preserve_checkpoint()
             logger.warning("Agent model provider failed type=%s", type(exc).__name__)
-            failure_factory = factory or EventFactory(
-                session_id=agent_input.session_id,
-                turn_id=secrets.token_urlsafe(12),
-                request_id=agent_input.request_id,
-            )
-            event = failure_factory.create(
-                AgentEventType.TURN_FAILED,
-                {
-                    "code": "model_provider_error",
-                    "message": _provider_failure_message(exc),
-                },
-            )
-            if self.journal is not None:
-                await self.journal.append(event, owner=agent_input.owner)
-            await queue.put(event)
+            await failure("model_provider_error", _provider_failure_message(exc))
         except Exception as exc:  # noqa: BLE001 - final turn fault boundary
             await preserve_checkpoint()
             logger.error("Agent turn failed type=%s", type(exc).__name__)
-            failure_factory = factory or EventFactory(
-                session_id=agent_input.session_id,
-                turn_id=secrets.token_urlsafe(12),
-                request_id=agent_input.request_id,
-            )
-            event = failure_factory.create(
-                AgentEventType.TURN_FAILED,
-                {"code": "internal_error", "message": "Agent 运行失败"},
-            )
-            if self.journal is not None:
-                await self.journal.append(event, owner=agent_input.owner)
-            await queue.put(event)
+            await failure("internal_error", "Agent 运行失败")
         finally:
             if lease is not None and token is not None:
                 await self.coordinator.finish(lease, token)
@@ -1208,31 +1163,6 @@ class AgentSession:
             if self.journal is not None:
                 await self.journal.append(event, owner=owner)
             await queue.put(event)
-
-    @staticmethod
-    def _estimated_tokens(value: object) -> int:
-        return estimated_tokens(value)
-
-    def _bounded_model_messages(
-        self,
-        messages: Sequence[ModelMessage],
-        *,
-        history_end: int,
-        tool_definitions: Sequence[Mapping[str, Any]],
-        system_prompt: str | None = None,
-    ) -> tuple[ModelMessage, ...]:
-        return bounded_model_messages(
-            messages,
-            history_end=history_end,
-            tool_definitions=tool_definitions,
-            system_prompt=system_prompt or self.system_prompt,
-            context_window_tokens=self.limits.context_window_tokens,
-            output_tokens=self.limits.effective_output_tokens,
-        )
-
-    @staticmethod
-    def _compact_tool_content(content: str, *, maximum: int) -> str:
-        return compact_tool_content(content, maximum=maximum)
 
     @staticmethod
     def _capability_retrieval_context(

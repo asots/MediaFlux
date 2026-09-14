@@ -34,6 +34,7 @@ from app.agent.kernel.state import (
     TurnCoordinator,
 )
 from app.agent.models import ToolReference, ToolResult
+from app.agent.model_context_budget import bounded_model_messages, compact_tool_content
 
 
 class ScriptedModel:
@@ -726,8 +727,11 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ModelMessage(role="user", content="current question"),
         ]
 
-        bounded = session._bounded_model_messages(
+        bounded = bounded_model_messages(
             messages,
+            system_prompt=session.system_prompt,
+            context_window_tokens=session.limits.context_window_tokens,
+            output_tokens=session.limits.effective_output_tokens,
             history_end=4,
             tool_definitions=(catalog.get("library.status").model_definition(),),
         )
@@ -775,8 +779,11 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ModelMessage(role="user", content="方案 A"),
         ]
 
-        bounded = session._bounded_model_messages(
+        bounded = bounded_model_messages(
             messages,
+            system_prompt=session.system_prompt,
+            context_window_tokens=session.limits.context_window_tokens,
+            output_tokens=session.limits.effective_output_tokens,
             history_end=4,
             tool_definitions=(catalog.get("library.status").model_definition(),),
         )
@@ -788,7 +795,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(historical_call.tool_calls[0].arguments), {})
 
     async def test_compacted_failed_tool_keeps_failure_fact(self) -> None:
-        compact = AgentSession._compact_tool_content(
+        compact = compact_tool_content(
             '{"ok":false,"status":"error","code":"precondition_failed",'
             '"error":"观察快照已过期"}',
             maximum=240,
