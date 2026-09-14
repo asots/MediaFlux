@@ -10,6 +10,7 @@ from app.agent.episode_audit import (
     reset_episode_audit_cache_for_tests,
 )
 from app.agent.update_actions import check_library_updates
+from app.agent.models import ToolResult
 from app.clients.base import SeriesCandidate, SeriesEpisodeInventory, SeriesSearchResult
 from app.discovery.models import ProviderNotConfigured, ProviderUnavailable
 from app.services import _series_source_payload
@@ -550,6 +551,35 @@ class EpisodeAuditTests(unittest.TestCase):
             self.assertEqual(reused.status, "up_to_date")
             self.assertEqual(reused.data["local_episode_count"], 3)
             self.assertEqual(inspect.call_count, 2)
+
+    def test_refresh_replaces_inflight_query_without_stale_cache_publish_or_unlock(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from app.agent import episode_audit as module
+        old_started, new_started, old_release, new_release = (threading.Event() for _ in range(4))
+        calls = []
+        def audit(_arguments):
+            calls.append(len(calls) + 1)
+            number = calls[-1]
+            (old_started if number == 1 else new_started).set()
+            self.assertTrue((old_release if number == 1 else new_release).wait(3))
+            return ToolResult(True, "up_to_date", "模拟库存", data={"local_episode_count": number})
+        with patch("app.agent.episode_audit._audit_uncached", side_effect=audit), ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                old = pool.submit(audit_series_episodes, dict(self.arguments))
+                self.assertTrue(old_started.wait(3))
+                fresh = pool.submit(check_library_updates, dict(self.arguments))
+                self.assertTrue(new_started.wait(3))
+                old_release.set()
+                self.assertEqual(old.result(3).data["local_episode_count"], 1)
+                self.assertEqual(len(module._inflight), 1)
+                new_release.set()
+                self.assertEqual(fresh.result(3).data["local_episode_count"], 2)
+                self.assertEqual(audit_series_episodes(dict(self.arguments)).data["local_episode_count"], 2)
+                self.assertEqual(calls, [1, 2])
+            finally:
+                old_release.set()
+                new_release.set()
 
 
 class TMDBSeasonPathTests(unittest.TestCase):

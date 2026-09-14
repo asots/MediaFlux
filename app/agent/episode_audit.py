@@ -584,16 +584,18 @@ def audit_series_episodes(arguments: dict[str, Any]) -> ToolResult:
     try:
         result = _audit_uncached(arguments)
         with _cache_lock:
-            _cache[key] = (time.monotonic() + _CACHE_TTL_SECONDS, deepcopy(result))
+            # 强制刷新可撤销旧在途查询的缓存发布权；旧查询仅返回给原调用者。
+            if _inflight.get(key) is event:
+                _cache[key] = (time.monotonic() + _CACHE_TTL_SECONDS, deepcopy(result))
             if len(_cache) > _CACHE_MAX_ENTRIES:
                 oldest = min(_cache, key=lambda item: _cache[item][0])
                 _cache.pop(oldest, None)
         return result
     finally:
         with _cache_lock:
-            pending = _inflight.pop(key, None)
-            if pending:
-                pending.set()
+            if _inflight.get(key) is event:
+                _inflight.pop(key, None)
+            event.set()
 
 
 def invalidate_episode_audit_cache(arguments: dict[str, Any]) -> None:
@@ -608,6 +610,9 @@ def invalidate_episode_audit_cache(arguments: dict[str, Any]) -> None:
     )
     with _cache_lock:
         _cache.pop(key, None)
+        previous = _inflight.pop(key, None)
+        if previous is not None:
+            previous.set()
 
 
 def reset_episode_audit_cache_for_tests() -> None:
