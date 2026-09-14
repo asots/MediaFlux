@@ -103,6 +103,20 @@ class AgentKernelAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view.error_code, "")
         self.assertEqual(view.error_message, "")
 
+    async def test_partial_completion_is_terminal_and_does_not_leak_tool_failure(self) -> None:
+        factory = EventFactory(session_id="partial", turn_id="turn", request_id="request")
+        events = [
+            factory.create(AgentEventType.TURN_STARTED),
+            factory.create(AgentEventType.TOOL_FAILED, {"code": "tool_budget_exceeded", "message": "未执行"}),
+            factory.create(AgentEventType.TURN_COMPLETED, {"status": "partial", "answer": "已核对两部，其余可继续。"}),
+        ]
+        view = await consume_events(event_stream(events))
+        self.assertTrue(view.terminal)
+        self.assertEqual(view.status, "partial")
+        self.assertEqual(view.error_code, "")
+        self.assertEqual(view.error_message, "")
+        self.assertIn("其余可继续", view.answer)
+
     def test_rejects_mixed_turns(self) -> None:
         builder = TurnViewBuilder()
         builder.apply(AgentEvent(AgentEventType.TURN_STARTED, "s", "t", "r", 1))

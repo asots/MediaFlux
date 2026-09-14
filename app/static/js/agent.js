@@ -1217,7 +1217,7 @@
                 : payload.message || '确认执行失败。';
             break;
         case 'turn.completed':
-            if (payload.status === 'success') finalizeAnswer(turn, payload.answer || '');
+            if (['success', 'partial'].includes(payload.status)) finalizeAnswer(turn, payload.answer || '');
             else if (payload.status === 'effect_completed') {
                 finalizeAnswer(turn, formatEffectResult(turn.effectResult));
             }

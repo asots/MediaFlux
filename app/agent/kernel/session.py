@@ -469,10 +469,33 @@ class AgentSession:
                 tool.model_definition() for tool in selected_tools
             )
             total_tool_calls = 0
+            tool_budget_blocked = False
             total_usage: dict[str, int] = {}
 
             async def progress(payload: Mapping[str, Any]) -> None:
                 await publish(AgentEventType.TOOL_PROGRESS, payload)
+
+            async def finish_answer(answer: str, status: str, reason: str, model_calls: int) -> None:
+                """正常回答与预算收尾共用一次持久化/终态发布，不丢失工具调用协议。"""
+                messages.append(ModelMessage(role="assistant", content=answer))
+                await self.state_store.commit(
+                    lease,
+                    conversation=self._persisted_conversation(
+                        messages,
+                        current_user_index=current_user_index,
+                        original_message=agent_input.message, reply_context=agent_input.reply_context,
+                        prior_conversation=state.conversation,
+                    ),
+                )
+                await publish(AgentEventType.TURN_COMPLETED, {
+                    "status": status, "answer": answer, "finish_reason": reason,
+                    "usage": total_usage, "model_calls": model_calls, "tool_calls": total_tool_calls,
+                })
+
+            budget_notice = (
+                "部分完成：本轮预算已用完，已保留对话与已完成的检查结果。"
+                "未生成确认卡的写操作均未执行；你可以回复继续，我会基于现有上下文接着处理。"
+            )
 
             tool_context = ToolCallContext(
                 owner=agent_input.owner,
@@ -544,8 +567,9 @@ class AgentSession:
                 # 否则第 12 轮仍执行工具后没有第 13 轮收束，会真实完成调用却
                 # 对用户报 model_round_budget_exceeded，并丢失可续跑上下文。
                 final_synthesis_round = (
-                    round_index == self.limits.max_model_rounds - 1
-                    and total_tool_calls > 0
+                    tool_budget_blocked
+                    or total_tool_calls >= self.limits.max_tool_calls
+                    or (round_index == self.limits.max_model_rounds - 1 and total_tool_calls > 0)
                 )
                 request_tools = () if final_synthesis_round else tool_definitions
                 request_system_prompt = self.system_prompt
@@ -608,54 +632,36 @@ class AgentSession:
                         finish_reason = model_event.finish_reason
 
                 assistant_text = "".join(text_parts).strip()
-                if calls and final_synthesis_round:
+                over_tool_budget = bool(calls) and total_tool_calls + len(calls) > self.limits.max_tool_calls
+                blocked_calls = bool(calls) and (final_synthesis_round or over_tool_budget)
+                if blocked_calls:
+                    # 整批拒绝发生在任何工具/写入预览之前，绝不执行超额批次的前半段。
+                    error = ToolPipelineError(
+                        "本轮工具预算不足，本批调用均未执行" if over_tool_budget or tool_budget_blocked else "最终汇总轮次不再执行工具",
+                        code="tool_budget_exceeded" if over_tool_budget or tool_budget_blocked else "not_executed_final_round",
+                    )
+                    messages.append(ModelMessage(role="assistant", content=assistant_text, tool_calls=tuple(calls)))
                     for call in calls:
-                        error = ToolPipelineError(
-                            "最终汇总轮次不再执行工具",
-                            code="not_executed_final_round",
-                        )
-                        await publish(
-                            AgentEventType.TOOL_FAILED,
-                            {
-                                "call_id": call.call_id,
-                                "tool": call.name,
-                                "label": public_tool_label(call.name),
-                                "code": error.code,
-                                "message": str(error),
-                            },
-                        )
-                    final_text = assistant_text or (
-                        "部分完成：已完成的检查结果已保留，但模型未在本轮预算内形成完整方案。"
-                        "未生成确认卡的写操作均未执行；你可以回复继续，我会基于现有上下文接着处理。"
-                    )
-                    messages.append(ModelMessage(role="assistant", content=final_text))
-                    await self.state_store.commit(
-                        lease,
-                        conversation=self._persisted_conversation(
-                            messages,
-                            current_user_index=current_user_index,
-                            original_message=agent_input.message, reply_context=agent_input.reply_context,
-                            prior_conversation=state.conversation,
-                        ),
-                    )
-                    await publish(
-                        AgentEventType.TURN_COMPLETED,
-                        {
-                            "status": "partial",
-                            "answer": final_text,
-                            "finish_reason": "model_round_budget_exceeded",
-                            "usage": total_usage,
-                            "model_calls": round_index + 1,
-                            "tool_calls": total_tool_calls,
-                        },
+                        await publish(AgentEventType.TOOL_FAILED, {
+                            "call_id": call.call_id, "tool": call.name,
+                            "label": public_tool_label(call.name), "code": error.code, "message": str(error),
+                        })
+                        messages.append(self._tool_error_message(call, error))
+                    if over_tool_budget and not final_synthesis_round and round_index + 1 < self.limits.max_model_rounds:
+                        tool_budget_blocked = True
+                        continue
+                if blocked_calls or tool_budget_blocked or (final_synthesis_round and not assistant_text):
+                    tool_limited = tool_budget_blocked or over_tool_budget or total_tool_calls >= self.limits.max_tool_calls
+                    final_text = assistant_text if final_synthesis_round else ""
+                    if blocked_calls and final_text:
+                        final_text += "\n\n" + budget_notice
+                    await finish_answer(
+                        final_text or budget_notice, "partial",
+                        "tool_budget_exceeded" if tool_limited else "model_round_budget_exceeded",
+                        round_index + 1,
                     )
                     return
                 if calls:
-                    if total_tool_calls + len(calls) > self.limits.max_tool_calls:
-                        raise ToolPipelineError(
-                            "本轮工具调用次数超过安全上限",
-                            code="tool_budget_exceeded",
-                        )
                     total_tool_calls += len(calls)
                     messages.append(
                         ModelMessage(
@@ -843,33 +849,11 @@ class AgentSession:
                         "模型没有返回回答或工具调用",
                         code="empty_model_response",
                     )
-                messages.append(ModelMessage(role="assistant", content=final_text))
-                await self.state_store.commit(
-                    lease,
-                    conversation=self._persisted_conversation(
-                        messages,
-                        current_user_index=current_user_index,
-                        original_message=agent_input.message, reply_context=agent_input.reply_context,
-                        prior_conversation=state.conversation,
-                    ),
-                )
-                await publish(
-                    AgentEventType.TURN_COMPLETED,
-                    {
-                        "status": "success",
-                        "answer": final_text,
-                        "finish_reason": finish_reason or "stop",
-                        "usage": total_usage,
-                        "model_calls": round_index + 1,
-                        "tool_calls": total_tool_calls,
-                    },
-                )
+                await finish_answer(final_text, "success", finish_reason or "stop", round_index + 1)
                 return
 
-            raise ToolPipelineError(
-                "模型在调用轮次上限内未完成任务",
-                code="model_round_budget_exceeded",
-            )
+            # 单模型轮次等边界没有额外汇总调用机会，仍保留本轮已执行事实。
+            await finish_answer(budget_notice, "partial", "model_round_budget_exceeded", self.limits.max_model_rounds)
         except (asyncio.CancelledError, StalePublicationError) as exc:
             if factory is not None:
                 event = factory.create(

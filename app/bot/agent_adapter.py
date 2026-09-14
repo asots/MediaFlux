@@ -365,7 +365,7 @@ def _preview_lines(
 
 
 def _render_turn(view: TurnView) -> str:
-    if view.status == "success":
+    if view.status in {"success", "partial"}:
         chain = _tool_chain_line(view.tool_calls)
         answer = str(view.answer or "Agent 未返回可显示的回答，请重试。").replace("\x00", "").strip()
         body = f"{answer}\n\n🔎 执行：{chain}" if chain else answer

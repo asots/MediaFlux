@@ -316,6 +316,26 @@ class AgentKernelBrowserTests(unittest.TestCase):
         self.assertIn("/api/agent/query", paths)
         self.assertFalse(any("/tools/" in path or "/prepare" in path for path in paths))
 
+    def test_partial_budget_answer_finishes_in_place_without_retry_error(self) -> None:
+        answer = "## 部分完成\n\n已核对第一部，其余作品尚未检查。\n\n回复继续可接着核对。"
+        events = [
+            _event(1, "turn.started", {"kind": "query"}),
+            _event(2, "tool.failed", {"call_id": "blocked", "tool": "library.check_updates",
+                                      "code": "tool_budget_exceeded", "message": "本批工具未执行"}),
+            # 无model.delta也必须渲染最终answer（例如预算最后一轮直接确定性收尾）。
+            _event(3, "turn.completed", {"status": "partial", "answer": answer,
+                                         "finish_reason": "tool_budget_exceeded"}),
+        ]
+        page = self.make_page({"sessions": {"sessions": []}, "queryEvents": events})
+        page.locator("#agentPrompt").fill("检查这批剧集更新")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.locator(".agent-narrative .agent-md-heading").wait_for()
+        self.assertEqual(page.locator(".agent-message-assistant").count(), 1)
+        self.assertIn("其余作品尚未检查", page.locator(".agent-narrative").inner_text())
+        self.assertIn("回复继续", page.locator(".agent-narrative").inner_text())
+        self.assertEqual(page.locator(".agent-retry-draft").count(), 0)
+        self.assertEqual(page.locator(".agent-streaming, .is-interrupted").count(), 0)
+
     def test_assistant_markdown_is_rendered_as_safe_semantic_dom(self) -> None:
         answer = """# 国漫推荐
 

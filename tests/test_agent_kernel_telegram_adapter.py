@@ -286,6 +286,17 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         self.assertNotIn("**", final_text)
         self.assertNotIn("正在输出", final_text)
 
+    def test_partial_answer_preserves_full_markdown_and_execution_trace(self):
+        answer = "## 部分完成\n" + "已核对的说明。" * 900 + "\n**最后一部仍待确认，可以继续。**"
+        rendered = adapter._render_turn(TurnView(
+            session_id="partial", turn_id="turn", request_id="request", status="partial",
+            answer=answer, tool_calls=("library.check_updates",),
+        ))
+        self.assertIn("<b>部分完成</b>", rendered)
+        self.assertIn("最后一部仍待确认，可以继续。", rendered)
+        self.assertIn("🔎 执行：", rendered)
+        self.assertNotIn("Agent 暂时无法完成", rendered)
+
     def test_long_stream_keeps_a_bounded_latest_preview(self):
         factory = EventFactory(
             session_id="tg_session",

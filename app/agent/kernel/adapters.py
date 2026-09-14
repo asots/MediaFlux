@@ -61,6 +61,7 @@ class TurnView:
     def terminal(self) -> bool:
         return self.status in {
             "success",
+            "partial",
             "approval_required",
             "effect_completed",
             "failed",

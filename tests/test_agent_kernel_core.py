@@ -410,6 +410,298 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("37", model.requests[1].messages[-1].content)
 
+    async def test_exact_tool_budget_summarizes_success_and_preserves_facts_for_continue(
+        self,
+    ) -> None:
+        observed: list[str] = []
+
+        def read_one(_arguments, _context):
+            observed.append("one")
+            return {"summary": "第一项事实已读取", "data": {"item": "one"}}
+
+        def read_two(_arguments, _context):
+            observed.append("two")
+            return {"summary": "第二项事实已读取", "data": {"item": "two"}}
+
+        catalog = ToolCatalog(
+            [
+                read_tool(
+                    "library.read_one",
+                    description="读取第一项事实",
+                    examples=("检查两项事实",),
+                    handler=read_one,
+                ),
+                read_tool(
+                    "library.read_two",
+                    description="读取第二项事实",
+                    examples=("检查两项事实",),
+                    handler=read_two,
+                ),
+            ]
+        )
+        state = InMemorySessionStateStore()
+        model = ScriptedModel(
+            [
+                [
+                    ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("read-1", "library.read_one", {}),
+                    ),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ],
+                [
+                    ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("read-2", "library.read_two", {}),
+                    ),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ],
+                [
+                    ModelEvent(ModelEventType.TEXT_DELTA, text="两项事实均已保留。"),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+                ],
+            ]
+        )
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=2, maximum=2),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+            limits=SessionLimits(max_tool_calls=2),
+        )
+
+        events = await collect(
+            session.run(
+                AgentInput(
+                    message="检查两项事实",
+                    owner="owner-1",
+                    session_id="session-1",
+                )
+            )
+        )
+
+        self.assertEqual(observed, ["one", "two"])
+        self.assertEqual(tuple(model.requests[-1].tools), ())
+        self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
+        self.assertEqual(events[-1].payload["status"], "success")
+        self.assertEqual(events[-1].payload["finish_reason"], "stop")
+        self.assertEqual(events[-1].payload["model_calls"], 3)
+        self.assertEqual(events[-1].payload["tool_calls"], 2)
+
+        stored = await state.load(owner="owner-1", session_id="session-1")
+        self.assertEqual(stored.conversation[0]["content"], "检查两项事实")
+        tool_messages = [
+            item for item in stored.conversation if item.get("role") == "tool"
+        ]
+        self.assertEqual(
+            {item.get("tool_call_id") for item in tool_messages}, {"read-1", "read-2"}
+        )
+        self.assertIn("第一项事实已读取", tool_messages[0]["content"])
+        self.assertIn("第二项事实已读取", tool_messages[1]["content"])
+
+        model.rounds.append(
+            [
+                ModelEvent(ModelEventType.TEXT_DELTA, text="可以基于保留事实继续。"),
+                ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+            ]
+        )
+        continued = await collect(
+            session.run(
+                AgentInput(
+                    message="继续",
+                    owner="owner-1",
+                    session_id="session-1",
+                )
+            )
+        )
+        self.assertEqual(continued[-1].type, AgentEventType.TURN_COMPLETED)
+        self.assertTrue(
+            any(
+                item.role == "user" and item.content == "检查两项事实"
+                for item in model.requests[-1].messages
+            )
+        )
+        self.assertTrue(any("第一项事实已读取" in item.content for item in model.requests[-1].messages))
+
+    async def test_over_budget_batch_with_write_is_rejected_as_a_whole(self) -> None:
+        read_count = 0
+        prepare_count = 0
+
+        def read_handler(_arguments, _context):
+            nonlocal read_count
+            read_count += 1
+            return {"summary": "预算前的读取事实"}
+
+        def prepare(_arguments, _context):
+            nonlocal prepare_count
+            prepare_count += 1
+            return PreparedEffect(
+                preview={"summary": "不应生成写预览"},
+                snapshot_fingerprint="snapshot:budget",
+            )
+
+        write = KernelToolSpec(
+            name="download.pause",
+            domain="download",
+            description="暂停下载任务",
+            examples=("检查两个能力",),
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            effect=ToolEffect.WRITE,
+            prepare=prepare,
+            execute_confirmed=lambda _arguments, _snapshot, _context: {
+                "summary": "不应执行"
+            },
+        )
+        catalog = ToolCatalog(
+            [
+                read_tool(
+                    "library.read_one",
+                    description="读取预算前的事实",
+                    examples=("检查两个能力",),
+                    handler=read_handler,
+                ),
+                read_tool(
+                    "library.read_two",
+                    description="读取第二个事实",
+                    examples=("检查两个能力",),
+                ),
+                write,
+            ]
+        )
+        state = InMemorySessionStateStore()
+        model = ScriptedModel(
+            [
+                [
+                    ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("read-1", "library.read_one", {}),
+                    ),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ],
+                [
+                    ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("read-2", "library.read_two", {}),
+                    ),
+                    ModelEvent(
+                        ModelEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ModelToolCall("write-3", "download.pause", {}),
+                    ),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ],
+                [
+                    ModelEvent(ModelEventType.TEXT_DELTA, text="预算内事实已保留。"),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+                ],
+            ]
+        )
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(minimum=3, maximum=3),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+            limits=SessionLimits(max_tool_calls=2),
+        )
+
+        events = await collect(
+            session.run(
+                AgentInput(
+                    message="检查两个能力",
+                    owner="owner-1",
+                    session_id="session-1",
+                )
+            )
+        )
+
+        self.assertEqual(read_count, 1)
+        self.assertEqual(prepare_count, 0)
+        self.assertEqual(events[-1].payload["status"], "partial")
+        self.assertEqual(events[-1].payload["finish_reason"], "tool_budget_exceeded")
+        self.assertEqual(tuple(model.requests[-1].tools), ())
+        failed = {
+            event.payload["call_id"]: event
+            for event in events
+            if event.type is AgentEventType.TOOL_FAILED
+        }
+        self.assertEqual(
+            {failed["read-2"].payload["code"], failed["write-3"].payload["code"]},
+            {"tool_budget_exceeded"},
+        )
+        self.assertFalse(
+            any(
+                event.type is AgentEventType.TOOL_STARTED
+                and event.payload.get("call_id") in {"read-2", "write-3"}
+                for event in events
+            )
+        )
+        self.assertFalse(
+            any(
+                event.type is AgentEventType.EFFECT_PREVIEW_STARTED
+                and event.payload.get("call_id") in {"read-2", "write-3"}
+                for event in events
+            )
+        )
+
+        stored = await state.load(owner="owner-1", session_id="session-1")
+        assistant_calls = [
+            call
+            for item in stored.conversation
+            if item.get("role") == "assistant"
+            for call in item.get("tool_calls") or ()
+        ]
+        result_ids = {
+            item.get("tool_call_id")
+            for item in stored.conversation
+            if item.get("role") == "tool"
+        }
+        self.assertEqual(
+            {call["call_id"] for call in assistant_calls},
+            {"read-1", "read-2", "write-3"},
+        )
+        self.assertEqual(result_ids, {"read-1", "read-2", "write-3"})
+        self.assertTrue(
+            all(
+                "tool_budget_exceeded" in item["content"]
+                for item in stored.conversation
+                if item.get("tool_call_id") in {"read-2", "write-3"}
+            )
+        )
+
+    async def test_single_model_round_preserves_reads_and_rejects_over_budget_batches(self) -> None:
+        for requested, tool_limit, executed, reason in (
+            (1, 2, 1, "model_round_budget_exceeded"),
+            (2, 1, 0, "tool_budget_exceeded"),
+        ):
+            with self.subTest(requested=requested):
+                observed = []
+                catalog = ToolCatalog([read_tool("library.status", handler=lambda *_: observed.append("read") or {"summary": "读取事实"})])
+                state = InMemorySessionStateStore()
+                model = ScriptedModel([[
+                    *[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(f"call-{i}", "library.status", {})) for i in range(requested)],
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ]])
+                session = AgentSession(
+                    model=model, catalog=catalog, retriever=CapabilityRetriever(minimum=1, maximum=1),
+                    pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state,
+                    limits=SessionLimits(max_model_rounds=1, max_tool_calls=tool_limit),
+                )
+                events = await collect(session.run(AgentInput(owner="owner", session_id="single", message="查询状态")))
+                self.assertEqual(len(observed), executed)
+                self.assertEqual(len(model.requests), 1)
+                self.assertTrue(model.requests[0].tools)
+                self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
+                self.assertEqual(events[-1].payload["status"], "partial")
+                self.assertEqual(events[-1].payload["finish_reason"], reason)
+                stored = await state.load(owner="owner", session_id="single")
+                results = [item for item in stored.conversation if item["role"] == "tool"]
+                self.assertEqual(len(results), requested)
+
     async def test_context_window_drops_oldest_complete_turns_only(self) -> None:
         catalog = ToolCatalog([read_tool("library.status")])
         state = InMemorySessionStateStore()
@@ -567,6 +859,27 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed[-1].payload["code"], "not_executed_final_round")
         stored = await state.load(owner="owner-1", session_id="session-1")
         self.assertIn("部分完成", stored.conversation[-1]["content"])
+        assistant_calls = [
+            call
+            for item in stored.conversation
+            if item.get("role") == "assistant"
+            for call in item.get("tool_calls") or ()
+        ]
+        self.assertEqual(
+            {call["call_id"] for call in assistant_calls}, {"read-1", "late-call"}
+        )
+        self.assertEqual(
+            {
+                item.get("tool_call_id")
+                for item in stored.conversation
+                if item.get("role") == "tool"
+            },
+            {"read-1", "late-call"},
+        )
+        late_result = next(
+            item for item in stored.conversation if item.get("tool_call_id") == "late-call"
+        )
+        self.assertIn("not_executed_final_round", late_result["content"])
 
     async def test_reply_context_is_available_to_model_but_not_persisted_as_chat_text(
         self,
@@ -720,6 +1033,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             retriever=CapabilityRetriever(),
             pipeline=pipeline,
             state_store=state,
+            limits=SessionLimits(max_model_rounds=1),
         )
         preview_events = await collect(
             session.run(
