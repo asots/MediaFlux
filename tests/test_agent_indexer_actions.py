@@ -439,7 +439,7 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         ):
             result = _submit_resource({"result_id": _RESULT_ID, "target": "both"})
         self.assertTrue(result.ok)
-        self.assertEqual(result.status, "accepted")
+        self.assertEqual(result.status, "partial")
         self.assertEqual(
             set(result.data),
             {
@@ -451,6 +451,8 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
                 "succeeded",
                 "failed",
                 "duplicate",
+                "ok",
+                "error",
             },
         )
         self.assertNotIn("private backend error", str(result.to_dict()))
@@ -542,6 +544,22 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         self.assertEqual(result.summary, "下载任务提交结果待核对")
         self.assertNotIn("private timeout", str(result.to_dict()))
         self.assertNotIn("magnet:", str(result.to_dict()))
+
+    def test_single_resource_preserves_safe_guangya_rejection_reason(self):
+        with patch("app.agent.indexer_actions.config.get_bool", return_value=True), patch(
+            "app.agent.indexer_actions.download_indexer_result", AsyncMock(return_value={
+                "ok": False, "result_id": _RESULT_ID, "request_id": 88, "created": True,
+                "target": "guangya", "status": "failed", "succeeded": [], "failed": ["guangya"],
+                "error": "上游文件违规 https://private.example/token=SECRET", "duplicate": False,
+            })
+        ):
+            result = _submit_resource({"result_id": _RESULT_ID, "target": "guangya"}, service=FakeIndexerService())
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "光鸭返回：文件违规")
+        self.assertEqual(result.data["error"], result.error)
+        self.assertEqual(result.data["request_id"], 88)
+        self.assertNotIn("SECRET", str(result.to_dict()))
+        self.assertNotIn("https://", str(result.to_dict()))
 
     def test_submit_resource_batch_counts_manual_review_separately(self):
         service = FakeIndexerService()

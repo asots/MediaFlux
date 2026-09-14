@@ -22,6 +22,7 @@ from app.agent.recent_resource_candidates import (
     attach_resource_candidate_reference,
 )
 from app.clients.guangya import GuangYaClient, close_guangya_client
+from app.modules.download_dispatcher import public_dispatch_summary
 from app.indexers.downloads import (
     DownloadRequestCreationError,
     InvalidDownloadData,
@@ -590,43 +591,23 @@ def _submit_resource(
             "duplicate",
         )
     }
-    if result.get("duplicate"):
-        return ToolResult(
-            False,
-            "conflict",
-            "该资源已经提交或正在处理中",
-            data=public,
-            error="请勿重复提交。",
-        )
-    if result.get("status") == "manual_review":
-        return ToolResult(
-            False,
-            "review_required",
-            "下载任务提交结果待核对",
-            data=public,
-            error="请先核对下载器，勿直接重复提交。",
-        )
-    if not result.get("ok"):
-        return ToolResult(
-            False,
-            "unavailable",
-            "下载任务提交失败",
-            data=public,
-            error="所选下载后端未接受任务。",
-        )
+    public.update(public_dispatch_summary(result))
+    status, summary = {
+        "duplicate": ("conflict", "该资源已经提交或正在处理中"),
+        "manual_review": ("review_required", "下载任务提交结果待核对"),
+        "failed": ("unavailable", "下载任务提交失败"),
+        "partial": ("partial", "下载任务仅部分目标已提交"),
+        "submitted": ("accepted", "下载任务已提交"),
+    }[public["status"]]
     return ToolResult(
-        True,
-        "accepted",
-        "下载任务已提交",
-        data=public,
-        evidence=[
-            Evidence(
-                "download_dispatcher",
-                "已通过服务器端资源解析与下载分发器提交；响应未包含磁力、种子内容、路径或凭据。",
-                _now(),
-            )
-        ],
-        suggestions=["可前往下载任务页查看进度。"],
+        public["ok"], status, summary, data=public,
+        evidence=[Evidence(
+            "download_dispatcher",
+            "已通过服务器端资源解析与下载分发器处理；结果不包含磁力、种子内容、路径或凭据。",
+            _now(),
+        )],
+        suggestions=["可前往下载任务页查看进度；结果未知时先核验，勿直接重复提交。"],
+        error=public["error"],
     )
 
 
