@@ -14,6 +14,14 @@
         scope: $('releaseFormatScope'),
         parentPath: $('releaseFormatParentPath'),
         parentField: $('releaseFormatParentPathField'),
+        directoryPick: $('releaseFormatPickDirectoryBtn'),
+        directoryPickStart: $('releaseFormatPickStartBtn'),
+        directoryStart: $('releaseFormatDirectoryStart'),
+        directoryOrigin: $('releaseFormatDirectoryOrigin'),
+        directorySource: $('releaseFormatDirectorySource'),
+        effectivePath: $('releaseFormatEffectivePath'),
+        contextOrigin: $('releaseFormatContextOrigin'),
+        contextExplanation: $('releaseFormatContextExplanation'),
         scopeNote: $('releaseFormatScopeNote'),
         releaseNote: $('releaseFormatReleaseNote'),
         template: $('releaseFormatTemplate'),
@@ -49,7 +57,10 @@
         matched: '命中', unchanged: '无变化', unmatched: '未匹配',
         blocked: '已阻止', conflict: '冲突',
     };
-    const SCOPE_LABELS = {directory: '目录', release: '发布组'};
+    const SCOPE_LABELS = {
+        directory: '适用文件夹 · 仅此文件夹（不含子文件夹）',
+        release: '发布组 · 跨作品',
+    };
     const TEACHING_EXAMPLE = {
         name: 'Example-Team 教学示例',
         template: '[Example-Team][{title}][track{episode}r{version}][{resolution}].mkv',
@@ -76,9 +87,21 @@
         saveBusy: false,
         preview: null,
         templateSelection: {start: 0, end: 0},
+        directorySources: {guangya: [], local: []},
+        directorySourcesBusy: false,
+        directorySourceRequestSerial: 0,
+        directoryPickerSerial: 0,
+        directorySelectionApplying: false,
+        directoryContext: null,
+        directoryStart: null,
     };
 
-    const lifecycle = window.createAppModal(modal);
+    const lifecycle = window.createAppModal(modal, {onRequestClose: ({close}) => {
+        invalidateDirectoryPicker();
+        state.directorySourceRequestSerial += 1;
+        state.directorySourcesBusy = false;
+        close();
+    }});
 
     const iconize = (root = modal) => window.renderLucideIcons(root);
     const text = (node, value) => { if (node) node.textContent = value; };
@@ -114,13 +137,14 @@
     };
     const csrfToken = () => document.querySelector('meta[name="csrf-token"]')?.content || '';
 
-    async function requestJson(path, {method = 'GET', body} = {}) {
+    async function requestJson(path, {method = 'GET', body, signal} = {}) {
         const headers = new Headers({Accept: 'application/json'});
         if (body !== undefined) headers.set('Content-Type', 'application/json');
         if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method)) headers.set('X-CSRF-Token', csrfToken());
         const response = await fetch(path, {
             credentials: 'same-origin', method, headers,
             ...(body === undefined ? {} : {body}),
+            ...(signal ? {signal} : {}),
         });
         let data = {};
         try { data = await response.json(); } catch (_) {}
@@ -130,6 +154,141 @@
             throw error;
         }
         return data;
+    }
+
+    function normalizeDirectorySource(item, origin) {
+        if (!item || !item.id || !item.name || String(item.id) === '0') return null;
+        const rootId = origin === 'local' ? String(item.local_root || '').replace(/\\/g, '/').replace(/\/+$/, '') || '/' : String(item.id);
+        if (origin === 'local' && !item.local_root) return null;
+        return {
+            id: String(item.id), label: String(item.name), rootId,
+            name: origin === 'local' ? rootId.split('/').filter(Boolean).at(-1) || '' : String(item.name),
+            enabled: item.enabled !== false,
+        };
+    }
+
+    function currentDirectoryOrigin() { return refs.directoryOrigin.value; }
+    function selectedDirectorySource() {
+        return state.directorySources[currentDirectoryOrigin()].find(item => item.id === refs.directorySource.value) || null;
+    }
+    function selectedStart(source = selectedDirectorySource()) {
+        if (!source) return null;
+        const selected = state.directoryStart;
+        return selected?.origin === currentDirectoryOrigin() && selected.sourceId === source.id && selected.sourceRoot === source.rootId
+            ? selected : {id: source.rootId, name: source.name};
+    }
+    function invalidateDirectoryPicker() { state.directoryPickerSerial += 1; }
+
+    function syncDirectoryContext() {
+        const parent = refs.parentPath.value.trim();
+        const start = selectedStart();
+        text(refs.directoryStart, start?.name || '请选择具体文件夹作为整理起点');
+        refs.directoryStart.title = start?.name || '';
+        text(refs.effectivePath, parent || '选择文件夹后自动填入');
+        const context = state.directoryContext;
+        text(refs.contextOrigin, context?.parentPath === parent ? context.startName : '已有或手动填写的路径');
+        text(refs.contextExplanation, context?.parentPath === parent
+            ? `从「${context.startName}」开始整理时生效；仅匹配「${parent}」中的文件，不包含子文件夹。`
+            : '已填路径保持原样。请选择本次整理起点和文件所在目录来更新；浏览来源本身不会改写规则。');
+        syncDirectoryPickerControls();
+    }
+    function syncDirectoryPickerControls() {
+        const disabled = refs.scope.value === 'release' || state.directorySourcesBusy || !selectedDirectorySource();
+        refs.directoryPick.disabled = disabled;
+        refs.directoryPickStart.disabled = disabled;
+    }
+    async function refreshDirectorySources() {
+        const origin = currentDirectoryOrigin();
+        const previous = refs.directorySource.value;
+        const serial = ++state.directorySourceRequestSerial;
+        state.directorySourcesBusy = true;
+        refs.directorySource.disabled = true;
+        syncDirectoryPickerControls();
+        let error = '';
+        try {
+            let values;
+            if (origin === 'guangya') {
+                const ready = await window.organizeConfigReady;
+                if (ready?.success === false) throw new Error('光鸭整理来源尚未就绪，请刷新页面重试');
+                values = window.getOrganizeSourceDirectories?.() || [];
+            } else {
+                const data = await requestJson('/api/local-media/sources');
+                if (!Array.isArray(data.sources)) throw new Error('本地来源响应无效，请重试');
+                values = data.sources;
+            }
+            if (serial !== state.directorySourceRequestSerial) return;
+            state.directorySources[origin] = values.map(item => normalizeDirectorySource(item, origin)).filter(item => item?.enabled);
+        } catch (failure) {
+            if (serial !== state.directorySourceRequestSerial) return;
+            state.directorySources[origin] = [];
+            error = failure.message || '来源读取失败，请重试';
+        } finally {
+            if (serial === state.directorySourceRequestSerial) {
+                state.directorySourcesBusy = false;
+                const sources = state.directorySources[origin];
+                refs.directorySource.replaceChildren();
+                for (const source of sources) {
+                    const option = node('option', '', source.label);
+                    option.value = source.id;
+                    refs.directorySource.append(option);
+                }
+                if (!sources.length) {
+                    const option = node('option', '', error || '暂无来源，请先在对应整理页面配置');
+                    option.value = '';
+                    refs.directorySource.append(option);
+                } else {
+                    refs.directorySource.value = sources.some(item => item.id === previous) ? previous : sources[0].id;
+                }
+                refs.directorySource.disabled = !sources.length;
+                syncDirectoryContext();
+            }
+        }
+    }
+
+    async function pickDirectory(mode) {
+        if (refs.scope.value === 'release' || state.directorySourcesBusy) return;
+        const serial = ++state.directoryPickerSerial;
+        const origin = currentDirectoryOrigin();
+        const sourceId = refs.directorySource.value;
+        await refreshDirectorySources();
+        if (serial !== state.directoryPickerSerial || currentDirectoryOrigin() !== origin || refs.directorySource.value !== sourceId) return;
+        const source = selectedDirectorySource();
+        if (!source) return;
+        if (typeof window.openGuangYaDirectoryPicker !== 'function') {
+            setMessage('目录选择器尚未加载，请刷新页面；已有路径仍可手动填写。', 'error');
+            return;
+        }
+        const root = mode === 'start' ? {id: source.rootId, name: source.name} : selectedStart(source);
+        const options = {
+            modalId: 'releaseFormatDirectoryModal',
+            title: mode === 'start' ? '选择本次开始整理的文件夹' : '选择文件所在的文件夹',
+            rootId: root.id, rootName: root.name || '/', allowRoot: Boolean(root.name), preserveWhileLoading: true,
+            onSelect: directory => {
+                if (serial !== state.directoryPickerSerial || refs.scope.value !== 'directory'
+                    || currentDirectoryOrigin() !== origin || selectedDirectorySource()?.id !== source.id) return false;
+                if (!Array.isArray(directory?.path) || !directory.name) return false;
+                const start = mode === 'start' ? directory : root;
+                const parent = [start.name, ...(mode === 'start' ? [] : directory.path.map(part => part.name))].filter(Boolean).join('/');
+                if (!parent) return false;
+                if (mode === 'start') state.directoryStart = {origin, sourceId: source.id, sourceRoot: source.rootId, id: start.id, name: start.name};
+                state.directoryContext = {startName: start.name, parentPath: parent};
+                state.directorySelectionApplying = true;
+                try {
+                    refs.parentPath.value = parent;
+                    refs.parentPath.dispatchEvent(new Event('input', {bubbles: true}));
+                } finally { state.directorySelectionApplying = false; }
+                syncDirectoryContext();
+                setMessage('适用路径已自动填入，请刷新预览后确认保存。');
+                return true;
+            },
+        };
+        if (origin === 'local') options.fetchDirectory = async (path, {signal} = {}) => {
+            const query = new URLSearchParams({source_id: source.id, path});
+            const data = await requestJson(`/api/local-media/directories?${query}`, {signal});
+            if (!Array.isArray(data.directories)) throw new Error('本地目录响应无效');
+            return data.directories.map(item => ({id: item.path, name: item.name, is_dir: true}));
+        };
+        window.openGuangYaDirectoryPicker(options);
     }
 
     function setInput(row, field, value) {
@@ -241,7 +400,7 @@
         if (!slots.includes('title')) errors.push('模板必须包含 {title}。');
         if (!slots.includes('episode')) errors.push('模板必须包含 {episode}。');
         if (/\}\s*\{/.test(draft.template)) errors.push('字段不能相邻无分隔，请在字段之间加入字面量分隔符。');
-        if (draft.scope === 'directory' && !draft.parent_path) errors.push('目录范围必须填写 parent_path。');
+        if (draft.scope === 'directory' && !draft.parent_path) errors.push('请选择或填写适用文件夹。');
         if (examples.length < MIN_EXAMPLES || examples.length > MAX_EXAMPLES) errors.push('样本数量必须在 2 到 8 条之间。');
 
         examples.forEach((example, index) => {
@@ -255,7 +414,7 @@
 
         if (new Set(examples.map((example) => example.filename).filter(Boolean)).size < MIN_EXAMPLES) errors.push('至少需要 2 个不同文件的明确标注样本。');
         if (new Set(examples.map((example) => example.episode).filter(Number.isInteger)).size < MIN_EXAMPLES) errors.push('至少需要 2 个不同集号的明确标注样本。');
-        if (draft.scope === 'release' && new Set(examples.map((example) => example.title.toLocaleLowerCase()).filter(Boolean)).size < MIN_EXAMPLES) errors.push('release 范围至少需要 2 部不同标题的样本。');
+        if (draft.scope === 'release' && new Set(examples.map((example) => example.title.toLocaleLowerCase()).filter(Boolean)).size < MIN_EXAMPLES) errors.push('发布组范围至少需要 2 部不同作品的样本。');
         if (filenames.length > MAX_FILENAMES) errors.push(`批量文件名最多 ${MAX_FILENAMES} 个，请删减后再预览。`);
 
         return {valid: errors.length === 0, error: errors[0] || '', errors, payload};
@@ -319,8 +478,10 @@
         refs.parentField.hidden = release;
         refs.releaseNote.hidden = !release;
         text(refs.scopeNote.querySelector('span'), release
-            ? '发布组范围要求样本覆盖不同标题；规则可跨目录复用，但不会自动判断作品身份。'
-            : '目录范围只精确匹配规范化后的父目录上下文，不递归子目录。');
+            ? '发布组 · 跨作品无需适用文件夹；样本需覆盖不同作品，规则可跨目录复用。'
+            : '仅此文件夹（不含子文件夹）：按整理起点生成的源目录名/相对目录精确匹配。');
+        syncDirectoryContext();
+        syncDirectoryPickerControls();
     }
 
     function setSummary(values = {}) {
@@ -545,6 +706,9 @@
     }
 
     function resetEditor({clearResult = true} = {}) {
+        invalidateDirectoryPicker();
+        state.directoryContext = null;
+        state.directoryStart = null;
         refs.name.value = '';
         refs.scope.value = 'directory';
         refs.parentPath.value = '';
@@ -562,6 +726,9 @@
 
     function copyRuleToDraft(rule) {
         requireRuleItem(rule);
+        invalidateDirectoryPicker();
+        state.directoryContext = null;
+        state.directoryStart = null;
         refs.name.value = rule.name;
         refs.scope.value = rule.scope;
         refs.parentPath.value = rule.parent_path;
@@ -703,14 +870,34 @@
     }
 
     refs.form.addEventListener('input', (event) => {
+        if (!state.directorySelectionApplying) {
+            invalidateDirectoryPicker();
+            if (event.target === refs.parentPath) state.directoryContext = null;
+        }
+        syncDirectoryContext();
         if (event.target === refs.scope) syncScopeVisibility();
         updateFilenameCount();
         markDirty();
     });
     refs.form.addEventListener('change', (event) => {
+        if (!state.directorySelectionApplying) invalidateDirectoryPicker();
         if (event.target === refs.scope) syncScopeVisibility();
         updateFilenameCount();
         markDirty();
+    });
+    refs.directoryPick.addEventListener('click', () => pickDirectory('folder'));
+    refs.directoryPickStart.addEventListener('click', () => pickDirectory('start'));
+    refs.directoryOrigin.addEventListener('change', () => {
+        invalidateDirectoryPicker();
+        state.directoryStart = null;
+        state.directoryContext = null;
+        refreshDirectorySources();
+    });
+    refs.directorySource.addEventListener('change', () => {
+        invalidateDirectoryPicker();
+        state.directoryStart = null;
+        state.directoryContext = null;
+        syncDirectoryContext();
     });
     ['select', 'keyup', 'mouseup', 'focus', 'blur'].forEach((event) => refs.template.addEventListener(event, rememberSelection));
     modal.querySelectorAll('[data-release-field]').forEach((button) => {
@@ -726,6 +913,9 @@
         markDirty();
     });
     refs.loadExample.addEventListener('click', () => {
+        invalidateDirectoryPicker();
+        state.directoryContext = null;
+        state.directoryStart = null;
         refs.name.value = TEACHING_EXAMPLE.name;
         refs.scope.value = TEACHING_EXAMPLE.scope;
         refs.parentPath.value = TEACHING_EXAMPLE.parent_path;
@@ -765,6 +955,7 @@
         workbench.activate('ledger', {resetScroll: true});
         lifecycle.open(event.currentTarget, {initialFocus: workbench.isMobile() ? '#releaseFormatsLedgerTab' : '#releaseFormatName'});
         if (!state.rulesLoaded) loadRules();
+        refreshDirectorySources();
     });
     $('newReleaseFormatBtn').addEventListener('click', () => {
         resetEditor();

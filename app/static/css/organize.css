@@ -754,6 +754,34 @@ html[data-organize-rules-initial-tab="delivery"] #organizeRulesNav [data-tab-tar
 .release-format-filenames { min-height: 112px; }
 .release-format-template-help { margin: 7px 0 0; color: var(--text-muted); font-size: 9px; line-height: 1.5; }
 
+.release-format-directory-field { display: grid; gap: 7px; min-width: 0; }
+.release-format-directory-label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-width: 0; }
+.release-format-directory-label > span { color: var(--text-muted); font-size: 12px; }
+.release-format-directory-label b { margin-left: 4px; color: var(--warning); font-size: 11px; font-weight: 650; }
+.release-format-directory-label small,
+.release-format-directory-help { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.release-format-directory-label small { text-align: right; }
+.release-format-directory-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; min-width: 0; }
+.release-format-directory-input-row .form-input { min-width: 0; }
+.release-format-directory-pick { min-height: 38px; white-space: nowrap; }
+.release-format-directory-pick svg { width: 14px; height: 14px; }
+.release-format-directory-picker-row { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 8px; min-width: 0; }
+.release-format-directory-picker-row label { display: grid; gap: 5px; min-width: 0; }
+.release-format-directory-picker-row label > span { color: var(--text-muted); font-size: 11px; }
+.release-format-directory-picker-row .form-select { width: 100%; min-width: 0; }
+.release-format-directory-source-label { min-width: 0; }
+.release-format-directory-context { display: grid; gap: 6px; min-width: 0; padding: 9px 10px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--control-tint); }
+.release-format-directory-context > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; align-items: start; min-width: 0; }
+.release-format-directory-context > div > span { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.release-format-directory-context code { min-width: 0; color: var(--accent); font: 600 12px/1.45 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+.release-format-directory-context strong { min-width: 0; color: var(--text-primary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.release-format-directory-context p { margin: 2px 0 0; padding-top: 6px; border-top: 1px solid var(--border-soft); color: var(--text-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.release-format-directory-help { display: block; }
+
+.release-format-directory-start-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.release-format-directory-start-copy { display: grid; gap: 4px; min-width: 0; }
+.release-format-directory-start-copy strong { min-height: 2.9em; line-height: 1.45; overflow-wrap: anywhere; font-size: 12px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.release-format-directory-start-copy span, .release-format-directory-start-copy small { font-size: 11px; color: var(--text-muted); }
 .release-format-field-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .release-format-field-toolbar > span { color: var(--text-muted); font-size: 9px; }
 .release-format-field-button { min-height: 32px; padding-inline: 9px; }
@@ -870,6 +898,14 @@ html[data-organize-rules-initial-tab="delivery"] #organizeRulesNav [data-tab-tar
     .release-formats-editor-actions > span { min-height: 28px; }
     .release-formats-action-buttons { width: 100%; }
     .release-format-action-button { width: 100%; min-width: 0; flex: 1 1 0; }
+    .release-format-directory-label { display: grid; gap: 3px; }
+    .release-format-directory-label small { text-align: left; }
+    .release-format-directory-input-row { grid-template-columns: minmax(0, 1fr); }
+    .release-format-directory-pick { width: 100%; min-height: 44px; }
+    .release-format-directory-start-row { grid-template-columns: minmax(0, 1fr); }
+    .release-format-directory-field .form-input, .release-format-directory-field .form-select { font-size: 16px; }
+    .release-format-directory-picker-row { grid-template-columns: 1fr; }
+    .release-format-directory-context > div { grid-template-columns: 70px minmax(0, 1fr); }
     .release-formats-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 7px; }
     .release-formats-summary > div { min-height: 40px; padding-inline: 4px; }
     .release-formats-summary strong { font-size: 12px; }

@@ -34,6 +34,9 @@ MOCK_FETCH = r"""
     headers: {'Content-Type': 'application/json'},
   });
   const clone = value => JSON.parse(JSON.stringify(value));
+  window.organizeConfigReady = delay(config.organizeDelayMs).then(() => ({success: config.organizeReady !== false}));
+  window.getOrganizeSourceDirectories = () => window.__releaseConfig.guangyaSources || [];
+
   const defaultPreview = (payload) => ({
     draft: payload.draft,
     rows: payload.filenames.map((filename, index) => ({
@@ -59,8 +62,20 @@ MOCK_FETCH = r"""
     const method = String(options.method || 'GET').toUpperCase();
     let body = null;
     try { body = options.body ? JSON.parse(options.body) : null; } catch (_) {}
-    window.__releaseFormatCalls.push({path, method, body, headers: Object.fromEntries(new Headers(options.headers || {}))});
+    window.__releaseFormatCalls.push({path, method, body, query: Object.fromEntries(parsed.searchParams), headers: Object.fromEntries(new Headers(options.headers || {}))});
 
+    if (path === '/api/local-media/sources') {
+      await delay(window.__releaseConfig.localSourcesDelayMs);
+      return jsonResponse({sources: clone(window.__releaseConfig.localSources || [])}, window.__releaseConfig.localSourcesStatus || 200);
+    }
+    if (path === '/api/guangya/dirs') {
+      await delay(window.__releaseConfig.directoryDelayMs);
+      return jsonResponse(clone((window.__releaseConfig.guangyaDirectories || {})[parsed.searchParams.get('parent_id')] || []));
+    }
+    if (path === '/api/local-media/directories') {
+      await delay(window.__releaseConfig.directoryDelayMs);
+      return jsonResponse({directories: clone((window.__releaseConfig.localDirectories || {})[parsed.searchParams.get('path')] || [])});
+    }
     if (path === '/api/tools/release-formats' && method === 'GET') {
       await delay(window.__releaseConfig.getDelayMs);
       return jsonResponse({items: clone(window.__releaseConfig.items || [])});
@@ -270,6 +285,147 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
             finally:
                 page.close()
                 formats.invalidate_cache()
+
+    def test_cloud_directory_teaching_can_start_at_a_downloaded_child_folder(self):
+        config = {'guangyaSources': [{'id': 'inbox', 'name': '离线下载'}], 'guangyaDirectories': {
+            'inbox': [{'file_id': 'gm', 'name': '[GM-Team] 沧元图 第3季', 'is_dir': True}],
+            'gm': [{'file_id': 'season', 'name': 'Season 03', 'is_dir': True}],
+        }}
+        page, errors = self.make_page(config)
+        try:
+            self.open_modal(page)
+            self.load_teaching_example(page)
+            page.locator('#previewReleaseFormatBtn').click()
+            page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+            page.locator('#releaseFormatPickStartBtn').click()
+            page.locator('#releaseFormatDirectoryModal .settings-dir-select').first.click()
+            page.wait_for_selector('#releaseFormatDirectoryModal', state='detached')
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), '[GM-Team] 沧元图 第3季')
+            self.assertTrue(page.locator('#saveReleaseFormatBtn').is_disabled())
+            page.locator('#releaseFormatPickDirectoryBtn').click()
+            page.locator('#releaseFormatDirectoryModal .settings-dir-select').first.click()
+            page.wait_for_selector('#releaseFormatDirectoryModal', state='detached')
+            expected = '[GM-Team] 沧元图 第3季/Season 03'
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), expected)
+            self.assertEqual(page.locator('#releaseFormatEffectivePath').inner_text(), expected)
+            self.assertNotIn('离线下载/', expected)
+            page.locator('#previewReleaseFormatBtn').click()
+            page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+            body = page.evaluate("window.__releaseFormatCalls.filter(c => c.path.endsWith('/preview')).at(-1).body")
+            self.assertEqual(body['draft']['parent_path'], expected)
+            self.assertEqual(self.call_count(page, method='POST', path='/api/tools/release-formats'), 0)
+        finally:
+            page.close()
+        self.assertEqual(errors, [])
+
+    def test_local_directory_teaching_uses_directory_basename_and_selected_subtree(self):
+        config = {'localSources': [{'id': 7, 'name': '我的动漫下载源', 'local_root': '/downloads/anime', 'enabled': True}], 'localDirectories': {
+            '/downloads/anime': [{'name': 'GM合集', 'path': '/downloads/anime/GM合集'}],
+            '/downloads/anime/GM合集': [{'name': 'Season 02', 'path': '/downloads/anime/GM合集/Season 02'}],
+        }}
+        page, errors = self.make_page(config)
+        try:
+            self.open_modal(page)
+            self.load_teaching_example(page)
+            page.locator('#releaseFormatDirectoryOrigin').select_option('local')
+            page.wait_for_function("() => !document.querySelector('#releaseFormatPickDirectoryBtn').disabled")
+            self.assertEqual(page.locator('#releaseFormatDirectoryStart').inner_text(), 'anime')
+            page.locator('#releaseFormatPickDirectoryBtn').click()
+            page.locator('#releaseFormatDirectoryModal .settings-dir-select').first.click()
+            page.wait_for_selector('#releaseFormatDirectoryModal', state='detached')
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), 'anime/GM合集')
+            page.locator('#releaseFormatPickStartBtn').click()
+            page.locator('#releaseFormatDirectoryModal .settings-dir-select').first.click()
+            page.wait_for_selector('#releaseFormatDirectoryModal', state='detached')
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), 'GM合集')
+            page.locator('#releaseFormatPickDirectoryBtn').click()
+            page.locator('#releaseFormatDirectoryModal .settings-dir-select').first.click()
+            page.wait_for_selector('#releaseFormatDirectoryModal', state='detached')
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), 'GM合集/Season 02')
+            calls = page.evaluate("window.__releaseFormatCalls.filter(c => c.path === '/api/local-media/directories')")
+            self.assertEqual(calls[-1]['query'], {'source_id': '7', 'path': '/downloads/anime/GM合集'})
+            self.assertEqual(self.call_count(page, path='/api/guangya/dirs'), 0)
+        finally:
+            page.close()
+        self.assertEqual(errors, [])
+
+    def test_directory_picker_rejects_stale_return_after_source_switch(self):
+        page, errors = self.make_page({'guangyaSources': [{'id': 'inbox', 'name': '离线下载'}],
+            'localSources': [{'id': 7, 'name': '本地来源', 'local_root': '/downloads/anime'}]})
+        try:
+            self.open_modal(page)
+            self.load_teaching_example(page)
+            before = page.locator('#releaseFormatParentPath').input_value()
+            page.evaluate("window.openGuangYaDirectoryPicker = options => {window.__oldPicker = options;}")
+            page.locator('#releaseFormatPickDirectoryBtn').click()
+            page.wait_for_function("() => Boolean(window.__oldPicker)")
+            page.locator('#releaseFormatDirectoryOrigin').select_option('local')
+            accepted = page.evaluate("window.__oldPicker.onSelect({id:'old', name:'旧目录', path:[{id:'old',name:'旧目录'}]})")
+            self.assertFalse(accepted)
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), before)
+            page.locator('#releaseFormatScope').select_option('release')
+            self.assertFalse(page.locator('#releaseFormatParentPathField').is_visible())
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), before)
+        finally:
+            page.close()
+        self.assertEqual(errors, [])
+
+    def test_slow_cloud_source_loading_cannot_replace_a_new_local_selection(self):
+        page, errors = self.make_page({'organizeDelayMs': 300,
+            'guangyaSources': [{'id': 'cloud', 'name': '过时云盘来源'}],
+            'localSources': [{'id': 7, 'name': '本地来源别名', 'local_root': '/downloads/anime'}]})
+        try:
+            self.open_modal(page)
+            self.load_teaching_example(page)
+            page.locator('#releaseFormatDirectoryOrigin').select_option('local')
+            page.wait_for_function("() => document.querySelector('#releaseFormatDirectorySource').value === '7'")
+            page.evaluate('() => window.organizeConfigReady')
+            self.assertEqual(page.locator('#releaseFormatDirectorySource').input_value(), '7')
+            self.assertEqual(page.locator('#releaseFormatDirectoryStart').inner_text(), 'anime')
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), '/Anime/Teaching')
+        finally:
+            page.close()
+        self.assertEqual(errors, [])
+
+    def test_directory_source_failure_does_not_rewrite_or_block_legacy_preview(self):
+        page, errors = self.make_page({'organizeReady': False})
+        try:
+            self.open_modal(page)
+            self.load_teaching_example(page)
+            self.assertTrue(page.locator('#releaseFormatPickStartBtn').is_disabled())
+            self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), '/Anime/Teaching')
+            page.locator('#previewReleaseFormatBtn').click()
+            page.wait_for_function("() => !document.querySelector('#saveReleaseFormatBtn').disabled")
+            body = page.evaluate("window.__releaseFormatCalls.filter(c => c.path.endsWith('/preview')).at(-1).body")
+            self.assertEqual(body['draft']['parent_path'], '/Anime/Teaching')
+        finally:
+            page.close()
+        self.assertEqual(errors, [])
+
+    def test_directory_teaching_controls_fit_mobile_tablet_and_desktop(self):
+        for width in (320, 390, 768, 1440):
+            with self.subTest(width=width):
+                page, errors = self.make_page({'guangyaSources': [{'id': 'gm', 'name': '[GM-Team] 沧元图 第3季'}]}, viewport={'width': width, 'height': 900})
+                try:
+                    self.open_modal(page)
+                    self.load_teaching_example(page)
+                    page.locator('#releaseFormatPickStartBtn').click()
+                    page.locator('#releaseFormatDirectoryModal [data-dir-select-current]').click()
+                    page.wait_for_selector('#releaseFormatDirectoryModal', state='detached')
+                    self.assertEqual(page.locator('#releaseFormatParentPath').input_value(), '[GM-Team] 沧元图 第3季')
+                    self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), width)
+                    field = page.locator('#releaseFormatParentPathField')
+                    self.assertLessEqual(field.evaluate('el => el.scrollWidth'), field.evaluate('el => el.clientWidth') + 1)
+                    if width <= 390:
+                        self.assertGreaterEqual(page.locator('#releaseFormatPickStartBtn').bounding_box()['height'], 44)
+                    output = os.getenv('MEDIAFLUX_BROWSER_EVIDENCE_DIR')
+                    if output:
+                        Path(output).mkdir(parents=True, exist_ok=True)
+                        field.scroll_into_view_if_needed()
+                        page.screenshot(path=str(Path(output) / f'directory-teaching-{width}.png'))
+                finally:
+                    page.close()
+                self.assertEqual(errors, [])
 
     def test_real_app_preview_save_reload_and_delete_roundtrip(self):
         from app.modules.recognition import formats

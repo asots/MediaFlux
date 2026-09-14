@@ -48,6 +48,21 @@ class ReleaseFormatAgentActionTests(IsolatedDatabaseTestCase):
             conn.execute("DELETE FROM recognition_format_rules")
         formats.invalidate_cache()
 
+    def test_teaching_tools_explain_runtime_directory_context_not_source_labels(self):
+        from types import SimpleNamespace
+        from app.agent.domain_catalog.configuration_management import register_specs
+
+        specs = []
+        register_specs(SimpleNamespace(register=specs.append))
+        tools = [spec for spec in specs if spec.name in {"recognition.preview_release_format", "recognition.save_release_format"}]
+        self.assertEqual(len(tools), 2)
+        for tool in tools:
+            description = tool.parameters["properties"]["draft"]["properties"]["parent_path"]["description"]
+            self.assertIn("整理起点目录名/起点下的相对父目录", description)
+            self.assertIn("显示别名", description)
+            self.assertIn("保留已有规则原值", description)
+            self.assertNotIn("本地完整路径、光鸭相对目录名", description)
+
     @staticmethod
     def rule_count() -> int:
         with db.get_conn() as conn:

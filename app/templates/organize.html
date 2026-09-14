@@ -857,17 +857,58 @@
                                 <label>
                                     <span>应用范围</span>
                                     <select class="form-select" id="releaseFormatScope">
-                                        <option value="directory" selected>目录 · 当前父目录</option>
-                                        <option value="release">发布组 · 跨标题</option>
+                                        <option value="directory" selected>适用文件夹 · 仅此文件夹（不含子文件夹）</option>
+                                        <option value="release">发布组 · 跨作品</option>
                                     </select>
                                 </label>
-                                <label id="releaseFormatParentPathField" class="span-2 release-formats-field-wide">
-                                    <span>parent_path <b>目录范围必填</b></span>
-                                    <input class="form-input" id="releaseFormatParentPath" maxlength="4096" placeholder="例如：/downloads/anime/Show Name">
-                                </label>
+                                <div id="releaseFormatParentPathField" class="span-2 release-formats-field-wide release-format-directory-field">
+                                    <div class="release-format-directory-label">
+                                        <span>适用文件夹 <b>目录范围必填</b></span>
+                                        <small>选择起点和文件所在目录，自动填入适用路径</small>
+                                    </div>
+                                    <div class="release-format-directory-picker-row">
+                                        <label>
+                                            <span>文件来自</span>
+                                            <select class="form-select" id="releaseFormatDirectoryOrigin">
+                                                <option value="guangya" selected>光鸭整理源（当前配置）</option>
+                                                <option value="local">本地媒体来源（本地浏览）</option>
+                                            </select>
+                                        </label>
+                                        <label class="release-format-directory-source-label">
+                                            <span>浏览范围</span>
+                                            <select class="form-select" id="releaseFormatDirectorySource" disabled>
+                                                <option value="">读取已配置来源…</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                    <div class="release-format-directory-start-row">
+                                        <div class="release-format-directory-start-copy">
+                                            <span>本次整理起点</span>
+                                            <strong id="releaseFormatDirectoryStart">尚未读取整理起点</strong>
+                                            <small id="releaseFormatDirectoryStartHelp">默认使用上面的具体来源；也可选择实际要整理的 GM 合集等子文件夹。</small>
+                                        </div>
+                                        <button type="button" class="jump-btn release-format-directory-pick" id="releaseFormatPickStartBtn"><i data-lucide="route"></i>选择本次整理起点</button>
+                                    </div>
+                                    <div class="release-format-directory-input-row">
+                                        <input class="form-input" id="releaseFormatParentPath" maxlength="4096" aria-label="从此目录开始整理的适用路径" aria-describedby="releaseFormatParentPathHelp" placeholder="选择后自动填入；已有规则也可手动调整">
+                                        <button type="button" class="jump-btn release-format-directory-pick" id="releaseFormatPickDirectoryBtn"><i data-lucide="folder-search"></i>选择文件所在目录</button>
+                                    </div>
+                                    <div class="release-format-directory-context" id="releaseFormatDirectoryContext" role="status" aria-live="polite">
+                                        <div>
+                                            <span>适用路径</span>
+                                            <code id="releaseFormatEffectivePath">尚未选择适用文件夹</code>
+                                        </div>
+                                        <div>
+                                            <span>从此目录开始</span>
+                                            <strong id="releaseFormatContextOrigin">尚未选择整理起点</strong>
+                                        </div>
+                                        <p id="releaseFormatContextExplanation">从本次整理起点开始，文件所在目录会按同一路径精确匹配；不包含子文件夹。</p>
+                                    </div>
+                                    <small class="release-format-directory-help" id="releaseFormatParentPathHelp">自动填入只保存整理起点名称和其下的相对目录；本地容器或光鸭的全盘路径只用于浏览，不会写入规则。</small>
+                                </div>
                             </div>
                             <div class="release-format-scope-note preprocess-safety-note" id="releaseFormatScopeNote" role="note">
-                                <i data-lucide="map-pin"></i><span>目录范围只精确匹配规范化后的父目录上下文，不递归子目录。</span>
+                                <i data-lucide="map-pin"></i><span>仅此文件夹（不含子文件夹）：从本次整理起点开始，适用路径与文件所在目录精确一致时才使用。</span>
                             </div>
                         </section>
 
@@ -914,7 +955,7 @@
                                     </div>
                                 </div>
                             </div>
-                            <div class="release-format-release-note preprocess-safety-note" id="releaseFormatReleaseNote" role="note" hidden><i data-lucide="split"></i><span>release 范围用于跨标题复用；请在样本中填写至少两部不同作品的 title。它仍然只是命名格式规则，不会自动判断作品身份。</span></div>
+                            <div class="release-format-release-note preprocess-safety-note" id="releaseFormatReleaseNote" role="note" hidden><i data-lucide="split"></i><span>发布组 · 跨作品无需适用文件夹；请在样本中填写至少两部不同作品的 title。它仍然只是命名格式规则，不会自动判断作品身份。</span></div>
                             <template id="releaseFormatExampleTemplate">
                                 <div class="release-format-example tmdb-regex-editor-section" data-example-row>
                                     <div class="release-format-example-head"><div><strong data-example-label>样本</strong><span>filename / title / episode / optional season</span></div><span class="release-format-example-result" data-example-result aria-live="polite">待预览</span><button type="button" class="icon-action" data-remove-example title="移除样本" aria-label="移除样本"><i data-lucide="x"></i></button></div>

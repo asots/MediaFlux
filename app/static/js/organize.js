@@ -28,6 +28,12 @@
     const sourceInput=document.getElementById('organizeSourceDirs');
     let sources=[];
     let nsfwSourceIds=[];
+    let resolveOrganizeConfigReady;
+    let organizeConfigReadySettled=false;
+    const organizeConfigReady=new Promise(resolve=>{resolveOrganizeConfigReady=resolve;});
+    // 规则教学只读使用当前整理页已加载的来源；不把配置 API 再复制一份到教学脚本。
+    window.organizeConfigReady=organizeConfigReady;
+    window.getOrganizeSourceDirectories=()=>sources.map(source=>({id:source.id,name:source.name}));
     let pollTimer=null;
     let lastStatusRenderKey='';
     let lastStatusDetailText='';
@@ -640,6 +646,10 @@
     }
     function finishConfigLoad(success){
         const button=document.getElementById('saveOrganizeConfigBtn');const state=document.getElementById('organizeSaveState');configReady=success;button.disabled=!success||configSaveBusy;button.setAttribute('aria-busy',configSaveBusy?'true':'false');
+        if(!organizeConfigReadySettled){
+            organizeConfigReadySettled=true;
+            resolveOrganizeConfigReady({success,sources:window.getOrganizeSourceDirectories()});
+        }
         if(success)configFieldLocks.forEach(({field,disabled})=>{field.disabled=disabled;});
         executeConfigActions.forEach(action=>{action.disabled=!success;});
         executeReadyActions.forEach(action=>{

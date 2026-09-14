@@ -29,7 +29,7 @@
     const DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
     const MAX_DRAFTS = 20;
     const RELEASE_FORMAT_TEACHING_HASH = '#release-format-teaching';
-    const RELEASE_FORMAT_TEACHING_DRAFT = '请帮我做发布格式教学。我会贴至少 2 个真实文件名，并说明正确剧名、每个文件实际是第几集、所在目录（有季号也会说明）。请帮我生成规则，先批量预览结果、未匹配和冲突，让我核对后再确认保存。请直接引导我，不要让我手动配置规则。';
+    const RELEASE_FORMAT_TEACHING_DRAFT = '请帮我做发布格式教学。我会贴至少 2 个真实文件名，并说明正确剧名、每个文件实际是第几集、本次从哪个文件夹开始整理，以及文件所在目录（有季号也会说明）。请帮我生成规则，先批量预览结果、未匹配和冲突，让我核对后再确认保存。请直接引导我，不要让我手动配置规则。';
 
     const SESSION_KEY = 'mediaflux.agent.kernel.session.v1';
     const LAYOUT_KEY = 'mediaflux.agent.kernel.layout.v1';

@@ -562,6 +562,7 @@ Season 1 / S01E01
         self.assertIn("正确剧名", value)
         self.assertIn("每个文件实际是第几集", value)
         self.assertIn("所在目录", value)
+        self.assertIn("从哪个文件夹开始整理", value)
         self.assertIn("批量预览", value)
         self.assertIn("确认保存", value)
         self.assertIn("不要让我手动配置规则", value)
