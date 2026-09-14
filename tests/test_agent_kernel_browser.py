@@ -70,7 +70,6 @@ HTML = """
             <div class="agent-composer-header">
               <div class="agent-composer-actions">
                 <a class="agent-action-btn" id="agentSettings" href="#settings" aria-label="Agent 设置"><svg aria-hidden="true"></svg></a>
-                <button type="button" class="agent-action-btn agent-resume-session agent-release-format-guide" id="agentReleaseFormatGuide" aria-label="发布格式智能教学引导" hidden><span>智能教学</span></button>
                 <button type="button" class="agent-action-btn agent-resume-session" id="agentResumeLatestSession" disabled><span>继续上次</span></button>
               </div>
               <div class="agent-composer-actions-right">
@@ -567,27 +566,40 @@ Season 1 / S01E01
         self.assertIn("确认保存", value)
         self.assertIn("不要让我手动配置规则", value)
         self.assertNotIn("DSL", value)
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
+        self.assertEqual(page.locator(".agent-console.is-empty").count(), 1)
         self.assertEqual(page.evaluate("() => location.hash"), "#release-format-teaching")
         paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
         self.assertNotIn("/api/agent/query", paths)
 
-    def test_release_format_teaching_keeps_existing_draft_and_offers_clickable_entry(self) -> None:
+    def test_dismissed_teaching_draft_is_not_reinserted_in_the_same_session(self) -> None:
+        page = self.make_page({"sessions": {"sessions": []}}, hash_fragment="#release-format-teaching")
+        page.wait_for_function("() => document.querySelector('#agentPrompt').value.includes('确认保存')")
+        page.locator("#agentPrompt").fill("")
+        page.evaluate("""() => {
+            history.replaceState(null, '', '#other');
+            window.dispatchEvent(new Event('hashchange'));
+            history.replaceState(null, '', '#release-format-teaching');
+            window.dispatchEvent(new Event('hashchange'));
+        }""")
+        self.assertEqual(page.locator("#agentPrompt").input_value(), "")
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
+        self.assertFalse(any(call['url'] == '/api/agent/query' for call in page.evaluate('window.__kernelCalls')))
+
+    def test_release_format_teaching_keeps_existing_draft_without_teaching_button(self) -> None:
         draft = "这是我已经写好的发布格式草稿，请不要替换。"
         page = self.make_page(
             {"sessions": {"sessions": []}},
             hash_fragment="#release-format-teaching",
             initial_prompt=draft,
         )
-        guide = page.locator("#agentReleaseFormatGuide")
-        guide.wait_for(state="visible")
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
         self.assertEqual(page.locator("#agentPrompt").input_value(), draft)
-        guide.click()
-        self.assertEqual(page.locator("#agentPrompt").input_value(), draft)
-        self.assertIn("已有草稿", guide.get_attribute("title") or "")
+        self.assertEqual(page.locator(".agent-console.is-empty").count(), 1)
         paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
         self.assertNotIn("/api/agent/query", paths)
 
-    def test_release_format_teaching_does_not_replace_pending_approval(self) -> None:
+    def test_release_format_teaching_does_not_replace_pending_approval_without_button(self) -> None:
         approval = {
             "plan_id": "plan-browser-release-teaching-0001",
             "tool_name": "recognition.save_release_format",
@@ -624,17 +636,46 @@ Season 1 / S01E01
         )
         card = page.locator(".agent-confirmation-card")
         card.wait_for(state="visible")
-        guide = page.locator("#agentReleaseFormatGuide")
-        guide.wait_for(state="visible")
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
         self.assertEqual(page.locator("#agentPrompt").input_value(), "")
-        guide.click()
         self.assertTrue(card.is_visible())
-        self.assertEqual(page.locator("#agentPrompt").input_value(), "")
-        self.assertIn("待确认计划", guide.get_attribute("title") or "")
         paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
         self.assertNotIn("/api/agent/query", paths)
         self.assertNotIn("/api/agent/actions/confirm", paths)
         self.assertNotIn("/api/agent/actions/confirm/discard", paths)
+
+    def test_release_format_teaching_conversation_has_no_teaching_button(self) -> None:
+        page = self.make_page(
+            {
+                "sessions": {
+                    "sessions": [
+                        {
+                            "session_id": SESSION_ID,
+                            "title": "已有 Agent 对话",
+                            "message_count": 2,
+                            "updated_at": "2026-09-03T12:00:00+00:00",
+                        }
+                    ]
+                },
+                "sessionDetails": {
+                    SESSION_ID: {
+                        "session_id": SESSION_ID,
+                        "messages": [
+                            {"role": "user", "content": "检查媒体库状态"},
+                            {"role": "assistant", "content": "检查已完成。"},
+                        ],
+                    }
+                },
+            },
+            hash_fragment="#release-format-teaching",
+            stored_session=SESSION_ID,
+        )
+        page.locator(".agent-message-assistant").wait_for(state="visible")
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
+        self.assertEqual(page.locator("#agentPrompt").input_value(), "")
+        self.assertEqual(page.locator(".agent-console.is-empty").count(), 0)
+        paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
+        self.assertNotIn("/api/agent/query", paths)
 
     def test_release_format_teaching_hashchange_and_refresh_are_idempotent(self) -> None:
         draft_scope = "a" * 32
@@ -648,11 +689,10 @@ Season 1 / S01E01
             stored_session=SESSION_ID,
             draft_text=draft,
         )
-        guide = page.locator("#agentReleaseFormatGuide")
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
         page.wait_for_function(
             "() => document.querySelector('#agentPrompt').value === '刷新前后都要保留的发布格式教学草稿。'"
         )
-        guide.wait_for(state="visible")
         before = page.locator("#agentPrompt").input_value()
         before_calls = len(page.evaluate("window.__kernelCalls"))
         page.evaluate(
@@ -665,7 +705,7 @@ Season 1 / S01E01
             }"""
         )
         self.assertEqual(page.locator("#agentPrompt").input_value(), before)
-        self.assertTrue(guide.is_visible())
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
         self.assertEqual(len(page.evaluate("window.__kernelCalls")), before_calls)
 
         page.reload()
@@ -678,41 +718,38 @@ Season 1 / S01E01
         page.wait_for_function(
             "() => document.querySelector('#agentPrompt').value === '刷新前后都要保留的发布格式教学草稿。'"
         )
-        guide = page.locator("#agentReleaseFormatGuide")
-        guide.wait_for(state="visible")
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
         self.assertEqual(page.locator("#agentPrompt").input_value(), before)
         paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
         self.assertNotIn("/api/agent/query", paths)
 
-    def test_release_format_teaching_guide_stays_inside_mobile_viewport(self) -> None:
+    def test_release_format_teaching_has_no_button_on_mobile(self) -> None:
         page = self.make_page(
             {"sessions": {"sessions": []}},
             viewport={"width": 390, "height": 844},
             hash_fragment="#release-format-teaching",
             initial_prompt="已有一个需要保留的发布格式草稿。",
         )
-        guide = page.locator("#agentReleaseFormatGuide")
-        guide.wait_for(state="visible")
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
+        self.assertEqual(page.locator(".agent-console.is-empty").count(), 1)
         layout = page.evaluate("""() => {
             const composer = document.querySelector('.agent-composer').getBoundingClientRect();
-            const guide = document.querySelector('#agentReleaseFormatGuide').getBoundingClientRect();
             return {
                 documentWidth: document.documentElement.scrollWidth,
                 bodyWidth: document.body.scrollWidth,
                 viewportWidth: window.innerWidth,
                 composerLeft: composer.left,
                 composerRight: composer.right,
-                guideLeft: guide.left,
-                guideRight: guide.right,
             };
         }""")
         self.assertLessEqual(layout["documentWidth"], layout["viewportWidth"])
         self.assertLessEqual(layout["bodyWidth"], layout["viewportWidth"])
-        self.assertGreaterEqual(layout["guideLeft"], layout["composerLeft"] - 0.5)
-        self.assertLessEqual(layout["guideRight"], layout["composerRight"] + 0.5)
+        self.assertGreaterEqual(layout["composerLeft"], -0.5)
+        self.assertLessEqual(layout["composerRight"], layout["viewportWidth"] + 0.5)
 
     def test_empty_composer_centers_prompt_with_leading_action(self) -> None:
         page = self.make_page({"sessions": {"sessions": []}})
+        self.assertEqual(page.locator("#agentReleaseFormatGuide").count(), 0)
         layout = page.evaluate("""() => {
           const centerY = (selector) => {
             const rect = document.querySelector(selector).getBoundingClientRect();

@@ -110,6 +110,9 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertRegex(response.text, r"/static/js/agent\.js\?v=[0-9a-f]{16}")
         self.assertIn('id="agentResumeLatestSession"', response.text)
         self.assertIn("继续上次", response.text)
+        self.assertNotIn('id="agentReleaseFormatGuide"', response.text)
+        self.assertNotIn('class="agent-release-format-guide"', response.text)
+        self.assertNotIn("智能教学", response.text)
         self.assertNotRegex(
             response.text, re.compile(r"(?:API_KEY|PASSWORD|TOKEN)=", re.IGNORECASE)
         )
@@ -132,6 +135,7 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertNotIn(".agent-shortcuts-trigger", styles)
         self.assertNotIn(".agent-shortcuts-timeline-popover", styles)
         self.assertNotIn(".agent-timeline-task", styles)
+        self.assertNotIn(".agent-release-format-guide", styles)
         self.assertIn(".agent-console.is-empty", styles)
         self.assertIn(".agent-empty-intro", styles)
         self.assertNotIn(".agent-message-system", styles)
@@ -167,6 +171,19 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertIn(".agent-stream-step", styles)
         self.assertIn(".agent-tool-trace", styles)
         self.assertIn("function buildToolTrace(turn)", source)
+        self.assertIn("const RELEASE_FORMAT_TEACHING_HASH", source)
+        self.assertIn("const RELEASE_FORMAT_TEACHING_DRAFT", source)
+        self.assertIn("function applyReleaseFormatTeachingDraft()", source)
+        self.assertIn("releaseFormatTeachingHandled.has(key)", source)
+        for removed in (
+            "agentReleaseFormatGuide",
+            "agent-release-format-guide",
+            "releaseFormatGuide",
+            "syncReleaseFormatTeachingGuide",
+            "chooseReleaseFormatTeachingGuide",
+            "offerReleaseFormatTeaching",
+        ):
+            self.assertNotIn(removed, source)
         self.assertNotIn("payload.answer || '查询已完成。'", source)
 
     def test_agent_frontend_renders_effect_plan_as_safe_confirmation_card(self):

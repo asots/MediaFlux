@@ -32,7 +32,7 @@
             </div>
 
             <button type="button" class="agent-new-replies" id="agentNewReplies" hidden><i data-lucide="arrow-down"></i><span>有新回复</span></button>
-            <p class="sr-only" id="agentDraftHelp">未发送草稿仅保存在当前浏览器标签页，六小时后过期；疑似凭据不持久保存。等待回复时可继续编辑，但不会自动发送。发布格式智能教学只会填入草稿，不会替换已有草稿或待确认计划。</p>
+            <p class="sr-only" id="agentDraftHelp">未发送草稿仅保存在当前浏览器标签页，六小时后过期；疑似凭据不持久保存。等待回复时可继续编辑，但不会自动发送。通过发布格式教学链接进入时只会填入草稿，不会替换已有草稿或待确认计划。</p>
             <form class="agent-composer" id="agentComposer">
                 <div class="agent-composer-input-wrap">
                     <label class="sr-only" for="agentPrompt">输入要交给 Agent 的任务</label>
@@ -41,7 +41,6 @@
                 <div class="agent-composer-header">
                     <div class="agent-composer-actions">
                         <a class="agent-action-btn" href="{{ url_for('pages.settings') }}#agent" aria-label="Agent 设置" title="Agent 设置"><i data-lucide="sliders-horizontal"></i></a>
-                        <button type="button" class="agent-action-btn agent-resume-session agent-release-format-guide" id="agentReleaseFormatGuide" aria-label="发布格式智能教学引导" title="发布格式智能教学引导" hidden><i data-lucide="bot"></i><span>智能教学</span></button>
                         <button type="button" class="agent-action-btn agent-resume-session" id="agentResumeLatestSession" aria-label="继续上次会话" title="继续上次会话" disabled><i data-lucide="message-square-reply"></i><span>继续上次</span></button>
                     </div>
                     <div class="agent-composer-actions-right">
