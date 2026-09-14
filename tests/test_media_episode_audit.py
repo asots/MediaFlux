@@ -552,6 +552,16 @@ class EpisodeAuditTests(unittest.TestCase):
             self.assertEqual(reused.data["local_episode_count"], 3)
             self.assertEqual(inspect.call_count, 2)
 
+    def test_unknown_air_dates_are_not_presented_as_definitively_current(self):
+        with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=[_ready([(1, 1), (1, 2), (2, 1)])]), patch(
+            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+        ):
+            result = audit_series_episodes(dict(self.arguments))
+        self.assertEqual(result.status, "up_to_date")
+        self.assertEqual(result.data["unknown_air_date_count"], 1)
+        self.assertIn("已知播出日期", result.summary)
+        self.assertIn("不能据此判断全部最新", " ".join(result.suggestions))
+
     def test_refresh_replaces_inflight_query_without_stale_cache_publish_or_unlock(self):
         import threading
         from concurrent.futures import ThreadPoolExecutor

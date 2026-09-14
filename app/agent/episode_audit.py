@@ -544,8 +544,11 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
     return _result(
         ok=True,
         status="up_to_date",
-        summary="截至指定日期，已播普通剧集均已收录",
+        summary=("已知播出日期与有效编号记录内暂无缺集，仍有未确定记录"
+                 if unknown_air_date or data["ignored_unknown_local"] else "截至指定日期，已播普通剧集均已收录"),
         data=data,
+        suggestions=(["存在播出日期未知或本地缺少有效集号的条目，不能据此判断全部最新或全集齐全。"]
+                     if unknown_air_date or data["ignored_unknown_local"] else []),
     )
 
 

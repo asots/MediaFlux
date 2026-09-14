@@ -650,6 +650,18 @@ class LibraryUpdateActionTests(unittest.TestCase):
         self.assertFalse(model.get("truncated"))
         self.assertEqual(len(result.data["items"][0]["sources"]), 3)
 
+    def test_batch_preserves_unknown_metadata_counts_in_public_and_model_evidence(self):
+        scalar = _query_audit_result("示例剧", status="up_to_date")
+        scalar.data.update(unknown_air_date_count=1, ignored_unknown_local=2)
+        with patch("app.agent.update_actions.audit_series_episodes", return_value=scalar):
+            result = check_library_updates(_library_update_arguments({"queries": ["示例剧"], "as_of": "2026-08-01"}))
+        model = json.loads(DefaultProjector().project(result).model_content)
+        for data in (result.data, model["data"]):
+            self.assertEqual(data["items"][0]["unknown_air_date_count"], 1)
+            self.assertEqual(data["items"][0]["ignored_unknown_local"], 2)
+            self.assertEqual(data["items"][0]["status"], "up_to_date")
+        self.assertIn("不能宣称全部最新", " ".join(result.suggestions))
+
     def test_movie_comparison_unavailable_counts_as_uncertain_in_batch(self):
         titles = ["电影甲", "电影乙"]
 

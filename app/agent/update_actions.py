@@ -217,7 +217,7 @@ def _batch_update_item(arguments: dict[str, Any]) -> dict[str, Any]:
         "checked_at": result.evidence[-1].collected_at if result.evidence else _now(),
         "tmdb_id": data.get("tmdb_id", ""),
     }
-    for key in ("expected_aired", "local_episode_count", "missing_count", "latest_local", "latest_aired"):
+    for key in ("expected_aired", "local_episode_count", "missing_count", "latest_local", "latest_aired", "unknown_air_date_count", "ignored_unknown_local"):
         row[key] = data.get(key)
     for key in ("media_type", "season", "local_match_status", "exact_match_count", "possible_match_count"):
         if key in data:
@@ -256,6 +256,7 @@ def check_library_updates(arguments: dict[str, Any]) -> ToolResult:
             suggestions=[
                 "按作品逐行汇总，保留待确认/不可用项；最新季集位置不等于已收录集数，不能擅自换算总集号。",
                 "本次未检索资源站，也不证明官方平台实时进度；需要发布候选时再使用现有资源检索能力。",
+                "日期未知或本地未编号计数非零时，结论仅适用于已知日期与有效编号记录，不能宣称全部最新或全集齐全。",
             ],
         )
         # 公共结果保留来源明细；模型复用同一事实，仅去掉重复长描述和服务器名称。
