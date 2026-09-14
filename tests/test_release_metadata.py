@@ -8,13 +8,21 @@ class ReleaseMetadataTests(unittest.TestCase):
  def test_checksums_are_sorted_and_exclude_self(self):
   with tempfile.TemporaryDirectory() as d:
    r=Path(d); (r/'z.bin').write_bytes(b'z'); (r/'a.bin').write_bytes(b'a'); C.generate_checksums(r); lines=(r/'SHA256SUMS').read_text().splitlines(); self.assertTrue(lines[0].endswith('a.bin')); self.assertTrue(lines[1].endswith('z.bin')); self.assertNotIn('SHA256SUMS', '\n'.join(lines))
- def test_release_manifest_matches_artifacts(self):
+ def test_release_metadata_uses_the_same_docker_writer_and_repeatable_checksums(self):
   with tempfile.TemporaryDirectory() as d:
-   r=Path(d); (r/'a.tar.gz').write_bytes(b'a'); out=r/'BUILD-INFO.json'; B.generate_release_manifest(r,'v1.2.3','abc',out); p=json.loads(out.read_text()); self.assertEqual(p['version'],'1.2.3'); self.assertFalse(p['prerelease']); self.assertEqual([x['name'] for x in p['artifacts']],['a.tar.gz'])
- def test_release_manifest_marks_prerelease_from_semver_not_build_metadata(self):
+   root=Path(d); output=root/'BUILD-INFO.json'
+   info=B.generate_build_info('v1.2.3','abc','linux','multi','docker',build_time='2026-01-01T00:00:00Z')
+   B.write_build_info(output,info); first=output.read_bytes(); C.generate_checksums(root); sums=(root/'SHA256SUMS').read_bytes()
+   B.write_build_info(output,info); C.generate_checksums(root)
+   self.assertEqual(output.read_bytes(),first); self.assertEqual((root/'SHA256SUMS').read_bytes(),sums)
+   self.assertEqual(json.loads(first),info.as_dict()); self.assertEqual(info.artifact_name,'MediaFlux-1.2.3-docker-multi')
+   self.assertEqual(list(root.glob('.*.tmp')),[])
+ def test_release_metadata_marks_prerelease_from_semver_not_build_metadata(self):
   with tempfile.TemporaryDirectory() as d:
-   r=Path(d); out=r/'BUILD-INFO.json'; B.generate_release_manifest(r,'v1.2.3-rc.1+build-foo','abc',out); self.assertTrue(json.loads(out.read_text())['prerelease'])
-   B.generate_release_manifest(r,'v1.2.3+build-foo','abc',out); self.assertFalse(json.loads(out.read_text())['prerelease'])
+   output=Path(d)/'BUILD-INFO.json'
+   for version,expected in (('v1.2.3-rc.1+build-foo',True),('v1.2.3+build-foo',False)):
+    B.write_build_info(output,B.generate_build_info(version,'abc','linux','multi','docker'))
+    self.assertEqual(json.loads(output.read_text())['prerelease'],expected)
  def test_spdx_sbom_contains_python_dependencies(self):
   with tempfile.TemporaryDirectory() as d:
    r=Path(d); req=r/'requirements.txt'; req.write_text('fastapi==0.141.1 \\\n    --hash=sha256:' + 'a' * 64 + '\n# x\nuvicorn==0.52.3 \\\n    --hash=sha256:' + 'b' * 64 + '\n'); out=r/'SBOM.spdx.json'; S.generate_sbom([req],out,'https://example/sbom/1'); p=json.loads(out.read_text()); self.assertEqual(p['spdxVersion'],'SPDX-2.3'); self.assertEqual(p['name'],'MediaFlux locked Python dependencies'); self.assertEqual([(x['name'], x['versionInfo']) for x in p['packages']],[('fastapi','0.141.1'),('uvicorn','0.52.3')])

@@ -84,8 +84,6 @@ def compare_versions(left: str, right: str) -> int:
 def artifact_name(version: str, platform: str, arch: str, package: str) -> str:
     arch={'amd64':'x86_64','arm64':'aarch64'}.get(arch,arch)
     if package=='docker': return f'MediaFlux-{version}-docker-{arch}'
-    if package=='runtime': return f'MediaFlux-runtime-{version}-{platform}-{arch}.tar.gz'
-    if package=='source': return f'MediaFlux-{version}-source.tar.gz'
     raise ValueError(f'不支持的产物类型：{package}')
 
 def generate_build_info(ref: str, commit: str, platform: str, arch: str, package: str, *, build_time: str|None=None, release: bool=True) -> GeneratedBuildInfo:
@@ -105,28 +103,6 @@ def write_build_info(path: Path, info: GeneratedBuildInfo) -> None:
             json.dump(info.as_dict(),f,ensure_ascii=False,sort_keys=True,indent=2); f.write('\n'); f.flush(); os.fsync(f.fileno())
         os.replace(tmp,path)
     finally: Path(tmp).unlink(missing_ok=True)
-
-def generate_release_manifest(directory: Path, version: str, commit: str, output: Path) -> Path:
-    artifacts = []
-    for path in sorted((item for item in directory.rglob("*") if item.is_file()), key=lambda item: item.relative_to(directory).as_posix()):
-        if path.name in {"BUILD-INFO.json", "SHA256SUMS", "SHA256SUMS.sig", "SBOM.spdx.json"}:
-            continue
-        import hashlib
-        hasher = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        artifacts.append({"name": path.relative_to(directory).as_posix(), "sha256": hasher.hexdigest(), "size": path.stat().st_size})
-    normalized_version = normalize_version(version)
-    payload = {
-        "name": "MediaFlux",
-        "version": normalized_version,
-        "commit": commit,
-        "prerelease": is_prerelease(normalized_version),
-        "artifacts": artifacts,
-    }
-    output.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    return output
 
 def _changelog_section(changelog_text: str, version: str) -> str:
     """抽取带 ISO 日期的正式版本段落；标题或正文不合规时返回空串。"""
@@ -175,6 +151,6 @@ def generate_release_notes(ref: str, repo: str, changelog_path: Path, output: Pa
 
 
 def main(argv: Sequence[str]|None=None)->int:
-    p=argparse.ArgumentParser(description=__doc__); p.add_argument('--ref',required=True); p.add_argument('--commit',required=True); p.add_argument('--platform',required=True); p.add_argument('--arch',required=True); p.add_argument('--package',required=True,choices=('docker','runtime','source')); p.add_argument('--output',type=Path,required=True); p.add_argument('--development',action='store_true'); p.add_argument('--build-time')
+    p=argparse.ArgumentParser(description=__doc__); p.add_argument('--ref',required=True); p.add_argument('--commit',required=True); p.add_argument('--platform',required=True); p.add_argument('--arch',required=True); p.add_argument('--package',required=True,choices=('docker',)); p.add_argument('--output',type=Path,required=True); p.add_argument('--development',action='store_true'); p.add_argument('--build-time')
     a=p.parse_args(argv); info=generate_build_info(a.ref,a.commit,a.platform,a.arch,a.package,build_time=a.build_time,release=not a.development); write_build_info(a.output,info); print(info.artifact_name); return 0
 if __name__=='__main__': raise SystemExit(main())

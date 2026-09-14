@@ -15,13 +15,22 @@ class BuildInfoTests(unittest.TestCase):
         expected = {
             ("docker", "amd64", "docker"): "MediaFlux-1.2.3-docker-x86_64",
             ("docker", "arm64", "docker"): "MediaFlux-1.2.3-docker-aarch64",
-            ("linux", "x86_64", "runtime"): "MediaFlux-runtime-1.2.3-linux-x86_64.tar.gz",
-            ("linux", "aarch64", "runtime"): "MediaFlux-runtime-1.2.3-linux-aarch64.tar.gz",
-            ("linux", "all", "source"): "MediaFlux-1.2.3-source.tar.gz",
         }
         for (platform_name, arch, package), name in expected.items():
             with self.subTest(platform=platform_name, arch=arch, package=package):
                 self.assertEqual(M.artifact_name("1.2.3", platform_name, arch, package), name)
+
+    def test_retired_archive_generators_are_unavailable_but_old_info_remains_readable(self):
+        self.assertFalse(hasattr(M, "generate_release_manifest"))
+        for package in ("runtime", "source"):
+            with self.subTest(package=package), self.assertRaises(ValueError):
+                M.generate_build_info("v1.2.3", "abc", "linux", "x86_64", package)
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "BUILD-INFO.json"
+                path.write_text(json.dumps({"version": "0.1.0", "package": package}))
+                from unittest.mock import patch
+                with patch.dict(os.environ, {"MEDIAFLUX_BUILD_INFO_FILE": str(path)}):
+                    self.assertEqual(BuildInfo.current().package, package)
 
     def test_invalid_release_versions_are_rejected(self):
         for ref in ('', 'latest', '1.2', 'v1.0.0-01', 'v1.0.0-alpha.01'):
@@ -30,7 +39,7 @@ class BuildInfoTests(unittest.TestCase):
 
     def test_prerelease_classification_ignores_hyphens_in_build_metadata(self):
         stable = M.generate_build_info(
-            'v1.2.3+build-foo', 'abcdef12', 'docker', 'multi', 'runtime',
+            'v1.2.3+build-foo', 'abcdef12', 'docker', 'multi', 'docker',
             build_time='2026-07-29T00:00:00Z',
         )
         self.assertFalse(stable.prerelease)
