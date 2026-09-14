@@ -2059,7 +2059,6 @@ from app.repositories.download_requests import (  # noqa: E402,F401
     mark_download_request_local_media_failed,
     mark_download_request_local_media_skipped,
     recover_stale_submitting_download_requests,
-    renew_download_request_notification_lease,
     update_download_request,
     update_download_request_and_sync_media_admission,
 )

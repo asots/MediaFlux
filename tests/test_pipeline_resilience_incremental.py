@@ -314,29 +314,34 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         self.assertEqual(row["notification_delivery_status"], "sent")
         self.assertEqual(row["notification_lease_token"], "")
 
-    def test_download_notification_lease_can_only_be_renewed_by_owner(self):
+    def test_expired_notification_handoff_lease_is_reclaimed_and_old_owner_is_fenced(self):
         request_id, _ = db.create_download_request(
-            "notification-renew", "magnet", title="慢网络通知"
+            "notification-reclaim", "magnet", title="中断的通知交接"
         )
         db.update_download_request(
-            request_id,
-            status="completed",
-            notification_event_status="completed",
+            request_id, status="completed", notification_event_status="completed",
             notification_delivery_status="pending",
         )
-        claim = db.claim_download_request_notification(request_id, lease_seconds=30)
-        self.assertIsNotNone(claim)
-        token = str(claim["token"])
-
-        self.assertFalse(db.renew_download_request_notification_lease(
-            request_id, "stale-token", lease_seconds=300,
+        first = db.claim_download_request_notification(request_id, lease_seconds=30)
+        self.assertIsNotNone(first)
+        self.assertIsNone(db.claim_download_request_notification(request_id))
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE download_requests SET notification_lease_expires_at=? WHERE id=?",
+                ("2000-01-01 00:00:00", request_id),
+            )
+        second = db.claim_download_request_notification(request_id)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first["token"], second["token"])
+        self.assertFalse(db.finalize_download_request_notification(
+            request_id, first["token"], delivered=True,
         ))
-        self.assertTrue(db.renew_download_request_notification_lease(
-            request_id, token, lease_seconds=300,
+        self.assertTrue(db.finalize_download_request_notification(
+            request_id, second["token"], delivered=True,
         ))
         row = db.get_download_request(request_id)
-        self.assertEqual(row["notification_delivery_status"], "sending")
-        self.assertEqual(row["notification_lease_token"], token)
+        self.assertEqual(row["notification_delivery_status"], "sent")
+        self.assertEqual(row["notification_lease_token"], "")
 
     def test_guangya_organize_claim_survives_qb_manual_review(self):
         request_id, _ = db.create_download_request(

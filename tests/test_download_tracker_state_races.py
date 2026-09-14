@@ -370,6 +370,68 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         self.local_import.assert_not_called()
         self.notify.assert_not_called()
 
+    def test_notification_handoff_uses_only_the_active_repository_api(self) -> None:
+        from app.repositories import download_requests
+
+        self.assertFalse(hasattr(db, "renew_download_request_notification_lease"))
+        self.assertFalse(hasattr(download_requests, "renew_download_request_notification_lease"))
+
+    def test_notification_outbox_owns_transport_retries_after_tracker_handoff(self) -> None:
+        import threading
+        from app.modules import telegram_notification_center as center
+        from app.notifier import TelegramSendResult
+
+        request_id = self._request(
+            status="completed", targets="qb", qb_status="completed", gy_status="",
+            notification_event_status="completed", notification_delivery_status="pending",
+        )
+        with db.get_conn() as conn:
+            conn.execute("UPDATE download_requests SET chat_id='100' WHERE id=?", (request_id,))
+        with (
+            patch.object(center, "_dispatch_stop", threading.Event()),
+            patch.object(center, "allows_notification", return_value=True),
+            patch.object(center, "send_event_result", side_effect=[
+                TelegramSendResult(False, status_code=500, error="ServerError"),
+                TelegramSendResult(True, message_id=101),
+            ]) as transport,
+        ):
+            DownloadTracker._notify_completion(db.get_download_request(request_id), "completed", "", {})
+            request = db.get_download_request(request_id)
+            self.assertEqual(request["notification_delivery_status"], "sent")
+            self.assertEqual(request["notification_attempts"], 0)
+            with db.get_conn() as conn:
+                outbox = conn.execute("SELECT * FROM telegram_notification_outbox").fetchone()
+                self.assertEqual(outbox["status"], "retry_wait")
+                self.assertEqual(outbox["attempts"], 1)
+                conn.execute("UPDATE telegram_notification_outbox SET next_attempt_at='2000-01-01 00:00:00'")
+            DownloadTracker._notify_completion(request, "completed", "", {})
+            self.assertEqual(transport.call_count, 1)
+            self.assertTrue(center.drain_telegram_notifications())
+            self.assertEqual(transport.call_count, 2)
+            with db.get_conn() as conn:
+                outbox = conn.execute("SELECT * FROM telegram_notification_outbox").fetchone()
+                self.assertEqual((outbox["status"], outbox["message_id"]), ("sent", 101))
+            center.drain_telegram_notifications()
+            self.assertEqual(transport.call_count, 2)
+
+    def test_tracker_retries_if_outbox_persistence_fails(self) -> None:
+        from app.modules import telegram_notification_center as center
+
+        request_id = self._request(
+            status="failed", qb_status="failed", gy_status="failed",
+            notification_event_status="failed", notification_delivery_status="pending",
+        )
+        with db.get_conn() as conn:
+            conn.execute("UPDATE download_requests SET chat_id='100' WHERE id=?", (request_id,))
+        with patch.object(center, "upsert_notification", side_effect=RuntimeError("outbox unavailable")):
+            DownloadTracker._notify_completion(db.get_download_request(request_id), "failed", "failed", {})
+        request = db.get_download_request(request_id)
+        self.assertEqual(request["notification_delivery_status"], "retry_wait")
+        self.assertEqual(request["notification_attempts"], 1)
+        self.assertTrue(request["notification_next_retry_at"])
+        with db.get_conn() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM telegram_notification_outbox").fetchone()[0], 0)
+
     def test_resubmitted_request_can_finish_existing_notification_delivery(
         self,
     ) -> None:
