@@ -87,7 +87,7 @@ def register_specs(
 
     def missing_season_search(arguments, context):
         result = search_missing_season_resources(
-            arguments, preferences=owner_media_preferences(context.owner),
+            arguments, preferences=owner_media_preferences(context.owner), context=context,
         )
         if missing_media_runtime is not None:
             missing_media_runtime.capture_search(
@@ -343,7 +343,7 @@ def register_specs(
                 },
                 "additionalProperties": False,
             },
-            handler=check_library_updates,
+            context_handler=check_library_updates,
             validator=_library_update_arguments,
             related_tools=("library.search_missing_season_resources", "library.search_missing_episode_resources"),
             examples=(

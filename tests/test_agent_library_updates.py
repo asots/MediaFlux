@@ -662,6 +662,53 @@ class LibraryUpdateActionTests(unittest.TestCase):
             self.assertEqual(data["items"][0]["status"], "up_to_date")
         self.assertIn("不能宣称全部最新", " ".join(result.suggestions))
 
+    def test_cancelled_kernel_batch_stops_queued_library_reads(self):
+        import asyncio
+        from app.agent.domain_catalog import build_tool_specs
+        from app.agent.kernel.capabilities import CapabilityRetriever
+        from app.agent.kernel.events import AgentEventType
+        from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+        from app.agent.kernel.pipeline import ToolPipeline
+        from app.agent.kernel.ports import catalog_from_tool_specs
+        from app.agent.kernel.session import AgentSession
+        from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+        from tests.test_agent_kernel_core import ScriptedModel
+        names = [f"取消测试作品{i}" for i in range(10)]
+        started, release = threading.Event(), threading.Event()
+        lock, reads = threading.Lock(), []
+        def audit(arguments):
+            with lock:
+                reads.append(arguments["query"])
+                if len(reads) == 3:
+                    started.set()
+            assert release.wait(3)
+            return _query_audit_result(arguments["query"], status="up_to_date")
+        async def run():
+            catalog = catalog_from_tool_specs([spec for spec in build_tool_specs() if spec.name == "library.check_updates"])
+            state = InMemorySessionStateStore()
+            model = ScriptedModel([[
+                ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("batch", "library.check_updates", {"queries": names})),
+                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+            ]])
+            session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+            async def collect():
+                return [event async for event in session.run(AgentInput(owner="cancel-owner", session_id="cancel-batch", message="核对这批作品"))]
+            task = asyncio.create_task(collect())
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                self.assertTrue(await session.cancel(owner="cancel-owner", session_id="cancel-batch"))
+                release.set()
+                events = await asyncio.wait_for(task, 3)
+                self.assertEqual(events[-1].type, AgentEventType.TURN_CANCELLED)
+                self.assertEqual(len(reads), 3)
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+        with patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
+            asyncio.run(run())
+
     def test_movie_comparison_unavailable_counts_as_uncertain_in_batch(self):
         titles = ["电影甲", "电影乙"]
 

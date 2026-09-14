@@ -17,7 +17,7 @@ from app.agent.indexer_actions import (
 )
 from app.agent.indexer_actions import search_arguments as indexer_search_arguments
 from app.agent.media_preference_policy import validate_resource_preference_overrides
-from app.agent.models import Evidence, ToolResult
+from app.agent.models import Evidence, ToolContext, ToolResult
 from app.agent.recent_resource_candidates import attach_resource_candidate_reference, merge_resource_candidate_references
 from app.agent.resource_recommendation import rank_episode_search
 from app.indexers.runtime import get_indexer_service
@@ -408,10 +408,12 @@ _MISSING_SEASON_SEARCH_DEADLINE_SECONDS = 30.0
 
 
 def search_missing_season_resources(
-    arguments: dict[str, Any], *, preferences: dict[str, Any] | None = None,
+    arguments: dict[str, Any], *, preferences: dict[str, Any] | None = None, context: ToolContext | None = None,
 ) -> ToolResult:
     if "items" in arguments:
-        return _search_missing_resource_batch(arguments["items"], preferences=preferences)
+        return _search_missing_resource_batch(arguments["items"], preferences=preferences, context=context)
+    if context is not None and context.cancelled():
+        return ToolResult(False, "cancelled", "本项已停止，未执行资源核对")
     deadline_at = time.monotonic() + _MISSING_SEASON_SEARCH_DEADLINE_SECONDS
     audit_arguments: dict[str, Any] = {
         "query": arguments["query"],
@@ -496,6 +498,9 @@ def search_missing_season_resources(
     suggestions: list[str] = []
     deadline_exhausted = False
     for target in selected:
+        if context is not None and context.cancelled():
+            suggestions.append("本轮已停止，尚未开始的缺集资源不再检索。")
+            break
         remaining_seconds = deadline_at - time.monotonic()
         if remaining_seconds <= 0:
             deadline_exhausted = True
@@ -592,11 +597,11 @@ def search_missing_season_resources(
     )
 
 
-def _search_missing_resource_batch(items: list[dict[str, Any]], *, preferences: dict[str, Any] | None) -> ToolResult:
+def _search_missing_resource_batch(items: list[dict[str, Any]], *, preferences: dict[str, Any] | None, context: ToolContext | None = None) -> ToolResult:
     """复用单季检索与其已核验私有候选，仅选每个缺集的最佳可证明覆盖项。"""
     def search(item):
         try:
-            return search_missing_season_resources(item, preferences=preferences)
+            return search_missing_season_resources(item, preferences=preferences, context=context)
         except Exception:
             return ToolResult(False, "unavailable", "本部资源检索未完成，不能判断是否有资源")
 

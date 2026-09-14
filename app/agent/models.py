@@ -88,6 +88,7 @@ class ToolContext:
     request_id: str = ""
     confirmation_bootstrap: bool = False
     capability_search: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    cancelled: Callable[[], bool] = field(default=lambda: False, repr=False, compare=False)
 
 
 ContextualToolHandler = Callable[[dict[str, Any], ToolContext], ToolResult]

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from app.agent.episode_audit import audit_series_episodes, invalidate_episode_audit_cache
-from app.agent.models import Evidence, ToolResult
+from app.agent.models import Evidence, ToolContext, ToolResult
 from app.services import search_media_servers
 from app.logger import get_logger
 
@@ -203,10 +203,10 @@ def _check_movie_updates(arguments: dict[str, Any]) -> ToolResult:
     )
 
 
-def _batch_update_item(arguments: dict[str, Any]) -> dict[str, Any]:
+def _batch_update_item(arguments: dict[str, Any], context: ToolContext | None = None) -> dict[str, Any]:
     """每部使用同一紧凑响应；无法读取的计数为None，不能伪装成零缺集。"""
     try:
-        result = check_library_updates(arguments)
+        result = check_library_updates(arguments, context)
     except Exception as exc:
         logger.warning("批量更新核对单项失败 type=%s", type(exc).__name__)
         result = ToolResult(ok=False, status="unavailable", summary="本部查询失败，暂时无法判断更新")
@@ -232,13 +232,13 @@ def _batch_update_item(arguments: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def check_library_updates(arguments: dict[str, Any]) -> ToolResult:
+def check_library_updates(arguments: dict[str, Any], context: ToolContext | None = None) -> ToolResult:
     """单部与批量共用同一审计链；更新检查默认刷新库存，而不是复述旧缓存。"""
     if "queries" in arguments:
         shared = {key: value for key, value in arguments.items() if key != "queries"}
         items = [{**shared, "query": query} for query in arguments["queries"]]
         with ThreadPoolExecutor(max_workers=min(3, len(items)), thread_name_prefix="library-updates") as pool:
-            rows = list(pool.map(_batch_update_item, items))
+            rows = list(pool.map(lambda item: _batch_update_item(item, context), items))
         updates = sum(row["status"] == "updates_available" for row in rows)
         current = sum(row["status"] == "up_to_date" for row in rows)
         uncertain = len(rows) - updates - current
@@ -274,6 +274,8 @@ def check_library_updates(arguments: dict[str, Any]) -> ToolResult:
         result.model_data = {**result.data, "items": model_rows}
         return result
     media_type = arguments.get("media_type", "auto")
+    if context is not None and context.cancelled():
+        return ToolResult(False, "cancelled", "本项已停止，未读取库存", data={"query": arguments["query"], "media_type": media_type})
     if media_type == "movie":
         return _check_movie_updates(arguments)
 

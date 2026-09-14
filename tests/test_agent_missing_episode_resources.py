@@ -569,6 +569,19 @@ class MultiWorkResourceTests(unittest.TestCase):
         with self.assertRaises(AgentToolError):
             missing_season_resource_arguments({"items": [{"query": "剧", "season": 1}], "query": "另一部"})
 
+    def test_cancelled_batch_does_not_start_audits_or_indexers(self):
+        from app.agent.models import ToolContext
+        arguments = missing_season_resource_arguments({"items": [{"query": f"测试作品{i}", "season": 1} for i in range(7)]})
+        with patch("app.agent.episode_resource_actions.audit_series_episodes") as audit, patch(
+            "app.agent.episode_resource_actions.search_resources"
+        ) as search:
+            result = search_missing_season_resources(arguments, context=ToolContext(cancelled=lambda: True))
+        audit.assert_not_called()
+        search.assert_not_called()
+        self.assertEqual(len(result.data["groups"]), 7)
+        self.assertTrue(all(group["status"] == "cancelled" for group in result.data["groups"]))
+        self.assertFalse(result.references)
+
     def test_seven_work_batch_keeps_six_private_candidates_and_deduplicates_pack(self):
         from types import SimpleNamespace
         from app.agent.recent_resource_candidates import restore_resource_candidate_reference, validate_safe_resource_snapshot

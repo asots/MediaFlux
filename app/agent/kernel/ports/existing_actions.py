@@ -73,6 +73,7 @@ def _kernel_context(context: ToolCallContext) -> ToolContext:
         request_id=context.request_id,
         confirmation_bootstrap=False,
         capability_search=context.capability_search,
+        cancelled=lambda: context.cancellation.cancelled,
     )
 
 
