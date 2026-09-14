@@ -56,6 +56,7 @@ def register_specs(
                 "可提交的候选会同时返回 owner/session 绑定的 resource_candidates_ref，后续资源检查或"
                 "提交必须原样使用该引用。"
                 "可用于交叉核对连载资源跟进到哪一集，但资源标题只能作为旁证，不能证明官方播出进度。"
+                "普通搜索结果不默认推荐；已确认缺集后找资源应使用 library.search_missing_episode_resources 或 library.search_missing_season_resources，避免把旧集当更新。"
             ),
             risk=RiskLevel.READ,
             domains=("resource_search", "official_progress"),

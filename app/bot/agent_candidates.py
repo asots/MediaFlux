@@ -77,7 +77,10 @@ def render(telebot: Any, view: dict, draft: dict) -> tuple[str, Any]:
         markup.add(button("继续挑选本批资源", "b"))
         return str(draft.get("result_html") or "本次处理已结束，请核对实际下载状态。"), markup
     selected = set(draft["positions"])
-    lines = ["<b>资源推荐与批选</b>"]
+    recommended = view.get("recommended_positions") or []
+    lines = ["<b>资源推荐与批选</b>" if recommended else "<b>资源搜索与批选</b>"]
+    if not recommended:
+        lines.append("本次未生成补缺集推荐；搜索结果仅供手动挑选。")
     items = view["items"] if draft["expanded"] else [item for item in view["items"] if item["position"] in selected]
     for item in items:
         description = _short(item)
@@ -88,7 +91,10 @@ def render(telebot: Any, view: dict, draft: dict) -> tuple[str, Any]:
     if draft["expanded"]:
         for item in view["items"]:
             markup.add(button(f"{'✓' if item['position'] in selected else '□'} {_short(item)[:45]}", f"i{item['position']}"))
-    markup.add(button("收起版本" if draft["expanded"] else "挑选版本", "e"), button("使用推荐组合", "r"))
+    controls = [button("收起版本" if draft["expanded"] else "挑选版本", "e")]
+    if recommended:
+        controls.append(button("使用推荐组合", "r"))
+    markup.add(*controls)
     for target in view.get("targets", []):
         label = f"{'✓ ' if target['value'] == draft['target'] else ''}{target['label']}{'' if target['available'] else '（未就绪）'}"
         markup.add(button(label, f"t{target['value']}"))
@@ -157,6 +163,8 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
         elif action == "e":
             draft["expanded"] = not draft["expanded"]
         elif action == "r":
+            if not view["recommended_positions"]:
+                raise SelectionInvalidError("当前没有推荐组合，请展开版本手动选择。")
             selected = set(view["recommended_positions"])
         elif action == "b":
             draft.update(phase="select", expanded=True, result_html="")

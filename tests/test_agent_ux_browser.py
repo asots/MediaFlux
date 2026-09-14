@@ -437,6 +437,51 @@ class AgentUXBrowserTests(unittest.TestCase):
         self.assertIn('搜索结果', page.locator('.agent-candidates').locator('..').inner_text())
         self.assertNotIn('不相关', page.locator('.agent-candidates').locator('..').inner_text())
 
+    def test_general_search_results_do_not_recommend_old_episodes_as_updates(self):
+        view = candidate_view()
+        view['recommended_positions'] = []
+        view['items'] = [
+            {'position': 1, 'title': '[GM-Team][东大高武学院][01-04][4K]', 'coverage': [None, 1, 4]},
+            {'position': 2, 'title': '东大高武学院 S01E08', 'coverage': [1, 8, 8]},
+        ]
+        events = events_for_candidates(view)
+        events[-1] = harness._event(3, 'turn.completed', {'status': 'success', 'answer': '本次检索未找到 S01E09；部分站点超时，仅见旧集资源。'})
+        for viewport in ({'width': 1440, 'height': 900}, {'width': 768, 'height': 1024}, {'width': 390, 'height': 844}, {'width': 320, 'height': 640}):
+            with self.subTest(viewport=viewport):
+                page = self.page({'queryEvents': events}, viewport=viewport)
+                page.locator('#agentPrompt').fill('看看有无资源')
+                page.locator('#agentSend').click()
+                page.wait_for_selector('.agent-narrative')
+                self.assertEqual(page.locator('.agent-candidates-heading strong').inner_text(), '搜索结果')
+                summary = page.locator('.agent-candidate-recommendation').inner_text()
+                self.assertIn('仅供手动挑选', summary)
+                self.assertNotIn('01–04', summary)
+                self.assertTrue(page.locator('.agent-candidate-select').is_disabled())
+                self.assertEqual(page.locator('[data-candidate-position]:checked').count(), 0)
+                self.assertFalse(page.locator('.agent-candidates-more').evaluate('(node) => node.open'))
+                self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
+                self.snapshot(page, 'unverified-search-' + str(viewport['width']))
+                # 不把普通搜索下线：用户仍可明确挑选旧资源并预检，不能直接提交下载。
+                page.locator('.agent-candidates-more > summary').click()
+                page.locator('[data-candidate-position="1"]').check()
+                page.locator('.agent-candidate-select').click()
+                page.wait_for_function("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length === 2")
+                selection = page.evaluate("JSON.parse(window.__kernelCalls.filter(call => call.url === '/api/agent/query')[1].body).selection")
+                self.assertEqual(selection['positions'], [1])
+                self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
+
+    def test_no_missing_episode_candidates_has_no_recommendation_or_download_controls(self):
+        events = [harness._event(1, 'turn.started'), harness._event(2, 'tool.completed', {
+            'tool': 'library.search_missing_episode_resources', 'result': {'candidate_view': None},
+        }), harness._event(3, 'turn.completed', {'status': 'success', 'answer': '本次没有找到目标第 9 集的资源。'})]
+        page = self.page({'queryEvents': events})
+        page.locator('#agentPrompt').fill('查第9集资源')
+        page.locator('#agentSend').click()
+        page.wait_for_selector('.agent-narrative')
+        self.assertEqual(page.locator('.agent-candidates').count(), 0)
+        self.assertEqual(page.locator('.agent-candidate-select').count(), 0)
+        self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
+
     def test_recommended_complementary_versions_are_compact_and_warn_on_overlap(self):
         view = candidate_view()
         view['recommended_positions'] = [1, 3]

@@ -71,13 +71,20 @@ def test_batch_input_rejects_legacy_duplicate_unbounded_or_implicit_selection(va
         normalize_selection(value)
 
 
-def test_recommendation_only_combines_complementary_explicit_ranges():
-    items = [candidate_item({"title": title}, pos) for pos, title in enumerate([
+def test_recommendation_only_combines_verified_complementary_ranges():
+    items = [candidate_item({"title": title, "match": "episode_pack", "_verification_context": {
+        "title": "Example", "season": 1, "episode": 5 if pos <= 2 else 1,
+    }}, pos) for pos, title in enumerate([
         "Example.S01E05-06.2160p.SDR", "Example.S01E05-06.2160p.HDR",
         "Example.S01E01-04.2160p.SDR", "Example.S01E01-04.2160p.HDR",
     ], 1)]
     assert _recommend(items) == [1, 3]
-    assert _recommend([candidate_item({"title": "Movie.2026.2160p"}, 1), candidate_item({"title": "Movie.2026.1080p"}, 2)]) == [1]
+    text, markup = agent_candidates.render(TELEBOT, {"items": items, "recommended_positions": [1, 3]}, {
+        "handle": "ref_" + "a" * 24, "positions": [1, 3], "expanded": False, "target": "guangya",
+    })
+    assert "资源推荐与批选" in text
+    assert any(button.text == "使用推荐组合" for button in markup.buttons)
+    assert _recommend([candidate_item({"title": "Movie.2026.2160p"}, 1), candidate_item({"title": "Movie.2026.1080p"}, 2)]) == []
     assert _recommend([items[0], candidate_item({"title": "Other.S01E01-04"}, 2)]) == [1]
 
 
@@ -197,13 +204,21 @@ def test_telegram_in_place_multiselect_previews_and_confirms_once(store, monkeyp
         agent_adapter.handle_agent_callback(bot, call, TELEBOT)
         draft = asyncio.run(states.load(owner=owner, session_id=session_id)).metadata["ux_candidate_draft"]
 
+    assert draft["positions"] == []
+    text, markup = agent_candidates.render(TELEBOT, view, draft)
+    assert "仅供手动挑选" in text and "资源推荐与批选" not in text
+    assert not any(button.text == "使用推荐组合" for button in markup.buttons)
     stale = draft["handle"]
     click("e")
+    click("i1")
     click("i2")
     click("tboth")
     assert draft["positions"] == [1, 2] and draft["target"] == "both"
-    assert session.model.requests == [] and bot.sent == [] and len(bot.edits) == 3
+    assert session.model.requests == [] and bot.sent == [] and len(bot.edits) == 4
     edit_count = len(bot.edits)
+    click("r")  # 旧消息中遗留的推荐按钮不能清掉用户的手动选择。
+    assert len(bot.edits) == edit_count and draft["positions"] == [1, 2]
+    assert "当前没有推荐组合" in bot.answers[-1][1]
     click("i2", stale)
     assert len(bot.edits) == edit_count and draft["positions"] == [1, 2]
     assert bot.answers[-1][2]["show_alert"] is True

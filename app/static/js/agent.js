@@ -1830,11 +1830,11 @@
         group.dataset.candidateView = view.ref;
         group.setAttribute('aria-label', '资源批量选择');
         const heading = element('div', 'agent-candidates-heading');
-        heading.append(element('strong', '', '推荐组合'), element('span', '', `${items.length} 个版本`));
         const recommended = (Array.isArray(view.recommended_positions) ? view.recommended_positions : []).filter(pos => items.some(item => item.position === pos));
+        heading.append(element('strong', '', recommended.length ? '推荐组合' : '搜索结果'), element('span', '', `${items.length} 个版本`));
         const summary = element('ul', 'agent-candidate-recommendation');
         for (const item of items.filter(item => recommended.includes(item.position))) summary.append(element('li', '', candidateShortName(item)));
-        if (!summary.childElementCount) summary.append(element('li', '', '请展开列表核对版本后选择。'));
+        if (!summary.childElementCount) summary.append(element('li', '', '未生成补缺集推荐；这些搜索结果仅供手动挑选，不代表有更新。'));
         let stored = null;
         try { stored = JSON.parse(sessionStorage.getItem(candidateStorageKey(view.ref)) || 'null'); } catch (_) { /* Optional draft. */ }
         const positions = Array.isArray(stored?.positions) ? stored.positions : recommended;

@@ -96,38 +96,22 @@ def _target_options(owner: str) -> dict[str, Any]:
 
 
 def _recommend(items: list[dict[str, Any]]) -> list[int]:
-    """仅以明确集数范围推荐互补项；无法证明覆盖关系时只推荐首项。"""
-    if all(item.get("media_title") and item.get("requested_episode") for item in items):
-        covered: set[tuple[str, int, int]] = set()
-        selected = []
-        for item in items:
-            title = item["media_scope"]
-            season, episode = item["requested_episode"]
-            if (title, season, episode) in covered:
-                continue
-            selected.append(item["position"])
-            coverage = item.get("coverage")
-            start, end = (coverage[1], coverage[2]) if coverage and coverage[0] == season and coverage[1] <= episode <= coverage[2] else (episode, episode)
-            covered.update((title, season, number) for number in range(start, end + 1))
-        return selected
-    scopes = {
-        re.split(r"(?i)s\d{1,2}\s*e\d|[\[(【]\s*\d+\s*[-~～–—]", item["title"], maxsplit=1)[0].strip(" ._-[]").casefold()
-        for item in items if item.get("coverage")
-    }
-    if len(scopes) != 1 or not all(scopes):
-        return [items[0]["position"]]
-    covered: set[tuple[int | None, int]] = set()
-    recommended: list[int] = []
+    """只推荐领域已确认覆盖目标缺集的互补资源；普通搜索不推断下载意图。"""
+    covered: set[tuple[str, int, int]] = set()
+    selected = []
     for item in items:
-        coverage = item.get("coverage")
-        if not coverage:
+        if not (item.get("media_title") and item.get("requested_episode")
+                and item.get("match") in {"exact_episode", "episode_pack"}):
             continue
-        season, start, end = coverage
-        episodes = {(season, episode) for episode in range(start, end + 1)}
-        if not covered.intersection(episodes):
-            recommended.append(item["position"])
-            covered.update(episodes)
-    return recommended or [items[0]["position"]]
+        title = item["media_scope"]
+        season, episode = item["requested_episode"]
+        if (title, season, episode) in covered:
+            continue
+        selected.append(item["position"])
+        coverage = item.get("coverage")
+        start, end = (coverage[1], coverage[2]) if coverage and coverage[0] == season and coverage[1] <= episode <= coverage[2] else (episode, episode)
+        covered.update((title, season, number) for number in range(start, end + 1))
+    return selected
 
 
 def _snapshot(value: Any) -> dict[str, Any] | None:
@@ -167,6 +151,7 @@ def candidate_item(value: Mapping[str, Any], position: int) -> dict[str, Any]:
     quality = value.get("quality")
     quality = quality if isinstance(quality, dict) else value
     tags = quality.get("tags")
+    match = quality.get("match")
     return {
         "position": position,
         "title": title,
@@ -174,6 +159,7 @@ def candidate_item(value: Mapping[str, Any], position: int) -> dict[str, Any]:
         "media_title": media_title,
         "media_scope": media_scope,
         "requested_episode": requested,
+        "match": match if match in ("exact_episode", "episode_pack", "season_pack", "unknown", "conflict") else "",
         "site_name": display_text(value.get("site_name"), limit=80),
         "size_text": display_text(value.get("size_text"), limit=32),
         "tags": {
@@ -306,9 +292,10 @@ async def current_candidate_view(
             "positions": [item["position"] for item in view["items"]], "target": "guangya",
         }, state=state, store=store, for_preview=False)
         public = {key: deepcopy(view[key]) for key in (
-            "ref", "selection_ref", "expires_at", "turn_id", "recommended_positions",
+            "ref", "selection_ref", "expires_at", "turn_id",
         ) if key in view}
         public["items"] = [candidate_item(item, item["position"]) for item in view["items"]]
+        public["recommended_positions"] = _recommend(public["items"])
         result = state.metadata.get("ux_candidate_result")
         if isinstance(result, dict) and result.get("ref") == view["ref"]:
             public["last_result"] = {key: deepcopy(result[key]) for key in ("text", "target", "handled_positions") if key in result}

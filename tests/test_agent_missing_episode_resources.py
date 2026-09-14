@@ -291,6 +291,32 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertNotIn("secret-server", serialized)
         self.assertNotIn("/private/media", serialized)
 
+    def test_missing_ninth_episode_does_not_promote_old_packs_or_unknown_coverage(self):
+        from app.agent.kernel.ux_selection import _recommend, candidate_item
+
+        arguments = missing_episode_resource_arguments({"query": "东大高武学院", "season": 1, "episode": 9})
+        old_titles = ["[GM-Team] 东大高武学院 S01E01-E04 4K", "东大高武学院 S01E08"]
+        for extra, expected in ((None, []), ("[GM-Team][东大高武学院][01-04][4K]", []), ("东大高武学院 全集", []), ("东大高武学院 S01E09", [1]), ("东大高武学院 S01E08-E09", [1])):
+            titles = old_titles + ([extra] if extra else [])
+            searched = _search_result(status="partial", items=[{
+                "result_id": f"episode-nine-result-{position:03}", "title": title,
+                "site_id": "nyaa", "site_name": "Nyaa", "download_state": "ready", "download_kinds": ["magnet"],
+            } for position, title in enumerate(titles, 1)])
+            searched.data.update({"partial": True, "errors": [{"site_id": "1lou", "message": "timeout"}]})
+            with self.subTest(extra=extra), patch(
+                "app.agent.episode_resource_actions.audit_series_episodes",
+                return_value=_audit_result(missing=[{"season": 1, "episode": 9}], target_missing=True),
+            ), patch("app.agent.episode_resource_actions.search_resources", return_value=searched):
+                result = search_missing_episode_resources(arguments)
+            candidates = result.references[0].value["candidates"] if result.references else []
+            assert not any(item["title"] in old_titles for item in candidates)
+            assert _recommend([candidate_item(item, item["position"]) for item in candidates]) == expected
+            assert result.data["search"]["errors"] == searched.data["errors"]
+            assert result.data["search"]["partial"] is True
+            assert result.data["search"]["download_plan"]["auto_submit"] is False
+            if not extra:
+                assert result.references == [], "仅命中旧集时，不得生成候选卡引用"
+
     def test_exact_high_episode_can_be_verified_outside_bounded_sample(self):
         arguments = missing_episode_resource_arguments(
             {"query": "示例剧", "season": 1, "episode": 150, "library_name": "美女库"}

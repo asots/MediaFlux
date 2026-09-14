@@ -386,7 +386,7 @@ def test_candidate_projection_is_allowlisted_and_current_view_restores(store):
         assert set(view) == {"ref", "selection_ref", "expires_at", "items", "turn_id", "recommended_positions", "target", "target_source", "targets"}
         assert view["expires_at"] > time.time()
         item = view["items"][0]
-        assert set(item) == {"position", "title", "site_name", "size_text", "tags", "reasons", "warnings", "coverage", "media_title", "media_scope", "requested_episode"}
+        assert set(item) == {"position", "title", "site_name", "size_text", "tags", "reasons", "warnings", "coverage", "media_title", "media_scope", "requested_episode", "match"}
         assert item["tags"] == {"audio": "Atmos", "resolution": "2160p"}
         assert item["reasons"] == ["精确匹配"] and item["warnings"] == ["需要人工确认"]
         assert view["selection_ref"] != view["ref"]
@@ -789,22 +789,72 @@ def test_verified_cross_series_recommendations_keep_identity_and_global_position
 
     names = ["光阴之外", "择日飞升", "大主宰", "牧神记", "沧元图", "一斩苍穹"]
     items = [candidate_item({
-        "title": f"{name}.S01E08.2160p", "_verification_context": {"title": name, "season": 1, "episode": 8},
+        "title": f"{name}.S01E08.2160p", "match": "exact_episode", "_verification_context": {"title": name, "season": 1, "episode": 8},
     }, position) for position, name in enumerate(names, 1)]
     assert _recommend(items) == [1, 2, 3, 4, 5, 6]
     assert [item["media_title"] for item in items] == names
     assert all(item["requested_episode"] == [1, 8] for item in items)
     assert all(candidate_item(item, item["position"]) == item for item in items)
     alternatives = [*items, candidate_item({
-        "title": "光阴之外.S01E08.1080p", "_verification_context": {"title": names[0], "season": 1, "episode": 8},
+        "title": "光阴之外.S01E08.1080p", "match": "exact_episode", "_verification_context": {"title": names[0], "season": 1, "episode": 8},
     }, 7)]
     assert _recommend(alternatives) == [1, 2, 3, 4, 5, 6]
 
 
 def test_same_title_different_tmdb_id_are_distinct_recommendation_scopes():
     from app.agent.kernel.ux_selection import _recommend, candidate_item
-    items = [candidate_item({"title": "同名剧.S01E01", "_verification_context": {
+    items = [candidate_item({"title": "同名剧.S01E01", "match": "exact_episode", "_verification_context": {
         "title": "同名剧", "tmdb_id": str(identity), "season": 1, "episode": 1,
     }}, position) for position, identity in enumerate((111, 222), 1)]
     assert _recommend(items) == [1, 2]
     assert [item["media_scope"] for item in items] == ["tmdb:111", "tmdb:222"]
+
+
+def test_general_search_does_not_recommend_old_episodes_or_suggest_ingest(store):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        view, context = await _publish_candidates(pipeline, states)
+        result = await pipeline.execute("indexer.search_resources", {"title": "Example"}, context=context)
+        assert view["items"], "普通搜索仍应允许用户手动挑选"
+        assert view["recommended_positions"] == []
+        assert "recommended_ingest_arguments=" not in result.outcome.model_content
+        assert "candidate_numbers=" in result.outcome.model_content
+        # 旧会话曾按标题给出自动推荐，重新读取时不能继续沿用。
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        state.metadata[CANDIDATE_VIEW_KEY]["recommended_positions"] = [1]
+        restored = await current_candidate_view(state=state, store=store)
+        assert restored["recommended_positions"] == []
+        selection = await validate_selection(_selection(restored), state=state, store=store)
+        assert selection.arguments["positions"] == [1]
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("match", ["", "unknown", "season_pack", "conflict"])
+def test_missing_episode_context_alone_does_not_prove_candidate_coverage(match):
+    from app.agent.kernel.ux_selection import _recommend, candidate_item
+
+    item = candidate_item({
+        "title": "[GM-Team][东大高武学院][01-04][4K]", "match": match,
+        "_verification_context": {"title": "东大高武学院", "season": 1, "episode": 9},
+    }, 1)
+    assert _recommend([item]) == []
+    assert _recommend([]) == []
+
+
+def test_verified_match_recommendations_use_domain_evidence_not_generic_title_ranges():
+    from app.agent.kernel.ux_selection import _recommend, candidate_item
+
+    candidates = [
+        {"title": "东大高武学院 S01E01-E04", "match": "conflict"},
+        {"title": "东大高武学院 S01E08", "match": "conflict"},
+        {"title": "东大高武学院 全集", "match": "season_pack"},
+        {"title": "东大高武学院 S01E08-E09", "match": "episode_pack"},
+        {"title": "东大高武学院 S01E09", "match": "exact_episode"},
+    ]
+    items = [candidate_item({**item, "_verification_context": {
+        "title": "东大高武学院", "season": 1, "episode": 9,
+    }}, position) for position, item in enumerate(candidates, 1)]
+    assert _recommend(items) == [4]
+    assert all(candidate_item(item, item["position"]) == item for item in items)
+    # 普通搜索不携带缺集核验，仅标题/匹配标签不能成为补缺集证据。
+    assert _recommend([candidate_item(item, position) for position, item in enumerate(candidates, 1)]) == []

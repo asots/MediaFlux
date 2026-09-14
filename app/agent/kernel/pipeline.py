@@ -786,10 +786,11 @@ class ToolPipeline:
                 {key: item[key] for key in ("position", "title", "coverage", "media_title", "requested_episode")}
                 for item in candidate_view["items"]
             ], ensure_ascii=False, separators=(",", ":"))
-            model_content += "\nrecommended_ingest_arguments=" + json.dumps({
-                "source_type": RESOURCE_KIND, "resource_candidates_ref": candidate_view["ref"],
-                "positions": candidate_view["recommended_positions"], "target": "preferred",
-            }, ensure_ascii=False, separators=(",", ":"))
+            if candidate_view["recommended_positions"]:
+                model_content += "\nrecommended_ingest_arguments=" + json.dumps({
+                    "source_type": RESOURCE_KIND, "resource_candidates_ref": candidate_view["ref"],
+                    "positions": candidate_view["recommended_positions"], "target": "preferred",
+                }, ensure_ascii=False, separators=(",", ":"))
         updates = tuple(outcome.state_updates) + (
             StateUpdate("recent_refs", ids, mode="append"),
             StateUpdate("ref_kinds", kinds, mode="append"),
