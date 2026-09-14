@@ -28,8 +28,6 @@
     const DRAFT_PREFIX = 'mediaflux.agent.drafts.v1.';
     const DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
     const MAX_DRAFTS = 20;
-    const RELEASE_FORMAT_TEACHING_HASH = '#release-format-teaching';
-    const RELEASE_FORMAT_TEACHING_DRAFT = '请帮我做发布格式教学。我会贴至少 2 个真实文件名，并说明正确剧名、每个文件实际是第几集、本次从哪个文件夹开始整理，以及文件所在目录（有季号也会说明）。请帮我生成规则，先批量预览结果、未匹配和冲突，让我核对后再确认保存。请直接引导我，不要让我手动配置规则。';
 
     const SESSION_KEY = 'mediaflux.agent.kernel.session.v1';
     const LAYOUT_KEY = 'mediaflux.agent.kernel.layout.v1';
@@ -74,8 +72,6 @@
     let initialRestore = consoleNode?.dataset.initialRestore === 'true';
     let startupAttempt = 0;
     let startupController = null;
-    let releaseFormatTeachingReady = false;
-    const releaseFormatTeachingHandled = new Set();
 
     function createId(prefix) {
         let value = '';
@@ -196,26 +192,6 @@
         saveDraft();
         resizePrompt();
         promptInput.focus();
-    }
-
-    function releaseFormatTeachingIsActive() {
-        return window.location.hash === RELEASE_FORMAT_TEACHING_HASH;
-    }
-
-    function releaseFormatTeachingHasPendingApproval() {
-        return Boolean(transcript?.querySelector('.agent-confirmation-card:not(.is-expired)'));
-    }
-
-    function applyReleaseFormatTeachingDraft() {
-        if (!releaseFormatTeachingReady || !releaseFormatTeachingIsActive()) return;
-        const key = sessionId;
-        if (releaseFormatTeachingHandled.has(key)) return;
-        const draft = String(promptInput?.value || '').trim();
-        const hasConversation = Boolean(transcript?.childElementCount);
-        const hasPendingApproval = releaseFormatTeachingHasPendingApproval();
-        if (!draft && !hasConversation && !hasPendingApproval) fillDraft(RELEASE_FORMAT_TEACHING_DRAFT);
-        releaseFormatTeachingHandled.add(key);
-        if (releaseFormatTeachingHandled.size > 32) releaseFormatTeachingHandled.delete(releaseFormatTeachingHandled.values().next().value);
     }
 
     function element(tag, className, text) {
@@ -1689,7 +1665,6 @@
             followOutput = true;
             scrollToBottom(true);
             setConsoleEmpty(!transcript?.childElementCount);
-            applyReleaseFormatTeachingDraft();
             if (closeHistory) closeHistoryRail();
             if (!startup) refreshSessions({quiet: true});
             return true;
@@ -1726,8 +1701,6 @@
         if (newRepliesButton) newRepliesButton.hidden = true;
         transcript?.replaceChildren();
         setConsoleEmpty(true);
-        releaseFormatTeachingReady = true;
-        applyReleaseFormatTeachingDraft();
         promptInput?.focus();
         closeHistoryRail();
         refreshSessions({quiet: true});
@@ -2005,8 +1978,6 @@
             }
             stopInitialRestore();
             setConsoleEmpty(!transcript?.childElementCount);
-            releaseFormatTeachingReady = true;
-            applyReleaseFormatTeachingDraft();
         } catch (_) {
             if (attempt !== startupAttempt) return;
             if (initialRestore && restoreNotice) {
@@ -2089,7 +2060,6 @@
     });
     window.visualViewport?.addEventListener('resize', syncViewportHeight, {passive: true});
     window.addEventListener('resize', syncViewportHeight, {passive: true});
-    window.addEventListener('hashchange', applyReleaseFormatTeachingDraft);
 
     syncViewportHeight();
     resizePrompt();

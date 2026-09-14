@@ -171,11 +171,14 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertIn(".agent-stream-step", styles)
         self.assertIn(".agent-tool-trace", styles)
         self.assertIn("function buildToolTrace(turn)", source)
-        self.assertIn("const RELEASE_FORMAT_TEACHING_HASH", source)
-        self.assertIn("const RELEASE_FORMAT_TEACHING_DRAFT", source)
-        self.assertIn("function applyReleaseFormatTeachingDraft()", source)
-        self.assertIn("releaseFormatTeachingHandled.has(key)", source)
         for removed in (
+            "RELEASE_FORMAT_TEACHING_HASH",
+            "RELEASE_FORMAT_TEACHING_DRAFT",
+            "releaseFormatTeachingReady",
+            "releaseFormatTeachingHandled",
+            "releaseFormatTeachingIsActive",
+            "releaseFormatTeachingHasPendingApproval",
+            "applyReleaseFormatTeachingDraft",
             "agentReleaseFormatGuide",
             "agent-release-format-guide",
             "releaseFormatGuide",
