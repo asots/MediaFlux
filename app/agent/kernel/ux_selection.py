@@ -198,6 +198,14 @@ def _display_sources(public: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     return result
 
 
+def _candidate_summary(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """缺集无覆盖证据不挂卡，普通搜索保留手动候选；不代替查询结论。"""
+    recommended = _recommend(items)
+    if not items or (not recommended and all(item.get("requested_episode") for item in items)):
+        return None
+    return {"items": items, "recommended_positions": recommended}
+
+
 async def issue_candidate_view(
     *, store: ReferenceStore, owner: str, session_id: str, generation: int,
     ref: str, value: Any, ttl_seconds: int, public: Mapping[str, Any], turn_id: str = "",
@@ -208,18 +216,18 @@ async def issue_candidate_view(
     ttl = max(1, min(int(ttl_seconds), 86_400))
     expires_at = time.time() + ttl
     sources = _display_sources(public)
-    items: list[dict[str, Any]] = []
-    for candidate in snapshot["candidates"]:
-        position = candidate["position"]
-        items.append(candidate_item({**candidate, **sources.get(candidate["result_id"], {})}, position))
+    items = [candidate_item({**candidate, **sources.get(candidate["result_id"], {})}, candidate["position"])
+             for candidate in snapshot["candidates"]]
+    summary = _candidate_summary(items)
+    if summary is None:
+        return None
     selection = await store.put(
         owner=owner, session_id=session_id, kind=SELECTION_KIND, ttl_seconds=ttl,
         value={"ref": ref, "generation": generation, "expires_at": expires_at},
     )
     return {
         "ref": ref, "selection_ref": selection.ref, "expires_at": expires_at,
-        "generation": generation, "turn_id": turn_id, "items": items,
-        "recommended_positions": _recommend(items),
+        "generation": generation, "turn_id": turn_id, **summary,
         **await asyncio.to_thread(_target_options, owner),
     }
 
@@ -294,8 +302,10 @@ async def current_candidate_view(
         public = {key: deepcopy(view[key]) for key in (
             "ref", "selection_ref", "expires_at", "turn_id",
         ) if key in view}
-        public["items"] = [candidate_item(item, item["position"]) for item in view["items"]]
-        public["recommended_positions"] = _recommend(public["items"])
+        summary = _candidate_summary([candidate_item(item, item["position"]) for item in view["items"]])
+        if summary is None:
+            return None
+        public.update(summary)
         result = state.metadata.get("ux_candidate_result")
         if isinstance(result, dict) and result.get("ref") == view["ref"]:
             public["last_result"] = {key: deepcopy(result[key]) for key in ("text", "target", "handled_positions") if key in result}

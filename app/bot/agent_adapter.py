@@ -642,15 +642,17 @@ def _execute_query(
                 body,
                 reply_markup=_approval_markup(telebot_module, view.approval),
             )
-        elif view.candidate_view:
-            from app.bot.agent_candidates import render, start_draft
-
-            candidates = dict(view.candidate_view)
-            draft = asyncio.run(start_draft(runtime, owner=owner, session_id=session_id, view=candidates))
-            body, markup = render(telebot_module, candidates, draft)
-            progress.finish(body, reply_markup=markup)
         else:
-            progress.finish_many(split_telegram_html(_render_turn(view), limit=_MAX_MESSAGE) or ("Agent 未返回可显示的回答，请重试。",))
+            chunks = split_telegram_html(_render_turn(view), limit=_MAX_MESSAGE) or ["Agent 未返回可显示的回答，请重试。"]
+            markup = None
+            candidates = dict(view.candidate_view or {})
+            if view.status in {"success", "partial"} and candidates.get("items") and candidates.get("recommended_positions"):
+                from app.bot.agent_candidates import render, start_draft
+
+                draft = asyncio.run(start_draft(runtime, owner=owner, session_id=session_id, view=candidates))
+                body, markup = render(telebot_module, candidates, draft)
+                chunks = [*chunks, body]
+            progress.finish_many(chunks, reply_markup=markup)
         return view
     except Exception:
         with suppress(Exception):

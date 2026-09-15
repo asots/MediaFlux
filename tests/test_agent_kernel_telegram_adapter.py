@@ -3,7 +3,7 @@ from __future__ import annotations
 import types
 import unittest
 from dataclasses import dataclass
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.agent.kernel.adapters import ApprovalView, TurnView
 from app.agent.kernel.events import AgentEventType, EventFactory
@@ -212,6 +212,75 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
 
         self.assertEqual(len(lifecycle.calls), 1)
         self.assertIn("已确认写操作正在执行", bot.replies[-1][0])
+
+    def _query_candidate_response(self, answer, candidates, *, status="success"):
+        transport = FakeTelegramTransport(TurnView(
+            session_id="tg_session", turn_id="turn-candidate-answer", request_id="candidate-answer",
+            status=status, answer=answer, error_message="索引站查询失败", candidate_view=candidates,
+        ))
+        runtime = types.SimpleNamespace(telegram=transport, store=FakeStore())
+        bot = FakeBot()
+        access = self._patch_access()
+        draft = {"handle": "ref_" + "x" * 24, "positions": candidates.get("recommended_positions", []),
+                 "target": "guangya", "expanded": False, "phase": "select"}
+        with (access[0], access[1], access[2],
+              patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime),
+              patch("app.bot.agent_candidates.start_draft", new=AsyncMock(return_value=draft)) as start):
+            self.assertTrue(adapter.handle_agent_message(
+                bot, TELEBOT, Message("仙逆完美世界有更新吗？4k的排除1080")))
+        messages = [(text, kwargs) for text, _, _, kwargs in bot.edits]
+        messages += [(text, kwargs) for _, text, kwargs in bot.sent]
+        return messages, start
+
+    def test_no_recommendation_keeps_query_answer_without_download_keyboard(self):
+        candidates = {"items": [{"position": 1, "title": "完美世界.S01E01.1080p"}],
+                      "recommended_positions": []}
+        for answer in (
+            "仙逆、完美世界均没有已播缺集。",
+            "暂未找到符合4K且排除1080p条件的资源。",
+            "索引站超时，暂时无法判断是否有符合条件的资源。",
+            "找到两项可查看的2160p资源，可按序号指定预检。",
+        ):
+            with self.subTest(answer=answer):
+                messages, start = self._query_candidate_response(answer, candidates)
+                self.assertTrue(any(answer in text for text, _ in messages))
+                self.assertFalse(any(kwargs.get("reply_markup") for _, kwargs in messages))
+                self.assertFalse(any("资源搜索与批选" in text for text, _ in messages))
+                start.assert_not_called()
+
+    def test_empty_candidate_items_never_generate_preview_controls(self):
+        messages, start = self._query_candidate_response(
+            "未找到匹配资源。", {"items": [], "recommended_positions": [1]})
+        self.assertTrue(any("未找到匹配资源" in text for text, _ in messages))
+        self.assertFalse(any(kwargs.get("reply_markup") for _, kwargs in messages))
+        start.assert_not_called()
+
+    def test_recommendation_is_appended_after_the_complete_answer(self):
+        answer = "结论：完美世界有4K资源。\n" + "查询依据与版本说明。" * 700 + "\n完整回答结束。"
+        messages, start = self._query_candidate_response(answer, {
+            "items": [{"position": 1, "title": "完美世界.S01E01.2160p"}],
+            "recommended_positions": [1],
+        })
+        bodies = "\n".join(text for text, _ in messages)
+        self.assertIn("结论：完美世界有4K资源", bodies)
+        self.assertIn("完整回答结束", bodies)
+        controls = [(text, kwargs) for text, kwargs in messages if kwargs.get("reply_markup")]
+        self.assertEqual(len(controls), 1)
+        self.assertIn("资源推荐与批选", controls[0][0])
+        self.assertNotIn("结论：", controls[0][0])
+        self.assertTrue(any("预览下载 1 项" == button.text
+                            for button in controls[0][1]["reply_markup"].buttons))
+        start.assert_awaited_once()
+
+    def test_failed_or_cancelled_turn_cannot_be_replaced_by_a_candidate_card(self):
+        for status, expected in (("failed", "索引站查询失败"), ("cancelled", "已停止")):
+            with self.subTest(status=status):
+                messages, start = self._query_candidate_response("", {
+                    "items": [{"position": 1, "title": "仙逆.2160p"}], "recommended_positions": [1],
+                }, status=status)
+                self.assertTrue(any(expected in text for text, _ in messages))
+                self.assertFalse(any(kwargs.get("reply_markup") for _, kwargs in messages))
+                start.assert_not_called()
 
     def test_disabled_agent_does_not_capture_normal_telegram_text(self):
         bot = FakeBot()

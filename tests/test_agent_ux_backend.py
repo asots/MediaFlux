@@ -858,3 +858,67 @@ def test_verified_match_recommendations_use_domain_evidence_not_generic_title_ra
     assert all(candidate_item(item, item["position"]) == item for item in items)
     # 普通搜索不携带缺集核验，仅标题/匹配标签不能成为补缺集证据。
     assert _recommend([candidate_item(item, position) for position, item in enumerate(candidates, 1)]) == []
+
+
+def _episode_candidates_result(match="unknown", *, include_match=False):
+    from tests.test_agent_kernel_resource_ingest import _multi_work_candidate
+
+    candidates = [{**_multi_work_candidate(1, "仙逆", "111"), "match": match}]
+    if include_match:
+        candidates.append(_multi_work_candidate(2, "完美世界", "222"))
+    snapshot = {"search_id": new_resource_search_id(), "search_status": "success", "candidates": candidates}
+    result = ToolResult(True, "success", "已检索，缺集覆盖仍需核对", data={"items": candidates})
+    result.references.append(ToolReference("resource_candidates", snapshot))
+    return result
+
+
+@pytest.mark.parametrize("match", ["unknown", "season_pack"])
+def test_missing_episode_search_without_verified_coverage_does_not_issue_a_card(store, match):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        _, context = await _publish_candidates(pipeline, states)
+        with patch(__name__ + "._resources", return_value=_episode_candidates_result(match)):
+            result = await pipeline.execute("indexer.search_resources", {"title": "仙逆"}, context=context)
+        assert result.outcome.public_content["candidate_view"] is None
+        assert result.outcome.public_content["summary"] == "已检索,缺集覆盖仍需核对"
+        assert "candidate_numbers=" not in result.outcome.model_content
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        assert state.metadata[CANDIDATE_VIEW_KEY] is None
+        assert await current_candidate_view(state=state, store=store) is None
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("legacy_empty", [False, True])
+def test_restored_empty_or_unverified_episode_card_is_not_resurrected(store, legacy_empty):
+    from app.agent.kernel.ux_selection import candidate_item
+
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        view, _ = await _publish_candidates(pipeline, states)
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        snapshot = _episode_candidates_result().references[0].value
+        ref = await store.put(owner=OWNER, session_id=SESSION, kind="resource_candidates", value=snapshot)
+        selection = await store.put(owner=OWNER, session_id=SESSION, kind="ux_resource_selection", value={
+            "ref": ref.ref, "generation": state.generation, "expires_at": view["expires_at"],
+        })
+        state.metadata[CANDIDATE_VIEW_KEY] = {
+            **view, "generation": state.generation, "ref": ref.ref, "selection_ref": selection.ref,
+            "items": [] if legacy_empty else [candidate_item(item, item["position"]) for item in snapshot["candidates"]],
+            "recommended_positions": [1],
+        }
+        assert await current_candidate_view(state=state, store=store) is None
+    asyncio.run(exercise())
+
+
+def test_mixed_episode_candidates_keep_verified_global_positions(store):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        with patch(__name__ + "._resources", return_value=_episode_candidates_result(include_match=True)):
+            view, _ = await _publish_candidates(pipeline, states)
+        assert view["recommended_positions"] == [2]
+        assert [item["position"] for item in view["items"]] == [1, 2]
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        assert (await current_candidate_view(state=state, store=store))["recommended_positions"] == [2]
+        result = await validate_selection(_selection(view, [2]), state=state, store=store)
+        assert result.arguments["positions"] == [2]
+    asyncio.run(exercise())

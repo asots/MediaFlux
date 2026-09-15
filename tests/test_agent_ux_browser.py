@@ -471,16 +471,25 @@ class AgentUXBrowserTests(unittest.TestCase):
                 self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
 
     def test_no_missing_episode_candidates_has_no_recommendation_or_download_controls(self):
-        events = [harness._event(1, 'turn.started'), harness._event(2, 'tool.completed', {
-            'tool': 'library.search_missing_episode_resources', 'result': {'candidate_view': None},
-        }), harness._event(3, 'turn.completed', {'status': 'success', 'answer': '本次没有找到目标第 9 集的资源。'})]
-        page = self.page({'queryEvents': events})
-        page.locator('#agentPrompt').fill('查第9集资源')
-        page.locator('#agentSend').click()
-        page.wait_for_selector('.agent-narrative')
-        self.assertEqual(page.locator('.agent-candidates').count(), 0)
-        self.assertEqual(page.locator('.agent-candidate-select').count(), 0)
-        self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
+        for status, answer in (
+            ('success', '本次没有找到目标第 9 集的资源。'),
+            ('success', '搜索结果只有1080p，没有符合2160p门槛的资源。'),
+            ('partial', '部分索引站超时，暂时不能确认是否有更新。'),
+        ):
+            for width in (1440, 390):
+                with self.subTest(status=status, answer=answer, width=width):
+                    events = [harness._event(1, 'turn.started'), harness._event(2, 'tool.completed', {
+                        'tool': 'library.search_missing_episode_resources', 'result': {'candidate_view': None},
+                    }), harness._event(3, 'turn.completed', {'status': status, 'answer': answer})]
+                    page = self.page({'queryEvents': events}, viewport={'width': width, 'height': 844})
+                    page.locator('#agentPrompt').fill('仙逆完美世界有更新吗？4K排除1080')
+                    page.locator('#agentSend').click()
+                    page.wait_for_selector('.agent-narrative')
+                    self.assertIn(answer, page.locator('.agent-narrative').inner_text())
+                    self.assertEqual(page.locator('.agent-candidates').count(), 0)
+                    self.assertEqual(page.locator('.agent-candidate-select').count(), 0)
+                    self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
+                    self.snapshot(page, f'no-eligible-resources-{status}-{width}')
 
     def test_recommended_complementary_versions_are_compact_and_warn_on_overlap(self):
         view = candidate_view()

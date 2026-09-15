@@ -305,3 +305,47 @@ def test_candidate_result_history_metadata_survives_model_round_without_entering
     stored = AgentSession._persisted_conversation(messages, current_user_index=1, original_message="后续提问", prior_conversation=prior)
     assert stored[0]["candidate_result_ref"] == "ref_example"
     assert stored[0]["public_content"] == "已提交"
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_telegram_real_kernel_keeps_empty_update_answer_without_a_zero_selection_card(store, monkeypatch, scoped):
+    class Model:
+        calls = 0
+
+        async def stream(self, request, *, cancellation):
+            self.calls += 1
+            if self.calls == 1:
+                yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(
+                    "search-updates", "indexer.search_resources", {"title": "仙逆"},
+                ))
+                yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+            else:
+                yield ModelEvent(ModelEventType.TEXT_DELTA, text="目前没有可确认覆盖目标缺集的4K推荐，不能据此断言没有更新。")
+                yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+
+    resources = ux._episode_candidates_result() if scoped else ux._resources()
+    monkeypatch.setattr(ux, "_resources", lambda **_: resources)
+    monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
+    model = Model()
+    session, _, _ = _runtime(store, model=model)
+    runtime = SimpleNamespace(store=store, telegram=TelegramKernelTransport(session))
+    monkeypatch.setattr(agent_adapter, "get_agent_kernel_runtime", lambda: runtime)
+    monkeypatch.setattr(agent_adapter, "telegram_agent_access", lambda *args: "allowed")
+    monkeypatch.setattr(agent_adapter.agent_rate_limiter, "allow", lambda *args, **kwargs: True)
+    bot = FakeBot()
+    source = Message("仙逆完美世界有更新吗？4K排除1080")
+    view = agent_adapter._execute_query(bot, TELEBOT, source, chat_id="-100", user_id="7", text=source.text)
+    assert model.calls == 2
+    assert view.answer == "目前没有可确认覆盖目标缺集的4K推荐，不能据此断言没有更新。"
+    if scoped:
+        assert view.candidate_view is None
+    else:
+        assert view.candidate_view["items"] and view.candidate_view["recommended_positions"] == []
+    assert view.approval is None
+    messages = [(text, kwargs) for text, _, _, kwargs in bot.edits] + [(text, kwargs) for _, text, kwargs in bot.sent]
+    assert any(view.answer in text for text, _ in messages)
+    assert not any(kwargs.get("reply_markup") for _, kwargs in messages)
+    assert not any("资源搜索与批选" in text or "预览下载 0 项" in text for text, _ in messages)
+    state = asyncio.run(store.load(owner=agent_adapter.telegram_agent_owner(-100, 7),
+                                  session_id=agent_adapter.telegram_agent_session_id(-100, 7)))
+    assert state.recent_refs, "隐藏自动批选卡不应删除资源引用或阻断后续自然语言预检"

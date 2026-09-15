@@ -317,6 +317,134 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             if not extra:
                 assert result.references == [], "仅命中旧集时，不得生成候选卡引用"
 
+    def test_minimum_2160_filters_1080_and_unknown_without_candidate_reference(self):
+        arguments = missing_episode_resource_arguments(
+            {
+                "query": "示例剧",
+                "season": 2,
+                "episode": 3,
+                "preference_overrides": {"minimum_resolution": "2160p"},
+            }
+        )
+        searched = _search_result(
+            items=[
+                {
+                    "result_id": "resolution-filter-1080-01",
+                    "site_id": "nyaa",
+                    "site_name": "Nyaa",
+                    "title": "示例剧 S02E03 1080p",
+                    "download_state": "ready",
+                    "download_kinds": ["magnet"],
+                },
+                {
+                    "result_id": "resolution-filter-unknown-01",
+                    "site_id": "nyaa",
+                    "site_name": "Nyaa",
+                    "title": "示例剧 S02E03 WEB-DL",
+                    "download_state": "ready",
+                    "download_kinds": ["magnet"],
+                },
+            ]
+        )
+        with (
+            patch(
+                "app.agent.episode_resource_actions.audit_series_episodes",
+                return_value=_audit_result(
+                    missing=[{"season": 2, "episode": 3}], target_missing=True
+                ),
+            ),
+            patch(
+                "app.agent.episode_resource_actions.search_resources",
+                return_value=searched,
+            ),
+            patch(
+                "app.agent.episode_resource_actions.get_indexer_service",
+                return_value=Mock(result_store=None),
+            ),
+        ):
+            result = search_missing_episode_resources(arguments)
+
+        search = result.data["search"]
+        self.assertEqual(search["recommendation"]["status"], "no_downloadable_candidate")
+        self.assertIsNone(search["recommendation"]["selected"])
+        self.assertEqual(search["recommendation"]["candidate_count"], 0)
+        self.assertEqual(
+            [item["result_id"] for item in search["items"]],
+            ["resolution-filter-1080-01", "resolution-filter-unknown-01"],
+        )
+        self.assertTrue(all(not item["quality"]["eligible"] for item in search["items"]))
+        self.assertIn("低于偏好中的最低分辨率", search["items"][0]["quality"]["warnings"])
+        self.assertIn("分辨率未知，无法核对最低要求", search["items"][1]["quality"]["warnings"])
+        self.assertFalse(
+            any(reference.kind == "resource_candidates" for reference in result.references)
+        )
+
+    def test_minimum_2160_keeps_2160_candidate_reference_without_1080(self):
+        arguments = missing_episode_resource_arguments(
+            {
+                "query": "示例剧",
+                "season": 2,
+                "episode": 3,
+                "preference_overrides": {"minimum_resolution": "2160p"},
+            }
+        )
+        searched = _search_result(
+            items=[
+                {
+                    "result_id": "resolution-filter-1080-02",
+                    "site_id": "nyaa",
+                    "site_name": "Nyaa",
+                    "title": "示例剧 S02E03 1080p",
+                    "download_state": "ready",
+                    "download_kinds": ["magnet"],
+                },
+                {
+                    "result_id": "resolution-filter-2160-01",
+                    "site_id": "nyaa",
+                    "site_name": "Nyaa",
+                    "title": "示例剧 S02E03 2160p",
+                    "download_state": "ready",
+                    "download_kinds": ["magnet"],
+                },
+            ]
+        )
+        with (
+            patch(
+                "app.agent.episode_resource_actions.audit_series_episodes",
+                return_value=_audit_result(
+                    missing=[{"season": 2, "episode": 3}], target_missing=True
+                ),
+            ),
+            patch(
+                "app.agent.episode_resource_actions.search_resources",
+                return_value=searched,
+            ),
+            patch(
+                "app.agent.episode_resource_actions.get_indexer_service",
+                return_value=Mock(result_store=None),
+            ),
+        ):
+            result = search_missing_episode_resources(arguments)
+
+        search = result.data["search"]
+        self.assertEqual(
+            search["recommendation"]["selected"]["result_id"],
+            "resolution-filter-2160-01",
+        )
+        items_by_id = {item["result_id"]: item for item in search["items"]}
+        self.assertFalse(items_by_id["resolution-filter-1080-02"]["quality"]["eligible"])
+        self.assertTrue(items_by_id["resolution-filter-2160-01"]["quality"]["eligible"])
+        references = [
+            reference
+            for reference in result.references
+            if reference.kind == "resource_candidates"
+        ]
+        self.assertEqual(len(references), 1)
+        self.assertEqual(
+            [item["result_id"] for item in references[0].value["candidates"]],
+            ["resolution-filter-2160-01"],
+        )
+
     def test_exact_high_episode_can_be_verified_outside_bounded_sample(self):
         arguments = missing_episode_resource_arguments(
             {"query": "示例剧", "season": 1, "episode": 150, "library_name": "美女库"}
