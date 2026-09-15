@@ -14,7 +14,7 @@ from app.agent import guangya_fs_change_actions as change_actions
 from app.agent import guangya_workspace_actions as workspace_actions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
-from app.clients.guangya import GuangYaFile
+from app.clients.guangya import GuangYaFile, GuangYaWriteRejected
 from app.modules import guangya_fs_change, guangya_workspace
 from tests.support import isolated_test_database
 
@@ -418,6 +418,120 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
         self.assertEqual(normalized["operations"][1]["title"], "Series")
         self.assertEqual(normalized["operations"][1]["naming"], "absolute")
+
+    def _folder_move_with_child_renames(self, *, count=1, parent_op="move"):
+        client = FakeGatewayClient()
+        client.directories["source"] = []
+        for index in range(count):
+            folder, video = f"folder-{index}", f"video-{index}"
+            client.directories["source"].append(GuangYaFile(folder, f"Code-{index}", True, parent_id="source", etag="before"))
+            client.directories[folder] = [
+                GuangYaFile(video, f"site.example@Code-{index}.mp4", False, parent_id=folder, size=100, etag="content"),
+                GuangYaFile(f"poster-{index}", "poster.jpg", False, parent_id=folder, size=5, etag="poster"),
+            ]
+        observed = self._query(client, operation="tree", page_size=50)
+        entries = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+        operations = []
+        for index in range(count):
+            # 模型无须自行调度执行顺序，编译器应保证子文件改名完成后才搬目录。
+            operations.append({"op": parent_op, "object_ref": entries[f"Code-{index}"], **({"target_path": "/target"} if parent_op == "move" else {})})
+            operations.append({"op": "rename", "object_ref": entries[f"site.example@Code-{index}.mp4"], "new_name": f"Code-{index}.mp4"})
+        context = ToolContext(owner="owner", session_id="session")
+        with mock.patch.object(change_actions, "GuangYaClient", return_value=client):
+            preview = change_actions.preview_guangya_fs_change(change_actions.guangya_fs_change_preview_arguments({
+                "observation_ref": observed.data["observation_ref"], "operations": operations, "trigger_strm": False,
+            }), context)
+            confirmation, _fingerprint = change_actions.prepare_guangya_fs_change_confirmation({}, context)
+        self.assertIn(f"改名 {count} 项", preview.summary)
+        self.assertIn(f"移动 {count} 项", confirmation.summary)
+        plan = guangya_fs_change._read(change_actions._flow("owner").plan_id)
+        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        return client, plan
+
+    def test_clean_children_then_move_ten_original_folders_in_one_plan(self):
+        client, plan = self._folder_move_with_child_renames(count=10)
+        self.assertEqual(plan["stats"]["rename"], 10)
+        self.assertEqual(plan["stats"]["move"], 10)
+        self.assertEqual([item["op"] for item in plan["operations"]], ["rename"] * 10 + ["move"] * 10)
+        original_rename = client.rename
+
+        def rename(file_id, new_name):
+            original_rename(file_id, new_name)
+            # 真实云盘在修改子文件后会更新父目录etag/更新时间，不能误报外部漂移。
+            folder = next(item for item in client.directories["source"] if item.file_id == client.file_info(file_id).parent_id)
+            folder.etag = "after-own-rename"
+            folder.updated_at += 1
+            return True
+
+        with mock.patch.object(client, "rename", side_effect=rename):
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["renamed"], 10)
+        self.assertEqual(result["stats"]["moved"], 10)
+        self.assertEqual(client.directories["source"], [])
+        self.assertEqual(len(client.directories["target"]), 10)
+        for index in range(10):
+            self.assertEqual(client.file_info(f"folder-{index}").parent_id, "target")
+            self.assertEqual(client.file_info(f"video-{index}").name, f"Code-{index}.mp4")
+            self.assertEqual(client.file_info(f"video-{index}").parent_id, f"folder-{index}")
+            self.assertEqual(client.file_info(f"poster-{index}").parent_id, f"folder-{index}")
+
+    def test_failed_child_rename_never_moves_its_parent(self):
+        client, plan = self._folder_move_with_child_renames(count=2)
+        original_rename = client.rename
+
+        def rename(file_id, new_name):
+            if file_id == "video-0":
+                raise GuangYaWriteRejected("rename", code="rejected")
+            return original_rename(file_id, new_name)
+
+        with mock.patch.object(client, "rename", side_effect=rename):
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["stats"]["renamed"], 1)
+        self.assertEqual(result["stats"]["moved"], 1)
+        self.assertEqual(client.file_info("folder-0").parent_id, "source")
+        self.assertEqual(client.file_info("video-0").name, "site.example@Code-0.mp4")
+        self.assertEqual(client.file_info("folder-1").parent_id, "target")
+
+    def test_child_rename_does_not_allow_parent_trash(self):
+        with self.assertRaisesRegex(AgentToolError, "父目录"):
+            self._folder_move_with_child_renames(parent_op="trash")
+
+    def test_cancel_after_child_clean_keeps_parent_and_prevents_replay(self):
+        client, plan = self._folder_move_with_child_renames()
+        payload = self._queued_payload(plan)
+
+        def cancel():
+            if client.file_info("video-0").name == "Code-0.mp4":
+                raise RuntimeError("cancelled")
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, cancel_check=cancel)
+        self.assertEqual(client.file_info("folder-0").parent_id, "source")
+        with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+        self.assertEqual(client.file_info("folder-0").parent_id, "source")
+
+    def test_copy_scope_uses_frozen_operation_counts(self):
+        self.assertEqual(change_actions._change_summary({"total": 2, "copy": 2}), "复制 2 项")
+        # 展示文案从计划计数取得，不增改历史 preview_safe 参与签名的字段。
+        self.assertNotIn("copy_count", change_actions._safe_preview({"total": 2, "sample_changes": []}))
+
+    def test_own_child_rename_does_not_mask_external_parent_rename(self):
+        client, plan = self._folder_move_with_child_renames()
+        original_rename = client.rename
+
+        def rename(file_id, new_name):
+            original_rename(file_id, new_name)
+            client.directories["source"][0].name = "externally-changed"
+            return True
+
+        with mock.patch.object(client, "rename", side_effect=rename):
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["stats"]["moved"], 0)
+        self.assertEqual(client.file_info("folder-0").parent_id, "source")
 
     def test_relocate_combines_move_and_rename_for_one_observed_object(self):
         client = FakeGatewayClient()

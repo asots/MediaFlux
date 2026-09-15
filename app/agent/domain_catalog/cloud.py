@@ -598,7 +598,8 @@ def register_specs(
                 "把当前会话近期光鸭观察中的对象引用编译为确定性冻结计划；observation_ref 只指定主快照，"
                 "同一 owner 与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。支持 rename、move、copy、"
                 "relocate（一次计划内移动并改名）、batch_relocate（用 object_ref+集号批量生成规范文件名）、"
-                "trash（Provider 回收站）和 create_directory。create_directory 与指向该新目录的移动可放在同一计划；"
+                "trash（Provider 回收站）和 create_directory。文件rename与其父目录move可放在同一计划，系统先验证改名成功再搬整个目录，保留伴随文件；"
+                "create_directory 与指向该新目录的移动可放在同一计划；"
                 "重新核对 owner、凭据世代、对象快照、目录占用与结构冲突，不执行任何云端写入。"
             ),
             risk=RiskLevel.READ,
@@ -832,6 +833,7 @@ def register_specs(
                 "把这些对象移动到 /整理，先生成确认计划",
                 "把这些对象复制到 /备份，先生成确认计划",
                 "新建目录并为这些对象生成移动且改名的冻结计划",
+                "清理视频文件的广告前缀并把原作品目录整体移到目标目录，一次预览",
                 "把 85 个视频按各自集号批量移动并命名为规范剧集文件，先预览",
             ),
         )
@@ -840,7 +842,8 @@ def register_specs(
         ToolSpec(
             name="guangya.fs.change.execute",
             description=(
-                "在用户确认后执行最近一次通用光鸭文件变更冻结计划。不能接收新对象、名称或路径；"
+                "为完整的通用光鸭文件变更预览生成一张确认卡，用户确认后才执行。必须先核对动作计数覆盖用户全部要求；"
+                "若用户选择的方案增加了移动等动作，先重建完整preview，不能提交上轮仅改名的局部计划。不能接收新对象、名称或路径；"
                 "逐项执行写前快照校验、写后读回验证；复制由持久任务等待 Provider 可见性，trash 只使用 Provider 回收站语义。"
             ),
             risk=RiskLevel.DANGER,

@@ -128,6 +128,15 @@ def _safe_preview(value: object) -> dict[str, Any] | None:
     }
 
 
+def _change_summary(stats: dict[str, Any]) -> str:
+    return "、".join(
+        f"{label} {stats[key]} 项"
+        for key, label in (("rename", "改名"), ("move", "移动"), ("relocate", "移动并改名"),
+                           ("copy", "复制"), ("trash", "移入回收站"), ("create_directory", "建目录"))
+        if stats.get(key)
+    ) or f"{stats.get('total', 0)} 项"
+
+
 def _flow_payload(flow: _Flow) -> dict[str, Any]:
     return {
         "plan_id": flow.plan_id,
@@ -553,7 +562,7 @@ def preview_guangya_fs_change(
     return ToolResult(
         True,
         "ready",
-        f"已冻结 {preview_safe['total']} 项光鸭文件变更，尚未写入云盘",
+        f"已冻结光鸭文件变更：{_change_summary(stats)}；尚未写入云盘",
         data=preview_safe,
         evidence=[
             Evidence(
@@ -609,7 +618,7 @@ def prepare_guangya_fs_change_confirmation(
     return ToolResult(
         True,
         "confirmation_required",
-        f"确认后将执行 {flow.preview_safe['total']} 项光鸭文件变更",
+        f"确认后将执行光鸭文件变更：{_change_summary(plan.get('stats') or {})}",
         data={
             **flow.preview_safe,
             "effects": [
@@ -731,7 +740,7 @@ def execute_guangya_fs_change_confirmed(
     return ToolResult(
         True,
         "accepted",
-        "光鸭文件变更已排队" if queued else "光鸭文件变更任务已启动",
+        ("光鸭文件变更已排队：" if queued else "光鸭文件变更任务已启动：") + _change_summary(plan.get('stats') or {}),
         data={
             "queued": queued,
             "queue_position": max(0, int(task.get("queue_position") or 0)),

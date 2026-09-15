@@ -900,8 +900,8 @@ def build_fs_change_plan(
                 base["target_create_path"] = target_path
         frozen.append(base)
 
-    structural_paths = [
-        str(item.get("source_path") or "")
+    structural_moves = [
+        item
         for item in frozen
         if item.get("op") in {"move", "relocate", "trash"}
         and bool((item.get("source") or {}).get("is_dir"))
@@ -910,11 +910,15 @@ def build_fs_change_plan(
         source_path = str(item.get("source_path") or "")
         if not source_path:
             continue
-        for parent_path in structural_paths:
+        for parent in structural_moves:
+            parent_path = str(parent["source_path"])
             if source_path != parent_path and source_path.startswith(parent_path + "/"):
-                raise GuangYaFSChangeError(
-                    "同一计划不能同时移动或回收父目录并操作其内部对象"
-                )
+                if parent["op"] == "move" and item["op"] == "rename" and not item["source"]["is_dir"]:
+                    parent.setdefault("rename_dependencies", []).append(str(item["source"]["file_id"]))
+                else:
+                    raise GuangYaFSChangeError("同一计划的父子变更仅支持先改名子文件、再移动父目录")
+    # 同一冻结计划内先完成文件清洗，再搬整目录；其它操作保持原有相对顺序。
+    frozen.sort(key=lambda item: bool(item.get("rename_dependencies")))
 
     counts = {
         key: 0
@@ -1042,6 +1046,7 @@ def _preflight_operation(
     *,
     created_targets: dict[str, str] | None = None,
     allow_pending_target: bool = False,
+    completed_objects: set[str] | None = None,
 ) -> None:
     op = str(item.get("op") or "")
     if op == "create_directory":
@@ -1055,9 +1060,15 @@ def _preflight_operation(
             raise GuangYaFSChangeStale("新建目录名称已被占用，请重新预览")
         return
     source = item.get("source")
-    if not isinstance(source, dict) or not _snapshot_matches(
-        _find_current(client, source), source
-    ):
+    dependencies = set(item.get("rename_dependencies") or ())
+    if dependencies and completed_objects is not None:
+        if not dependencies.issubset(completed_objects):
+            raise GuangYaFSChangeStale("子文件改名未全部成功，未执行整目录移动")
+        # 子文件改名会更新目录版本；仍冻结目录身份/名称/位置，不能搬走别的目录。
+        source_matches = _verify_directory_snapshot(client, str((source or {}).get("file_id") or ""), source)
+    else:
+        source_matches = isinstance(source, dict) and _snapshot_matches(_find_current(client, source), source)
+    if not source_matches:
         raise GuangYaFSChangeStale("光鸭对象已变化，请重新预览")
     if op == "rename":
         siblings = {
@@ -1290,6 +1301,7 @@ def execute_fs_change_plan(
             stats=stats,
         )
         created_targets: dict[str, str] = {}
+        completed_objects: set[str] = set()
         for index, item in enumerate(operations, start=1):
             if cancel_check is not None:
                 cancel_check()
@@ -1305,6 +1317,7 @@ def execute_fs_change_plan(
                     client,
                     item,
                     created_targets=created_targets,
+                    completed_objects=completed_objects,
                 )
                 provider_write_started = True
                 if op == "rename":
@@ -1444,6 +1457,8 @@ def execute_fs_change_plan(
                 persistence_uncertain = True
                 # 日志介质失效后停止追加写入，避免扩大无法可靠追溯的副作用面。
                 break
+            if status == "completed":
+                completed_objects.add(str(source.get("file_id") or created_id))
         successful = (
             stats["renamed"]
             + stats["moved"]
