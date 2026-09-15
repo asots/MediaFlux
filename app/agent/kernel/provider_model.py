@@ -393,7 +393,6 @@ async def iter_protocol_model_events(
                 reason = str(choice.get("finish_reason") or "")
                 if reason:
                     finish_reason = reason
-                    completed = reason in {"stop", "tool_calls", "end_turn"}
             continue
 
         event_type = str(event.get("type") or "")
@@ -459,14 +458,16 @@ async def iter_protocol_model_events(
             completed = True
             break
 
+    if not completed:
+        raise ModelProviderError("Provider 流在完成事件前中断")
+    if finish_reason in {"length", "max_tokens", "content_filter", "model_context_window_exceeded"}:
+        raise ModelProviderError("Provider 回复被截断，未完整结束")
     for key in list(calls):
         async for output in emit_call(key):
             yield output
     tail = reasoning.finalize()
     if tail:
         yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
-    if not completed:
-        raise ModelProviderError("Provider 流在完成事件前中断")
     yield ModelEvent(ModelEventType.FINISH, finish_reason=finish_reason or "stop")
 
 

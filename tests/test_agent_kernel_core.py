@@ -26,7 +26,7 @@ from app.agent.kernel.model import (
 from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
 from app.agent.kernel.projection import ReferenceValue, ToolOutcome
 from app.agent.kernel.provider_model import ModelProviderError
-from app.agent.kernel.session import AgentSession, SessionLimits
+from app.agent.kernel.session import AgentSession, SessionLimits, _provider_failure_message
 from app.agent.kernel.state import (
     AgentInput,
     CancellationToken,
@@ -308,6 +308,11 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0].type, AgentEventType.TURN_FAILED)
         self.assertEqual(events[0].payload["code"], "authorization_denied")
         self.assertEqual(model.requests, [])
+
+    def test_incomplete_provider_stream_has_explicit_error(self):
+        for message in ("Provider 流在完成事件前中断", "Provider 回复被截断，未完整结束"):
+            self.assertEqual(_provider_failure_message(ModelProviderError(message)),
+                             "模型回复未完整生成，请重试；不要把截断内容视为完成结果。")
 
     async def test_provider_failure_has_specific_retryable_public_error(self) -> None:
         class FailingProviderModel:

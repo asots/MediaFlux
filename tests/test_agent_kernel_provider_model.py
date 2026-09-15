@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from app.agent.kernel.model import ModelEventType, ModelRequest
 from app.agent.kernel.provider_model import (
+    ModelProviderError,
     OpenAICompatibleModelAdapter,
     ProviderSettings,
     _network_idle_timeout_seconds,
@@ -15,6 +16,7 @@ from app.agent.kernel.provider_model import (
     iter_protocol_model_events,
 )
 from app.agent.kernel.state import CancellationToken
+from app.clients.openai_compatible import ProviderStreamError, iter_provider_text_deltas
 
 
 async def chunks(events: list[dict | str], *, split: int = 0) -> AsyncIterator[bytes]:
@@ -34,6 +36,26 @@ async def collect(stream):
 
 
 class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_length_finish_never_emits_a_success_or_executable_call(self):
+        observed = []
+        with self.assertRaises(ModelProviderError):
+            async for event in iter_protocol_model_events(chunks([
+                {"choices": [{"delta": {"content": "部分结果", "tool_calls": [{
+                    "index": 0, "id": "partial-call", "function": {"name": "write.test", "arguments": "{}"},
+                }]}, "finish_reason": "length"}]}, "[DONE]",
+            ]), protocol="chat_completions"):
+                observed.append(event)
+        self.assertNotIn(ModelEventType.FINISH, [event.type for event in observed])
+        self.assertNotIn(ModelEventType.TOOL_CALL_COMPLETED, [event.type for event in observed])
+
+    async def test_anthropic_max_tokens_is_incomplete_even_with_message_stop(self):
+        with self.assertRaises(ModelProviderError):
+            await collect(iter_protocol_model_events(chunks([
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "部分结果"}},
+                {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+                {"type": "message_stop"},
+            ]), protocol="anthropic_messages"))
+
     async def test_adapter_retries_one_transient_http_failure_before_output(
         self,
     ) -> None:
@@ -159,6 +181,41 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_stream_deadline_seconds(2), 60)
         self.assertEqual(_stream_deadline_seconds(30), 120)
         self.assertEqual(_stream_deadline_seconds(120), 300)
+
+    async def test_chat_stream_rejects_eof_after_stop_without_done(self) -> None:
+        truncated = [
+            {
+                "choices": [
+                    {"delta": {"content": "partial"}, "finish_reason": "stop"}
+                ]
+            }
+        ]
+
+        with self.assertRaises(ModelProviderError) as caught:
+            await collect(
+                iter_protocol_model_events(
+                    chunks(truncated), protocol="chat_completions"
+                )
+            )
+
+        self.assertIn("完成事件前中断", str(caught.exception))
+
+    async def test_text_stream_rejects_eof_after_stop_without_done(self) -> None:
+        truncated = [
+            {
+                "choices": [
+                    {"delta": {"content": "partial"}, "finish_reason": "stop"}
+                ]
+            }
+        ]
+
+        with self.assertRaises(ProviderStreamError):
+            _ = [
+                delta
+                async for delta in iter_provider_text_deltas(
+                    chunks(truncated), protocol="chat_completions"
+                )
+            ]
 
     async def test_chat_completions_stream_assembles_tool_call(self) -> None:
         events = await collect(

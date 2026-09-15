@@ -800,7 +800,6 @@ async def iter_provider_text_deltas(
     if normalized == "auto":
         raise ValueError("流式解析需要具体协议")
     completed = False
-    accepted_finish = False
     reasoning_filter = _ReasoningDeltaFilter()
 
     async for data in _iter_sse_data(chunks, max_event_bytes=max_event_bytes):
@@ -851,9 +850,7 @@ async def iter_provider_text_deltas(
                         if visible:
                             yield visible
                 finish_reason = choice.get("finish_reason")
-                if finish_reason in {"stop", "end_turn"}:
-                    accepted_finish = True
-                elif finish_reason not in {None, ""}:
+                if finish_reason not in {None, "", "stop", "end_turn"}:
                     raise ProviderStreamError("Chat Completions 未完整结束")
             continue
 
@@ -873,16 +870,12 @@ async def iter_provider_text_deltas(
         elif event_type == "message_delta":
             delta = event.get("delta")
             stop_reason = delta.get("stop_reason") if isinstance(delta, dict) else None
-            if stop_reason in {"end_turn", "stop_sequence"}:
-                accepted_finish = True
-            elif stop_reason not in {None, ""}:
+            if stop_reason not in {None, "", "end_turn", "stop_sequence"}:
                 raise ProviderStreamError("Anthropic Messages 未完整结束")
         elif event_type == "message_stop":
             completed = True
             break
 
-    if normalized == "chat_completions" and accepted_finish:
-        completed = True
     if normalized == "anthropic_messages" and not completed:
         completed = False
     if not completed:

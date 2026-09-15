@@ -55,6 +55,8 @@ def _provider_failure_message(exc: ModelProviderError) -> str:
     """把 Provider 内部故障归一为不泄露配置的用户提示。"""
 
     reason = str(exc or "")
+    if "完成事件前中断" in reason or "未完整结束" in reason:
+        return "模型回复未完整生成，请重试；不要把截断内容视为完成结果。"
     if "超时" in reason:
         return "模型服务响应超时，请稍后重试。"
     if "HTTP 429" in reason:
