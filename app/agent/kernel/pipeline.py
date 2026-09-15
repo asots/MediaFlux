@@ -580,6 +580,9 @@ class ToolPipeline:
                 "metadata.confirmed_publication",
                 {"generation": context.lease.generation, "turn_id": context.lease.turn_id},
             ),))
+            await context.report_progress({
+                "plan_id": plan_id, "kind": "confirmed_effect", "tool": plan.tool_name,
+            })
             try:
                 tool = self.catalog.get(plan.tool_name)
             except KeyError as exc:

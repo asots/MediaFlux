@@ -112,9 +112,11 @@ class FakeDraftBot(FakeBot):
 
 
 class FakeTelegramTransport:
-    def __init__(self, view, *, events=()):
+    def __init__(self, view, *, events=(), confirm_events=(), confirm_view=None):
         self.view = view
+        self.confirm_view = confirm_view
         self.events = tuple(events)
+        self.confirm_events = tuple(confirm_events)
         self.queries = []
         self.confirmations = []
         self.cancelled = []
@@ -128,6 +130,11 @@ class FakeTelegramTransport:
 
     async def confirm(self, envelope, *, observe=None):
         self.confirmations.append(envelope)
+        if observe is not None:
+            for event in self.confirm_events:
+                await observe(event)
+        if self.confirm_view is not None:
+            return self.confirm_view
         return TurnView(
             session_id=envelope.session_id,
             turn_id="turn-confirm",
@@ -513,6 +520,236 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             adapter.handle_agent_callback(bot, call, TELEBOT)
         self.assertEqual(len(transport.confirmations), 1)
         self.assertIn("订阅已创建", bot.edits[-1][0])
+
+    def test_confirm_callback_finishes_a_claimed_effect_failure_after_observer_progress(self):
+        effect_result = {
+            "ok": False,
+            "status": "confirmation_stale",
+            "summary": "资源快照已失效，请重新预检",
+        }
+        factory = EventFactory(
+            session_id="tg_session",
+            turn_id="turn-confirm-failure",
+            request_id="tgcb_callback-1",
+        )
+        transport = FakeTelegramTransport(
+            TurnView(
+                session_id="tg_session",
+                turn_id="turn-query-unused",
+                request_id="query-unused",
+                status="success",
+            ),
+            confirm_events=(
+                factory.create(
+                    AgentEventType.EFFECT_FAILED,
+                    {
+                        "code": "confirmation_stale",
+                        "message": "资源快照已失效，请重新预检",
+                        "result": effect_result,
+                    },
+                ),
+                factory.create(
+                    AgentEventType.TURN_FAILED,
+                    {
+                        "code": "confirmation_stale",
+                        "message": "资源快照已失效，请重新预检",
+                    },
+                ),
+            ),
+            confirm_view=TurnView(
+                session_id="tg_session",
+                turn_id="turn-confirm-failure",
+                request_id="tgcb_callback-1",
+                status="failed",
+                effect_result=effect_result,
+                error_code="confirmation_stale",
+                error_message="资源快照已失效，请重新预检",
+            ),
+        )
+        runtime = types.SimpleNamespace(telegram=transport, store=FakeStore())
+        bot = FakeBot()
+        call = Call("agk:c:plan_1234567890abcdef", Message("preview", user_id=0, message_id=33))
+        patches = self._patch_access()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime),
+            patch.object(adapter, "_candidate_result_markup", return_value=None),
+        ):
+            adapter.handle_agent_callback(bot, call, TELEBOT)
+
+        self.assertEqual(len(transport.confirmations), 1)
+        self.assertGreaterEqual(len(bot.edits), 2)
+        self.assertIn("执行未完成，正在整理结果…", bot.edits[0][0])
+        self.assertIn("资源快照已失效", bot.edits[-1][0])
+        self.assertIn("请重新预检", bot.edits[-1][0])
+        self.assertNotIn("执行未完成，正在整理结果…", bot.edits[-1][0])
+        self.assertIsNone(bot.edits[-1][3]["reply_markup"])
+
+    def test_confirm_callback_keeps_unclaimed_confirmation_failure_without_result_unedited(self):
+        transport = FakeTelegramTransport(
+            TurnView(
+                session_id="tg_session",
+                turn_id="turn-query-unused",
+                request_id="query-unused",
+                status="success",
+            ),
+            confirm_view=TurnView(
+                session_id="tg_session",
+                turn_id="turn-confirm-invalid",
+                request_id="tgcb_callback-1",
+                status="failed",
+                error_code="confirmation_invalid",
+                error_message="确认计划无效、已过期或已被使用",
+            ),
+        )
+        runtime = types.SimpleNamespace(telegram=transport, store=FakeStore())
+        bot = FakeBot()
+        call = Call("agk:c:plan_1234567890abcdef", Message("preview", user_id=0, message_id=33))
+        patches = self._patch_access()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime),
+        ):
+            adapter.handle_agent_callback(bot, call, TELEBOT)
+
+        self.assertEqual(len(transport.confirmations), 1)
+        self.assertEqual(bot.edits, [])
+        self.assertIn("正在核对确认计划", bot.answers[-1][1])
+        self.assertEqual(len(bot.sent), 1)
+        self.assertIn("这次确认未被接受", bot.sent[0][1])
+        self.assertIn("已过期或已被使用", bot.sent[0][1])
+        self.assertIn("重新生成预览", bot.sent[0][1])
+
+    def test_real_kernel_duplicate_and_expired_confirm_do_not_edit_or_execute_again(self):
+        import asyncio
+        import tempfile
+        from pathlib import Path
+
+        from app.agent.kernel.capabilities import (
+            CapabilityRetriever,
+            KernelToolSpec,
+            ToolCatalog,
+            ToolEffect,
+        )
+        from app.agent.confirmation import ConfirmationStore
+        from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+        from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+        from app.agent.kernel.pipeline import ToolPipeline
+        from app.agent.kernel.session import AgentSession
+        from app.agent.kernel.state import InMemorySessionStateStore
+        from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
+        from tests.test_agent_kernel_core import ScriptedModel
+
+        clock = [1000.0]
+        executions = []
+
+        def execute(_arguments, _snapshot, _context):
+            executions.append("write")
+            return {"summary": "测试写操作已完成"}
+
+        tool = KernelToolSpec(
+            name="download.pause",
+            domain="download",
+            description="暂停下载任务",
+            examples=("暂停下载",),
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            effect=ToolEffect.WRITE,
+            prepare=lambda _arguments, _context: PreparedEffect(
+                preview={"summary": "将执行测试写操作"},
+                snapshot_fingerprint="test-snapshot",
+            ),
+            execute_confirmed=execute,
+        )
+        catalog = ToolCatalog([tool])
+        state = InMemorySessionStateStore()
+        model = ScriptedModel(
+            [[
+                ModelEvent(
+                    ModelEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ModelToolCall("write", tool.name, {}),
+                ),
+                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+            ]]
+        )
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state, effect_store=ConfirmationEffectPlanStore(
+                ConfirmationStore(clock=lambda: clock[0]),
+            )),
+            state_store=state,
+        )
+        model.rounds.append(list(model.rounds[0]))
+        transport = TelegramKernelTransport(session)
+        owner = adapter.telegram_agent_owner(-100, 7)
+        session_id = adapter.telegram_agent_session_id(-100, 7)
+        bot = FakeBot()
+        call = Call(
+            "agk:c:placeholder",
+            Message("preview", chat_id=-100, user_id=0, message_id=33),
+        )
+        call.message.message_thread_id = 73
+        runtime = types.SimpleNamespace(telegram=transport, store=None)
+        patches = self._patch_access()
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "app.database.resolve_db_path",
+            return_value=Path(temp_dir) / "kernel-test.db",
+        ), patch.object(
+            adapter, "get_agent_kernel_runtime", return_value=runtime
+        ), patch.object(
+            adapter, "_candidate_result_markup", return_value=None
+        ):
+            preview = asyncio.run(
+                transport.query(
+                    QueryEnvelope(
+                        owner=owner,
+                        session_id=session_id,
+                        message="手动清洗云盘目录",
+                    )
+                )
+            )
+            self.assertIsNotNone(preview.approval)
+            call.data = f"agk:c:{preview.approval.plan_id}"
+
+            with patches[0], patches[1], patches[2]:
+                adapter.handle_agent_callback(bot, call, TELEBOT)
+            first_edits = list(bot.edits)
+            self.assertTrue(first_edits)
+            self.assertIn("测试写操作已完成", first_edits[-1][0])
+
+            # 同一一次性计划再次确认：真实 Kernel 只发 TURN_FAILED，
+            # 不应让 TG observer 把原来的终态重新改成工具进度。
+            with patches[0], patches[1], patches[2]:
+                adapter.handle_agent_callback(bot, call, TELEBOT)
+            self.assertEqual(bot.edits, first_edits)
+            self.assertEqual(executions, ["write"])
+
+            # 新预览超过默认十分钟后点击：不执行、不改原消息，但必须给明确反馈。
+            preview = asyncio.run(transport.query(QueryEnvelope(
+                owner=owner, session_id=session_id, message="重新预览云盘文件变更",
+            )))
+            call.data = f"agk:c:{preview.approval.plan_id}"
+            clock[0] += 601
+            with patches[0], patches[1], patches[2]:
+                adapter.handle_agent_callback(bot, call, TELEBOT)
+
+        self.assertEqual(bot.edits, first_edits)
+        self.assertEqual(executions, ["write"])
+        self.assertIn("这次确认未被接受", bot.sent[-1][1])
+        self.assertIn("已过期或已被使用", bot.sent[-1][1])
+        self.assertIn("重新生成预览", bot.sent[-1][1])
+        self.assertEqual(bot.sent[-1][2]["message_thread_id"], 73)
+        self.assertEqual(len(model.requests), 2)
 
     def test_old_callback_is_explicitly_retired(self):
         bot = FakeBot()

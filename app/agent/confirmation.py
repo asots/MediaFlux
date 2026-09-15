@@ -19,6 +19,9 @@ from app.agent.action_plan_id import normalize_action_plan_id
 from app.agent.errors import AgentToolError
 from app.modules.web_secret import get_web_secret
 
+# 批量预览留出人工核对时间；只影响新票据，执行时仍校验领域快照。
+_DEFAULT_TTL_SECONDS = 10 * 60
+
 
 def confirmation_context_fingerprint(value: Any, *, domain: str) -> str:
     """生成部署密钥绑定的确认上下文指纹，避免敏感快照形成离线校验 oracle。"""
@@ -210,7 +213,7 @@ class ConfirmationStore:
     def __init__(
         self,
         *,
-        ttl_seconds: int = 60,
+        ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         max_entries: int = 256,
         clock: Callable[[], float] = time.monotonic,
         token_factory: Callable[[], str] | None = None,
@@ -555,7 +558,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
     def __init__(
         self,
         *,
-        ttl_seconds: int = 60,
+        ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         max_entries: int = 256,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,

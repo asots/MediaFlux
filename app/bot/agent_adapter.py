@@ -764,7 +764,7 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         bot.answer_callback_query(call.id, "已取消" if discarded else "确认已失效")
         return
 
-    bot.answer_callback_query(call.id, "正在执行")
+    bot.answer_callback_query(call.id, "正在核对确认计划")
     send_typing(
         bot,
         call.message.chat.id,
@@ -778,8 +778,18 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
                 observe=observer,
             )
         )
-        if view.error_code in {"effect_in_progress", "confirmation_invalid", "confirmation_stale", "stale_generation"}:
-            return  # 保留另一并发请求的进度或真实终态，不用旧回调覆盖它。
+        if not view.effect_result and view.error_code in {"effect_in_progress", "confirmation_invalid", "confirmation_stale", "stale_generation"}:
+            # 未领票也必须告知原因；另发提示，不覆盖另一请求的进度或真实终态。
+            notice = "⚠️ 这次确认未被接受\n" + _render_turn(view)
+            notice += "\n\n请先查询任务状态；若尚未执行，请重新生成预览后确认。"
+            result, _value = call_telegram_delivery(partial(
+                bot.send_message, call.message.chat.id, notice,
+                parse_mode="HTML", **_thread_kwargs(call.message),
+                **telegram_message_options(bot.send_message),
+            ))
+            if not result.ok:
+                logger.warning("Telegram Agent 确认拒绝提示投递失败 %s", telegram_error_summary(result))
+            return
         body = _render_turn(view)
         markup = _candidate_result_markup(owner, session_id, envelope.plan_id, body, telebot_module)
         _edit_final(bot, call.message, body, reply_markup=markup, rendered_html=True)

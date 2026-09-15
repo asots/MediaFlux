@@ -980,7 +980,8 @@ class AgentSession:
                     await queue.put(event)
 
                 async def progress(payload: Mapping[str, Any]) -> None:
-                    await publish(AgentEventType.TOOL_PROGRESS, payload)
+                    event_type = AgentEventType.TOOL_STARTED if payload.get("kind") == "confirmed_effect" else AgentEventType.TOOL_PROGRESS
+                    await publish(event_type, payload)
 
                 context = ToolCallContext(
                     owner=owner,
@@ -1040,10 +1041,6 @@ class AgentSession:
                             "generation": lease.generation,
                             "kind": "confirmation",
                         },
-                    )
-                    await publish(
-                        AgentEventType.TOOL_STARTED,
-                        {"plan_id": plan_id, "kind": "confirmed_effect"},
                     )
                     result = await self.pipeline.execute_confirmed(plan_id, context=context)
                     public_result = dict(result.outcome.public_content)
@@ -1107,22 +1104,16 @@ class AgentSession:
                     # 未领取票据的重复/失效确认不能用旧快照覆盖另一 worker 已提交的
                     # 成功回执，也不能清除仍在执行的计划。错误仅投影到本次请求。
                     if not isinstance(exc, ConfirmationClaimError):
+                        public_result = {"ok": False, "status": exc.code, "summary": str(exc)}
                         await remember_result(
                             tool_name="confirmed_effect",
                             content=f"执行失败：{str(exc)[:500]}（错误码：{exc.code[:80]}）",
-                            public_content=format_public_result(
-                                {
-                                    "ok": False,
-                                    "status": exc.code,
-                                    "summary": str(exc),
-                                },
-                                fallback="确认执行未能完成。",
-                            ),
+                            public_content=format_public_result(public_result, fallback="确认执行未能完成。"),
                         )
-                    await publish(
-                        AgentEventType.EFFECT_FAILED,
-                        {"plan_id": plan_id, "code": exc.code, "message": str(exc)},
-                    )
+                        await publish(
+                            AgentEventType.EFFECT_FAILED,
+                            {"plan_id": plan_id, "code": exc.code, "message": str(exc), "result": public_result},
+                        )
                     await publish(
                         AgentEventType.TURN_FAILED,
                         {"code": exc.code, "message": str(exc)},

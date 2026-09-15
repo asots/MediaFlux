@@ -6,16 +6,49 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from app.agent.confirmation import ConfirmationStore, confirmation_reply_intent
+from app.agent.confirmation import ConfirmationStore, SQLiteConfirmationStore, confirmation_reply_intent
 from app.agent.confirmation_contract import (
     build_confirmation_contract,
     sanitize_confirmation_contract,
 )
 from app.agent.errors import AgentToolError
 from app.agent.models import RiskLevel, ToolResult
+from tests.support import isolated_test_database
 
 
 class ConfirmationStoreTests(unittest.TestCase):
+    def test_default_confirmation_window_allows_review_but_still_expires(self):
+        for store_type in (ConfirmationStore, SQLiteConfirmationStore):
+            with self.subTest(store=store_type.__name__), isolated_test_database():
+                now = [1000.0]
+                store = store_type(clock=lambda: now[0])
+                ticket = store.issue(owner="owner", tool_name="guangya.fs.change.execute", arguments={})
+                self.assertEqual(ticket.expires_at - now[0], 600)
+                # 复现实例：用户看完批量方案，约五分钟后点击确认。
+                now[0] += 306
+                claimed = store.claim_and_rotate_owner(owner="owner", confirmation_id=ticket.confirmation_id)
+                self.assertEqual(claimed.confirmation_id, ticket.confirmation_id)
+                with self.assertRaises(AgentToolError):
+                    store.claim_and_rotate_owner(owner="owner", confirmation_id=ticket.confirmation_id)
+
+                ticket = store.issue(owner="owner", tool_name="guangya.fs.change.execute", arguments={})
+                now[0] = ticket.expires_at
+                with self.assertRaises(AgentToolError) as expired:
+                    store.claim_and_rotate_owner(owner="owner", confirmation_id=ticket.confirmation_id)
+                self.assertEqual(expired.exception.code, "confirmation_invalid")
+
+    def test_new_default_does_not_extend_persisted_or_explicit_confirmation_expiry(self):
+        with isolated_test_database():
+            now = [1000.0]
+            old_store = SQLiteConfirmationStore(ttl_seconds=60, clock=lambda: now[0])
+            old_ticket = old_store.issue(owner="owner", tool_name="write.test", arguments={})
+            rebuilt = SQLiteConfirmationStore(clock=lambda: now[0])
+            self.assertEqual(rebuilt.list_active_tickets(owner="owner")[0].expires_at, 1060.0)
+            now[0] += 61
+            with self.assertRaises(AgentToolError):
+                rebuilt.claim_and_rotate_owner(owner="owner", confirmation_id=old_ticket.confirmation_id)
+            self.assertEqual(rebuilt.list_active_tickets(owner="owner"), [])
+
     def test_expected_owner_generation_rejects_bool_even_when_epoch_is_one(self):
         store = ConfirmationStore(token_factory=lambda: "ticket-generation-bool-1234")
         with patch("app.agent.confirmation.secrets.randbits", return_value=1):

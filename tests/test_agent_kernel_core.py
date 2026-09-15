@@ -7,6 +7,7 @@ import time
 import unittest
 from collections.abc import AsyncIterator
 
+from app.agent.kernel.adapters import consume_events
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
@@ -1104,7 +1105,73 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(calls["execute"], 1)
-        self.assertIn(AgentEventType.EFFECT_FAILED, [event.type for event in replay])
+        self.assertNotIn(AgentEventType.EFFECT_FAILED, [event.type for event in replay])
+        self.assertNotIn(AgentEventType.TOOL_STARTED, [event.type for event in replay])
+        self.assertEqual(replay[-1].type, AgentEventType.TURN_FAILED)
+
+    async def test_claimed_execution_failure_keeps_cause_and_clears_pending_plan(self) -> None:
+        # 同一个 confirmation_* 错误码既可能来自领票，也可能来自真实执行；
+        # 已领票的领域失败必须作为终态交付，而不是被 TG 当成重复点击吞掉。
+        for code in ("confirmation_stale", "confirmation_invalid", "precondition_failed"):
+            with self.subTest(code=code):
+                calls = []
+                reason = "光鸭变更预览已过期，请重新生成"
+
+                def execute(_arguments, _snapshot, _context):
+                    calls.append("execute")
+                    raise ToolPipelineError(reason, code=code)
+
+                tool = KernelToolSpec(
+                    name="cloud.relocate", domain="cloud", description="云盘文件移动",
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                    effect=ToolEffect.WRITE,
+                    prepare=lambda _a, _c: PreparedEffect(
+                        preview={"summary": "预览视频清洗与移动"},
+                        snapshot_fingerprint="frozen-directory",
+                    ),
+                    execute_confirmed=execute,
+                )
+                catalog = ToolCatalog([tool])
+                state = InMemorySessionStateStore()
+                model = ScriptedModel([[
+                    ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
+                               tool_call=ModelToolCall("move", tool.name, {})),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ]])
+                session = AgentSession(
+                    model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                    pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state,
+                )
+                preview = await consume_events(session.run(AgentInput(
+                    message="手动清洗云盘视频到目标目录", owner="owner", session_id="session",
+                )))
+                self.assertEqual(calls, [])
+                self.assertIsNotNone(preview.approval)
+                plan_id = preview.approval.plan_id
+                confirmed = await consume_events(session.confirm(
+                    owner="owner", session_id="session", plan_id=plan_id,
+                ))
+                self.assertEqual(calls, ["execute"])
+                self.assertEqual(confirmed.status, "failed")
+                self.assertEqual(confirmed.error_code, code)
+                self.assertEqual(confirmed.error_message, reason)
+                self.assertEqual(dict(confirmed.effect_result), {
+                    "ok": False, "status": code, "summary": reason,
+                })
+                saved = await state.load(owner="owner", session_id="session")
+                self.assertEqual(saved.pending_effect_plan_id, "")
+                self.assertIn("光鸭变更预览已过期", saved.conversation[-1]["public_content"])
+                self.assertIn("请重新生成", saved.conversation[-1]["public_content"])
+                self.assertEqual(len(model.requests), 1, "确认结果不得再依赖模型")
+
+                previous_conversation = saved.conversation
+                replay = await consume_events(session.confirm(
+                    owner="owner", session_id="session", plan_id=plan_id,
+                ))
+                self.assertEqual(calls, ["execute"], "失败重放不得二次执行")
+                self.assertEqual(dict(replay.effect_result), {})
+                self.assertEqual((await state.load(owner="owner", session_id="session")).conversation,
+                                 previous_conversation, "重复点击不得覆盖已记录的失败原因")
 
     async def test_completed_read_survives_provider_failure_for_rebuilt_session(self) -> None:
         class FailsAfterRead(ScriptedModel):
@@ -1504,7 +1571,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 plan_id=plan_id,
             )
         )
-        self.assertIn(AgentEventType.EFFECT_FAILED, [event.type for event in stale])
+        self.assertNotIn(AgentEventType.EFFECT_FAILED, [event.type for event in stale])
+        self.assertNotIn(AgentEventType.TOOL_STARTED, [event.type for event in stale])
+        self.assertEqual(stale[-1].type, AgentEventType.TURN_FAILED)
 
     async def test_confirmed_effect_cannot_be_cancelled_or_superseded_by_new_chat(
         self,
