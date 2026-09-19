@@ -43,6 +43,7 @@ outputs/
 # Local Agent/Superpowers artifacts
 /.superpowers/
 /docs/superpowers/
+AGENTS.md
 
 # Browser and test artifacts
 playwright-report/
