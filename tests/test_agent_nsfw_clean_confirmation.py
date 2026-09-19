@@ -110,6 +110,18 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         with self.assertRaisesRegex(ValueError, "人工"):
             confirmations.start_confirmation(token, 0, chat_id="100", actor="agent")
 
+    def test_numeric_prefix_candidate_keeps_agent_authorization_boundary(self):
+        self.payload = clean_payload("300MIUM-1474.mp4")
+        self.payload["rules"] = confirmations.organize_rules_snapshot(self.rules)
+        self.payload["_notification_suppressed"] = True
+        self.candidate = self.payload["candidates"][0]
+        token = self.ticket()
+        self.enabled = False
+
+        with self.assertRaises(DirectoryScrapeConflictError):
+            confirmations.start_confirmation(token, 0, chat_id="100", actor="agent")
+        self.assertEqual(db.get_organize_confirmation(token)["status"], "pending")
+
     def test_disable_queued_review_hands_off_without_network_or_auto_retry(self):
         token = self.ticket(running=True)
         self.enabled = False

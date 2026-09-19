@@ -95,6 +95,23 @@ class CleanEvidenceTests(IsolatedDatabaseTestCase):
                 self.assertEqual(result["data"]["entry_mode"], "clean_title")
                 self.assertEqual(len(result["data"]["files"]), len(names))
 
+    def test_numeric_prefix_parts_keep_clean_evidence_and_no_metadata_boundary(self):
+        cases = [
+            (("300MIUM-1474.mp4",), "300MIUM-1474"),
+            (
+                ("300MIUM-1474-CD1.mp4", "300MIUM-1474-CD2.mp4"),
+                "300MIUM-1474",
+            ),
+            (("200GANA-3419-1.mp4",), "200GANA-3419"),
+        ]
+        for names, expected in cases:
+            with self.subTest(names=names):
+                result = self.inspect(clean_payload(*names))
+                self.assertTrue(result["ok"], result)
+                self.assertFalse(result["data"]["metadata_verified"])
+                self.assertEqual(result["data"]["entry_mode"], "clean_title")
+                self.assertEqual(result["data"]["number"], expected)
+
     def test_wrong_scope_forged_candidate_and_ambiguous_identity_are_rejected(self):
         cases = []
 
@@ -190,6 +207,18 @@ class CleanKernelReviewTests(IsolatedDatabaseTestCase):
         result, model = self.run_review(p)
         self.assertFalse(result.approved)
         self.assertFalse(model.requests)
+
+    def test_numeric_prefix_clean_review_stays_manual_when_subscope_is_off(self):
+        payload = clean_payload("300MIUM-1474.mp4")
+        result, model = self.run_review(payload, enabled=False)
+        self.assertFalse(result.approved)
+        self.assertEqual(result.reason_code, "nsfw_clean_not_authorized")
+        self.assertFalse(model.requests)
+
+        result, model = self.run_review(payload, enabled=True)
+        self.assertTrue(result.approved)
+        self.assertEqual(result.entry_mode, "clean_title")
+        self.assertTrue(model.requests)
 
     def test_skipped_evidence_low_confidence_and_abstention_preserve_manual(self):
         for kwargs in [

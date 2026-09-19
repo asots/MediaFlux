@@ -130,6 +130,28 @@ class NsfwIdentifierTests(unittest.TestCase):
                 self.assertIsNotNone(identifier)
                 self.assertEqual(identifier.code, expected)
 
+    def test_numeric_prefix_identifiers_feed_clean_title_candidates(self):
+        cases = {
+            "300MIUM-1474/300MIUM-1474.mp4": "300MIUM-1474",
+            "300MIUM-1444.mp4": "300MIUM-1444",
+            "300MIUM-1433.mp4": "300MIUM-1433",
+            "300MIUM-1415.mp4": "300MIUM-1415",
+            "300MIUM-1408.mp4": "300MIUM-1408",
+            "300MIUM-1397.mp4": "300MIUM-1397",
+            "300MIUM-1327.mp4": "300MIUM-1327",
+            "200GANA-3419.mp4": "200GANA-3419",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                identifier = extract_nsfw_identifier(value)
+                self.assertIsNotNone(identifier)
+                self.assertEqual(identifier.code, expected)
+                candidate = build_clean_title_candidate(value.rsplit("/", 1)[-1])
+                self.assertIsNotNone(candidate)
+                self.assertEqual(candidate["provider"], "clean_title")
+                self.assertEqual(candidate["external_id"], expected)
+                self.assertEqual(candidate["title"], expected)
+
     def test_codec_and_episode_tokens_are_not_treated_as_identifiers(self):
         for filename in (
             "Movie.2026.2160p.H265.DDP5.1.HDR10.mkv",
@@ -137,6 +159,11 @@ class NsfwIdentifierTests(unittest.TestCase):
             "Alien-1979-Remux.mkv",
             "Anime.S01E03.1080p.HEVC.AAC.mkv",
             "WEB-DL.x264.AV1.mp4",
+            "1080P-1234.mp4",
+            "2026-1234.mp4",
+            "H265-1234.mp4",
+            "1080HEVC-1234.mp4",
+            "2026WEB-1234.mp4",
         ):
             with self.subTest(filename=filename):
                 self.assertIsNone(extract_nsfw_identifier(filename))
@@ -409,6 +436,18 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         self.assertIsNone(ambiguous.part_index)
         self.assertEqual(extract_nsfw_part_index("FJIN-140.CD2.mkv"), 2)
 
+    def test_numeric_prefix_multipart_and_cleaning_reuse_shared_chain(self):
+        part = extract_nsfw_multipart("300MIUM-1474-CD2.mp4")
+        self.assertIsNotNone(part)
+        self.assertEqual(part.part_index, 2)
+        self.assertEqual(
+            clean_nsfw_archive_title("300MIUM-1474-CD2.1080p.mp4"),
+            "300MIUM-1474",
+        )
+        candidate = build_clean_title_candidate("200GANA-3419-1.mp4")
+        self.assertEqual(candidate["external_id"], "200GANA-3419")
+        self.assertEqual(candidate["title"], "200GANA-3419")
+
     def test_clean_title_removes_site_noise_and_keeps_safe_number(self):
         self.assertEqual(
             clean_nsfw_archive_title("hhd800.com@ATID-675.mp4"),
@@ -508,6 +547,26 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         })
         self.assertEqual(validated[0]["candidates"][0]["provider"], "clean_title")
         self.assertEqual(actionable, 1)
+
+    def test_numeric_prefix_no_metadata_confirmation_group_gets_clean_title_candidate(self):
+        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        plan = OrganizePlan(
+            file_id="numeric-f1", original_name="200GANA-3419.mp4",
+            original_path="200GANA-3419", original_parent_id="p",
+            match=MatchResult(
+                media_type="movie", provider="metatube", need_confirm=True,
+                error="MetaTube 没有返回完全一致的结果",
+            ),
+            action="skip",
+        )
+        groups = organizer._build_confirmation_groups(
+            [plan], {}, source_dir_id="adult", source_name="NSFW",
+            rules=OrganizeRules(nsfw_enabled=True, nsfw_exclusive=True),
+        )
+
+        self.assertEqual(groups[0]["candidates"][0]["provider"], "clean_title")
+        self.assertEqual(groups[0]["candidates"][0]["external_id"], "200GANA-3419")
+        self.assertEqual(groups[0]["candidates"][0]["title"], "200GANA-3419")
 
     def test_sw_number_confirmation_group_offers_clean_title_instead_of_skip_only(self):
         organizer = Organizer(client=object(), scraper=TMDBScraper())

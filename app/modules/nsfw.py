@@ -35,8 +35,10 @@ _DATE_PROVIDER_RE = re.compile(
     r"(?i)(?<![A-Z0-9])(1PONDO|CARIB(?:BEANCOM)?|PACOPACOMAMA|10MUSUME)"
     r"[\s._-]*(\d{6,8})[\s._-]+(\d{2,4})(?!\d)"
 )
+# 数字前缀仍须跟至少两位字母，避免把纯年份、分辨率或单字母编码当作番号。
 _GENERIC_CODE_RE = re.compile(
-    r"(?i)(?<![A-Z0-9])([A-Z]{2,8}[A-Z0-9]{0,4})[\s._-]+(\d{3,7})(?!\d)"
+    r"(?i)(?<![A-Z0-9])((?:[0-9]{1,4})?[A-Z]{2,8}[A-Z0-9]{0,4})"
+    r"[\s._-]+(\d{3,7})(?!\d)"
 )
 _COMPACT_CODE_RE = re.compile(
     r"(?i)(?<![A-Z0-9])([A-Z]{2,7})(\d{3,5})(?![A-Z0-9])"
@@ -261,7 +263,7 @@ def extract_nsfw_identifier(value: str, strip_domains: str = "") -> NsfwIdentifi
         for match in regex.finditer(text):
             prefix = match.group(1).upper()
             number = match.group(2)
-            if prefix in _CODE_PREFIX_BLOCKLIST:
+            if prefix.lstrip("0123456789") in _CODE_PREFIX_BLOCKLIST:
                 continue
             # 只排除真正的季/集占位；不能按首字母整段屏蔽，否则 SW、SD、
             # EB 等合法成人番号前缀会被误判为普通剧集位置。
