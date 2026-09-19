@@ -15,7 +15,7 @@ from app.agent import guangya_recycle_actions as recycle_actions
 from app.agent import guangya_share_actions as share_actions
 from app.agent import guangya_workspace_actions as workspace_actions
 from app.agent.models import ToolContext
-from app.clients.guangya import GuangYaClient, GuangYaFile
+from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
 
 
 class _RawSdk:
@@ -96,9 +96,17 @@ class _RawSdk:
         self.calls.append(("share_delete", list(ids)))
         return {"msg": "删除成功"}
 
-    def file_upload(self, file_path, **kwargs):
-        self.calls.append(("upload", str(file_path), dict(kwargs)))
-        return {"msg": "文件上传中", "data": {"taskId": "upload-task"}}
+    def upload_token(self, name, file_size, parent_id=None, md5=None):
+        self.calls.append(("upload_token", name, file_size, parent_id, md5))
+        return {"msg": "success", "data": {"taskId": "upload-task"}}
+
+    def cdn_upload(self, file_path, token_data, **kwargs):
+        self.calls.append(("cdn_upload", str(file_path), token_data, kwargs))
+        return '"fixture-etag"'
+
+    def upload_info(self, task_id):
+        self.calls.append(("upload_info", task_id))
+        return {"msg": "success", "data": {"taskId": task_id}}
 
 
 class _Client(GuangYaClient):
@@ -149,6 +157,267 @@ class GuangYaSdkClientTests(unittest.TestCase):
 
         self.assertNotIn("local_upload", result.data["write_operations"])
         self.assertEqual(result.data["agent_disabled_operations"], ["local_upload"])
+
+
+class GuangYaLocalUploadTests(unittest.TestCase):
+    """独立上传链回归；只使用原子方法替身，禁止 high-level 回退和实网。"""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.path = Path(temp.name) / "sample.mkv"
+        self.path.write_bytes(b"x" * (1024 * 1024))
+        sleeper = mock.patch("app.clients.guangya.sleep")
+        self.sleep = sleeper.start()
+        self.addCleanup(sleeper.stop)
+        network = mock.patch("socket.socket.connect", side_effect=AssertionError("external network forbidden"))
+        network.start()
+        self.addCleanup(network.stop)
+
+    def make_raw(self):
+        raw = mock.Mock(spec=["upload_token", "check_can_flash_upload", "cdn_upload", "upload_info"])
+        raw.upload_token.return_value = {"msg": "success", "data": {"taskId": "upload-task"}}
+        raw.check_can_flash_upload.return_value = {"msg": "success", "canFlashUpload": False}
+        raw.cdn_upload.return_value = '"etag"'
+        raw.upload_info.return_value = {"msg": "success", "data": {"fileId": "uploaded"}}
+        return raw
+
+    def test_flash_top_level_and_wrapped_true_or_false(self):
+        for wrapped in (False, True):
+            for can_flash in (False, True):
+                with self.subTest(wrapped=wrapped, can_flash=can_flash):
+                    raw = self.make_raw()
+                    payload = {"canFlashUpload": can_flash}
+                    raw.check_can_flash_upload.return_value = {"msg": "success", **({"data": payload} if wrapped else payload)}
+                    result = _Client(raw).upload_local_file(self.path)
+                    self.assertEqual(result, raw.upload_info.return_value)
+                    raw.upload_token.assert_called_once_with(self.path.name, 1024 * 1024, None)
+                    raw.check_can_flash_upload.assert_called_once_with("upload-task", self.path)
+                    self.assertEqual(raw.cdn_upload.call_count, 0 if can_flash else 1)
+                    raw.upload_info.assert_called_once_with("upload-task")
+        self.sleep.assert_not_called()
+
+    def test_small_file_keeps_base64_md5_and_uploads_cdn_without_flash(self):
+        from base64 import b64encode
+        from hashlib import md5
+
+        for content in (b"", b"sample", b"x" * (1024 * 1024 - 1)):
+            with self.subTest(size=len(content)):
+                self.path.write_bytes(content)
+                raw = self.make_raw()
+                _Client(raw).upload_local_file(self.path, parent_id="target")
+                raw.upload_token.assert_called_once_with(
+                    self.path.name, len(content), "target", md5=b64encode(md5(content).digest()).decode()
+                )
+                raw.check_can_flash_upload.assert_not_called()
+                raw.cdn_upload.assert_called_once_with(
+                    self.path, raw.upload_token.return_value["data"],
+                    content_type="application/octet-stream", chunk_size=5 * 1024 * 1024,
+                )
+                raw.upload_info.assert_called_once_with("upload-task")
+        self.sleep.assert_not_called()
+
+    def test_observed_flash_success_without_flag_uses_same_task_cdn(self):
+        # probe-upload-shape.log 的真实 flash 响应：成功不等于已完成秒传。
+        raw = self.make_raw()
+        raw.check_can_flash_upload.return_value = {"msg": "success"}
+        result = _Client(raw).upload_local_file(self.path)
+        self.assertEqual(result, raw.upload_info.return_value)
+        raw.upload_token.assert_called_once()
+        raw.cdn_upload.assert_called_once_with(
+            self.path, raw.upload_token.return_value["data"],
+            content_type="application/octet-stream", chunk_size=5 * 1024 * 1024,
+        )
+        self.assertEqual([call[0] for call in raw.mock_calls], [
+            "upload_token", "check_can_flash_upload", "cdn_upload", "upload_info",
+        ])
+
+    def test_observed_small_file_pending_147_requires_cdn_and_bounded_wait(self):
+        self.path.write_bytes(b"sample")
+        raw = self.make_raw()
+        raw.upload_token.return_value["data"].update({
+            "creds": {"accessKeyID": "fixture-key", "secretAccessKey": "fixture-secret", "sessionToken": "fixture-token"},
+            "fullEndPoint": "https://cdn.example.invalid", "bucketName": "fixture", "objectPath": "synthetic",
+        })
+        pending = {"code": 147, "msg": "文件上传中"}
+        ready = raw.upload_info.return_value
+        raw.upload_info.side_effect = [pending, pending, pending, ready]
+        self.assertEqual(_Client(raw).upload_local_file(self.path), ready)
+        raw.upload_token.assert_called_once()
+        raw.check_can_flash_upload.assert_not_called()
+        raw.cdn_upload.assert_called_once()
+        self.assertEqual([call[0] for call in raw.mock_calls], [
+            "upload_token", "cdn_upload", *(["upload_info"] * 4),
+        ])
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2)] * 3)
+        self.assertEqual(pending, {"code": 147, "msg": "文件上传中"})
+
+    def test_destination_name_and_chunk_bounds(self):
+        for name, parent, size, expected_name, expected_parent, expected_size in (
+            ("  renamed.mkv  ", "target", 2 * 1024 * 1024, "renamed.mkv", "target", 2 * 1024 * 1024),
+            ("  ", "0", 1, "sample.mkv", None, 1024 * 1024),
+            ("", "", 128 * 1024 * 1024, "sample.mkv", None, 64 * 1024 * 1024),
+        ):
+            with self.subTest(parent=parent, size=size):
+                raw = self.make_raw()
+                _Client(raw).upload_local_file(self.path, name=name, parent_id=parent, chunk_size=size)
+                raw.upload_token.assert_called_once_with(expected_name, 1024 * 1024, expected_parent)
+                raw.cdn_upload.assert_called_once_with(
+                    self.path, raw.upload_token.return_value["data"],
+                    content_type="application/octet-stream", chunk_size=expected_size,
+                )
+
+    def test_token_rejection_or_missing_task_never_starts_second_task(self):
+        for response in (None, {}, {"msg": "success", "data": {}},
+                         {"data": {"taskId": "  "}},
+                         {"code": 403, "msg": "拒绝", "data": {"taskId": "bad"}},
+                         {"code": 0, "data": {"code": 403, "taskId": "bad"}}):
+            with self.subTest(response=response):
+                raw = self.make_raw()
+                raw.upload_token.return_value = response
+                with self.assertRaises(GuangYaWriteRejected):
+                    _Client(raw).upload_local_file(self.path)
+                raw.upload_token.assert_called_once()
+                raw.check_can_flash_upload.assert_not_called()
+                raw.cdn_upload.assert_not_called()
+                raw.upload_info.assert_not_called()
+
+    def test_flash_failure_or_invalid_flag_does_not_start_cdn(self):
+        for response in (None, {}, {"msg": "检查失败"},
+                         {"code": 403, "canFlashUpload": True},
+                         {"data": {"success": False, "canFlashUpload": False}},
+                         {"canFlashUpload": "false"}, {"canFlashUpload": None}):
+            with self.subTest(response=response):
+                raw = self.make_raw()
+                raw.check_can_flash_upload.return_value = response
+                with self.assertRaises(GuangYaWriteRejected):
+                    _Client(raw).upload_local_file(self.path)
+                raw.upload_token.assert_called_once()
+                raw.cdn_upload.assert_not_called()
+                raw.upload_info.assert_not_called()
+
+    def test_cdn_failure_stops_without_polling_or_new_token(self):
+        for failure in (RuntimeError("cdn failed"), "", None, {"msg": "上传失败"}):
+            with self.subTest(failure=failure):
+                raw = self.make_raw()
+                if isinstance(failure, Exception):
+                    raw.cdn_upload.side_effect = failure
+                else:
+                    raw.cdn_upload.return_value = failure
+                with self.assertRaises(RuntimeError):
+                    _Client(raw).upload_local_file(self.path)
+                raw.upload_token.assert_called_once()
+                raw.cdn_upload.assert_called_once()
+                raw.upload_info.assert_not_called()
+
+    def test_processing_is_polled_with_a_bound_and_returned_unchanged(self):
+        pending = {"code": 147, "msg": "文件上传中"}
+        for finish in (True, False):
+            with self.subTest(finish=finish):
+                raw = self.make_raw()
+                self.sleep.reset_mock()
+                ready = raw.upload_info.return_value
+                raw.upload_info.side_effect = [pending, ready] if finish else [pending] * 4
+                result = _Client(raw).upload_local_file(self.path)
+                self.assertEqual(result, ready if finish else pending)
+                self.assertEqual(raw.upload_info.call_count, 2 if finish else 4)
+                self.assertEqual(self.sleep.call_args_list, [mock.call(2)] * (1 if finish else 3))
+                raw.upload_token.assert_called_once()
+
+    def test_small_and_flash_processing_are_bounded_and_never_claim_complete(self):
+        for small in (True, False):
+            with self.subTest(small=small):
+                self.path.write_bytes(b"sample" if small else b"x" * (1024 * 1024))
+                raw = self.make_raw()
+                raw.check_can_flash_upload.return_value = {"canFlashUpload": True}
+                pending = {"msg": "文件上传中", "data": {"taskId": "upload-task"}}
+                raw.upload_info.return_value = pending
+                self.assertEqual(_Client(raw).upload_local_file(self.path), pending)
+                self.assertEqual(raw.upload_info.call_args_list, [mock.call("upload-task")] * 4)
+                self.assertEqual(raw.cdn_upload.call_count, 1 if small else 0)
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2)] * 6)
+
+    def test_upload_info_failure_is_not_masked_by_processing_or_success(self):
+        for response in (None, {}, [], {"msg": "文件上传失败"},
+                         {"code": 403, "msg": "文件上传中"},
+                         {"code": 147, "msg": "success"},
+                         {"code": 147, "msg": "文件上传中 "},
+                         {"code": 147, "msg": "文件上传中", "error": "rejected"},
+                         {"code": 147, "msg": "文件上传中", "data": {"error": "rejected"}},
+                         {"code": 147, "msg": "文件上传中", "data": {"errors": ["rejected"]}},
+                         {"code": 147, "msg": "文件上传中", "data": {"code": 403}},
+                         {"msg": "文件上传中", "data": {"success": False}},
+                         {"msg": "文件上传中", "data": {"msg": "上传失败"}},
+                         {"code": 0, "data": {"code": 403, "msg": "失败"}}):
+            with self.subTest(response=response):
+                raw = self.make_raw()
+                raw.upload_info.return_value = response
+                with self.assertRaises(GuangYaWriteRejected):
+                    _Client(raw).upload_local_file(self.path)
+                raw.upload_info.assert_called_once_with("upload-task")
+                raw.upload_token.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_real_sdk_primitives_keep_multipart_bytes_and_target(self):
+        import json
+        from xml.etree.ElementTree import fromstring
+
+        from guangyaclient import GuangyaClient as RawClient
+
+        self.path.write_bytes(b"x" * (2 * 1024 * 1024 + 17))
+        requests = []
+        parts = []
+
+        def handle(request):
+            requests.append(request)
+            if request.url.path.endswith("get_res_center_token"):
+                body = json.loads(request.read())
+                self.assertEqual(body["parentId"], "synthetic-target")
+                self.assertEqual(body["name"], "renamed.mkv")
+                self.assertEqual(body["res"]["fileSize"], self.path.stat().st_size)
+                return httpx.Response(200, json={"msg": "success", "data": {
+                    "taskId": "upload-task", "fullEndPoint": "https://cdn.example.invalid",
+                    "bucketName": "fixture", "objectPath": "synthetic",
+                    "creds": {"accessKeyID": "fixture-key", "secretAccessKey": "fixture-secret", "sessionToken": "fixture-token"},
+                }})
+            if request.url.path.endswith("check_can_flash_upload"):
+                self.assertEqual(json.loads(request.read())["taskId"], "upload-task")
+                return httpx.Response(200, json={"msg": "success"})
+            if request.url.path.endswith("get_info_by_task_id"):
+                self.assertEqual(len(parts), 3)
+                if sum(req.url.path.endswith("get_info_by_task_id") for req in requests) == 1:
+                    return httpx.Response(200, json={"code": 147, "msg": "文件上传中"})
+                return httpx.Response(200, json={"msg": "success", "data": {"fileId": "uploaded"}})
+            self.assertEqual(request.url.host, "cdn.example.invalid")
+            if "uploads" in request.url.params:
+                return httpx.Response(200, text="<InitiateMultipartUploadResult><UploadId>fixture-upload</UploadId></InitiateMultipartUploadResult>")
+            self.assertEqual(request.url.params["uploadId"], "fixture-upload")
+            if request.method == "PUT":
+                parts.append(request.read())
+                self.assertEqual(int(request.url.params["partNumber"]), len(parts))
+                return httpx.Response(200, headers={"etag": f'"part-{len(parts)}"'})
+            self.assertEqual(len(fromstring(request.read()).findall("Part")), 3)
+            return httpx.Response(200, text='<CompleteMultipartUploadResult><ETag>"fixture-etag"</ETag></CompleteMultipartUploadResult>')
+
+        raw = RawClient(access_token="fixture-access", device_id="fixture-device")
+        raw.close()
+        raw._client = httpx.Client(transport=httpx.MockTransport(handle))
+        self.addCleanup(raw.close)
+        result = _Client(raw).upload_local_file(
+            self.path, name="renamed.mkv", parent_id="synthetic-target", chunk_size=1024 * 1024,
+        )
+        self.assertEqual(result["data"]["fileId"], "uploaded")
+        self.assertEqual([len(part) for part in parts], [1024 * 1024, 1024 * 1024, 17])
+        self.assertEqual(b"".join(parts), self.path.read_bytes())
+        self.assertEqual(sum(request.url.path.endswith("get_res_center_token") for request in requests), 1)
+
+    def test_invalid_local_input_does_not_allocate_remote_task(self):
+        for path, chunk_size in ((self.path.with_name("missing"), 1024 * 1024), (self.path, "invalid")):
+            with self.subTest(path=path, chunk_size=chunk_size):
+                raw = self.make_raw()
+                with self.assertRaises((FileNotFoundError, ValueError)):
+                    _Client(raw).upload_local_file(path, chunk_size=chunk_size)
+                raw.upload_token.assert_not_called()
 
 
 class _RecycleClient:

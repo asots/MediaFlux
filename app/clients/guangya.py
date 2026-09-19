@@ -2230,26 +2230,76 @@ class GuangYaClient:
         parent_id: str = "0",
         chunk_size: int = 5 * 1024 * 1024,
     ) -> dict:
-        """执行 SDK 上传/秒传全流程；调用方负责路径白名单与快照校验。"""
+        """单次建任务，复用 SDK 秒传/分片原语；调用方负责路径和落盘核验。"""
+        from base64 import b64encode
+
+        def validate(response, operation):
+            _validate_write_response(response, operation=operation)
+            if isinstance(response, dict) and any(
+                payload.get("error") or payload.get("errors")
+                for payload in (response, response.get("data"))
+                if isinstance(payload, dict)
+            ):
+                raise GuangYaWriteRejected(operation, code="provider_error")
+
         path = Path(file_path)
-        response = self.raw.file_upload(
-            path,
-            name=str(name or "").strip() or path.name,
-            parent_id=None if str(parent_id or "0") == "0" else str(parent_id),
-            chunk_size=max(1024 * 1024, min(int(chunk_size), 64 * 1024 * 1024)),
+        file_size = path.stat().st_size
+        chunk_size = max(1024 * 1024, min(int(chunk_size), 64 * 1024 * 1024))
+        # 小文件仍传 Base64-MD5，但拿到 token 不代表内容已经上传。
+        md5_arguments = (
+            {"md5": b64encode(hashlib.md5(path.read_bytes()).digest()).decode()}
+            if file_size < 1024 * 1024 else {}
         )
-        # ``file_upload`` 在服务端仍处理时可能返回“文件上传中”，不能把它
-        # 当作明确失败；最终成功由领域任务读取目标目录验证。
-        if isinstance(response, dict):
-            explicit = any(
-                key in response for key in ("code", "success")
-            ) or isinstance(response.get("data"), dict) and any(
-                key in response["data"] for key in ("code", "success")
+        raw = self.raw
+        token = raw.upload_token(
+            str(name or "").strip() or path.name,
+            file_size,
+            None if str(parent_id or "0") == "0" else str(parent_id),
+            **md5_arguments,
+        )
+        validate(token, "upload_token")
+        token_data = token.get("data") if isinstance(token, dict) else None
+        task_id = token_data.get("taskId") if isinstance(token_data, dict) else None
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise GuangYaWriteRejected("upload_token", code="invalid_response")
+
+        can_flash = False
+        if file_size >= 1024 * 1024:
+            flash = raw.check_can_flash_upload(task_id, path)
+            validate(flash, "upload_flash")
+            # 实测可能只有 msg=success：检查成功，但未证明秒传，继续同任务 CDN。
+            flash_data = flash.get("data", flash) if isinstance(flash, dict) else None
+            if not isinstance(flash_data, dict) or (
+                "canFlashUpload" not in flash_data
+                and not (_read_success_acknowledged(flash) or _read_success_acknowledged(flash_data))
+            ):
+                raise GuangYaWriteRejected("upload_flash", code="invalid_response")
+            can_flash = flash_data.get("canFlashUpload", False)
+            if not isinstance(can_flash, bool):
+                raise GuangYaWriteRejected("upload_flash", code="invalid_response")
+        if not can_flash:
+            etag = raw.cdn_upload(
+                path, token_data,
+                content_type="application/octet-stream", chunk_size=chunk_size,
             )
-            if explicit:
-                _validate_write_response(response, operation="upload")
-            return response
-        return {}
+            if not isinstance(etag, str) or not etag.strip().strip('"'):
+                raise GuangYaWriteRejected("upload_cdn", code="invalid_response")
+
+        for attempt in range(4):
+            response = raw.upload_info(task_id)
+            if not isinstance(response, dict) or not response:
+                raise GuangYaWriteRejected("upload", code="invalid_response")
+            pending = response.get("msg") == "文件上传中"
+            checked = dict(response)
+            if pending:
+                checked.pop("msg")
+                # 147 仅在精确的处理中提示下豁免；其他错误及嵌套字段继续校验。
+                if str(checked.get("code")) == "147":
+                    checked.pop("code")
+            validate(checked, "upload")
+            if not pending or attempt == 3:
+                return response
+            sleep(2)
 
     # ===== 秒传 JSON =====
     def generate_gcid_json(self, source_dir_id: str, source_name: str = "") -> dict:
