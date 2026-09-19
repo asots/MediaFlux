@@ -183,7 +183,8 @@ def _target_options(_owner):
     ]}
 
 
-def test_telegram_in_place_multiselect_previews_and_confirms_once(store, monkeypatch):
+@pytest.mark.parametrize("terminal_action", ["c", "x"])
+def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeypatch, terminal_action):
     owner = agent_adapter.telegram_agent_owner(-100, 7)
     session_id = agent_adapter.telegram_agent_session_id(-100, 7)
     monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
@@ -239,15 +240,53 @@ def test_telegram_in_place_multiselect_previews_and_confirms_once(store, monkeyp
         assert draft["phase"] == "approval" and session.model.requests == []
         execute.assert_not_called()
         plan = draft["plan_id"]
-        agent_adapter.handle_agent_callback(bot, Call(f"agk:c:{plan}", message), TELEBOT)
-        assert execute.call_count == 1, [edit[0] for edit in bot.edits]
-        assert "结果未知" in bot.edits[-1][0] and "#81" in bot.edits[-1][0]
-        assert bot.edits[-1][3]["reply_markup"].buttons[0].text == "继续挑选本批资源"
-        assert bot.sent == [] and len(session.model.requests) == 1
+        agent_adapter.handle_agent_callback(bot, Call(f"agk:{terminal_action}:{plan}", message), TELEBOT)
+        assert execute.call_count == (1 if terminal_action == "c" else 0)
+        if terminal_action == "c":
+            assert "结果未知" in bot.edits[-1][0] and "#81" in bot.edits[-1][0]
+        else:
+            assert "已取消" in bot.edits[-1][0]
+        assert bot.edits[-1][3]["reply_markup"] is None
+        assert "继续挑选本批资源" not in bot.edits[-1][0]
+        ended = asyncio.run(states.load(owner=owner, session_id=session_id)).metadata["ux_candidate_draft"]
+        assert ended["phase"] == "result" and ended["positions"] == [] and ended["plan_id"] == ""
+        assert agent_candidates.render(TELEBOT, view, ended)[1] is None
+        assert bot.sent == [] and len(session.model.requests) == (1 if terminal_action == "c" else 0)
         count = len(bot.edits)
         agent_adapter.handle_agent_callback(bot, Call(f"agk:c:{plan}", message), TELEBOT)
         assert len(bot.edits) == count
-        execute.assert_called_once()
+        assert execute.call_count == (1 if terminal_action == "c" else 0)
+        click("b", ended["handle"])
+        assert len(bot.edits) == count
+        assert draft["phase"] == "result"
+
+
+@pytest.mark.parametrize("final_text", ["已完成", "已取消，本次未执行"])
+def test_telegram_followup_approval_transfers_then_closes_the_same_draft(store, monkeypatch, final_text):
+    monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
+
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        view, _ = await _publish_candidates(pipeline, states)
+        runtime = SimpleNamespace(store=store)
+        draft = await agent_candidates.start_draft(runtime, owner=OWNER, session_id=SESSION, view=view)
+        await agent_candidates.save_draft(runtime, owner=OWNER, session_id=SESSION, view=view,
+            expected=draft["handle"], draft={**draft, "phase": "approval", "plan_id": "first-plan", "positions": [1, 2]})
+        await agent_candidates.settle_draft(runtime, owner=OWNER, session_id=SESSION,
+            plan_id="first-plan", result_html="第一步已完成", next_plan_id="next-plan")
+        following = (await states.load(owner=OWNER, session_id=SESSION)).metadata["ux_candidate_draft"]
+        assert following["phase"] == "approval" and following["plan_id"] == "next-plan"
+        assert following["positions"] == [1, 2]
+        await agent_candidates.settle_draft(runtime, owner=OWNER, session_id=SESSION,
+            plan_id="first-plan", result_html="过时结果不得覆盖下一步")
+        assert (await states.load(owner=OWNER, session_id=SESSION)).metadata["ux_candidate_draft"] == following
+        await agent_candidates.settle_draft(runtime, owner=OWNER, session_id=SESSION,
+            plan_id="next-plan", result_html=final_text)
+        ended = (await states.load(owner=OWNER, session_id=SESSION)).metadata["ux_candidate_draft"]
+        assert ended["phase"] == "result" and ended["plan_id"] == "" and ended["positions"] == []
+        assert agent_candidates.render(TELEBOT, view, ended) == (final_text, None)
+
+    asyncio.run(exercise())
 
 
 def test_telegram_ui_cas_survives_restart_rejects_concurrent_and_cross_owner(store, monkeypatch):

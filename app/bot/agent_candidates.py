@@ -12,7 +12,7 @@ from app.agent.kernel.references import ReferenceError
 from app.agent.kernel.state import PublicationLease, SelectionInvalidError, StateUpdate
 from app.agent.kernel.ux_selection import current_candidate_view
 
-CALLBACK_RE = re.compile(r"^agk:s:(ref_[A-Za-z0-9_-]{24}):(?P<action>i(?:[1-9]|1[0-2])|t(?:qb|guangya|both)|[eprb])$")
+CALLBACK_RE = re.compile(r"^agk:s:(ref_[A-Za-z0-9_-]{24}):(?P<action>i(?:[1-9]|1[0-2])|t(?:qb|guangya|both)|[epr])$")
 _DRAFT_KIND = "ux_telegram_candidate"
 
 
@@ -67,15 +67,14 @@ async def load_draft(runtime: Any, *, owner: str, session_id: str, handle: str, 
 
 
 def render(telebot: Any, view: dict, draft: dict) -> tuple[str, Any]:
+    if draft.get("phase") == "result":
+        return str(draft.get("result_html") or "本次处理已结束，请核对实际下载状态。"), None
     markup = telebot.types.InlineKeyboardMarkup(row_width=2)
     handle = draft["handle"]
 
     def button(label: str, action: str):
         return telebot.types.InlineKeyboardButton(label, callback_data=f"agk:s:{handle}:{action}")
 
-    if draft.get("phase") == "result":
-        markup.add(button("继续挑选本批资源", "b"))
-        return str(draft.get("result_html") or "本次处理已结束，请核对实际下载状态。"), markup
     selected = set(draft["positions"])
     recommended = view.get("recommended_positions") or []
     lines = ["<b>资源推荐与批选</b>" if recommended else "<b>资源搜索与批选</b>"]
@@ -146,7 +145,7 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
     try:
         view, draft = asyncio.run(load_draft(runtime, owner=owner, session_id=session_id, handle=match.group(1), message_id=call.message.message_id))
         action = match.group("action")
-        if draft["phase"] != "select" and not (draft["phase"] == "result" and action == "b"):
+        if draft["phase"] != "select":
             raise SelectionInvalidError("正在处理预检或确认，请使用当前按钮。")
         draft["message_id"] = call.message.message_id
         selected = set(draft["positions"])
@@ -166,8 +165,6 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
             if not view["recommended_positions"]:
                 raise SelectionInvalidError("当前没有推荐组合，请展开版本手动选择。")
             selected = set(view["recommended_positions"])
-        elif action == "b":
-            draft.update(phase="select", expanded=True, result_html="")
         elif action == "p":
             if not selected:
                 raise SelectionInvalidError("请至少选择一个资源。")
@@ -205,13 +202,14 @@ def handle_callback(bot: Any, call: Any, telebot: Any, *, owner: str, session_id
         _edit_final(bot, call.message, "预检响应中断；尚未确认下载。请查询当前计划或重新发起选择。")
 
 
-async def finish_result(runtime: Any, *, owner: str, session_id: str, plan_id: str, result_html: str, telebot: Any) -> Any:
+async def settle_draft(runtime: Any, *, owner: str, session_id: str, plan_id: str, result_html: str, next_plan_id: str = "") -> None:
     state = await runtime.store.load(owner=owner, session_id=session_id)
     draft = state.metadata.get("ux_candidate_draft")
     view = await current_candidate_view(state=state, store=runtime.store)
     if not view or not isinstance(draft, dict) or draft.get("plan_id") != plan_id or draft.get("candidate_ref") != view["ref"]:
         return None
-    draft = await save_draft(runtime, owner=owner, session_id=session_id, view=view, expected=draft["handle"], draft={
-        **draft, "phase": "result", "result_html": result_html, "positions": [], "plan_id": "",
+    await save_draft(runtime, owner=owner, session_id=session_id, view=view, expected=draft["handle"], draft={
+        **draft, "phase": "approval" if next_plan_id else "result", "plan_id": next_plan_id,
+        "result_html": "" if next_plan_id else result_html,
+        "positions": draft["positions"] if next_plan_id else [],
     })
-    return render(telebot, view, draft)[1]

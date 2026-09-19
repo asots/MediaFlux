@@ -675,13 +675,21 @@ class TelegramProgress:
         if self.message_id is None:
             return False
         delete = getattr(self.bot, "delete_message", None)
-        if not callable(delete):
-            return False
-        try:
-            delete(self.chat_id, self.message_id)
-            return True
-        except Exception:
-            return False
+        if callable(delete):
+            try:
+                delete(self.chat_id, self.message_id)
+                return True
+            except Exception:
+                pass
+        clear = getattr(self.bot, "edit_message_reply_markup", None)
+        if callable(clear):
+            result, _value = call_telegram_edit(
+                lambda: clear(self.chat_id, self.message_id, reply_markup=None),
+                message_id=int(self.message_id),
+            )
+            if not result.ok:
+                logger.info("Telegram 旧消息键盘清理未确认 %s", telegram_error_summary(result))
+        return False
 
     def dismiss_source_message(self) -> bool:
         """删除触发进度的原消息，并让后续终态作为独立消息发送。

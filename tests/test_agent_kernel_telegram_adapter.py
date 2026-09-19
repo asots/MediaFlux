@@ -583,7 +583,7 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             patches[1],
             patches[2],
             patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime),
-            patch.object(adapter, "_candidate_result_markup", return_value=None),
+            patch.object(adapter, "_settle_candidate_draft", return_value=None),
         ):
             adapter.handle_agent_callback(bot, call, TELEBOT)
 
@@ -717,7 +717,7 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         ), patch.object(
             adapter, "get_agent_kernel_runtime", return_value=runtime
         ), patch.object(
-            adapter, "_candidate_result_markup", return_value=None
+            adapter, "_settle_candidate_draft", return_value=None
         ):
             preview = asyncio.run(
                 transport.query(
@@ -780,8 +780,10 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             observed.append(instance)
             return instance
         access = self._patch_access()
-        with access[0], access[1], access[2], patch.object(adapter, "get_agent_kernel_runtime", return_value=types.SimpleNamespace(telegram=transport, store=FakeStore())),              patch.object(adapter, "_ExistingMessageProgress", side_effect=progress):
+        with access[0], access[1], access[2], patch.object(adapter, "get_agent_kernel_runtime", return_value=types.SimpleNamespace(telegram=transport, store=FakeStore())),              patch.object(adapter, "_ExistingMessageProgress", side_effect=progress), patch.object(adapter, "_settle_candidate_draft") as settle:
             adapter.handle_agent_callback(bot, Call("agk:c:plan_1234567890abcdef", Message("preview", user_id=0, message_id=33)), TELEBOT)
+        settle.assert_called_once()
+        self.assertEqual(settle.call_args.kwargs["next_plan_id"], next_plan.plan_id)
         self.assertIn("改名已完成", bot.edits[-1][0])
         self.assertIn("下一步移动目录", bot.edits[-1][0])
         self.assertTrue(any(b.callback_data == "agk:c:" + next_plan.plan_id for b in bot.edits[-1][3]["reply_markup"].buttons))

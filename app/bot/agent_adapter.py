@@ -36,7 +36,6 @@ from app.agent.public_safety import public_tool_label
 from app.agent.rate_limit import agent_rate_limiter
 from app.bot.progress import TelegramProgress, send_typing
 from app.bot.telegram_compat import (
-    call_telegram_edit,
     telegram_error_summary,
     telegram_message_options,
 )
@@ -49,7 +48,7 @@ from app.modules.telegram_write_confirmations import (
     TelegramWriteConfirmationError,
     get_telegram_write_confirmation_store,
 )
-from app.notifier import call_telegram_delivery, telegram_edit_fallback_allowed
+from app.notifier import call_telegram_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -398,6 +397,7 @@ class _ExistingMessageProgress(TelegramProgress):
         super().__init__(
             bot, None, target.chat.id, "Agent 确认执行",
             mode="edit", message_id=target.message_id, source_message=target,
+            message_thread_id=_thread_kwargs(target).get("message_thread_id"),
             timeout_seconds=1800, prefer_persistent_message=True,
         )
         self._started = False
@@ -518,49 +518,11 @@ def _edit_final(
 ) -> bool:
     body = str(text) if rendered_html else html.escape(_safe_text(text))
     chunks = split_telegram_html(body, limit=_MAX_MESSAGE) or ("任务已结束。",)
-    kwargs: dict[str, Any] = {
-        "reply_markup": reply_markup if len(chunks) == 1 else None,
-        "parse_mode": "HTML",
-        **telegram_message_options(bot.edit_message_text),
-    }
-    result, _value = call_telegram_edit(
-        lambda: bot.edit_message_text(
-            chunks[0], target.chat.id, target.message_id, **kwargs,
-        ),
-        message_id=int(target.message_id),
-    )
-    if not result.ok and telegram_edit_fallback_allowed(result):
-        send_kwargs = {
-            **_thread_kwargs(target),
-            "parse_mode": "HTML",
-            **telegram_message_options(bot.send_message),
-        }
-        if reply_markup is not None and len(chunks) == 1:
-            send_kwargs["reply_markup"] = reply_markup
-        result, _value = call_telegram_delivery(
-            lambda: bot.send_message(target.chat.id, chunks[0], **send_kwargs)
-        )
-    if not result.ok:
-        logger.warning("Telegram Agent 终态投递失败 %s", telegram_error_summary(result))
-        return False
-    for index, chunk in enumerate(chunks[1:], start=1):
-        send_kwargs = {
-            **_thread_kwargs(target),
-            "parse_mode": "HTML",
-            **telegram_message_options(bot.send_message),
-        }
-        if reply_markup is not None and index == len(chunks) - 1:
-            send_kwargs["reply_markup"] = reply_markup
-        result, _value = call_telegram_delivery(
-            partial(bot.send_message, target.chat.id, chunk, **send_kwargs)
-        )
-        if not result.ok:
-            logger.warning(
-                "Telegram Agent 长终态后续分段发送失败 part=%s/%s %s",
-                index, len(chunks), telegram_error_summary(result),
-            )
-            return False
-    return True
+    return TelegramProgress(
+        bot, None, target.chat.id, "Agent 回执", mode="edit",
+        message_id=target.message_id,
+        message_thread_id=_thread_kwargs(target).get("message_thread_id"),
+    ).finish_many(chunks, reply_markup=reply_markup, clear_reply_markup=True)
 
 
 def _approval_markup(telebot_module: Any, approval: ApprovalView) -> Any:
@@ -705,13 +667,13 @@ def handle_agent_message(bot: Any, telebot_module: Any, message: Any) -> bool:
 
 
 
-def _candidate_result_markup(owner: str, session_id: str, plan_id: str, body: str, telebot_module: Any) -> Any:
-    from app.bot.agent_candidates import finish_result
+def _settle_candidate_draft(owner: str, session_id: str, plan_id: str, body: str, *, next_plan_id: str = "") -> None:
+    from app.bot.agent_candidates import settle_draft
 
     try:
-        return asyncio.run(finish_result(
+        asyncio.run(settle_draft(
             get_agent_kernel_runtime(), owner=owner, session_id=session_id,
-            plan_id=plan_id, result_html=body, telebot=telebot_module,
+            plan_id=plan_id, result_html=body, next_plan_id=next_plan_id,
         ))
     except Exception:  # noqa: BLE001 - UI 恢复不可覆盖已确认的真实业务结果
         return None
@@ -773,8 +735,8 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
             logger.warning("Telegram Agent 取消计划失败 type=%s", type(exc).__name__)
             discarded = False
         body = "已取消，本次没有执行任何写操作。" if discarded else "该确认已过期或已处理。"
-        markup = _candidate_result_markup(owner, session_id, envelope.plan_id, html.escape(body), telebot_module)
-        _edit_final(bot, call.message, body, reply_markup=markup)
+        _settle_candidate_draft(owner, session_id, envelope.plan_id, html.escape(body))
+        _edit_final(bot, call.message, body)
         bot.answer_callback_query(call.id, "已取消" if discarded else "确认已失效")
         return
 
@@ -811,7 +773,9 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
             markup = _approval_markup(telebot_module, view.approval)
         else:
             body = _render_turn(view)
-            markup = _candidate_result_markup(owner, session_id, envelope.plan_id, body, telebot_module)
+            markup = None
+        _settle_candidate_draft(owner, session_id, envelope.plan_id, body,
+            next_plan_id=view.approval.plan_id if view.approval else "")
         progress.finish_many(split_telegram_html(body, limit=_MAX_MESSAGE), reply_markup=markup, clear_reply_markup=True)
     except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
         logger.warning("Telegram Agent 确认执行失败 type=%s", type(exc).__name__)

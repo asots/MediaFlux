@@ -253,7 +253,7 @@ class TelegramCompatibilityTests(IsolatedDatabaseTestCase):
             with self.subTest(type=type(error).__name__):
                 bot = _Bot()
                 bot.error = error
-                with self.assertLogs("app.bot.agent_adapter", level="WARNING") as capture:
+                with self.assertLogs("app.bot.progress", level="WARNING") as capture:
                     agent_adapter._edit_final(bot, _SOURCE, "长结果" * 4000)
                 self.assertEqual(len(bot.edits), 1)
                 self.assertEqual(bot.sent, [])
@@ -268,6 +268,51 @@ class TelegramCompatibilityTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(bot.sent), 1)
         self.assertEqual(bot.sent[0][2]["message_thread_id"], 7)
         self.assertIs(bot.sent[0][2]["reply_markup"], markup)
+
+    def test_confirmation_without_progress_event_keeps_original_topic_on_fallback(self):
+        bot = _Bot()
+        bot.error = _api_error(400, "Bad Request: message can't be edited")
+        progress = agent_adapter._ExistingMessageProgress(bot, _SOURCE)
+        self.assertTrue(progress.finish("已结束", clear_reply_markup=True))
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(bot.sent[0][2].get("message_thread_id"), 7)
+
+    def test_callback_fallback_retires_old_keyboard_only_after_replacement_delivery(self):
+        for deletion_fails, sending_fails in ((False, False), (True, False), (False, True)):
+            with self.subTest(deletion_fails=deletion_fails, sending_fails=sending_fails):
+                class RetiringBot(_Bot):
+                    def __init__(self):
+                        super().__init__()
+                        self.deleted = []
+                        self.cleared = []
+
+                    def send_message(self, chat_id, text, **kwargs):
+                        if sending_fails:
+                            raise requests.ReadTimeout("replacement response unknown")
+                        return super().send_message(chat_id, text, **kwargs)
+
+                    def delete_message(self, chat_id, message_id):
+                        self.deleted.append((chat_id, message_id))
+                        if deletion_fails:
+                            raise _api_error(400, "Bad Request: message can't be deleted")
+                        return True
+
+                    def edit_message_reply_markup(self, chat_id, message_id, **kwargs):
+                        self.cleared.append((chat_id, message_id, kwargs))
+                        return SimpleNamespace(message_id=message_id)
+
+                bot = RetiringBot()
+                bot.error = _api_error(400, "Bad Request: message can't be edited")
+                delivered = agent_adapter._edit_final(bot, _SOURCE, "处理完成")
+                self.assertEqual(delivered, not sending_fails)
+                self.assertEqual(bot.deleted, [] if sending_fails else [(100, 18)])
+                if deletion_fails:
+                    self.assertEqual(bot.cleared, [(100, 18, {"reply_markup": None})])
+                else:
+                    self.assertEqual(bot.cleared, [])
+                if not sending_fails:
+                    self.assertEqual(len(bot.sent), 1)
+                    self.assertEqual(bot.sent[0][2]["message_thread_id"], 7)
 
     def test_raw_exception_text_without_api_400_is_not_not_modified_success(self):
         progress = self.progress()
