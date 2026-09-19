@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -184,8 +185,15 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 arguments, ToolContext(owner="owner", session_id="session")
             )
 
-    def _confirmed_plan(self, client: FakeGatewayClient, operation: dict) -> dict:
-        observed = self._query(client)
+    def _confirmed_plan(
+        self,
+        client: FakeGatewayClient,
+        operation: dict,
+        *,
+        trigger_strm: bool = False,
+        path: str = "/source",
+    ) -> dict:
+        observed = self._query(client, path=path)
         entries = {item["object_name"]: item for item in observed.data["entries"]}
         operation = dict(operation)
         source_name = str(operation.pop("source_name", ""))
@@ -198,13 +206,50 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             client,
             owner="owner",
             observation=observation,
-            trigger_strm=False,
+            trigger_strm=trigger_strm,
             operations=[operation],
         )
         guangya_fs_change.confirm_fs_change_plan(
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
         )
         return plan
+
+    def _execute_with_strm_scope(
+        self,
+        client: FakeGatewayClient,
+        plan: dict,
+        *,
+        strm_source_ids: tuple[str, ...] = ("source",),
+        organize_source_ids: tuple[str, ...] = ("source",),
+        organize_target_id: str = "target",
+    ) -> tuple[dict, mock.Mock]:
+        scheduler = mock.Mock()
+        scheduler.trigger.return_value = {"ok": True}
+        config_values = {
+            "GY_ORGANIZE_SOURCE_DIRS": json.dumps(
+                [{"id": source_id, "name": source_id} for source_id in organize_source_ids]
+            ),
+            "GY_ORGANIZE_TARGET_DIR": organize_target_id,
+        }
+
+        def get_config(key, default=""):
+            return config_values.get(key, default)
+
+        with (
+            mock.patch("app.modules.scheduler.get_scheduler", return_value=scheduler),
+            mock.patch(
+                "app.modules.strm.configured_strm_source_plans",
+                return_value=(
+                    [{"id": source_id, "name": source_id} for source_id in strm_source_ids],
+                    "",
+                ),
+            ),
+            mock.patch("app.config.get", side_effect=get_config),
+        ):
+            result = guangya_fs_change.execute_fs_change_plan(
+                self._queued_payload(plan), client_factory=lambda: client
+            )
+        return result, scheduler
 
     def _queued_payload(self, plan: dict, *, job_id: str = "") -> dict:
         if not job_id:
@@ -225,6 +270,448 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             "credential_generation": 31,
             "job_id": job_id,
         }
+
+    def test_strm_trigger_skips_successful_unrelated_prefix_sibling_change(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(
+            GuangYaFile("source-2", "source-2", True, parent_id="0", etag="s2")
+        )
+        client.directories["source-2"] = [
+            GuangYaFile(
+                "private",
+                "Private.mp4",
+                False,
+                parent_id="source-2",
+                size=80,
+                etag="p",
+                extension="mp4",
+            )
+        ]
+        plan = self._confirmed_plan(
+            client,
+            {"op": "rename", "source_name": "Private.mp4", "new_name": "Private-renamed.mp4"},
+            trigger_strm=True,
+            path="/source-2",
+        )
+
+        result, scheduler = self._execute_with_strm_scope(client, plan)
+
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["renamed"], 1)
+        scheduler.trigger.assert_not_called()
+        self.assertNotIn("strm_triggered", result["stats"])
+
+    def _nested_strm_root_client(self):
+        client = FakeGatewayClient()
+        client.directories["0"].extend(
+            [
+                GuangYaFile("media", "媒体", True, parent_id="0", etag="media"),
+                GuangYaFile("other", "other", True, parent_id="0", etag="other"),
+            ]
+        )
+        client.directories["media"] = [
+            GuangYaFile("guoman", "国漫", True, parent_id="media", etag="guoman"),
+            GuangYaFile(
+                "outside-media",
+                "其他.mp4",
+                False,
+                parent_id="media",
+                size=80,
+                etag="outside",
+                extension="mp4",
+            ),
+        ]
+        client.directories["guoman"] = []
+        client.directories["other"] = []
+        return client
+
+    def test_directory_ancestor_of_strm_root_is_in_scope_but_parent_path_is_not(self):
+        cases = (
+            ("rename", "/", "媒体", {"new_name": "媒体-改名"}, True),
+            ("move", "/", "媒体", {"target_path": "/other"}, True),
+            ("rename", "/媒体", "其他.mp4", {"new_name": "其他-改名.mp4"}, False),
+        )
+        for op, path, source_name, extra, should_trigger in cases:
+            with self.subTest(op=op, source_name=source_name):
+                client = self._nested_strm_root_client()
+                operation = {"op": op, "source_name": source_name, **extra}
+                plan = self._confirmed_plan(
+                    client, operation, trigger_strm=True, path=path
+                )
+
+                result, scheduler = self._execute_with_strm_scope(
+                    client,
+                    plan,
+                    strm_source_ids=("guoman",),
+                    organize_source_ids=("0",),
+                    organize_target_id="",
+                )
+
+                self.assertFalse(result["partial"])
+                self.assertEqual(result["stats"]["moved" if op == "move" else "renamed"], 1)
+                if should_trigger:
+                    scheduler.trigger.assert_called_once_with(
+                        "organize", force_full=True, sync_mode="full"
+                    )
+                else:
+                    scheduler.trigger.assert_not_called()
+
+    def test_organize_input_sources_are_not_strm_scope(self):
+        for organize_source_id in ("new-nsfw", "0"):
+            with self.subTest(organize_source_id=organize_source_id):
+                client = FakeGatewayClient()
+                client.directories["0"].extend(
+                    [
+                        GuangYaFile("整理", "整理", True, parent_id="0", etag="archive"),
+                        GuangYaFile("new-nsfw", "NewNsfw", True, parent_id="0", etag="nsfw"),
+                        GuangYaFile("zhuxian", "诛仙", True, parent_id="0", etag="novel"),
+                    ]
+                )
+                client.directories["整理"] = []
+                client.directories["new-nsfw"] = [
+                    GuangYaFile(
+                        "new-file",
+                        "NewNsfw.mp4",
+                        False,
+                        parent_id="new-nsfw",
+                        size=80,
+                        etag="new",
+                        extension="mp4",
+                    )
+                ]
+                client.directories["zhuxian"] = [
+                    GuangYaFile(
+                        "zhuxian-file",
+                        "诛仙.mp4",
+                        False,
+                        parent_id="zhuxian",
+                        size=80,
+                        etag="novel-file",
+                        extension="mp4",
+                    )
+                ]
+                for source_path, source_name in (
+                    ("/NewNsfw", "NewNsfw.mp4"),
+                    ("/诛仙", "诛仙.mp4"),
+                ):
+                    with self.subTest(source_path=source_path):
+                        plan = self._confirmed_plan(
+                            client,
+                            {
+                                "op": "rename",
+                                "source_name": source_name,
+                                "new_name": f"{source_name}.renamed.mp4",
+                            },
+                            trigger_strm=True,
+                            path=source_path,
+                        )
+                        result, scheduler = self._execute_with_strm_scope(
+                            client,
+                            plan,
+                            strm_source_ids=("整理",),
+                            organize_source_ids=(organize_source_id,),
+                            organize_target_id="",
+                        )
+
+                        self.assertFalse(result["partial"])
+                        self.assertEqual(result["stats"]["renamed"], 1)
+                        scheduler.trigger.assert_not_called()
+
+    def test_move_into_and_out_of_strm_source_still_triggers(self):
+        for direction in ("in", "out"):
+            with self.subTest(direction=direction):
+                client = FakeGatewayClient()
+                client.directories["0"].extend(
+                    [
+                        GuangYaFile("整理", "整理", True, parent_id="0", etag="archive"),
+                        GuangYaFile("other", "other", True, parent_id="0", etag="other"),
+                    ]
+                )
+                client.directories["整理"] = []
+                client.directories["other"] = []
+                if direction == "in":
+                    client.directories["other"].append(
+                        GuangYaFile(
+                            "other-file",
+                            "待整理.mp4",
+                            False,
+                            parent_id="other",
+                            size=80,
+                            etag="in-file",
+                            extension="mp4",
+                        )
+                    )
+                    path, source_name, target_path = "/other", "待整理.mp4", "/整理"
+                else:
+                    client.directories["整理"].append(
+                        GuangYaFile(
+                            "archive-file",
+                            "已归档.mp4",
+                            False,
+                            parent_id="整理",
+                            size=80,
+                            etag="out-file",
+                            extension="mp4",
+                        )
+                    )
+                    path, source_name, target_path = "/整理", "已归档.mp4", "/other"
+                plan = self._confirmed_plan(
+                    client,
+                    {"op": "move", "source_name": source_name, "target_path": target_path},
+                    trigger_strm=True,
+                    path=path,
+                )
+
+                result, scheduler = self._execute_with_strm_scope(
+                    client,
+                    plan,
+                    strm_source_ids=("整理",),
+                    organize_source_ids=("new-nsfw",),
+                    organize_target_id="",
+                )
+
+                self.assertFalse(result["partial"])
+                self.assertEqual(result["stats"]["moved"], 1)
+                scheduler.trigger.assert_called_once_with(
+                    "organize", force_full=True, sync_mode="full"
+                )
+
+    def test_copy_out_of_scope_does_not_trigger_for_unchanged_source(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(
+            GuangYaFile("other", "other", True, parent_id="0", etag="o")
+        )
+        client.directories["other"] = []
+        plan = self._confirmed_plan(
+            client,
+            {
+                "op": "copy",
+                "source_name": "Move.mp4",
+                "target_path": "/other",
+            },
+            trigger_strm=True,
+        )
+
+        result, scheduler = self._execute_with_strm_scope(client, plan)
+
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["copied"], 1)
+        scheduler.trigger.assert_not_called()
+
+    def test_strm_trigger_covers_move_into_and_out_of_configured_archive(self):
+        for direction in ("out", "in"):
+            with self.subTest(direction=direction):
+                client = FakeGatewayClient()
+                client.directories["0"].append(
+                    GuangYaFile("other", "other", True, parent_id="0", etag="o")
+                )
+                client.directories["other"] = []
+                if direction == "out":
+                    plan = self._confirmed_plan(
+                        client,
+                        {
+                            "op": "move",
+                            "source_name": "Move.mp4",
+                            "target_path": "/other",
+                        },
+                        trigger_strm=True,
+                    )
+                else:
+                    client.directories["other"].append(
+                        GuangYaFile(
+                            "other-file",
+                            "Other.mp4",
+                            False,
+                            parent_id="other",
+                            size=70,
+                            etag="o1",
+                            extension="mp4",
+                        )
+                    )
+                    plan = self._confirmed_plan(
+                        client,
+                        {
+                            "op": "move",
+                            "source_name": "Other.mp4",
+                            "target_path": "/target",
+                        },
+                        trigger_strm=True,
+                        path="/other",
+                    )
+
+                result, scheduler = self._execute_with_strm_scope(client, plan)
+
+                self.assertFalse(result["partial"])
+                self.assertEqual(result["stats"]["moved"], 1)
+                scheduler.trigger.assert_called_once_with(
+                    "organize", force_full=True, sync_mode="full"
+                )
+                self.assertEqual(result["stats"]["strm_triggered"], 1)
+
+    def test_strm_trigger_covers_archive_root_object_and_root_destination(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(
+            GuangYaFile("container", "container", True, parent_id="0", etag="c")
+        )
+        client.directories["container"] = [
+            GuangYaFile("archive", "archive", True, parent_id="container", etag="a")
+        ]
+        client.directories["archive"] = []
+        plan = self._confirmed_plan(
+            client,
+            {"op": "move", "source_name": "archive", "target_path": "/"},
+            trigger_strm=True,
+            path="/container",
+        )
+
+        result, scheduler = self._execute_with_strm_scope(
+            client, plan, strm_source_ids=("source",), organize_source_ids=(), organize_target_id="archive"
+        )
+
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["moved"], 1)
+        scheduler.trigger.assert_called_once_with(
+            "organize", force_full=True, sync_mode="full"
+        )
+
+    def test_strm_trigger_treats_explicit_root_target_as_scope(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(
+            client,
+            {"op": "create_directory", "parent_path": "/", "name": "root-created"},
+            trigger_strm=True,
+            path="/",
+        )
+
+        result, scheduler = self._execute_with_strm_scope(
+            client, plan, strm_source_ids=("source",), organize_source_ids=(), organize_target_id="0"
+        )
+
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["created"], 1)
+        scheduler.trigger.assert_called_once_with(
+            "organize", force_full=True, sync_mode="full"
+        )
+
+    def test_only_successful_relevant_operations_can_trigger_strm(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(
+            GuangYaFile("source-2", "source-2", True, parent_id="0", etag="s2")
+        )
+        client.directories["source-2"] = [
+            GuangYaFile(
+                "private",
+                "Private.mp4",
+                False,
+                parent_id="source-2",
+                size=80,
+                etag="p",
+                extension="mp4",
+            )
+        ]
+        observed = self._query(client, path="/", operation="tree", page_size=50)
+        entries = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+        observation = guangya_workspace.load_directory_observation(
+            observed.data["observation_ref"], owner="owner"
+        )
+        operations = [
+            {"op": "rename", "object_ref": entries["广告-ABC.mp4"], "new_name": "ABC.mp4"},
+            {
+                "op": "rename",
+                "object_ref": entries["Private.mp4"],
+                "new_name": "Private-renamed.mp4",
+            },
+        ]
+        config_values = {
+            "GY_ORGANIZE_SOURCE_DIRS": json.dumps([{"id": "source", "name": "source"}]),
+            "GY_ORGANIZE_TARGET_DIR": "target",
+        }
+        with (
+            mock.patch(
+                "app.modules.strm.configured_strm_source_plans",
+                return_value=([{"id": "source", "name": "source"}], ""),
+            ),
+            mock.patch(
+                "app.config.get",
+                side_effect=lambda key, default="": config_values.get(key, default),
+            ),
+        ):
+            plan = guangya_fs_change.build_fs_change_plan(
+                client, owner="owner", observation=observation, operations=operations, trigger_strm=True
+            )
+        guangya_fs_change.confirm_fs_change_plan(
+            plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
+        )
+
+        scheduler = mock.Mock()
+        scheduler.trigger.return_value = {"ok": True}
+        original_rename = client.rename
+
+        def rename(file_id, new_name):
+            if str(file_id) == "rename":
+                raise GuangYaWriteRejected("rename", code="rejected")
+            return original_rename(file_id, new_name)
+
+        with (
+            mock.patch.object(client, "rename", side_effect=rename),
+            mock.patch("app.modules.scheduler.get_scheduler", return_value=scheduler),
+            mock.patch("app.modules.strm.configured_strm_source_plans", return_value=([{"id": "source", "name": "source"}], "")),
+            mock.patch("app.config.get", side_effect=lambda key, default="": config_values.get(key, default)),
+        ):
+            result = guangya_fs_change.execute_fs_change_plan(
+                self._queued_payload(plan), client_factory=lambda: client
+            )
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["stats"]["failed"], 1)
+        self.assertEqual(result["stats"]["renamed"], 1)
+        scheduler.trigger.assert_not_called()
+
+    def test_scope_lookup_failure_keeps_real_write_result_without_triggering(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(
+            client,
+            {"op": "rename", "source_name": "Move.mp4", "new_name": "Move-renamed.mp4"},
+            trigger_strm=True,
+        )
+        scheduler = mock.Mock()
+        with (
+            mock.patch("app.modules.scheduler.get_scheduler", return_value=scheduler),
+            mock.patch(
+                "app.modules.strm.configured_strm_source_plans",
+                side_effect=RuntimeError("scope unavailable"),
+            ),
+        ):
+            result = guangya_fs_change.execute_fs_change_plan(
+                self._queued_payload(plan), client_factory=lambda: client
+            )
+
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["renamed"], 1)
+        self.assertEqual(result["stats"]["strm_scope_unknown"], 1)
+        scheduler.trigger.assert_not_called()
+
+    def test_trigger_strm_false_never_reads_or_triggers_scope(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(
+            client,
+            {"op": "rename", "source_name": "Move.mp4", "new_name": "Move-renamed.mp4"},
+            trigger_strm=False,
+        )
+        scheduler = mock.Mock()
+        with (
+            mock.patch("app.modules.scheduler.get_scheduler", return_value=scheduler),
+            mock.patch(
+                "app.modules.strm.configured_strm_source_plans",
+                side_effect=AssertionError("trigger_strm=False 不应读取 STRM 配置"),
+            ),
+        ):
+            result = guangya_fs_change.execute_fs_change_plan(
+                self._queued_payload(plan), client_factory=lambda: client
+            )
+
+        self.assertFalse(result["partial"])
+        scheduler.trigger.assert_not_called()
 
     def test_query_supports_search_stat_and_opaque_refs(self):
         client = FakeGatewayClient()

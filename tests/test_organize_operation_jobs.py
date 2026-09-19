@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 import unittest
@@ -12,6 +13,7 @@ from app.repositories.organize_operation_jobs import (
     enqueue_organize_operation_job,
     finish_organize_operation_job,
     get_organize_operation_job,
+    sanitize_organize_operation_result,
     is_organize_operation_cancel_requested,
     organize_operation_owner_digest,
     verify_organize_operation_payload,
@@ -149,6 +151,40 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
         self.assertEqual(terminal["payload_auth"], "")
         self.assertEqual(terminal["reference"], "")
         self.assertEqual(terminal["result_json"], '{}')
+
+    def test_result_sanitizer_keeps_scope_and_relocated_counters(self) -> None:
+        result = {
+            "stats": {
+                "strm_scope_unknown": 1,
+                "strm_trigger_skipped": 1,
+                "relocated": 2,
+                "leaked_text": "must be discarded",
+            }
+        }
+        expected = {
+            "stats": {
+                "strm_scope_unknown": 1,
+                "strm_trigger_skipped": 1,
+                "relocated": 2,
+            }
+        }
+        self.assertEqual(sanitize_organize_operation_result(result), expected)
+
+        created, _ = self._enqueue(dedupe="owner:scope-stats")
+        claimed = claim_organize_operation_job(str(created["job_id"]))
+        self.assertTrue(finish_organize_operation_job(
+            str(created["job_id"]),
+            expected_lease_generation=int(claimed["lease_generation"]),
+            status="partial",
+            result=result,
+        ))
+        terminal = get_organize_operation_job(str(created["job_id"]))
+        self.assertEqual(json.loads(terminal["result_json"]), expected)
+        public_ref = organize_operation_public_ref(str(created["job_id"]))
+        queried = OrganizeTaskManager().task_result(
+            public_ref, owner="owner-durable-test"
+        )
+        self.assertEqual(queried["result"], expected)
 
     def test_old_manual_review_history_is_pruned_on_next_enqueue(self) -> None:
         with db.get_conn() as conn:

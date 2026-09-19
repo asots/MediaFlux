@@ -189,6 +189,36 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
             dedupe_key=f"fs-change:{plan['plan_id']}",
         )
 
+    def test_legacy_frozen_plan_without_scope_metadata_fails_closed(self):
+        plan = self._confirmed_plan()
+        plan["trigger_strm"] = True
+        plan["operations"] = [{"op": "create_directory", "name": "legacy"}]
+        plan["fingerprint"] = guangya_fs_change._fingerprint(plan)
+        guangya_fs_change._atomic_write(plan)
+
+        with (
+            mock.patch(
+                "app.modules.strm.configured_strm_source_plans",
+                return_value=([{"id": "source", "name": "source"}], ""),
+            ),
+            mock.patch(
+                "app.config.get",
+                side_effect=lambda key, default="": {
+                    "GY_ORGANIZE_SOURCE_DIRS": "[{\"id\":\"source\"}]",
+                    "GY_ORGANIZE_TARGET_DIR": "target",
+                }.get(key, default),
+            ),
+        ):
+            should_trigger, scope_known = guangya_fs_change._strm_scope_decision(
+                plan, plan["operations"]
+            )
+
+        self.assertFalse(should_trigger)
+        self.assertFalse(scope_known)
+        queued, _replayed = self._enqueue(plan)
+        self.assertEqual(queued["job_kind"], "agent_guangya_fs_change")
+        self.assertNotIn("strm_scope", guangya_fs_change.load_fs_change_plan(plan["plan_id"]))
+
     def test_enqueue_injects_signed_job_id_and_binds_plan_before_return(self):
         plan = self._confirmed_plan()
 
