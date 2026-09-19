@@ -1452,6 +1452,9 @@ class Organizer:
         identity_history_loader: Callable[
             [OrganizePlan], set[tuple[str, str]]
         ] | None = None,
+        source_positions_by_file_id: dict[
+            str, tuple[int | None, int | None]
+        ] | None = None,
         finalize: bool = True,
         media_probe_workers: int | None = None,
         collect_performance: bool = True,
@@ -1467,6 +1470,7 @@ class Organizer:
         probe_cache_only = context.probe_cache_only
         automatic = context.automatic
         plans: list[OrganizePlan] = []
+        source_positions = source_positions_by_file_id or {}
         source_files_by_id = {
             str(item.file.file_id): item.file for item in scanned_videos
         }
@@ -1511,7 +1515,6 @@ class Organizer:
             and has_fractional_episode_position(item.file.name)
         )
         recognition_parent_paths: dict[str, str] = {}
-        source_positions: dict[str, tuple[int | None, int | None]] = {}
         episode_evidence_keys: dict[str, str] = {}
         evidence_entries: list[tuple[str, str, int | None, int | None]] = []
         directory_video_member_counts: dict[str, int] = {}
@@ -1532,25 +1535,36 @@ class Organizer:
                 directory_video_member_counts[physical_directory] = (
                     directory_video_member_counts.get(physical_directory, 0) + 1
                 )
-            if callable(parse_source_position_impl):
+            file_id = str(item.file.file_id)
+            position = source_positions.get(file_id)
+            if position is None and callable(parse_source_position_impl):
                 try:
-                    position = self.scraper.parse_source_position(item.file.name, parent_context)
+                    position = self.scraper.parse_source_position(
+                        item.file.name, parent_context,
+                    )
                 except Exception:
                     position = (None, None)
-                if isinstance(position, (tuple, list)) and len(position) == 2:
-                    normalized_position = (position[0], position[1])
-                    # 只有明确集号才构成可执行的位置覆盖。``(None, None)``
-                    # 或 ``(S, None)`` 继续向下传都会绕过“剧集缺少集号”的
-                    # 安全门，导致异常文件按电影式命名。
-                    if normalized_position[1] is not None:
-                        source_positions[item.file.file_id] = normalized_position
-                        if not item.special:
-                            evidence_entries.append((
-                                evidence_key,
-                                parent_context,
-                                position[0],
-                                position[1],
-                            ))
+            if isinstance(position, (tuple, list)) and len(position) == 2:
+                normalized_position = (position[0], position[1])
+                # 只有明确集号才构成可执行的位置覆盖。``(None, None)``
+                # 或 ``(S, None)`` 继续向下传都会绕过“剧集缺少集号”的
+                # 安全门，导致异常文件按电影式命名。
+                if normalized_position[1] is not None:
+                    position = normalized_position
+                    source_positions[file_id] = normalized_position
+                    if not item.special:
+                        evidence_entries.append((
+                            evidence_key,
+                            parent_context,
+                            normalized_position[0],
+                            normalized_position[1],
+                        ))
+                else:
+                    source_positions.pop(file_id, None)
+                    position = None
+            else:
+                source_positions.pop(file_id, None)
+                position = None
         directory_episode_evidence = build_directory_episode_evidence(evidence_entries)
         # 后续季只剩 2 个连续文件时也需要一个不携带越界位置的作品身份探针，
         # 否则 S02E25/E26 会在取得正确 TMDB 身份前就被逐文件位置校验拦截。
@@ -2341,6 +2355,9 @@ class Organizer:
         identity_history_loader: Callable[
             [OrganizePlan], set[tuple[str, str]]
         ] | None = None,
+        source_positions_by_file_id: dict[
+            str, tuple[int | None, int | None]
+        ] | None = None,
     ) -> tuple[OrganizePlanningResult, dict]:
         """对已由来源适配器生成的稳定快照运行统一只读规划。
 
@@ -2372,6 +2389,7 @@ class Organizer:
             media_profile_loader=media_profile_loader,
             target_inventory_loader=target_inventory_loader,
             identity_history_loader=identity_history_loader,
+            source_positions_by_file_id=source_positions_by_file_id,
         )
         return result, stats
 

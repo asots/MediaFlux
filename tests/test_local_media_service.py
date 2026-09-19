@@ -12,8 +12,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import database as db
-from app.modules.local_media_service import LocalMediaService, LocalMediaServiceError
-from app.modules.scraper import MatchResult
+from app.clients.guangya import GuangYaFile
+from app.modules.local_media_service import (
+    LocalMediaService,
+    LocalMediaServiceError,
+    _Inspection,
+)
+from app.modules.organize_scan import OrganizeScanResult, ScannedVideo
+from app.modules.scraper import MatchResult, TMDBScraper
 from tests.support import IsolatedDatabaseTestCase, release_parse_result
 
 
@@ -84,6 +90,254 @@ class SharedPositionFakeScraper(FakeScraper):
 
 
 class LocalMediaServiceTests(IsolatedDatabaseTestCase):
+    def test_directory_inspection_reuses_release_source_position_once(self):
+        from app.modules import scraper as scraper_module
+
+        source_root = Path(tempfile.mkdtemp(prefix="mediaflux-recognition-source-"))
+        self.addCleanup(lambda: source_root.rmdir())
+        scraper = TMDBScraper("offline-fixture")
+        self.addCleanup(scraper.close)
+        service = LocalMediaService(scraper=scraper)
+        self.addCleanup(service.close)
+        video = GuangYaFile(
+            "video-1", "Example.Show.S01E03.mkv", False,
+            1024, "etag-1", str(source_root),
+        )
+        scan_result = OrganizeScanResult(
+            scanned_videos=[ScannedVideo(
+                file=video,
+                relative_dir="",
+                recognition_parent_path="",
+            )],
+            scanned_dirs=[],
+            companion_files={},
+            video_files_by_path={"": [video]},
+            protected_sources=set(),
+            source_root_name="Example Show",
+        )
+        inspection = _Inspection(
+            owner="admin", source_id=1, root=source_root,
+            selected_path=source_root, snapshots=[], digest="digest",
+            created_at=time.time(), media_type="tv",
+        )
+
+        with patch.object(
+            scraper_module,
+            "_parse_release_core",
+            wraps=scraper_module._parse_release_core,
+        ) as parse_core:
+            directory_inspection, source_positions = (
+                service._build_local_directory_inspection(
+                    inspection, scan_result, media_type="tv",
+                )
+            )
+
+        self.assertEqual(parse_core.call_count, 1)
+        self.assertEqual(source_positions["video-1"], (1, 3))
+        self.assertEqual(directory_inspection.videos[0].season, 1)
+        self.assertEqual(directory_inspection.videos[0].episode, 3)
+
+    def test_directory_inspection_keeps_source_and_effective_positions_distinct(self):
+        class SourceEffectiveScraper(FakeScraper):
+            def parse_media(self, filename, parent_path="", match=None):
+                del match
+                return release_parse_result(
+                    {
+                        "season": 1,
+                        "episode": 3,
+                        "title": "Example Show",
+                        "type": self.result.media_type,
+                    },
+                    filename=filename,
+                    parent_path=parent_path,
+                    source_season=2,
+                    source_episode=7,
+                )
+
+        source_root = Path(tempfile.mkdtemp(prefix="mediaflux-recognition-source-effective-"))
+        self.addCleanup(lambda: source_root.rmdir())
+        service = LocalMediaService(
+            scraper=SourceEffectiveScraper(MatchResult(media_type="tv")),
+        )
+        self.addCleanup(service.close)
+        video = GuangYaFile(
+            "video-source-effective", "Example.Show.mkv", False,
+            1024, "etag-source-effective", str(source_root),
+        )
+        scan_result = OrganizeScanResult(
+            scanned_videos=[ScannedVideo(
+                file=video,
+                relative_dir="",
+                recognition_parent_path="",
+            )],
+            scanned_dirs=[],
+            companion_files={},
+            video_files_by_path={"": [video]},
+            protected_sources=set(),
+            source_root_name="Example Show",
+        )
+        inspection = _Inspection(
+            owner="admin", source_id=1, root=source_root,
+            selected_path=source_root, snapshots=[], digest="digest",
+            created_at=time.time(), media_type="tv",
+        )
+
+        directory_inspection, source_positions = (
+            service._build_local_directory_inspection(
+                inspection, scan_result, media_type="tv",
+            )
+        )
+
+        self.assertEqual(source_positions["video-source-effective"], (2, 7))
+        self.assertEqual(
+            (directory_inspection.videos[0].season, directory_inspection.videos[0].episode),
+            (2, 7),
+        )
+
+    def test_planner_reuses_passed_source_position_result(self):
+        from app.modules.organize import OrganizeRules, Organizer
+
+        class CountingPositionScraper(FakeScraper):
+            def __init__(self, match):
+                super().__init__(match)
+                self.source_position_calls = 0
+
+            def parse_source_position(self, filename, parent_path=""):
+                del filename, parent_path
+                self.source_position_calls += 1
+                raise AssertionError("trusted parsed result should avoid reparsing position")
+
+        scraper = CountingPositionScraper(MatchResult(
+            tmdb_id="1", title="Movie", year="2026", media_type="movie",
+            confidence=1.0, status="matched",
+        ))
+        planner = Organizer(client=object(), scraper=scraper)
+        self.addCleanup(planner.close)
+        video = GuangYaFile("planner-video", "Movie.2026.mkv", False, 1024, "etag", "source")
+        scan_result = OrganizeScanResult(
+            scanned_videos=[ScannedVideo(
+                file=video, relative_dir="", recognition_parent_path="",
+            )],
+            scanned_dirs=[], companion_files={}, video_files_by_path={"": [video]},
+            protected_sources=set(), source_root_name="Source",
+        )
+        rules = OrganizeRules(
+            target_dir_id="0", region_split=False, year_split=False,
+            clean_empty=False, link_strm=False, notify_enabled=False,
+            media_info_enabled=False, media_probe_enabled=False,
+        )
+
+        for partial_position in ((None, None), (2, None)):
+            with self.subTest(partial_position=partial_position):
+                planning_result, _ = planner.plan_scan_result(
+                    scan_result,
+                    rules,
+                    source_positions_by_file_id={
+                        video.file_id: partial_position,
+                    },
+                    target_inventory_loader=lambda _plan: (None, [], {}),
+                )
+
+                self.assertTrue(planning_result.plans)
+                self.assertIsNone(planning_result.plans[0].source_season)
+                self.assertIsNone(planning_result.plans[0].source_episode)
+
+        self.assertEqual(scraper.source_position_calls, 0)
+
+    def test_directory_inspection_keeps_source_position_when_parse_media_fails(self):
+        class FallbackScraper(FakeScraper):
+            def parse_media(self, filename, parent_path="", match=None):
+                del filename, parent_path, match
+                raise RuntimeError("parse_media fixture failure")
+
+            def parse_source_position(self, filename, parent_path=""):
+                del filename, parent_path
+                return 2, 7
+
+        source_root = Path(tempfile.mkdtemp(prefix="mediaflux-recognition-fallback-"))
+        self.addCleanup(lambda: source_root.rmdir())
+        service = LocalMediaService(scraper=FallbackScraper(MatchResult(media_type="tv")))
+        self.addCleanup(service.close)
+        video = GuangYaFile(
+            "video-fallback", "Example.Show.mkv", False,
+            1024, "etag-fallback", str(source_root),
+        )
+        scan_result = OrganizeScanResult(
+            scanned_videos=[ScannedVideo(
+                file=video,
+                relative_dir="",
+                recognition_parent_path="",
+            )],
+            scanned_dirs=[],
+            companion_files={},
+            video_files_by_path={"": [video]},
+            protected_sources=set(),
+            source_root_name="Example Show",
+        )
+        inspection = _Inspection(
+            owner="admin", source_id=1, root=source_root,
+            selected_path=source_root, snapshots=[], digest="digest",
+            created_at=time.time(), media_type="tv",
+        )
+
+        directory_inspection, source_positions = (
+            service._build_local_directory_inspection(
+                inspection, scan_result, media_type="tv",
+            )
+        )
+
+        self.assertEqual(source_positions, {"video-fallback": (2, 7)})
+        self.assertEqual(directory_inspection.videos[0].season, 2)
+        self.assertEqual(directory_inspection.videos[0].episode, 7)
+
+    def test_directory_inspection_does_not_fabricate_position_after_both_parsers_fail(self):
+        class NoPositionScraper(FakeScraper):
+            def parse_media(self, filename, parent_path="", match=None):
+                del filename, parent_path, match
+                raise RuntimeError("parse_media fixture failure")
+
+            def parse_source_position(self, filename, parent_path=""):
+                del filename, parent_path
+                raise RuntimeError("fallback fixture failure")
+
+        source_root = Path(tempfile.mkdtemp(prefix="mediaflux-recognition-no-position-"))
+        self.addCleanup(lambda: source_root.rmdir())
+        service = LocalMediaService(
+            scraper=NoPositionScraper(MatchResult(media_type="tv")),
+        )
+        self.addCleanup(service.close)
+        video = GuangYaFile(
+            "video-no-position", "Example.Show.mkv", False,
+            1024, "etag-no-position", str(source_root),
+        )
+        scan_result = OrganizeScanResult(
+            scanned_videos=[ScannedVideo(
+                file=video,
+                relative_dir="",
+                recognition_parent_path="",
+            )],
+            scanned_dirs=[],
+            companion_files={},
+            video_files_by_path={"": [video]},
+            protected_sources=set(),
+            source_root_name="Example Show",
+        )
+        inspection = _Inspection(
+            owner="admin", source_id=1, root=source_root,
+            selected_path=source_root, snapshots=[], digest="digest",
+            created_at=time.time(), media_type="tv",
+        )
+
+        directory_inspection, source_positions = (
+            service._build_local_directory_inspection(
+                inspection, scan_result, media_type="tv",
+            )
+        )
+
+        self.assertEqual(source_positions, {})
+        self.assertIsNone(directory_inspection.videos[0].season)
+        self.assertIsNone(directory_inspection.videos[0].episode)
+
     def test_execution_uses_persisted_tasks_without_an_in_memory_write_entry(self):
         self.assertFalse(hasattr(LocalMediaService, "execute_preview"))
         self.assertFalse(hasattr(LocalMediaService, "_execute_preview_under_writer"))

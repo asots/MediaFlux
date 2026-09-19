@@ -711,9 +711,13 @@ class LocalMediaService:
         scan_result: OrganizeScanResult,
         *,
         media_type: str,
-    ) -> DirectoryInspection:
+    ) -> tuple[
+        DirectoryInspection,
+        dict[str, tuple[int | None, int | None]],
+    ]:
         videos: list[MediaSnapshot] = []
         identities: list[_VideoIdentity] = []
+        source_positions_by_file_id: dict[str, tuple[int | None, int | None]] = {}
         for item in scan_result.scanned_videos:
             parent_context = "/".join(
                 value for value in (
@@ -722,24 +726,32 @@ class LocalMediaService:
             )
             try:
                 parsed = self.scraper.parse_media(item.file.name, parent_context)
-            except Exception:
-                parsed = None
-            season = getattr(parsed, "source_season", None)
-            episode = getattr(parsed, "source_episode", None)
-            if season is None:
-                season = getattr(parsed, "effective_season", None)
-            if episode is None:
-                episode = getattr(parsed, "effective_episode", None)
-            try:
-                source_season, source_episode = self.scraper.parse_source_position(
-                    item.file.name, parent_context,
+                source_position = (
+                    getattr(parsed, "source_season", None),
+                    getattr(parsed, "source_episode", None),
                 )
             except Exception:
-                source_season, source_episode = None, None
-            if source_season is not None:
-                season = source_season
-            if source_episode is not None:
-                episode = source_episode
+                parsed = None
+                try:
+                    fallback = self.scraper.parse_source_position(
+                        item.file.name, parent_context,
+                    )
+                    source_position = (fallback[0], fallback[1])
+                except Exception:
+                    source_position = None
+            if source_position is not None:
+                source_positions_by_file_id[item.file.file_id] = source_position
+            source_season, source_episode = source_position or (None, None)
+            season = (
+                source_season
+                if source_season is not None
+                else getattr(parsed, "effective_season", None)
+            )
+            episode = (
+                source_episode
+                if source_episode is not None
+                else getattr(parsed, "effective_episode", None)
+            )
 
             special_container = is_special_path(item.relative_dir)
             special = bool(item.special or special_container)
@@ -807,21 +819,24 @@ class LocalMediaService:
                 selected_videos, companions,
             )
 
-        return DirectoryInspection(
-            directory_id=str(inspection.selected_path),
-            directory_name=scan_result.source_root_name,
-            media_type=media_type,
-            suggested_query="",
-            videos=tuple(selected_videos),
-            companions=tuple(companions),
-            counts={
-                "video": len(selected_videos),
-                "subtitle": sum(item.role == "subtitle" for item in companions),
-                "metadata": sum(item.role != "subtitle" for item in companions),
-            },
-            mixed=bool(pending_videos),
-            fingerprint=inspection.digest,
-            pending_videos=tuple(pending_videos),
+        return (
+            DirectoryInspection(
+                directory_id=str(inspection.selected_path),
+                directory_name=scan_result.source_root_name,
+                media_type=media_type,
+                suggested_query="",
+                videos=tuple(selected_videos),
+                companions=tuple(companions),
+                counts={
+                    "video": len(selected_videos),
+                    "subtitle": sum(item.role == "subtitle" for item in companions),
+                    "metadata": sum(item.role != "subtitle" for item in companions),
+                },
+                mixed=bool(pending_videos),
+                fingerprint=inspection.digest,
+                pending_videos=tuple(pending_videos),
+            ),
+            source_positions_by_file_id,
         )
 
     @staticmethod
@@ -1161,6 +1176,7 @@ class LocalMediaService:
         planner_scraper = self.scraper
         position_overrides: dict[object, tuple[int | None, int | None]] = {}
         episode_mappings = {}
+        source_positions_by_file_id: dict[str, tuple[int | None, int | None]] = {}
         fixed_match: MatchResult | None = None
         detail: dict[str, Any] = {}
         manual_pending_confirmations: list[dict[str, Any]] = []
@@ -1180,7 +1196,10 @@ class LocalMediaService:
             )
             if not detail:
                 raise LocalMediaServiceError("TMDB 详情不存在或无法确认")
-            directory_inspection = self._build_local_directory_inspection(
+            (
+                directory_inspection,
+                source_positions_by_file_id,
+            ) = self._build_local_directory_inspection(
                 inspection, scan_result, media_type=effective_media_type,
             )
             if directory_inspection.pending_videos:
@@ -1303,6 +1322,7 @@ class LocalMediaService:
             media_type_hint=effective_media_type,
             media_profile_loader=load_media_profile,
             target_inventory_loader=load_target_inventory,
+            source_positions_by_file_id=source_positions_by_file_id,
             # 光鸭历史日志不属于本地媒体库；本地仍复用同批身份绑定和
             # 目录标记校验，但历史来源必须由本地后端单独提供。
             identity_history_loader=lambda _plan: set(),
