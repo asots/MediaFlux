@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from app.modules.scraper import parse_release_position
+from app.modules.special_media import is_special_media_name, is_special_path
 
 _MAX_MEDIA_OPERATIONS = 200
 _MAX_CREATE_DIRECTORY_OPERATIONS = 32
+# 共享 special_media 已处理 S00/OVA/NCOP 等；这里只补剧集盘点中明确的
+# Movie/广告/附加素材标记，不解析集号，也不按体积或篇章名称猜测。
+_EXTRA_MARKER = re.compile(
+    r"(?i)(?P<movie>(?<![a-z0-9])(?:movies?|films?)(?![a-z0-9])|剧场版|劇場版)"
+    r"|(?P<advertisement>(?<![a-z0-9])(?:ads?|advertisements?|commercials?)(?![a-z0-9])|广告|廣告)"
+    r"|(?P<extra>(?<![a-z0-9])(?:extras?|bonus|featurettes?)(?![a-z0-9])|特典|花絮)"
+)
 
 
 class GuangYaEpisodeNamingError(ValueError):
@@ -39,17 +48,29 @@ def _desired_name(title: str, season: int, episode: int, entry: dict[str, Any]) 
     return f"{title} - S{season:02d}E{episode:02d}{suffix}"
 
 
-def _episode_position(entry: dict[str, Any]) -> tuple[int | None, int | None]:
-    parsed = parse_release_position(
-        str(entry.get("name") or ""), tv_episode_mapping_context=True
+def _episode_details(entry: dict[str, Any], target_root: str) -> tuple[str, str, int | None, int | None]:
+    """inspect 与 plan 共用同一分类，源位置只能来自共享 parser。"""
+    name = str(entry.get("name") or "")
+    parsed = parse_release_position(name, tv_episode_mapping_context=True)
+    season, episode = parsed.get("season"), parsed.get("episode")
+    parent = _normalize_path(entry.get("parent_path"), field="parent_path")
+    # 只检查作品根以内的相对路径，避免上层目录名污染作品分类。
+    relative_parent = parent.removeprefix(target_root)
+    marker = _EXTRA_MARKER.search(name) or next(
+        (match for part in Path(relative_parent).parts if (match := _EXTRA_MARKER.fullmatch(part))),
+        None,
     )
-    season = parsed.get("season")
-    episode = parsed.get("episode")
-    return (
-        int(season) if isinstance(season, int) else None,
-        int(episode) if isinstance(episode, int) else None,
-    )
-
+    if marker:
+        kind, reason = "extra", str(marker.lastgroup)
+    elif season == 0 or is_special_media_name(name) or is_special_path(relative_parent):
+        kind, reason = "extra", "special_media"
+    elif episode is None:
+        kind, reason = "unknown", "unparsed_episode"
+    else:
+        kind, reason = "regular", ""
+    if parsed.get("episode_end") not in (None, episode):
+        return "unknown", "multi_episode_file", season, None
+    return kind, reason, season, episode
 
 
 def _compress_episode_numbers(values: list[int]) -> str:
@@ -89,61 +110,74 @@ def summarize_episode_naming_observation(
         grouped.setdefault(parent_path, []).append(entry)
 
     summaries: list[dict[str, Any]] = []
-    total_videos = 0
+    counts = {"regular": 0, "extra": 0, "unknown": 0}
     total_unparsed = 0
     for parent_path, items in sorted(
         grouped.items(), key=lambda pair: (pair[0] != normalized_root, pair[0].casefold())
     ):
-        positions: dict[int | None, list[int]] = {}
-        unparsed = 0
-        small_videos = 0
-        samples: list[str] = []
+        buckets: dict[tuple[str, str], list[tuple[dict[str, Any], int | None, int | None]]] = {}
         for entry in sorted(items, key=lambda item: str(item.get("name") or "").casefold()):
-            name = str(entry.get("name") or "")
-            if len(samples) < 3:
-                samples.append(name)
-            size = entry.get("size")
-            if isinstance(size, int) and 0 <= size < 5 * 1024 * 1024:
-                small_videos += 1
-            season, episode = _episode_position(entry)
-            if episode is None:
-                unparsed += 1
-            else:
-                positions.setdefault(season, []).append(episode)
-        total_videos += len(items)
+            kind, reason, season, episode = _episode_details(entry, normalized_root)
+            counts[kind] += 1
+            buckets.setdefault((kind, reason), []).append((entry, season, episode))
+        regular = _summarize_positions(buckets.get(("regular", ""), []))
+        exceptions = {
+            kind: [
+                {"reason": reason, **_summarize_positions(rows)}
+                for (category, reason), rows in sorted(buckets.items()) if category == kind
+            ]
+            for kind in ("extra", "unknown")
+        }
+        unparsed = sum(episode is None for rows in buckets.values() for _, _, episode in rows)
         total_unparsed += unparsed
-        summaries.append(
-            {
-                "source_path": parent_path,
-                "directory_name": "(共同父目录)"
-                if parent_path == normalized_root
-                else Path(parent_path).name,
-                "video_count": len(items),
-                "parsed_count": len(items) - unparsed,
-                "unparsed_count": unparsed,
-                "small_video_count": small_videos,
-                "positions": [
-                    {
-                        "source_season": season,
-                        "episodes": _compress_episode_numbers(episodes),
-                        "count": len(set(episodes)),
-                    }
-                    for season, episodes in sorted(
-                        positions.items(), key=lambda pair: (-1 if pair[0] is None else pair[0])
-                    )
-                ],
-                "samples": samples,
-            }
-        )
+        summaries.append({
+            "source_path": parent_path,
+            "directory_name": "(共同父目录)" if parent_path == normalized_root else Path(parent_path).name,
+            **regular,
+            "video_count": len(items),
+            "small_video_count": sum(row["small_video_count"] for row in [regular, *exceptions["extra"], *exceptions["unknown"]]),
+            "parsed_count": len(items) - unparsed,
+            "unparsed_count": unparsed,
+            "regular_count": regular["video_count"],
+            "extra_count": sum(row["video_count"] for row in exceptions["extra"]),
+            "unknown_count": sum(row["video_count"] for row in exceptions["unknown"]),
+            "extras": exceptions["extra"],
+            "unknown": exceptions["unknown"],
+        })
     if not summaries:
         raise GuangYaEpisodeNamingError("目标目录中没有可用于剧集命名盘点的视频")
     return {
         "target_root": normalized_root,
-        "video_count": total_videos,
+        "video_count": sum(counts.values()),
         "source_group_count": len(summaries),
         "unparsed_count": total_unparsed,
+        **{f"{kind}_count": count for kind, count in counts.items()},
+        "mapping_status": "needs_verification",
+        "mapping_note": "positions 仅为正片候选的源文件集号，不是 TMDB 映射；缺少可靠依据时请说明待核对，不得按目录或已观察集数推断偏移。extra 默认排除，unknown 不自动分配集号。",
         "groups": summaries,
     }
+
+
+def _summarize_positions(rows: list[tuple[dict[str, Any], int | None, int | None]]) -> dict[str, Any]:
+    positions: dict[int | None, list[int]] = {}
+    for _, season, episode in rows:
+        if episode is not None:
+            positions.setdefault(season, []).append(episode)
+    return {
+        "video_count": len(rows),
+        "small_video_count": sum(
+            isinstance(entry.get("size"), int) and 0 <= entry["size"] < 5 * 1024 * 1024
+            for entry, _, _ in rows
+        ),
+        "positions": [
+            {"source_season": season, "episodes": _compress_episode_numbers(episodes), "count": len(set(episodes))}
+            for season, episodes in sorted(positions.items(), key=lambda pair: -1 if pair[0] is None else pair[0])
+        ],
+        # 按类别取首/中/尾样例，异常不会被目录中的前三个正片挤掉；计数覆盖全部。
+        "samples": [str(rows[i][0].get("name") or "") for i in sorted({0, len(rows) // 2, len(rows) - 1})] if rows else [],
+        "samples_truncated": len(rows) > 3,
+    }
+
 
 def compile_episode_naming_operations(
     observation: dict[str, Any],
@@ -192,6 +226,8 @@ def compile_episode_naming_operations(
     for index, group in enumerate(groups, start=1):
         if not isinstance(group, dict):
             raise GuangYaEpisodeNamingError(f"第 {index} 个篇章映射格式无效")
+        if type(group.get("include_extras", False)) is not bool:
+            raise GuangYaEpisodeNamingError("include_extras 必须是布尔值")
         raw_source_path = str(group.get("source_path") or "").strip()
         directory_contains = str(group.get("source_directory_contains") or "").strip()
         if bool(raw_source_path) == bool(directory_contains):
@@ -226,6 +262,7 @@ def compile_episode_naming_operations(
         source_season = group.get("source_season")
         if source_season is not None:
             source_season = int(source_season)
+        include_extras = group.get("include_extras", source_season == 0 or target_season == 0)
         name_contains = str(group.get("name_contains") or "").strip()
         expected_count = group.get("expected_count")
         if expected_count is not None:
@@ -233,6 +270,8 @@ def compile_episode_naming_operations(
 
         selected: list[tuple[int, dict[str, Any]]] = []
         unparsed = 0
+        included_extras = 0
+        excluded_extras = 0
         for entry in entries:
             if bool(entry.get("is_dir")) or str(entry.get("media_kind") or "") != "video":
                 continue
@@ -240,22 +279,23 @@ def compile_episode_naming_operations(
                 continue
             if name_contains and name_contains.casefold() not in str(entry.get("name") or "").casefold():
                 continue
-            parsed_season, parsed_episode = _episode_position(entry)
-            if parsed_episode is None:
+            kind, _, parsed_season, parsed_episode = _episode_details(entry, normalized_root)
+            if kind == "unknown" or parsed_episode is None:
                 unparsed += 1
                 continue
             if source_season is not None and parsed_season != source_season:
                 continue
-            if source_season is None and target_season != 0 and parsed_season == 0:
-                # 未明确源季时，非特别篇目标季不能默默吸收 S00/番外。
-                continue
             if source_start <= parsed_episode <= source_end:
+                if kind == "extra" and not include_extras:
+                    excluded_extras += 1
+                    continue
+                included_extras += kind == "extra"
                 selected.append((parsed_episode, entry))
 
         selected.sort(key=lambda pair: (pair[0], str(pair[1].get("name") or "").casefold()))
         if not selected:
             detail = "，且存在无法识别集号的文件" if unparsed else ""
-            raise GuangYaEpisodeNamingError(f"第 {index} 个篇章映射没有匹配到正片{detail}")
+            raise GuangYaEpisodeNamingError(f"第 {index} 个篇章映射没有匹配到可处理文件（非正片默认排除）{detail}")
         if expected_count is not None and len(selected) != expected_count:
             raise GuangYaEpisodeNamingError(
                 f"第 {index} 个篇章映射预期 {expected_count} 集，实际匹配 {len(selected)} 集"
@@ -323,6 +363,9 @@ def compile_episode_naming_operations(
                 else Path(source_path).name,
                 "season": target_season,
                 "matched": len(selected),
+                "included_extra_count": included_extras,
+                "excluded_extra_count": excluded_extras,
+                "unknown_count": unparsed,
                 "renamed_in_place": len(rename_items),
                 "relocated": len(relocate_items),
                 "source_episode_start": selected[0][0],
@@ -353,6 +396,7 @@ def compile_episode_naming_operations(
         "operations": operations,
         "effective_total": effective_total,
         "selected_files": len(used_handles),
+        "included_extra_count": sum(group["included_extra_count"] for group in group_summaries),
         "created_directories": len(create_operations),
         "skipped_noop": skipped_noop,
         "groups": group_summaries,

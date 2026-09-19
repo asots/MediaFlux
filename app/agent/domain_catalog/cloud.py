@@ -449,7 +449,8 @@ def register_specs(
             name="guangya.episode_naming.inspect",
             description=(
                 "为混乱发布组剧集目录建立一次完整只读快照，并把全部视频按来源父目录压缩为"
-                "可识别源季、集号区间、数量、小体积文件数和少量样例。用于制定 TMDB 分季映射；"
+                "正片源季集区间、数量与样例；extras/unknown 分开统计并各自保留异常样例。"
+                "这些是本地源位置，不是 TMDB 映射，目录名或已观察集数不能证明目标偏移；"
                 "不要用 guangya.fs.query 分页读取全部文件，也不要用刮削或垃圾清理工具代替本盘点。"
             ),
             risk=RiskLevel.READ,
@@ -487,7 +488,9 @@ def register_specs(
                 "把光鸭共同父目录中的发布组剧集按紧凑篇章映射编译为 TMDB 标准分季文件："
                 "工具会在预检时自行建立完整最新快照，再按精确 source_path 或唯一目录名片段、"
                 "源季集区间和目标季集区间自动选择全部正片，保留扩展名，创建缺失的 Season XX 目录，"
-                "并生成移动加改名的单一冻结计划。模型不得逐文件拼 object_ref，也不需要传分页快照引用；"
+                "并生成移动加改名的单一冻结计划。普通正片映射默认排除 Movie/广告/特典；明确 S0 映射兼容纳入意图，include_extras=false 始终排除。"
+                "没有可靠映射时应答复待核对，不得按目录名、源季号或本地已观察集数猜偏移。"
+                "模型不得逐文件拼 object_ref，也不需要传分页快照引用；"
                 "最多一次处理 200 个媒体文件并创建 32 个分季目录。调用只产生人工确认卡，不会立即写入云盘。"
             ),
             risk=RiskLevel.DANGER,
@@ -553,6 +556,11 @@ def register_specs(
                                     "minimum": 1,
                                     "maximum": 9999,
                                     "default": 1,
+                                    "description": "目标起始集号；省略兼容默认 1。有偏移时必须依据真实 TMDB 对应关系或用户明确指定，不能按本地数量推断。",
+                                },
+                                "include_extras": {
+                                    "type": "boolean",
+                                    "description": "省略时，明确 source_season=0 或 target_season=0 等同显式选择非正片并继承纳入意图；普通正片映射默认 false。显式 false 始终排除，true 仅用于明确要求纳入非正片。unknown 仍不自动编号。",
                                 },
                                 "name_contains": {
                                     "type": "string",

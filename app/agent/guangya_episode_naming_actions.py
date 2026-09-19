@@ -104,7 +104,8 @@ def inspect_guangya_episode_naming(
         data=data,
         model_data=data,
         suggestions=[
-            "确认 TMDB 季集映射后，一次调用 guangya.episode_naming.plan 生成完整确认卡。"
+            "先核对 compact 正片位置、extras 与 unknown；源季号/本地数量不能证明 TMDB 目标偏移。",
+            "只在取得可靠 TMDB 映射或用户明确指定映射后建卡；缺依据则说明待核对，不能猜测。",
         ],
     )
 
@@ -136,9 +137,12 @@ def guangya_episode_naming_plan_arguments(arguments: dict[str, Any]) -> dict[str
             "source_season",
             "name_contains",
             "expected_count",
+            "include_extras",
         }
         if set(raw) - expected:
             raise AgentToolError(f"第 {index} 个篇章映射包含不支持的参数")
+        if type(raw.get("include_extras", False)) is not bool:
+            raise AgentToolError("include_extras 必须是布尔值")
         required = {
             "target_season",
             "source_episode_start",
@@ -199,6 +203,9 @@ def guangya_episode_naming_plan_arguments(arguments: dict[str, Any]) -> dict[str
             group["expected_count"] = _integer(
                 raw.get("expected_count"), field="expected_count", minimum=1, maximum=200
             )
+        group["include_extras"] = raw.get(
+            "include_extras", group.get("source_season") == 0 or group["target_season"] == 0
+        )
         groups.append(group)
     trigger_strm = arguments.get("trigger_strm", True)
     if type(trigger_strm) is not bool:
@@ -253,6 +260,7 @@ def prepare_guangya_episode_naming_confirmation(
         discard_observation(str(fs_arguments.get("observation_ref") or ""))
     mapping = {
         "selected_files": int(compiled["selected_files"]),
+        "included_extra_count": int(compiled["included_extra_count"]),
         "created_directories": int(compiled["created_directories"]),
         "skipped_noop": int(compiled["skipped_noop"]),
         "groups": list(compiled["groups"]),
@@ -260,7 +268,12 @@ def prepare_guangya_episode_naming_confirmation(
     confirmation.summary = (
         f"确认后将按分季方案执行 {int(preview.data.get('total') or 0)} 项光鸭文件变更"
     )
+    if mapping["included_extra_count"]:
+        confirmation.summary += f"（含 {mapping['included_extra_count']} 个非正片，需明确授权纳入）"
     confirmation.data = {**confirmation.data, "episode_naming": mapping}
     confirmation.model_data = dict(confirmation.data)
-    confirmation.suggestions = ["请核对每季匹配数量；确认后由一个持久任务完成整份计划。"]
+    confirmation.suggestions = [
+        "请核对每季匹配数量和非正片纳入范围；确认后由一个持久任务完成整份计划。",
+        "源目录/已观察集数不能证明 TMDB 偏移；映射未核实时不要确认。",
+    ]
     return confirmation, fingerprint

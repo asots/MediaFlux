@@ -18,6 +18,7 @@ from app.modules import guangya_fs_change, guangya_workspace
 from app.modules.guangya_episode_naming import (
     GuangYaEpisodeNamingError,
     compile_episode_naming_operations,
+    summarize_episode_naming_observation,
 )
 from tests.support import isolated_test_database
 
@@ -423,3 +424,270 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
                     ],
                 }
             )
+
+    @staticmethod
+    def _b1_observation(*names: str, parent: str = "/Series/Release") -> dict:
+        return {
+            "plan_id": "b1-observation", "truncated": False,
+            "entries": [
+                {"handle": f"B1-{i}", "name": name, "is_dir": False,
+                 "media_kind": "video", "parent_path": parent, "size": 1000}
+                for i, name in enumerate(names, 1)
+            ],
+        }
+
+    @staticmethod
+    def _b1_mapping(**changes) -> dict:
+        return {
+            "source_path": "/Series/Release",
+            "source_episode_start": 1, "source_episode_end": 3,
+            "target_season": 1, "target_episode_start": 1, "expected_count": 3,
+            **changes,
+        }
+
+    def test_mixed_inspect_separates_all_exception_types_after_regular_samples(self):
+        regular = [f"Series S01E{i:02d}.mkv" for i in range(1, 7)]
+        observation = self._b1_observation(
+            *regular, "Series S01E14 - Movie.mkv", "Series S01E15 - AD.mkv",
+            "Series S01E16 - 特典.mkv", "Series NCOP01.mkv",
+            "zzz unknown.mkv", "Series S01E20-E21.mkv",
+        )
+        data = summarize_episode_naming_observation(observation, target_root="/Series")
+        group = data["groups"][0]
+        self.assertEqual((data["video_count"], data["regular_count"], data["extra_count"], data["unknown_count"]), (12, 6, 4, 2))
+        self.assertEqual(group["positions"], [{"source_season": 1, "episodes": "1-6", "count": 6}])
+        self.assertEqual(group["small_video_count"], 12)
+        self.assertEqual({r["reason"] for r in group["extras"]}, {"movie", "advertisement", "extra", "special_media"})
+        self.assertEqual({r["reason"] for r in group["unknown"]}, {"unparsed_episode", "multi_episode_file"})
+        self.assertEqual({name for row in group["extras"] for name in row["samples"]}, {observation["entries"][i]["name"] for i in range(6, 10)})
+        self.assertEqual(len(group["samples"]), 3)
+        self.assertTrue(group["samples_truncated"])
+        self.assertEqual(data["mapping_status"], "needs_verification")
+        self.assertNotIn("target_episode_start", str(data))
+
+    def test_compact_exception_summary_keeps_full_counts_not_all_names(self):
+        observation = self._b1_observation(
+            *(f"Series S01E{i:03d}.mkv" for i in range(1, 101)),
+            *(f"Series S03E{i:03d} - Movie.mkv" for i in range(1, 101)),
+            "Series S03E101 - AD.mkv", "zzz unknown.mkv",
+        )
+        data = summarize_episode_naming_observation(observation, target_root="/Series")
+        group = data["groups"][0]
+        self.assertEqual(data["video_count"], 202)
+        movies = next(row for row in group["extras"] if row["reason"] == "movie")
+        self.assertEqual(movies["video_count"], 100)
+        self.assertEqual(movies["positions"][0]["episodes"], "1-100")
+        self.assertTrue(movies["samples_truncated"])
+        self.assertEqual(len(movies["samples"]), 3)
+        ads = next(row for row in group["extras"] if row["reason"] == "advertisement")
+        self.assertEqual(ads["samples"], ["Series S03E101 - AD.mkv"])
+        self.assertLess(len(str(data)), 4000)
+
+    def test_shared_special_path_rules_and_explicit_extra_directories(self):
+        for directory in ("Extras", "Bonus", "Movie", "AD", "特典", "Extras/disc1"):
+            with self.subTest(directory=directory):
+                observation = self._b1_observation("Series S01E01.mkv", parent=f"/Series/{directory}")
+                data = summarize_episode_naming_observation(observation, target_root="/Series")
+                self.assertEqual(data["extra_count"], 1)
+                self.assertEqual(data["regular_count"], 0)
+                group = self._b1_mapping(source_path=f"/Series/{directory}", expected_count=1)
+                with self.assertRaisesRegex(GuangYaEpisodeNamingError, "非正片默认排除"):
+                    compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[group])
+        # 作品根外的目录不影响分类，词内部的 Movie/AD 也不触发排除。
+        observation = self._b1_observation("MovieMaker Adventure S01E01.mkv", parent="/Extras/Series/Release")
+        data = summarize_episode_naming_observation(observation, target_root="/Extras/Series")
+        self.assertEqual(data["regular_count"], 1)
+
+    def test_plan_excludes_movie_ad_and_unknown_before_matching_count(self):
+        observation = self._b1_observation(
+            "Series S01E01.mkv", "Series S01E02.mkv", "Series S01E03.mkv",
+            "Series S01E02 - Movie.mkv", "Series S01E03 - AD.mkv", "Series Unknown.mkv",
+        )
+        compiled = compile_episode_naming_operations(
+            observation, title="Series", target_root="/Series", groups=[self._b1_mapping()],
+        )
+        self.assertEqual(compiled["selected_files"], 3)
+        self.assertEqual(compiled["included_extra_count"], 0)
+        self.assertEqual(compiled["groups"][0]["excluded_extra_count"], 2)
+        self.assertEqual(compiled["groups"][0]["unknown_count"], 1)
+        move = next(op for op in compiled["operations"] if op["op"] == "batch_relocate")
+        self.assertEqual([r["object_ref"] for r in move["items"]], ["B1-1", "B1-2", "B1-3"])
+        with self.assertRaisesRegex(GuangYaEpisodeNamingError, "预期 5 集，实际匹配 3 集"):
+            compile_episode_naming_operations(
+                observation, title="Series", target_root="/Series", groups=[self._b1_mapping(expected_count=5)],
+            )
+
+    def test_explicit_false_excludes_extras_even_for_season_zero(self):
+        for name in ("Series S01E01 - Movie.mkv", "Series S01E01 - AD.mkv", "Series S01E01 - 特典.mkv", "Series NCOP01.mkv", "Series S00E01.mkv"):
+            with self.subTest(name=name):
+                observation = self._b1_observation(name)
+                group = self._b1_mapping(target_season=0, source_episode_end=1, expected_count=1, include_extras=False)
+                with self.assertRaisesRegex(GuangYaEpisodeNamingError, "非正片默认排除"):
+                    compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[group])
+                group["include_extras"] = True
+                compiled = compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[group])
+                self.assertEqual(compiled["included_extra_count"], 1)
+                self.assertEqual(compiled["groups"][0]["included_extra_count"], 1)
+                self.assertEqual(compiled["operations"][-1]["season"], 0)
+
+    def test_include_extras_does_not_invent_unknown_or_multi_episode_positions(self):
+        for name in ("unknown.mkv", "Series S01E04-E05.mkv", "Series S01E04E05.mkv"):
+            with self.subTest(name=name), self.assertRaisesRegex(GuangYaEpisodeNamingError, "无法识别集号"):
+                compile_episode_naming_operations(
+                    self._b1_observation(name), title="Series", target_root="/Series",
+                    groups=[self._b1_mapping(include_extras=True, source_episode_end=9, expected_count=1)],
+                )
+
+    def test_omitted_target_episode_start_keeps_legacy_default(self):
+        observation = self._b1_observation("Series S03E05.mkv", "Series S03E07.mkv")
+        group = self._b1_mapping(source_episode_start=5, source_episode_end=7, expected_count=2)
+        del group["target_episode_start"]
+        arguments = episode_actions.guangya_episode_naming_plan_arguments({
+            "title": "Series", "target_root": "/Series", "groups": [group],
+        })
+        self.assertEqual(arguments["groups"][0]["target_episode_start"], 1)
+        self.assertFalse(arguments["groups"][0]["include_extras"])
+        compiled = compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[group])
+        self.assertEqual([item["episode"] for item in compiled["operations"][-1]["items"]], [1, 3])
+
+    def test_extra_opt_in_requires_boolean_not_truthy_string(self):
+        for include_extras in ("true", 1, None):
+            with self.subTest(include_extras=include_extras):
+                group = self._b1_mapping(include_extras=include_extras)
+                with self.assertRaisesRegex(AgentToolError, "include_extras 必须是布尔值"):
+                    episode_actions.guangya_episode_naming_plan_arguments({
+                        "title": "Series", "target_root": "/Series", "groups": [group],
+                    })
+                with self.assertRaisesRegex(GuangYaEpisodeNamingError, "include_extras 必须是布尔值"):
+                    compile_episode_naming_operations(self._b1_observation("Series S01E01.mkv"), title="Series", target_root="/Series", groups=[group])
+
+    def test_explicit_offsets_preserve_gaps_not_observed_file_count(self):
+        observation = self._b1_observation("Series S03E02.mkv", "Series S03E05.mp4")
+        for target_start in (7, 42, 119):
+            with self.subTest(target_start=target_start):
+                group = self._b1_mapping(
+                    source_episode_start=2, source_episode_end=5, source_season=3,
+                    target_episode_start=target_start, expected_count=2,
+                )
+                args = episode_actions.guangya_episode_naming_plan_arguments({"title": "Series", "target_root": "/Series", "groups": [group]})
+                compiled = compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=args["groups"])
+                move = compiled["operations"][-1]
+                self.assertEqual([r["episode"] for r in move["items"]], [target_start, target_start + 3])
+                self.assertFalse(args["groups"][0]["include_extras"])
+
+    def test_correct_files_are_noop_and_partial_correct_files_not_rewritten(self):
+        observation = self._b1_observation(
+            "Series - S01E01.mkv", "Series - S01E02.mp4", "Series - S01E03.mkv",
+            parent="/Series/Season 01",
+        )
+        group = self._b1_mapping(source_path="/Series/Season 01")
+        with self.assertRaisesRegex(GuangYaEpisodeNamingError, "无需变更"):
+            compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[group])
+        observation["entries"][-1]["name"] = "Series S01E03.mkv"
+        compiled = compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[group])
+        self.assertEqual(compiled["skipped_noop"], 2)
+        self.assertEqual(compiled["operations"], [{"op": "rename", "object_ref": "B1-3", "new_name": "Series - S01E03.mkv"}])
+
+    def test_default_exclusions_survive_actual_frozen_plan_compilation(self):
+        client = EpisodeNamingClient(episodes_per_group=3)
+        client.directories["release-a"].append(GuangYaFile(
+            "movie", "Test S01E02 - Movie.mkv", False,
+            parent_id="release-a", size=1000, etag="movie", extension="mkv",
+        ))
+        args = self._arguments()
+        args["groups"] = [dict(group, source_episode_end=3, expected_count=3) for group in args["groups"]]
+        with mock.patch.object(episode_actions, "GuangYaClient", return_value=client), mock.patch.object(change_actions, "GuangYaClient", return_value=client):
+            confirmation, _ = episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"))
+        mapping = confirmation.data["episode_naming"]
+        self.assertEqual(mapping["selected_files"], 6)
+        self.assertEqual(mapping["included_extra_count"], 0)
+        self.assertEqual(mapping["groups"][0]["excluded_extra_count"], 1)
+        flow = change_actions._flow("owner")
+        plan = guangya_fs_change.load_fs_change_plan(flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint)
+        self.assertEqual({op["source"]["file_id"] for op in plan["operations"]}, {f"{prefix}-{i}" for prefix in ("a", "b") for i in range(1, 4)})
+        self.assertFalse(plan["trigger_strm"])
+
+    def test_explicit_extra_inclusion_visible_on_confirmation_card(self):
+        client = EpisodeNamingClient(episodes_per_group=1)
+        client.directories["release-a"][0].name = "Test S01E01 - Movie.mkv"
+        args = self._arguments()
+        args["groups"] = [dict(args["groups"][0], source_episode_end=1, expected_count=1, include_extras=True)]
+        with mock.patch.object(episode_actions, "GuangYaClient", return_value=client), mock.patch.object(change_actions, "GuangYaClient", return_value=client):
+            confirmation, _ = episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"))
+        self.assertEqual(confirmation.data["episode_naming"]["included_extra_count"], 1)
+        self.assertIn("含 1 个非正片", confirmation.summary)
+        self.assertEqual(confirmation.status, "confirmation_required")
+
+    def test_catalog_keeps_mapping_compatibility_and_declares_opt_in_extras(self):
+        from types import SimpleNamespace
+
+        from app.agent.domain_catalog.cloud import register_specs
+
+        specs = []
+        register_specs(SimpleNamespace(register=specs.append), resource_store=None, active_ingest_store=None, ingest_actions=None)
+        plan = next(spec for spec in specs if spec.name == "guangya.episode_naming.plan")
+        group = plan.parameters["properties"]["groups"]["items"]
+        self.assertNotIn("target_episode_start", group["required"])
+        self.assertEqual(group["properties"]["target_episode_start"]["default"], 1)
+        self.assertNotIn("mapping_evidence", group["properties"])
+        extras = group["properties"]["include_extras"]
+        self.assertNotIn("default", extras)
+        self.assertIn("source_season=0 或 target_season=0", extras["description"])
+        self.assertIn("显式 false 始终排除", extras["description"])
+        self.assertTrue(plan.requires_confirmation)
+
+
+    def test_noop_confirmation_discards_observation_without_creating_plan(self):
+        observation = self._b1_observation(
+            "Series - S01E01.mkv", "Series - S01E02.mkv", "Series - S01E03.mkv",
+            parent="/Series/Season 01",
+        )
+        args = episode_actions.guangya_episode_naming_plan_arguments({
+            "title": "Series", "target_root": "/Series", "trigger_strm": False,
+            "groups": [self._b1_mapping(source_path="/Series/Season 01")],
+        })
+        with (
+            mock.patch.object(episode_actions, "_fresh_observation", return_value=observation),
+            mock.patch.object(episode_actions, "discard_observation") as discard,
+            mock.patch.object(episode_actions, "preview_guangya_fs_change") as preview,
+            self.assertRaisesRegex(AgentToolError, "无需变更"),
+        ):
+            episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"))
+        discard.assert_called_once_with("b1-observation")
+        preview.assert_not_called()
+        self.assertEqual(list(self.plan_dir.glob("*.json")), [])
+
+
+    def test_legacy_s0_mapping_inherits_extra_selection_unless_explicit_false(self):
+        observation = self._b1_observation("Series S00E01.mkv")
+        for seasons in ({"source_season": 0}, {"target_season": 0}, {"source_season": 0, "target_season": 0}):
+            for explicit_false in (False, True):
+                with self.subTest(seasons=seasons, explicit_false=explicit_false):
+                    group = self._b1_mapping(source_episode_end=1, expected_count=1, **seasons)
+                    if explicit_false:
+                        group["include_extras"] = False
+                    normalized = episode_actions.guangya_episode_naming_plan_arguments({
+                        "title": "Series", "target_root": "/Series", "groups": [group],
+                    })["groups"][0]
+                    self.assertIs(normalized["include_extras"], not explicit_false)
+                    for candidate in (group, normalized):
+                        if explicit_false:
+                            with self.assertRaisesRegex(GuangYaEpisodeNamingError, "非正片默认排除"):
+                                compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[candidate])
+                        else:
+                            compiled = compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[candidate])
+                            self.assertEqual(compiled["selected_files"], 1)
+                            self.assertEqual(compiled["included_extra_count"], 1)
+
+    def test_regular_mapping_still_excludes_movie_when_extra_flag_omitted(self):
+        observation = self._b1_observation("Series S01E01.mkv", "Series S01E02 - Movie.mkv")
+        group = self._b1_mapping(source_episode_end=2, expected_count=1)
+        normalized = episode_actions.guangya_episode_naming_plan_arguments({
+            "title": "Series", "target_root": "/Series", "groups": [group],
+        })["groups"][0]
+        self.assertIs(normalized["include_extras"], False)
+        for candidate in (group, normalized):
+            compiled = compile_episode_naming_operations(observation, title="Series", target_root="/Series", groups=[candidate])
+            self.assertEqual(compiled["selected_files"], 1)
+            self.assertEqual(compiled["included_extra_count"], 0)
+            self.assertEqual(compiled["groups"][0]["excluded_extra_count"], 1)
