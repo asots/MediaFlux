@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 import requests
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +16,11 @@ from tests.support import InitializedWebTestCase
 
 from app import config as app_config
 from app import database
+from app.discovery.models import (
+    ProviderAuthenticationError,
+    ProviderRateLimited,
+    ProviderTimeout,
+)
 from app.clients.douban_public import DoubanPublicPage
 from app.discovery.cache import DiscoveryCache
 from app.discovery.models import DiscoveryPage, MediaCard, ProviderHealth, ProviderUnavailable
@@ -175,6 +180,110 @@ class _BaseClientTests(InitializedWebTestCase):
 class DiscoveryAPITests(_BaseClientTests):
     def test_api_requires_login(self):
         self.assertEqual(self.client.get("/api/discovery/sections").status_code, 401)
+
+    def test_douban_dbcl2_status_requires_login_and_never_returns_cookie(self):
+        self.assertEqual(self.client.get("/api/douban/dbcl2/status").status_code, 401)
+
+        self.authenticate()
+        with patch("app.routes.api.config.get", return_value=""):
+            response = self.client.get("/api/douban/dbcl2/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "unconfigured"})
+        self.assertNotIn("dbcl2", response.text.lower())
+
+    def test_douban_dbcl2_status_maps_authenticated_client_outcomes(self):
+        self.authenticate()
+        cases = (
+            ("valid", "valid"),
+            ("invalid", "invalid"),
+            ("unconfigured", "unconfigured"),
+            ("unknown", "unknown"),
+        )
+        for client_status, expected in cases:
+            with self.subTest(client_status=client_status):
+                client = Mock()
+                client.check_authentication.return_value = client_status
+                client.configured = client_status != "unconfigured"
+                with patch(
+                    "app.routes.api.DoubanAuthenticatedClient",
+                    return_value=client,
+                ), patch(
+                    "app.routes.api.config.get",
+                    return_value="123456789:test-dbcl2-value",
+                ):
+                    response = self.client.get("/api/douban/dbcl2/status")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"status": expected})
+                self.assertNotIn("123456789:test-dbcl2-value", response.text)
+
+    def test_douban_dbcl2_status_never_marks_indeterminate_provider_errors_invalid(self):
+        self.authenticate()
+        for error in (
+            ProviderTimeout("timeout"),
+            ProviderRateLimited("rate limited"),
+            ProviderAuthenticationError("authentication"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                client = Mock()
+                client.check_authentication.side_effect = error
+                with patch(
+                    "app.routes.api.DoubanAuthenticatedClient",
+                    return_value=client,
+                ), patch(
+                    "app.routes.api.config.get",
+                    return_value="123456789:test-dbcl2-value",
+                ):
+                    response = self.client.get("/api/douban/dbcl2/status")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"status": "unknown"})
+                self.assertNotIn("123456789:test-dbcl2-value", response.text)
+
+    def test_douban_dbcl2_status_closes_session_after_success(self):
+        self.authenticate()
+        session = MagicMock()
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        client = Mock()
+        client.check_authentication.return_value = "valid"
+
+        with patch("app.routes.api.requests.Session", return_value=session), patch(
+            "app.routes.api.DoubanAuthenticatedClient", return_value=client
+        ), patch(
+            "app.routes.api.config.get", return_value="123456789:test-dbcl2-value"
+        ):
+            response = self.client.get("/api/douban/dbcl2/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "valid"})
+        session.__enter__.assert_called_once_with()
+        session.__exit__.assert_called_once_with(None, None, None)
+        client.assert_not_called()
+        client.check_authentication.assert_called_once_with()
+
+    def test_douban_dbcl2_status_closes_session_after_client_failure(self):
+        self.authenticate()
+        session = MagicMock()
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        client = Mock()
+        client.check_authentication.side_effect = ProviderTimeout("timeout")
+
+        with patch("app.routes.api.requests.Session", return_value=session), patch(
+            "app.routes.api.DoubanAuthenticatedClient", return_value=client
+        ), patch(
+            "app.routes.api.config.get", return_value="123456789:test-dbcl2-value"
+        ):
+            response = self.client.get("/api/douban/dbcl2/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "unknown"})
+        session.__enter__.assert_called_once_with()
+        session.__exit__.assert_called_once()
+        exit_args = session.__exit__.call_args.args
+        self.assertIs(exit_args[0], ProviderTimeout)
+        self.assertIsInstance(exit_args[1], ProviderTimeout)
+        client.check_authentication.assert_called_once_with()
 
     def test_sections_items_filters_and_detail_use_safe_contract(self):
         self.authenticate()

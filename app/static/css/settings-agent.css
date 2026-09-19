@@ -1942,3 +1942,18 @@ html[data-settings-config="pending"] .settings-page #settingsForm {
 
 .agent-settings-card-global .agent-settings-card-head { min-height: 0; }
 .agent-settings-card-global .agent-settings-boundary { margin-top: 14px; }
+
+/* 豆瓣 dbcl2 状态：固定占位，避免异步探测改变设置行高度。 */
+.settings-page .douban-dbcl2-status {
+    display: inline-block;
+    min-width: 4.8em;
+    margin-left: 5px;
+    color: var(--text-muted);
+    font-size: .82em;
+    font-weight: 500;
+    white-space: nowrap;
+    vertical-align: baseline;
+}
+.settings-page .douban-dbcl2-status[data-tone="valid"] { color: var(--success); }
+.settings-page .douban-dbcl2-status[data-tone="invalid"] { color: var(--danger); }
+.settings-page .douban-dbcl2-status[data-tone="unknown"] { color: var(--text-muted); }

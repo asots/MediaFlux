@@ -151,6 +151,32 @@ class DiscoveryPageTests(InitializedWebTestCase):
         self.assertNotIn("配置可选回退", response.text)
         self.assertNotIn('data-key="BANGUMI_USER_AGENT"', response.text)
 
+    def test_settings_douban_cookie_exposes_stable_status_slot_without_cookie_value(self):
+        self._login()
+
+        response = self.client.get("/settings")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-douban-dbcl2-status', response.text)
+        self.assertIn('aria-live="polite"', response.text)
+        self.assertIn('· 未确认', response.text)
+        self.assertIn('/api/douban/dbcl2/status', (ROOT / "app/static/js/settings.js").read_text(encoding="utf-8"))
+        self.assertIn('data-tone="unknown"', response.text)
+        self.assertNotIn("123456789:test-dbcl2-value", response.text)
+
+    def test_settings_douban_cookie_status_contract_uses_neutral_state_for_network_uncertainty(self):
+        html = (
+            SETTINGS_TEMPLATE.read_text(encoding="utf-8")
+            + (ROOT / "app/static/js/settings.js").read_text(encoding="utf-8")
+            + (ROOT / "app/static/css/settings-agent.css").read_text(encoding="utf-8")
+        )
+        self.assertIn("data-douban-dbcl2-status", html)
+        self.assertIn("setDoubanDbcl2Status", html)
+        self.assertIn("未知", html)
+        self.assertIn("有效", html)
+        self.assertIn("无效", html)
+        self.assertIn("douban-dbcl2-status", html)
+
     def test_settings_never_renders_stored_frodo_or_dbcl2_values(self):
         self._login()
 

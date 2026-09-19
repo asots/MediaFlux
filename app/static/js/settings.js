@@ -42,6 +42,28 @@
     const indexerSiteInputs=[...(indexerSiteBox?.querySelectorAll('[data-indexer-site]')||[])];
     const resourceResultsToggle=form.querySelector('[data-key="DISCOVERY_RESOURCE_RESULTS_ENABLED"]');
     const indexerSearchToggle=form.querySelector('[data-key="INDEXER_SEARCH_ENABLED"]');
+    const doubanDbcl2Input=form.querySelector('[data-key="DOUBAN_DBCL2"]');
+    const doubanDbcl2Status=form.querySelector('[data-douban-dbcl2-status]');
+    let doubanDbcl2StatusGeneration=0;
+
+    function captureDoubanDbcl2State(){
+        return {
+            value:doubanDbcl2Input?.value||'',
+            secretState:doubanDbcl2Input?.dataset.secretState||'empty',
+        };
+    }
+    function isCurrentSavedDoubanDbcl2State(snapshot){
+        const current=captureDoubanDbcl2State();
+        return current.value===snapshot.value
+            && current.secretState===snapshot.secretState
+            && !['draft','clear'].includes(current.secretState);
+    }
+    function isSavedDoubanDbcl2State(){
+        return !['draft','clear'].includes(captureDoubanDbcl2State().secretState);
+    }
+    function invalidateDoubanDbcl2Status(){
+        doubanDbcl2StatusGeneration+=1;
+    }
 
     function syncIndexerSiteSelection(){
         if(!indexerSiteField)return;
@@ -160,6 +182,40 @@
         });
     }
 
+    function setDoubanDbcl2Status(status){
+        if(!doubanDbcl2Status)return;
+        const states={
+            valid:{label:'· 有效',tone:'valid'},
+            invalid:{label:'· 无效',tone:'invalid'},
+            unconfigured:{label:'· 未配置',tone:'unknown'},
+            unknown:{label:'· 未确认',tone:'unknown'},
+        };
+        const next=states[status]||states.unknown;
+        doubanDbcl2Status.textContent=next.label;
+        doubanDbcl2Status.dataset.tone=next.tone;
+    }
+
+    async function refreshDoubanDbcl2Status(){
+        const generation=++doubanDbcl2StatusGeneration;
+        const savedState=captureDoubanDbcl2State();
+        setDoubanDbcl2Status('unknown');
+        try{
+            const response=await fetch('/api/douban/dbcl2/status');
+            const data=await response.json();
+            if(!response.ok)throw new Error(data.error||'状态读取失败');
+            if(generation!==doubanDbcl2StatusGeneration||!isCurrentSavedDoubanDbcl2State(savedState))return;
+            setDoubanDbcl2Status(data.status);
+        }catch{
+            if(generation===doubanDbcl2StatusGeneration&&isCurrentSavedDoubanDbcl2State(savedState))setDoubanDbcl2Status('unknown');
+        }
+    }
+
+    doubanDbcl2Input?.addEventListener('input',()=>{
+        invalidateDoubanDbcl2Status();
+        if(!configReady)return;
+        setDoubanDbcl2Status(doubanDbcl2Input.value.trim()?'unknown':'unconfigured');
+    });
+
     loadAppConfig().then(config=>{
         // 与执行端 get_bool 一致，避免部署环境使用 on/y 时授权已生效却显示关闭。
         [recognitionReviewToggle,nsfwCleanReviewToggle,episodeResearchToggle,
@@ -175,6 +231,7 @@
         loadIndexerSiteSelection(config);
         setConfigReady();
         syncTelemetryWidgets();
+        refreshDoubanDbcl2Status();
     }).catch(setConfigLoadError);
 
     saveButtons.forEach(button=>button.addEventListener('click',async()=>{
@@ -185,6 +242,9 @@
         button.setAttribute('aria-disabled','true');
         button.classList.add('is-saving');
         button.setAttribute('aria-busy','true');
+        const isDoubanDiscoverySave=panel?.dataset.settingsPanel==='discovery';
+        if(isDoubanDiscoverySave)invalidateDoubanDbcl2Status();
+        const saveGeneration=doubanDbcl2StatusGeneration;
         state.className='';
         state.textContent='正在保存当前分区...';
         try{
@@ -193,6 +253,7 @@
                 || Object.keys(collectConfigFields(panel)).length>0;
             state.className=hasPendingChanges?'':'is-success';
             state.textContent=hasPendingChanges?'上一版已保存，仍有未保存更改':'当前分区已保存';
+            if(isDoubanDiscoverySave&&saveGeneration===doubanDbcl2StatusGeneration&&isSavedDoubanDbcl2State())refreshDoubanDbcl2Status();
         }
         catch(error){state.className='is-error';state.textContent=error.message;}
         finally{

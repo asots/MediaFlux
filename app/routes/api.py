@@ -10,7 +10,10 @@ import requests
 from fastapi import APIRouter, Body, Request
 
 from app import config
-from app.clients.douban_authenticated import normalize_dbcl2
+from app.clients.douban_authenticated import (
+    DoubanAuthenticatedClient,
+    normalize_dbcl2,
+)
 from app.defaults import (
     DEFAULT_AGENT_EPISODE_RESEARCH_ENABLED,
     DEFAULT_AGENT_EPISODE_RESEARCH_DAILY_LIMIT,
@@ -18,6 +21,7 @@ from app.defaults import (
     DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS,
     MAX_DOWNLOAD_TORRENT_RETENTION_DAYS,
 )
+from app.discovery.models import ProviderError
 from app.indexers.config import build_indexer_site_updates, encode_indexer_site_ids
 from app.logger import configure_telebot_logging, get_logger
 from app.security import redact_config
@@ -1033,6 +1037,25 @@ def get_config(request: Request):
         redacted["DOUBAN_DBCL2"] = _CONFIG_MASK
     redacted["__managed_fields"] = managed_fields
     return redacted
+
+
+@router.get("/douban/dbcl2/status")
+def get_douban_dbcl2_status(request: Request):
+    """返回 dbcl2 的非敏感状态，不返回 Cookie 或上游响应内容。"""
+    require_api_login(request)
+    try:
+        with requests.Session() as session:
+            client = DoubanAuthenticatedClient(
+                dbcl2=config.get("DOUBAN_DBCL2", ""),
+                session=session,
+            )
+            status = client.check_authentication()
+    except (ProviderError, ValueError):
+        # 状态探测失败只能保持灰色，不能把网络/风控问题误判为失效。
+        status = "unknown"
+    if status not in {"valid", "invalid", "unknown", "unconfigured"}:
+        status = "unknown"
+    return {"status": status}
 
 
 def _normalize_organize_extensions(value: object, *, defaults: tuple[str, ...], label: str) -> str:

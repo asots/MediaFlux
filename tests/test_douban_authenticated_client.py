@@ -32,6 +32,30 @@ class CapturingSession(requests.Session):
         return response
 
 
+class AuthStatusSession(requests.Session):
+    def __init__(self, *, status_code=200, body="", headers=None, error=None):
+        super().__init__()
+        self.status_code = status_code
+        self.body = body.encode("utf-8")
+        self.response_headers = headers or {"Content-Type": "text/html; charset=utf-8"}
+        self.error = error
+        self.prepared_requests = []
+
+    def send(self, request, **kwargs):
+        del kwargs
+        self.prepared_requests.append(request)
+        if self.error is not None:
+            raise self.error
+        response = requests.Response()
+        response.status_code = self.status_code
+        response.headers = self.response_headers
+        response.url = request.url
+        response.request = request
+        response._content = self.body
+        response._content_consumed = True
+        return response
+
+
 class DoubanDbcl2NormalizationTests(unittest.TestCase):
     def test_accepts_raw_quoted_and_full_cookie_but_retains_only_value(self):
         expected = "123456789:test-dbcl2-value"
@@ -128,6 +152,89 @@ class DoubanAuthenticatedClientTests(unittest.TestCase):
         rendered = "\n".join(captured.output + [str(raised.exception), repr(raised.exception)])
         self.assertNotIn(self.DBCL2, rendered)
         self.assertNotIn("dbcl2=", rendered.lower())
+
+    def test_authentication_status_requires_authenticated_marker_on_private_page(self):
+        cases = (
+            (
+                "valid",
+                '<div class="top-nav-info"><span class="nav-user-name">测试用户</span></div>',
+                200,
+                {},
+            ),
+            (
+                "invalid",
+                '<a class="nav-login" href="https://accounts.douban.com/passport/login">登录/注册</a>',
+                200,
+                {},
+            ),
+            (
+                "invalid",
+                "",
+                302,
+                {"Location": "https://accounts.douban.com/passport/login?source=movie"},
+            ),
+            (
+                "unknown",
+                "",
+                302,
+                {"Location": "https://sec.douban.com/aegis/verify?source=movie"},
+            ),
+            (
+                "unknown",
+                '<title>没有访问权限</title><a class="nav-login">登录/注册</a>',
+                403,
+                {},
+            ),
+            (
+                "unknown",
+                "<html><body>公共页面</body></html>",
+                200,
+                {},
+            ),
+        )
+        for expected, body, status_code, headers in cases:
+            with self.subTest(expected=expected, status_code=status_code):
+                response_headers = {"Content-Type": "text/html; charset=utf-8"}
+                response_headers.update(headers)
+                session = AuthStatusSession(
+                    status_code=status_code,
+                    body=body,
+                    headers=response_headers,
+                )
+                client = DoubanAuthenticatedClient(dbcl2=self.DBCL2, session=session)
+
+                self.assertEqual(client.check_authentication(), expected)
+                self.assertEqual(
+                    urlsplit(session.prepared_requests[0].url).path,
+                    "/mine",
+                )
+
+    def test_authentication_status_does_not_use_public_search_page_or_leak_cookie(self):
+        session = AuthStatusSession(
+            body='{"subjects": []}',
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        client = DoubanAuthenticatedClient(dbcl2=self.DBCL2, session=session)
+
+        self.assertEqual(client.check_authentication(), "unknown")
+        self.assertNotIn("search_subjects", session.prepared_requests[0].url)
+        self.assertEqual(
+            session.prepared_requests[0].headers.get("Cookie"),
+            f"dbcl2={self.DBCL2}",
+        )
+
+    def test_unconfigured_authentication_status_never_performs_network_request(self):
+        session = AuthStatusSession()
+        client = DoubanAuthenticatedClient(dbcl2="", session=session)
+
+        self.assertEqual(client.check_authentication(), "unconfigured")
+        self.assertEqual(session.prepared_requests, [])
+
+    def test_authentication_status_keeps_timeout_inconclusive(self):
+        session = AuthStatusSession(error=requests.Timeout("simulated timeout"))
+        client = DoubanAuthenticatedClient(dbcl2=self.DBCL2, session=session)
+
+        self.assertEqual(client.check_authentication(), "unknown")
 
 
 if __name__ == "__main__":

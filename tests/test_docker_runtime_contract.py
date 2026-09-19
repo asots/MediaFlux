@@ -276,6 +276,7 @@ class DockerRuntimeContractTests(unittest.TestCase):
                 "tests.test_release_formats_browser",
                 "tests.test_deep_audit_rss_browser",
                 "tests.test_agent_nsfw_clean_review_settings_browser",
+                "tests.test_douban_dbcl2_settings_browser",
                 "tests.test_settings_review_tooltips_browser",
                 "tests.test_guangya_directory_scrape_browser",
                 "tests.test_guangya_directory_scrape_ui",

@@ -49,6 +49,21 @@ _MAX_DBCL2_LENGTH = 512
 _DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _SENSITIVE_SESSION_HEADERS = {"authorization", "proxy-authorization", "cookie"}
 _EXTERNAL_ID_RE = re.compile(r"^[0-9]+$")
+_AUTH_STATUS_PATH = "/mine"
+_AUTH_LOGIN_MARKER_RE = re.compile(
+    r'<[^>]+class=["\'][^"\']*\bnav-login\b[^"\']*["\'][^>]*>',
+    re.IGNORECASE,
+)
+_AUTHENTICATED_MARKER_RE = re.compile(
+    r"(?:"
+    r'<[^>]+class=["\'][^"\']*\bnav-user-name\b[^"\']*["\'][^>]*>'
+    r"|"
+    r'<[^>]+class=["\'][^"\']*\bnav-user-account\b[^"\']*["\'][^>]*>'
+    r"|"
+    r'<[^>]+href=["\']https://www\.douban\.com/mine/?(?:["\'][^>]*|\?[^"\']*)["\']'
+    r")",
+    re.IGNORECASE,
+)
 
 
 def normalize_dbcl2(value: str | None) -> str:
@@ -183,17 +198,27 @@ class DoubanAuthenticatedClient:
             raise ProviderNotConfigured("豆瓣 dbcl2 回退未配置")
 
     @staticmethod
-    def _status_error(response: Any) -> ProviderError | None:
+    def _status_error(
+        response: Any,
+        *,
+        classify_authentication: bool = True,
+    ) -> ProviderError | None:
         status = int(getattr(response, "status_code", 0) or 0)
         if 300 <= status < 400:
             # dbcl2 过期时豆瓣把受保护页面 302 到登录页；这是登录态失效，
             # 不是服务不可用，必须让用户看到可操作的原因。
             location = _header(getattr(response, "headers", {}) or {}, "Location").lower()
+            if not classify_authentication and "sec.douban" in location:
+                # 安全验证/风控跳转没有足够证据判断 Cookie 是否失效。
+                return ProviderUnavailable("豆瓣认证状态暂时无法确认")
             if "login" in location or "accounts.douban" in location or "sec.douban" in location:
                 return ProviderAuthenticationError("豆瓣 dbcl2 登录态已失效，请更新 Cookie")
             return ProviderUnavailable("豆瓣认证上游重定向被拒绝")
         if status in {401, 403}:
-            return ProviderAuthenticationError("豆瓣登录态已失效")
+            if classify_authentication:
+                return ProviderAuthenticationError("豆瓣登录态已失效")
+            # 豆瓣会用 403 表示风控/访问权限不足；认证探测不能把它误报成失效。
+            return ProviderUnavailable("豆瓣认证状态暂时无法确认")
         if status == 429:
             try:
                 retry_after = int(_header(response.headers or {}, "Retry-After") or 0)
@@ -240,6 +265,7 @@ class DoubanAuthenticatedClient:
         *,
         params: Mapping[str, Any] | None,
         expected: str,
+        classify_authentication: bool = True,
     ) -> tuple[bytes, str]:
         self._ensure_configured()
         response = None
@@ -259,7 +285,10 @@ class DoubanAuthenticatedClient:
                 allow_redirects=False,
                 stream=True,
             )
-            failure = self._status_error(response)
+            failure = self._status_error(
+                response,
+                classify_authentication=classify_authentication,
+            )
             if failure is None:
                 result = self._read(response, expected)
         except ProviderError as exc:
@@ -279,6 +308,34 @@ class DoubanAuthenticatedClient:
         if result is None:
             raise ProviderInvalidResponse("豆瓣认证响应无效")
         return result
+
+    def check_authentication(self) -> str:
+        """通过固定 host 的受保护页面确认 dbcl2，不把公共页 200 当成登录成功。"""
+        if not self.configured:
+            return "unconfigured"
+        try:
+            body, _ = self._request(
+                _AUTH_STATUS_PATH,
+                params=None,
+                expected="html",
+                classify_authentication=False,
+            )
+        except ProviderAuthenticationError:
+            # 受保护页面明确跳回登录页时，才认定 Cookie 已失效。
+            return "invalid"
+        except ProviderError:
+            # 超时、风控、429、403、上游异常都保持灰色“未确认”。
+            return "unknown"
+
+        try:
+            html = body.decode("utf-8", errors="strict")
+        except (UnicodeDecodeError, AttributeError):
+            return "unknown"
+        if _AUTH_LOGIN_MARKER_RE.search(html):
+            return "invalid"
+        if _AUTHENTICATED_MARKER_RE.search(html):
+            return "valid"
+        return "unknown"
 
     def list_items(
         self,
