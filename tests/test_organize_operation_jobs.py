@@ -38,6 +38,21 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             dedupe_key=dedupe,
         )
 
+    def test_non_durable_task_results_still_use_organize_counters(self) -> None:
+        manager = OrganizeTaskManager()
+        manager._task = {
+            "id": "normal-organize", "status": "completed",
+            "result": {"stats": {"total": 3, "moved": 3}},
+        }
+        for source in ("live", "history"):
+            with self.subTest(source=source):
+                result = manager.task_result("normal-organize")["result"]
+                self.assertEqual(result["schema_version"], 1)
+                self.assertEqual(result["counters"]["total"], 3)
+                self.assertEqual(result["counters"]["moved"], 3)
+                manager._remember_task_locked(manager._task)
+                manager._task = {}
+
     def test_enqueue_is_idempotent_and_public_reference_round_trips(self) -> None:
         first, first_replayed = self._enqueue()
         second, second_replayed = self._enqueue()

@@ -749,22 +749,16 @@ class OrganizeTaskManager:
             if str(owner or "").strip() else ""
         )
         with self._state_lock:
-            if str(self._task.get("id") or "") == expected:
-                if owner_digest and str(self._task.get("owner_digest") or "") != owner_digest:
-                    pass
-                else:
-                    result = dict(self._task)
-                    if isinstance(result.get("result"), dict):
-                        result["result"] = read_organize_result(result["result"])
-                    return result
-            for item in self._task_history:
-                if str(item.get("id") or "") == expected:
-                    if owner_digest and str(item.get("owner_digest") or "") != owner_digest:
-                        continue
-                    result = dict(item)
-                    if isinstance(result.get("result"), dict):
-                        result["result"] = read_organize_result(result["result"])
-                    return result
+            for task in (self._task, *self._task_history):
+                if str(task.get("id") or "") != expected:
+                    continue
+                if owner_digest and str(task.get("owner_digest") or "") != owner_digest:
+                    continue
+                result = dict(task)
+                # 持久作业已统一为安全 {stats: ...}；不能套用普通整理 counters 协议。
+                if not result.get("durable") and isinstance(result.get("result"), dict):
+                    result["result"] = read_organize_result(result["result"])
+                return result
         try:
             row = (
                 get_organize_operation_job_for_owner(expected, str(owner))
