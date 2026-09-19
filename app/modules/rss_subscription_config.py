@@ -83,6 +83,15 @@ def _integer(value: Any, *, field: str, minimum: int, maximum: int) -> int:
     return result
 
 
+def _refresh_cron(value: Any, previous: Any = "") -> str:
+    cron = _text(value, field="refresh_cron", maximum=_MAX_CRON)
+    if cron and cron != str(previous or "").strip():
+        raise RSSSubscriptionConfigError(
+            "refresh_cron 已停用，请改用 refresh_interval_minutes 设置自动刷新间隔"
+        )
+    return cron
+
+
 def _mapping_value(current: Mapping[str, Any] | None, key: str, default: Any) -> Any:
     if current is None:
         return default
@@ -166,9 +175,7 @@ def normalize_rss_subscription_create(
             field="exclude_keywords",
             maximum=_MAX_EXCLUDE,
         ),
-        "refresh_cron": _text(
-            data.get("refresh_cron", ""), field="refresh_cron", maximum=_MAX_CRON
-        ),
+        "refresh_cron": _refresh_cron(data.get("refresh_cron", "")),
         "parser": parser,
         "action": action,
         "enabled": 1 if _bool(data.get("enabled", True), field="enabled") else 0,
@@ -228,10 +235,8 @@ def normalize_rss_subscription_update(
             field="exclude_keywords",
             maximum=_MAX_EXCLUDE,
         )
-    if "refresh_cron" in data:
-        fields["refresh_cron"] = _text(
-            data["refresh_cron"], field="refresh_cron", maximum=_MAX_CRON
-        )
+    # 旧客户端可回传空值或原值；不改写历史 cron，也不接受新调度规则。
+    _refresh_cron(data.get("refresh_cron", ""), _mapping_value(current, "refresh_cron", ""))
     if "parser" in data:
         parser = _text(data["parser"], field="parser", maximum=32)
         if parser not in _ALLOWED_PARSERS:

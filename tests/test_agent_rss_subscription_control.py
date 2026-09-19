@@ -16,6 +16,7 @@ from app.agent.rss_subscription_control_actions import (
 from app.modules.rss_subscription_config import (
     RSSSubscriptionConfigError,
     normalize_rss_subscription_create,
+    normalize_rss_subscription_update,
 )
 from tests.agent_kernel_test_harness import (
     get_kernel_test_service as get_agent_service,
@@ -268,6 +269,37 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         )
         self.assertEqual(normalized["refresh_interval_minutes"], 45)
         self.assertEqual(normalized["media_default_season"], 2)
+
+    def test_shared_config_rejects_nonempty_cron_but_accepts_legacy_empty_value(self):
+        base = {"name": "Cron Feed", "urls": "https://example.invalid/rss"}
+        for normalizer in (
+            normalize_rss_subscription_create,
+            lambda payload: normalize_rss_subscription_update(
+                payload, current={"media_tmdb_id": "", "media_default_season": 1,
+                                  "skip_existing_episodes": 0}
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RSSSubscriptionConfigError, "refresh_interval_minutes"
+            ):
+                normalizer({**base, "refresh_cron": "0 4 * * *"})
+
+        normalized = normalize_rss_subscription_create(
+            {**base, "refresh_cron": "", "refresh_interval_minutes": 45}
+        )
+        self.assertEqual(normalized["refresh_cron"], "")
+        self.assertEqual(normalized["refresh_interval_minutes"], 45)
+
+        with self.assertRaisesRegex(AgentToolError, "refresh_interval_minutes"):
+            rss_create_subscription_arguments(
+                {**base, "refresh_cron": "0 4 * * *"}
+            )
+        with self.assertRaisesRegex(AgentToolError, "包含未知参数"):
+            get_agent_service().prepare(
+                "rss.update_subscription",
+                {"subscription_id": self.sid, "refresh_cron": "0 4 * * *"},
+                owner="owner",
+            )
 
     def test_update_confirmation_uses_one_write_transaction_for_revision_and_bindings(
         self,

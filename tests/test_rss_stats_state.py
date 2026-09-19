@@ -135,6 +135,101 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
                 )
                 self.assertEqual(wake_scheduler.call_count, 2)
 
+    def test_rss_api_rejects_nonempty_cron_preserves_legacy_value_and_keeps_interval_schedule(self) -> None:
+        timestamp = db.now()
+        with db.get_conn() as conn:
+            cursor = conn.execute(
+                "INSERT INTO rss_items(name,enabled,refresh_cron,refresh_interval_minutes,urls,parser,"
+                "exclude_keywords,action,download_method,qb_save_path,gy_target_dir,gy_target_dir_name,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "legacy-cron",
+                    1,
+                    "0 4 * * *",
+                    0,
+                    "https://example.invalid/legacy",
+                    "mikan",
+                    "",
+                    "subscribe",
+                    "",
+                    "",
+                    "",
+                    "",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            legacy_id = int(cursor.lastrowid)
+
+        with TestClient(create_app(start_background=False)) as client:
+            login_page = client.get("/login")
+            csrf = self._csrf(login_page.text)
+            logged_in = client.post(
+                "/login",
+                data={
+                    "username": "admin",
+                    "password": "123456",
+                    "csrf_token": csrf,
+                },
+                follow_redirects=False,
+            )
+            self.assertEqual(logged_in.status_code, 302)
+            headers = {"X-CSRF-Token": self._csrf(client.get("/rss").text)}
+            with patch("app.routes.rss_api.wake_rss_scheduler"):
+                rejected_create = client.post(
+                    "/api/rss/subscriptions",
+                    headers=headers,
+                    json={
+                        "name": "new-cron",
+                        "urls": "https://example.invalid/new",
+                        "refresh_cron": "0 4 * * *",
+                    },
+                )
+                self.assertEqual(rejected_create.status_code, 400)
+                self.assertIn("refresh_interval_minutes", rejected_create.text)
+
+                rejected_update = client.put(
+                    f"/api/rss/subscriptions/{legacy_id}",
+                    headers=headers,
+                    json={"refresh_cron": "0 5 * * *"},
+                )
+                self.assertEqual(rejected_update.status_code, 400)
+                self.assertIn("refresh_interval_minutes", rejected_update.text)
+
+                preserved_update = client.put(
+                    f"/api/rss/subscriptions/{legacy_id}",
+                    headers=headers,
+                    json={"name": "legacy-renamed", "refresh_cron": ""},
+                )
+                self.assertEqual(preserved_update.status_code, 200, preserved_update.text)
+
+                echoed_update = client.put(
+                    f"/api/rss/subscriptions/{legacy_id}",
+                    headers=headers,
+                    json={"name": "legacy-renamed", "refresh_cron": "0 4 * * *"},
+                )
+                self.assertEqual(echoed_update.status_code, 200, echoed_update.text)
+
+                empty_create = client.post(
+                    "/api/rss/subscriptions",
+                    headers=headers,
+                    json={
+                        "name": "interval-feed",
+                        "urls": "https://example.invalid/interval",
+                        "refresh_cron": "",
+                        "refresh_interval_minutes": 10,
+                    },
+                )
+                self.assertEqual(empty_create.status_code, 200, empty_create.text)
+                interval_id = int(empty_create.json()["id"])
+
+        self.assertEqual(db.get_rss_subscription(legacy_id)["name"], "legacy-renamed")
+        self.assertEqual(db.get_rss_subscription(legacy_id)["refresh_cron"], "0 4 * * *")
+        self.assertIn(
+            interval_id,
+            [int(row["id"]) for row in db.list_due_rss_subscriptions("2099-01-01 00:00:00")],
+        )
+
     def test_bulk_processed_updates_preserve_inflight_and_downloaded_states(self) -> None:
         _active, entry_ids = self._seed()
         self.assertEqual(db.update_rss_entries_processed(entry_ids, True), 3)
