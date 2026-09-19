@@ -42,6 +42,7 @@ class ModelMessage:
     tool_calls: tuple[ModelToolCall, ...] = ()
     tool_call_id: str = ""
     tool_name: str = ""
+    effect_plan_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"role": self.role, "content": self.content}
@@ -58,6 +59,8 @@ class ModelMessage:
             result["tool_call_id"] = self.tool_call_id
         if self.tool_name:
             result["tool_name"] = self.tool_name
+        if self.effect_plan_id:
+            result["effect_plan_id"] = self.effect_plan_id
         return result
 
     @classmethod
@@ -78,6 +81,7 @@ class ModelMessage:
             tool_calls=tuple(calls),
             tool_call_id=str(value.get("tool_call_id") or ""),
             tool_name=str(value.get("tool_name") or ""),
+            effect_plan_id=str(value.get("effect_plan_id") or ""),
         )
 
 

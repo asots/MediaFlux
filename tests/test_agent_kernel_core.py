@@ -311,6 +311,56 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         saved = await state.load(owner="owner", session_id="session")
         self.assertEqual([r["content"] for r in saved.conversation if r["role"] == "user"], ["先清洗再移动，完成后告诉我"])
         self.assertEqual(saved.pending_effect_plan_id, "")
+        marker = "当前回合是用户点击确认后的续行"
+        self.assertNotIn(marker, model.requests[0].system_prompt)
+        for request in model.requests[1:]:
+            self.assertIn(marker, request.system_prompt)
+            self.assertIn("已消费", request.system_prompt)
+            executed = [row for row in request.messages if row.role == "tool" and row.tool_name == tool.name]
+            self.assertTrue(executed)
+            self.assertIn("已完成", executed[-1].content)
+            self.assertNotIn('"status":"approval_required"', executed[-1].content)
+            self.assertEqual([row.content for row in request.messages if row.role == "user"],
+                             ["先清洗再移动，完成后告诉我"])
+        # 授权语义只属于真实confirm回合，不能泄漏到后续普通请求。
+        model.rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="没有执行新操作。"),
+                             ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
+        await consume_events(session.run(AgentInput(message="只看看状态，不操作", owner="owner", session_id="session")))
+        self.assertNotIn(marker, model.requests[-1].system_prompt)
+        self.assertEqual(writes, [1, 2])
+
+    async def test_confirmation_resolves_only_the_bound_call_in_a_same_tool_batch(self):
+        writes = []
+        tool = KernelToolSpec(
+            name="cloud.change", domain="cloud", description="修改文件",
+            input_schema={"type": "object", "properties": {"step": {"type": "integer"}}},
+            effect=ToolEffect.WRITE,
+            prepare=lambda a, _c: PreparedEffect(preview={"summary": f"预览{a['step']}"}, snapshot_fingerprint="frozen"),
+            execute_confirmed=lambda a, _s, _c: writes.append(a["step"]) or {"ok": True, "summary": f"已完成{a['step']}"},
+        )
+        model = ScriptedModel([
+            [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(f"call-{step}", tool.model_name, {"step": step})) for step in (1, 2)],
+            [ModelEvent(ModelEventType.TEXT_DELTA, text="第一步完成，第二步未执行。")],
+        ])
+        catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        preview = await consume_events(session.run(AgentInput(message="处理两步", owner="o", session_id="s")))
+        before = await state.load(owner="o", session_id="s")
+        pending = {row["tool_call_id"]: row for row in before.conversation if row["role"] == "tool"}
+        self.assertEqual(pending["call-1"]["effect_plan_id"], preview.approval.plan_id)
+        self.assertNotIn("effect_plan_id", pending["call-2"])
+        final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
+        self.assertEqual(final.status, "success")
+        self.assertEqual(writes, [1])
+        for rows in (model.requests[-1].messages, session._restore_messages(await state.load(owner="o", session_id="s"))):
+            by_id = {row.tool_call_id: row for row in rows if row.role == "tool"}
+            self.assertIn("已完成1", by_id["call-1"].content)
+            self.assertIn("not_executed_after_approval", by_id["call-2"].content)
+        # 内部关联不是模型参数，不进入任一Provider的工具协议。
+        from app.agent.kernel.provider_model import _history_for_protocol
+        for protocol in ("chat_completions", "responses", "anthropic_messages"):
+            self.assertNotIn("effect_plan_id", json.dumps(_history_for_protocol(protocol, "system", model.requests[-1].messages)))
 
     async def test_summary_failure_after_confirm_preserves_successful_write(self):
         writes = []

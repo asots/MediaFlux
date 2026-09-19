@@ -78,7 +78,7 @@ DEFAULT_SYSTEM_PROMPT = """你是 MediaFlux Media Agent，一名可操作当前 
 
 副作用规则：
 - READ 工具可直接调用。
-- WRITE/DANGER 工具永远只会生成冻结 EffectPlan，不会立即写入。看到 approval_required 后，清楚概括对象、动作、影响与不可逆性，然后停止；绝不能声称已经执行。
+- WRITE/DANGER 工具永远只会生成冻结 EffectPlan，不会立即写入。本轮新工具结果为 approval_required 时，清楚概括对象、动作、影响与不可逆性，然后停止；不能把预览说成已执行，也不能把历史上已消费的确认卡说成仍待确认。
 - 用户确认后，系统先执行获准操作并等待可跟踪任务真实结果，再让你沿原始任务继续。已完成步骤不能重复执行；仍有未完成步骤可继续读取或生成下一张确认卡，新的写操作仍需再次授权。全部完成后给出明确结论；排队/运行/未知不等于完成。不得猜测、修改或伪造 plan_id。
 - 只使用工具返回的安全 opaque ref；不要猜数据库主键、Provider 对象 ID、绝对路径、令牌或内部句柄。不得自行构造或改写 URL；只可原样展示媒体工具返回的已校验 `open_url`，或追漫日历明确返回且恰为 `/discovery/calendar` 的 `calendar_url`。
 
@@ -374,6 +374,12 @@ class AgentSession:
             if not safe_content:
                 return False
             conversation = [dict(item) for item in state.conversation]
+            # 完成原调用的结果，而非仅追加一条模型自述；旧预览仍保留在事件审计中。
+            # 不新增虚构调用或孤立tool消息，保持各Provider的一问一答配对。
+            for row in reversed(conversation):
+                if row.get("role") == "tool" and row.get("effect_plan_id") == plan_id:
+                    row["content"] = safe_content
+                    break
             item = ModelMessage(
                 role="assistant",
                 content=(
@@ -694,6 +700,7 @@ class AgentSession:
                 messages.append(ModelMessage(
                     role="tool", content=result.outcome.model_message(),
                     tool_call_id=call.call_id, tool_name=call.name,
+                    effect_plan_id=result.effect_plan.plan_id if result.effect_plan else "",
                 ))
                 plan = result.effect_plan
                 if plan is not None:
@@ -738,6 +745,14 @@ class AgentSession:
                     f"当前模型轮次 {round_index + 1}/{self.limits.max_model_rounds}。"
                     "未收到预算耗尽错误或最终汇总要求时，不得自行声称工具额度不足。"
                 )
+                if confirmed_result is not None:
+                    request_system_prompt += (
+                        "\n当前回合是用户点击确认后的续行，不是原预览请求的重放。"
+                        "上一张冻结计划已获授权并已消费；对话末尾的可信系统结果是本次真实执行回执。"
+                        "历史中的‘只预览/等待确认/approval_required’描述的是授权前状态，不能覆盖新回执。"
+                        "先依据回执的状态、实际动作计数说明已完成或未完成部分；运行中/未知不等于完成。"
+                        "不能再次索要这张卡的确认或重复执行；若还有其他写步骤，必须另建确认卡。"
+                    )
                 if final_synthesis_round:
                     request_system_prompt += (
                         "\n\n本次是最终汇总轮次：不得调用任何工具。请只基于已经取得的工具事实"
@@ -851,7 +866,7 @@ class AgentSession:
                             and call.name not in selected_model_names
                         ):
                             error = ToolPipelineError(
-                                "该工具不在本轮候选能力中",
+                                "该工具不在本轮候选能力中；先调用 agent.capabilities 指定 tool_names 加载工具，下一轮按返回的 Schema 调用。",
                                 code="tool_not_available",
                             )
                             messages.append(self._tool_error_message(call, error))
@@ -931,6 +946,7 @@ class AgentSession:
                                     content=result.outcome.model_message(),
                                     tool_call_id=call.call_id,
                                     tool_name=call.name,
+                                    effect_plan_id=plan.plan_id,
                                 )
                             )
                             completed_call_ids.add(call.call_id)
