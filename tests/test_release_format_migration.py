@@ -136,9 +136,10 @@ class ReleaseFormatMigrationTests(unittest.TestCase):
 
     def test_schema31_ddl_has_exact_columns_defaults_and_constraints(self) -> None:
         self.assertEqual(db.SCHEMA_VERSION, 31)
-        self.assertEqual(sorted(db._SCHEMA_MIGRATIONS), list(range(1, 31)))
+        self.assertEqual(sorted(database_migrations._SCHEMA_MIGRATIONS), list(range(1, 31)))
         migration = database_migrations._SCHEMA_MIGRATIONS[30]
-        self.assertIs(getattr(db, migration.__name__), migration)
+        self.assertFalse(hasattr(db, migration.__name__))
+        self.assertEqual(migration.__module__, database_migrations.__name__)
         self.assertEqual(len(database_schema._RECOGNITION_FORMAT_RULE_STATEMENTS), 1)
 
         with db.get_conn() as conn:
@@ -286,14 +287,14 @@ class ReleaseFormatMigrationTests(unittest.TestCase):
     def test_failed_30_to_31_migration_rolls_back_table_and_version(self) -> None:
         with db.get_conn() as conn:
             self._set_up_v30(conn)
-        migration = db._SCHEMA_MIGRATIONS[30]
+        migration = database_migrations._SCHEMA_MIGRATIONS[30]
 
         def failing(connection: sqlite3.Connection) -> None:
             migration(connection)
             raise RuntimeError("release format migration interrupted")
 
         with (
-            patch.dict(db._SCHEMA_MIGRATIONS, {30: failing}),
+            patch.dict(database_migrations._SCHEMA_MIGRATIONS, {30: failing}),
             self.assertRaisesRegex(RuntimeError, "release format migration interrupted"),
         ):
             db.init_db()

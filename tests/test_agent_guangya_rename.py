@@ -9,7 +9,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from app import database
+from app import database_migrations
 from app.agent import guangya_rename_actions as actions
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile, GuangYaWriteRejected
@@ -391,7 +391,7 @@ class GuangYaRenameTests(unittest.TestCase):
             "INSERT INTO organize_operation_jobs(job_id,job_kind,owner_digest,operation,dedupe_digest,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             ("a" * 32, "directory_scrape", "owner", "刮削", "dedupe", "c", "u"),
         )
-        database._migrate_agent_guangya_operation_jobs_v10(conn)
+        database_migrations._migrate_agent_guangya_operation_jobs_v10(conn)
         row = conn.execute(
             "SELECT job_kind,operation FROM organize_operation_jobs WHERE job_id=?",
             ("a" * 32,),

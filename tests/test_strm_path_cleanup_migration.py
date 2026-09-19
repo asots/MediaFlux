@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from app import database as db
+from app import database_migrations
 from tests.support import isolated_test_database
 
 
@@ -53,14 +54,14 @@ class StrmPathCleanupMigrationTests(unittest.TestCase):
             with db.get_conn() as conn:
                 conn.execute("DROP TABLE strm_path_cleanup")
                 conn.execute("PRAGMA user_version=25")
-            real_migrate = db._SCHEMA_MIGRATIONS[25]
+            real_migrate = database_migrations._SCHEMA_MIGRATIONS[25]
 
             def failing(conn):
                 real_migrate(conn)
                 raise RuntimeError("isolated migration failure")
 
             with (
-                patch.dict(db._SCHEMA_MIGRATIONS, {25: failing}),
+                patch.dict(database_migrations._SCHEMA_MIGRATIONS, {25: failing}),
                 self.assertRaises(RuntimeError),
             ):
                 db.init_db()

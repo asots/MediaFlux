@@ -33,12 +33,55 @@ class DatabaseModuleImportTests(unittest.TestCase):
 
     def test_schema_and_migration_registry_have_one_owner(self):
         self.assertIs(db._SCHEMA, database_schema._SCHEMA)
-        self.assertIs(db._SCHEMA_MIGRATIONS, database_migrations._SCHEMA_MIGRATIONS)
-        self.assertEqual(sorted(db._SCHEMA_MIGRATIONS), list(range(1, db.SCHEMA_VERSION)))
-        for function in db._SCHEMA_MIGRATIONS.values():
+        migrations = database_migrations._SCHEMA_MIGRATIONS
+        self.assertEqual(sorted(migrations), list(range(1, db.SCHEMA_VERSION)))
+        removed_exports = {
+            "_SCHEMA_MIGRATIONS",
+            "_restore_interrupted_agent_session_context_v2",
+            "_LegacyTelegramHTMLTextExtractor",
+            "_legacy_organize_notification_event",
+            "_legacy_rss_download_identity",
+            *(function.__name__ for function in migrations.values()),
+        }
+        for name in removed_exports:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(db, name))
+        for function in migrations.values():
             with self.subTest(migration=function.__name__):
-                self.assertIs(getattr(db, function.__name__), function)
                 self.assertEqual(function.__module__, database_migrations.__name__)
+
+    def test_coordinator_uses_canonical_registry_and_rolls_back_migration_failure(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("PRAGMA user_version=1")
+
+            def fail_migration(connection):
+                connection.execute("CREATE TABLE rollback_probe(id INTEGER)")
+                raise RuntimeError("canonical migration failure")
+
+            canonical_registry = {1: fail_migration}
+            with patch.object(
+                database_migrations,
+                "_SCHEMA_MIGRATIONS",
+                canonical_registry,
+            ), patch.object(db, "SCHEMA_VERSION", 2), patch.object(
+                db, "_create_pre_migration_backup"
+            ):
+                with self.assertRaisesRegex(RuntimeError, "canonical migration failure"):
+                    db._prepare_schema_migration(conn, database_existed=True)
+
+            self.assertEqual(
+                conn.execute("PRAGMA user_version").fetchone()[0],
+                1,
+            )
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='rollback_probe'"
+                ).fetchone()
+            )
+        finally:
+            conn.close()
 
     def test_import_order_never_opens_a_database_or_creates_a_cycle(self):
         orders = (

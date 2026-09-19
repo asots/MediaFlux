@@ -9,6 +9,7 @@ from unittest import mock
 from zipfile import ZipFile
 
 from app import database as db
+from app import database_migrations
 from app.modules.backup import verify_backup
 from tests.support import IsolatedDatabaseTestCase
 
@@ -40,7 +41,7 @@ class PostprocessingSchemaV28Tests(IsolatedDatabaseTestCase):
     def test_schema_28_registers_postprocessing_upgrade(self) -> None:
         self.assertGreaterEqual(db.SCHEMA_VERSION, 28)
         self.assertIs(
-            db._SCHEMA_MIGRATIONS[27], db._migrate_postprocessing_recovery_v28,
+            database_migrations._SCHEMA_MIGRATIONS[27], database_migrations._migrate_postprocessing_recovery_v28,
         )
 
     def test_fresh_schema_has_probe_identity_and_due_reconciliation(self) -> None:
@@ -69,7 +70,7 @@ class PostprocessingSchemaV28Tests(IsolatedDatabaseTestCase):
         conn = self._legacy_connection()
         try:
             before = tuple(conn.execute("SELECT * FROM organize_probe_queue").fetchone())
-            db._migrate_postprocessing_recovery_v28(conn)
+            database_migrations._migrate_postprocessing_recovery_v28(conn)
             row = conn.execute("SELECT * FROM organize_probe_queue").fetchone()
             self.assertEqual(tuple(row)[:-1], before)
             self.assertEqual(row["notification_context_json"], "{}")
@@ -84,7 +85,7 @@ class PostprocessingSchemaV28Tests(IsolatedDatabaseTestCase):
     def test_repeated_upgrade_preserves_context_and_reconciliation_intent(self) -> None:
         conn = self._legacy_connection()
         try:
-            db._migrate_postprocessing_recovery_v28(conn)
+            database_migrations._migrate_postprocessing_recovery_v28(conn)
             context = json.dumps({"version": 1, "task_id": "synthetic-parent"})
             conn.execute(
                 "UPDATE organize_probe_queue SET notification_context_json=?", (context,),
@@ -96,7 +97,7 @@ class PostprocessingSchemaV28Tests(IsolatedDatabaseTestCase):
                 "'ReadUnavailable','before','before')"
             )
             before = tuple(conn.execute("SELECT * FROM download_staging_reconcile").fetchone())
-            db._migrate_postprocessing_recovery_v28(conn)
+            database_migrations._migrate_postprocessing_recovery_v28(conn)
             self.assertEqual(
                 conn.execute("SELECT notification_context_json FROM organize_probe_queue").fetchone()[0],
                 context,
@@ -111,7 +112,7 @@ class PostprocessingSchemaV28Tests(IsolatedDatabaseTestCase):
     def test_queue_guards_invalid_state_attempts_and_orphan_identity(self) -> None:
         conn = self._legacy_connection()
         try:
-            db._migrate_postprocessing_recovery_v28(conn)
+            database_migrations._migrate_postprocessing_recovery_v28(conn)
             query = (
                 "INSERT INTO download_staging_reconcile(confirmation_id,request_id,"
                 "identity_json,status,attempt_count,created_at,updated_at) "
@@ -135,7 +136,7 @@ class PostprocessingSchemaV28Tests(IsolatedDatabaseTestCase):
         conn = self._legacy_connection()
         try:
             def interrupted(connection: sqlite3.Connection) -> None:
-                db._migrate_postprocessing_recovery_v28(connection)
+                database_migrations._migrate_postprocessing_recovery_v28(connection)
                 raise RuntimeError("synthetic migration interruption")
 
             with self.assertRaisesRegex(RuntimeError, "synthetic migration interruption"):

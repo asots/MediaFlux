@@ -306,9 +306,10 @@ class EpisodeResearchCacheTests(unittest.TestCase):
 
     def test_v29_migration_alone_matches_fresh_schema_and_preserves_legacy_database(self):
         self.assertEqual(db.SCHEMA_VERSION, 31)
-        self.assertEqual(sorted(db._SCHEMA_MIGRATIONS), list(range(1, 31)))
+        self.assertEqual(sorted(database_migrations._SCHEMA_MIGRATIONS), list(range(1, 31)))
         migration = database_migrations._SCHEMA_MIGRATIONS[29]
-        self.assertIs(getattr(db, migration.__name__), migration)
+        self.assertFalse(hasattr(db, migration.__name__))
+        self.assertEqual(migration.__module__, database_migrations.__name__)
         with db.get_conn() as conn:
             fresh = self.cache_schema(conn)
             self.legacy_29(conn)
@@ -354,9 +355,9 @@ class EpisodeResearchCacheTests(unittest.TestCase):
     def test_init_db_29_to_31_uses_registered_migration(self):
         with db.get_conn() as conn:
             self.legacy_29(conn)
-        migration = db._SCHEMA_MIGRATIONS[29]
-        with patch.dict(db._SCHEMA_MIGRATIONS, {29: unittest.mock.Mock(wraps=migration)}):
-            observed = db._SCHEMA_MIGRATIONS[29]
+        migration = database_migrations._SCHEMA_MIGRATIONS[29]
+        with patch.dict(database_migrations._SCHEMA_MIGRATIONS, {29: unittest.mock.Mock(wraps=migration)}):
+            observed = database_migrations._SCHEMA_MIGRATIONS[29]
             db.init_db()
             self.assertEqual(observed.call_count, 1)
         with db.get_conn() as conn:
@@ -369,7 +370,7 @@ class EpisodeResearchCacheTests(unittest.TestCase):
     def test_missing_migration_or_backup_failure_does_not_modify_v29(self):
         with db.get_conn() as conn:
             self.legacy_29(conn)
-        with patch.dict(db._SCHEMA_MIGRATIONS, {}, clear=True), self.assertRaisesRegex(RuntimeError, "缺少"):
+        with patch.dict(database_migrations._SCHEMA_MIGRATIONS, {}, clear=True), self.assertRaisesRegex(RuntimeError, "缺少"):
             db.init_db()
         with (
             patch.object(db, "_create_pre_migration_backup", side_effect=RuntimeError("backup blocked")),
@@ -383,14 +384,14 @@ class EpisodeResearchCacheTests(unittest.TestCase):
     def test_migration_failure_rolls_back_table_indexes_and_version(self):
         with db.get_conn() as conn:
             self.legacy_29(conn)
-        migration = db._SCHEMA_MIGRATIONS[29]
+        migration = database_migrations._SCHEMA_MIGRATIONS[29]
 
         def failing(connection):
             migration(connection)
             raise RuntimeError("migration interrupted")
 
         with (
-            patch.dict(db._SCHEMA_MIGRATIONS, {29: failing}),
+            patch.dict(database_migrations._SCHEMA_MIGRATIONS, {29: failing}),
             self.assertRaisesRegex(RuntimeError, "migration interrupted"),
         ):
             db.init_db()

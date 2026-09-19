@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from app import database as db
+from app import database_migrations
 from app import runtime_paths as runtime_paths_module
 from app.modules.backup import BackupError, restore_backup, verify_backup
 from app.runtime_paths import RuntimePaths
@@ -28,7 +29,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 "'2026-09-01 00:00:00');"
             )
 
-            db._migrate_strm_refresh_outbox_v19(conn)
+            database_migrations._migrate_strm_refresh_outbox_v19(conn)
 
             rows = conn.execute(
                 "SELECT path,allow_emby,created_at,updated_at "
@@ -113,7 +114,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 "created_at,updated_at) VALUES('old',1,1,'missing','now','now','now');"
             )
 
-            db._migrate_media_subscription_notification_outbox_v13(conn)
+            database_migrations._migrate_media_subscription_notification_outbox_v13(conn)
             conn.execute(
                 "INSERT INTO media_subscription_notification_outbox("
                 "event_key,subscription_id,subscription_revision,event_type,next_attempt_at,"
@@ -146,7 +147,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 "INSERT INTO organize_confirmations(token) VALUES('keep-me');"
             )
 
-            db._migrate_organize_confirmation_rollup_v14(conn)
+            database_migrations._migrate_organize_confirmation_rollup_v14(conn)
 
             columns = {
                 str(row[1])
@@ -180,7 +181,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 status="retry_wait", last_error="temporary",
             )
 
-            db._migrate_retire_organize_notification_outbox_v15(conn)
+            database_migrations._migrate_retire_organize_notification_outbox_v15(conn)
 
             old_table = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -211,7 +212,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                     conn, key=f"status:{status}", status=status,
                     sent_at=("2026-09-01 12:01:00" if status == "sent" else None),
                 )
-            db._migrate_retire_organize_notification_outbox_v15(conn)
+            database_migrations._migrate_retire_organize_notification_outbox_v15(conn)
             rows = conn.execute(
                 "SELECT status,delivered_revision,last_error "
                 "FROM telegram_notification_outbox ORDER BY id"
@@ -242,7 +243,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                     "- <b>结果：</b> 1 个 &amp; 安全"
                 ),
             )
-            db._migrate_retire_organize_notification_outbox_v15(conn)
+            database_migrations._migrate_retire_organize_notification_outbox_v15(conn)
             payload = conn.execute(
                 "SELECT event_json FROM telegram_notification_outbox"
             ).fetchone()[0]
@@ -262,7 +263,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
             self._create_legacy_organize_notification_outbox(conn)
             key = "collision"
             self._insert_legacy_organize_notification(conn, key=key)
-            db._migrate_telegram_notification_outbox_v12(conn)
+            database_migrations._migrate_telegram_notification_outbox_v12(conn)
             digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
             conn.execute(
                 "INSERT INTO telegram_notification_outbox("
@@ -276,7 +277,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
             )
 
             with self.assertRaisesRegex(sqlite3.IntegrityError, "保留源表"):
-                db._migrate_retire_organize_notification_outbox_v15(conn)
+                database_migrations._migrate_retire_organize_notification_outbox_v15(conn)
 
             old_count = conn.execute(
                 "SELECT COUNT(*) FROM organize_notification_outbox"
@@ -309,7 +310,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 ") VALUES('old','group','digest','confirm','rss_refresh',1,'now');"
             )
 
-            db._migrate_retire_telegram_write_confirmations_v16(conn)
+            database_migrations._migrate_retire_telegram_write_confirmations_v16(conn)
 
             retired = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -341,7 +342,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 "INSERT INTO rss_guangya_download_claims VALUES('hash-2',2,'submitted');"
             )
 
-            db._migrate_unify_rss_download_requests_v20(conn)
+            database_migrations._migrate_unify_rss_download_requests_v20(conn)
 
             tables = {
                 str(row["name"])
@@ -434,7 +435,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                  "2026-08-01 00:00:00", "2026-08-01 00:00:02"),
             )
 
-            db._migrate_unify_rss_download_requests_v20(conn)
+            database_migrations._migrate_unify_rss_download_requests_v20(conn)
 
             canonical_key = hashlib.sha256(
                 f"btih:{infohash}".encode("utf-8")
@@ -584,7 +585,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 ),
             )
 
-            db._migrate_unify_rss_download_requests_v20(conn)
+            database_migrations._migrate_unify_rss_download_requests_v20(conn)
 
             rows = {
                 str(row["title"]): row
@@ -1945,7 +1946,7 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
     def test_registered_future_migration_advances_schema_version(self) -> None:
         previous_path = db.DB_PATH
         previous_test_mode = bool(getattr(db, "_configured_test_mode", False))
-        previous_migrations = dict(db._SCHEMA_MIGRATIONS)
+        previous_migrations = dict(database_migrations._SCHEMA_MIGRATIONS)
         with tempfile.TemporaryDirectory(prefix="mediaflux-schema-upgrade-") as root:
             path = Path(root) / "v1.db"
             conn = sqlite3.connect(path)
@@ -1960,8 +1961,8 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 conn.execute("ALTER TABLE v1_data ADD COLUMN label TEXT NOT NULL DEFAULT ''")
 
             try:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS[1] = migrate_v1_to_v2
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS[1] = migrate_v1_to_v2
                 with mock.patch.object(db, "SCHEMA_VERSION", 2):
                     db.init_db()
                 with db.get_conn() as conn:
@@ -1973,14 +1974,14 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 self.assertEqual(version, 2)
                 self.assertIn("label", columns)
             finally:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS.update(previous_migrations)
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS.update(previous_migrations)
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 
     def test_failed_future_migration_rolls_back_schema_data_and_version(self) -> None:
         previous_path = db.DB_PATH
         previous_test_mode = bool(getattr(db, "_configured_test_mode", False))
-        previous_migrations = dict(db._SCHEMA_MIGRATIONS)
+        previous_migrations = dict(database_migrations._SCHEMA_MIGRATIONS)
         with tempfile.TemporaryDirectory(prefix="mediaflux-schema-upgrade-rollback-") as root:
             path = Path(root) / "v1.db"
             conn = sqlite3.connect(path)
@@ -2001,8 +2002,8 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 raise sqlite3.OperationalError("injected migration failure")
 
             try:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS[1] = fail_mid_migration
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS[1] = fail_mid_migration
                 with mock.patch.object(db, "SCHEMA_VERSION", 2):
                     with self.assertRaisesRegex(
                         sqlite3.OperationalError,
@@ -2025,14 +2026,14 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 self.assertEqual(columns, {"id", "value"})
                 self.assertEqual(value, "before")
             finally:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS.update(previous_migrations)
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS.update(previous_migrations)
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 
     def test_failed_later_migration_rolls_back_entire_upgrade_chain(self) -> None:
         previous_path = db.DB_PATH
         previous_test_mode = bool(getattr(db, "_configured_test_mode", False))
-        previous_migrations = dict(db._SCHEMA_MIGRATIONS)
+        previous_migrations = dict(database_migrations._SCHEMA_MIGRATIONS)
         with tempfile.TemporaryDirectory(prefix="mediaflux-schema-chain-rollback-") as root:
             path = Path(root) / "v1.db"
             conn = sqlite3.connect(path)
@@ -2058,8 +2059,8 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 raise sqlite3.OperationalError("injected second migration failure")
 
             try:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS.update({1: migrate_v1_to_v2, 2: fail_v2_to_v3})
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS.update({1: migrate_v1_to_v2, 2: fail_v2_to_v3})
                 with mock.patch.object(db, "SCHEMA_VERSION", 3):
                     with self.assertRaisesRegex(
                         sqlite3.OperationalError,
@@ -2082,14 +2083,14 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 self.assertEqual(columns, {"id", "value"})
                 self.assertEqual(value, "before")
             finally:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS.update(previous_migrations)
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS.update(previous_migrations)
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 
     def test_keyboard_interrupt_rolls_back_schema_step(self) -> None:
         previous_path = db.DB_PATH
         previous_test_mode = bool(getattr(db, "_configured_test_mode", False))
-        previous_migrations = dict(db._SCHEMA_MIGRATIONS)
+        previous_migrations = dict(database_migrations._SCHEMA_MIGRATIONS)
         with tempfile.TemporaryDirectory(prefix="mediaflux-schema-interrupt-") as root:
             path = Path(root) / "v1.db"
             conn = sqlite3.connect(path)
@@ -2106,8 +2107,8 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 raise KeyboardInterrupt()
 
             try:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS[1] = interrupt_migration
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS[1] = interrupt_migration
                 with mock.patch.object(db, "SCHEMA_VERSION", 2):
                     with self.assertRaises(KeyboardInterrupt):
                         db.init_db()
@@ -2123,8 +2124,8 @@ class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
                 self.assertEqual(version, 1)
                 self.assertEqual(columns, {"id"})
             finally:
-                db._SCHEMA_MIGRATIONS.clear()
-                db._SCHEMA_MIGRATIONS.update(previous_migrations)
+                database_migrations._SCHEMA_MIGRATIONS.clear()
+                database_migrations._SCHEMA_MIGRATIONS.update(previous_migrations)
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 
     def test_newer_database_is_rejected(self) -> None:

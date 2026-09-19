@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from app import database
+from app import database_migrations
 from app.agent.domain_catalog.cloud_runtime import (
     guangya_organize_status,
     wait_for_guangya_operation,
@@ -79,7 +80,7 @@ class GuangYaFSChangeQueueTests(unittest.TestCase):
             """
         )
 
-        database._migrate_agent_guangya_fs_change_jobs_v17(connection)
+        database_migrations._migrate_agent_guangya_fs_change_jobs_v17(connection)
 
         preserved = connection.execute(
             "SELECT job_kind,operation FROM organize_operation_jobs WHERE job_id='old'"

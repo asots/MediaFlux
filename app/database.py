@@ -247,43 +247,7 @@ def _test_mode_enabled() -> bool:
     return _configured_test_mode or os.getenv("MEDIAFLUX_TEST_MODE", "").strip() == "1"
 
 
-from app.database_migrations import (  # noqa: E402,F401
-    _SCHEMA_MIGRATIONS,
-    _restore_interrupted_agent_session_context_v2,
-    _migrate_agent_session_context_v2,
-    _migrate_agent_session_context_v3,
-    _migrate_organize_operation_jobs_v4,
-    _migrate_organize_operation_jobs_v5,
-    _migrate_agent_action_history_v6,
-    _migrate_local_media_recognition_summary_v7,
-    _migrate_local_library_target_server_path_v8,
-    _migrate_media_proxy_trusted_forwarders_v9,
-    _migrate_agent_guangya_operation_jobs_v10,
-    _migrate_agent_guangya_fs_change_jobs_v17,
-    _migrate_agent_provider_plans_v18,
-    _migrate_local_media_numbering_mode_v11,
-    _migrate_telegram_notification_outbox_v12,
-    _migrate_media_subscription_notification_outbox_v13,
-    _migrate_organize_confirmation_rollup_v14,
-    _LegacyTelegramHTMLTextExtractor,
-    _legacy_organize_notification_event,
-    _migrate_retire_organize_notification_outbox_v15,
-    _migrate_retire_telegram_write_confirmations_v16,
-    _migrate_strm_refresh_outbox_v19,
-    _legacy_rss_download_identity,
-    _migrate_unify_rss_download_requests_v20,
-    _migrate_agent_kernel_v21,
-    _migrate_agent_recognition_review_v22,
-    _migrate_agent_kernel_session_epochs_v23,
-    _migrate_agent_capability_closure_v24,
-    _migrate_durable_handoffs_v25,
-    _migrate_strm_path_cleanup_v26,
-    _migrate_organize_business_snapshot_v27,
-    _migrate_postprocessing_recovery_v28,
-    _migrate_download_resource_and_strm_ownership_v29,
-    _migrate_episode_research_cache_v30,
-    _migrate_recognition_format_rules_v31,
-)
+from app import database_migrations
 
 
 def _run_schema_savepoint(
@@ -406,7 +370,7 @@ def _prepare_schema_migration(
     migrations = []
     version = current_version
     while version < SCHEMA_VERSION:
-        migration = _SCHEMA_MIGRATIONS.get(version)
+        migration = database_migrations._SCHEMA_MIGRATIONS.get(version)
         if migration is None:
             raise RuntimeError(
                 f"数据库缺少从版本 {version} 升级到 {version + 1} 的正式迁移；已取消启动"
@@ -602,14 +566,18 @@ def init_db() -> None:
             # 一个原子步骤完成，避免退出后留下半迁移 schema。
             def prepare_schema_baseline(connection: sqlite3.Connection) -> None:
                 _sync_missing_schema_columns(connection)
-                _migrate_agent_session_context_v2(connection)
+                database_migrations._migrate_agent_session_context_v2(connection)
                 # 未打版本的早期数据库不会进入正式迁移链；仍需同步清除
                 # 已被统一 Telegram 通知中心取代的旧整理通知队列。
-                _migrate_retire_organize_notification_outbox_v15(connection)
-                _migrate_retire_telegram_write_confirmations_v16(connection)
-                _migrate_strm_refresh_outbox_v19(connection)
-                _migrate_unify_rss_download_requests_v20(connection)
-                _migrate_durable_handoffs_v25(connection)
+                database_migrations._migrate_retire_organize_notification_outbox_v15(
+                    connection
+                )
+                database_migrations._migrate_retire_telegram_write_confirmations_v16(
+                    connection
+                )
+                database_migrations._migrate_strm_refresh_outbox_v19(connection)
+                database_migrations._migrate_unify_rss_download_requests_v20(connection)
+                database_migrations._migrate_durable_handoffs_v25(connection)
 
             _run_schema_savepoint(conn, operation=prepare_schema_baseline)
             _run_schema_savepoint(

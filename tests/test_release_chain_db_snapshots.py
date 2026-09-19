@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from app import database as db
+from app import database_migrations
 from app.repositories import organize_history
 from tests.support import isolated_test_database
 
@@ -50,11 +51,11 @@ def test_failed_v27_migration_rolls_back_ddl_and_version():
         with db.get_conn() as conn:
             conn.execute("ALTER TABLE organize_operation_steps DROP COLUMN state_before_json")
             conn.execute("PRAGMA user_version=26")
-        migrate = db._SCHEMA_MIGRATIONS[26]
+        migrate = database_migrations._SCHEMA_MIGRATIONS[26]
         def fail(conn):
             migrate(conn)
             raise RuntimeError("isolated migration failure")
-        with patch.dict(db._SCHEMA_MIGRATIONS, {26: fail}), pytest.raises(RuntimeError):
+        with patch.dict(database_migrations._SCHEMA_MIGRATIONS, {26: fail}), pytest.raises(RuntimeError):
             db.init_db()
         with db.get_conn() as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 26

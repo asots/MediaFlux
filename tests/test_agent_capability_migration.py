@@ -4,6 +4,7 @@ import sqlite3
 import unittest
 
 from app import database as db
+from app import database_migrations
 
 
 class CapabilityMigrationTests(unittest.TestCase):
@@ -12,8 +13,8 @@ class CapabilityMigrationTests(unittest.TestCase):
             conn.executescript(
                 "CREATE TABLE agent_media_preferences (owner_digest TEXT PRIMARY KEY,preferred_server TEXT,preferred_download_target TEXT,updated_at TEXT); INSERT INTO agent_media_preferences VALUES('owner','emby','qb','before');"
             )
-            db._migrate_agent_capability_closure_v24(conn)
-            db._migrate_agent_capability_closure_v24(conn)
+            database_migrations._migrate_agent_capability_closure_v24(conn)
+            database_migrations._migrate_agent_capability_closure_v24(conn)
             self.assertEqual(
                 conn.execute("SELECT * FROM agent_media_preferences").fetchone(),
                 ("owner", "emby", "qb", "before", "{}", ""),
@@ -34,7 +35,7 @@ class CapabilityMigrationTests(unittest.TestCase):
     def test_migration_participates_in_transaction(self):
         with sqlite3.connect(":memory:") as conn:
             conn.execute("BEGIN IMMEDIATE")
-            db._migrate_agent_capability_closure_v24(conn)
+            database_migrations._migrate_agent_capability_closure_v24(conn)
             conn.rollback()
             self.assertIsNone(
                 conn.execute(
@@ -48,7 +49,7 @@ class CapabilityMigrationTests(unittest.TestCase):
             sqlite3.connect(":memory:") as migrated,
         ):
             fresh.executescript(db._SCHEMA)
-            db._migrate_agent_capability_closure_v24(migrated)
+            database_migrations._migrate_agent_capability_closure_v24(migrated)
             expected = list(
                 migrated.execute("PRAGMA table_info(media_automation_rules)")
             )
