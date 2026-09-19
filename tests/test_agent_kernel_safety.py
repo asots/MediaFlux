@@ -19,6 +19,7 @@ from app.agent.kernel.capabilities import (
 )
 from app.agent.kernel.effects import (
     ConfirmationEffectPlanStore,
+    EffectPlan,
     EffectPlanError,
     PreparedEffect,
 )
@@ -282,6 +283,27 @@ class EffectLifecycleIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self._database.__exit__(None, None, None)
+
+    def test_tracked_partial_job_invalidates_runtime_but_rejected_write_does_not(self):
+        plan = EffectPlan(
+            plan_id="tracked-job", owner="job-owner", session_id="session-1",
+            generation=1, tool_name="guangya.file_changes.execute",
+            effect=ToolEffect.WRITE, arguments={}, snapshot_fingerprint="snapshot",
+            preview={}, expires_at=0,
+        )
+        for status, data, expected in (
+            ("partial", {"background_job": {"operation_ref": "GY-12345678", "status": "partial"}}, True),
+            ("outcome_unknown", {"background_job": {"operation_ref": "GY-12345678", "status": "running"}}, True),
+            ("failed", {}, False),
+        ):
+            with self.subTest(status=status), patch(
+                "app.agent.kernel.ports.mediaflux_effects.invalidate_agent_runtime_generation"
+            ) as invalidate:
+                MediaFluxEffectLifecycle().completed(
+                    plan=plan, value=ToolResult(False, status, "任务核验结果", data=data),
+                    elapsed_ms=1,
+                )
+                self.assertEqual(invalidate.called, expected)
 
     async def test_confirmed_effect_records_actual_owner_and_invalidates_runtime(
         self,

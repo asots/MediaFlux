@@ -40,6 +40,10 @@ class SearchModel:
 
     async def stream(self, request, *, cancellation):
         cancellation.raise_if_cancelled()
+        if any("已确认操作的可信系统结果" in message.content for message in request.messages):
+            yield ModelEvent(ModelEventType.TEXT_DELTA, text="两项下载请求已提交，回执已记录。")
+            yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+            return
         if request.round_index == 0:
             yield ModelEvent(
                 ModelEventType.TOOL_CALL_COMPLETED,
@@ -174,7 +178,7 @@ def test_batch_cross_module_web_selection_telegram_confirmation_has_per_target_r
                 plan_id=plan,
             )
         )
-        assert view.status == "effect_completed" and not view.error_code
+        assert view.status == "success" and not view.error_code
         items = view.effect_result["data"]["items"]
         assert [item["position"] for item in items] == [1, 2]
         assert all(
@@ -210,7 +214,7 @@ def test_restart_repeat_of_confirmation_preserves_completed_receipt(offline_chai
         plan = await prepare(session, await search(session))
         request = EffectEnvelope(owner=OWNER, session_id=SESSION, plan_id=plan)
         accepted = await WebKernelTransport(session).confirm_view(request)
-        assert accepted.status == "effect_completed"
+        assert accepted.status == "success"
         restarted, store = runtime()
         original = await store.load(owner=OWNER, session_id=SESSION)
         for _ in range(2):

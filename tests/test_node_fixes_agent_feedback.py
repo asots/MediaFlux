@@ -76,7 +76,7 @@ class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
     tearDownClass = classmethod(browser_tests.AgentKernelBrowserTests.tearDownClass.__func__)
     make_page = browser_tests.AgentKernelBrowserTests.make_page
 
-    def confirm(self, events, *, malformed_tail=""):
+    def confirm(self, events, *, malformed_tail="", http_error=None):
         approval = {'plan_id': 'plan-result-boundary', 'tool_name': 'downloads.submit',
                     'effect': 'WRITE', 'preview': {'summary': '提交测试任务'}, 'result': {}}
         page = self.make_page({'sessions': {'sessions': [{'session_id': SESSION_ID,
@@ -90,23 +90,36 @@ class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
                     ? new Response(text, {status: 200, headers: {'Content-Type': 'application/x-ndjson'}})
                     : previous(...args);
             }""", ''.join(json.dumps(e, ensure_ascii=False) + '\n' for e in events) + malformed_tail)
+        elif http_error:
+            page.evaluate("""payload => {
+                const previous = window.fetch;
+                window.fetch = async (...args) => String(args[0]) === '/api/agent/actions/confirm'
+                    ? new Response(JSON.stringify(payload.body), {
+                        status: payload.status,
+                        headers: {'Content-Type': 'application/json'},
+                    })
+                    : previous(...args);
+            }""", http_error)
         card = page.locator('.agent-confirmation-card')
         card.wait_for()
         card.locator('[data-effect-confirm]').click()
-        result = page.locator('.agent-result-card')
+        result = page.locator('.agent-result-card:not(.agent-streaming)')
         result.wait_for()
         return result
 
-    def test_missing_or_malformed_effect_terminal_never_reports_success(self):
+    def test_missing_or_malformed_effect_completion_reports_unknown_not_success(self):
         for suffix in ([], [_event(3, 'turn.completed', {'status': 'effect_completed'})],
                        [_event(3, 'effect.completed', {'result': {}})],
                        [_event(3, 'effect.completed', {'result': []})]):
             with self.subTest(suffix=suffix):
                 result = self.confirm([_event(1, 'turn.started', {'kind': 'confirmation'}),
                     _event(2, 'tool.started', {'kind': 'confirmed_effect'}), *suffix])
-                self.assertNotIn('通过写后校验', result.inner_text())
-                self.assertNotIn('✅', result.inner_text())
-                self.assertIn('勿直接重复提交', result.inner_text())
+                text = result.inner_text()
+                self.assertNotIn('通过写后校验', text)
+                self.assertNotIn('✅', text)
+                self.assertIn('连接中断，后续结果尚未确认', text)
+                self.assertIn('可刷新会话核对', text)
+                self.assertIn('不要重复提交', text)
                 self.assertIn('is-interrupted', result.get_attribute('class'))
 
     def test_failed_dto_survives_generic_turn_failure(self):
@@ -118,11 +131,33 @@ class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
         self.assertIn('提交结果未知', result.inner_text())
         self.assertIn('is-interrupted', result.get_attribute('class'))
 
-    def test_trusted_effect_completion_is_enough_without_turn_trailer(self):
+    def test_isolated_effect_completion_preserves_receipt_but_reports_unknown_eof(self):
         result = self.confirm([_event(1, 'turn.started', {}), _event(2, 'effect.completed',
             {'result': {'ok': True, 'status': 'success', 'summary': '任务已暂停'}})])
-        self.assertIn('任务已暂停', result.inner_text())
+        text = result.inner_text()
+        self.assertIn('任务已暂停', text)
+        self.assertIn('连接中断，后续结果尚未确认', text)
+        self.assertIn('不要重复提交', text)
+        self.assertNotIn('通过写后校验', text)
         self.assertNotIn('is-interrupted', result.get_attribute('class'))
+
+    def test_explicit_effect_completed_turn_terminal_renders_without_model_followup(self):
+        cases = (
+            ([_event(1, 'turn.started', {}), _event(2, 'turn.completed', {
+                'status': 'effect_completed', 'answer': '直接计划已完成，返回确定性回执。'})],
+             '直接计划已完成，返回确定性回执'),
+            ([_event(1, 'turn.started', {}), _event(2, 'effect.completed', {
+                'result': {'ok': True, 'status': 'success', 'summary': 'DTO 计划已完成'}}),
+             _event(3, 'turn.completed', {'status': 'effect_completed'})],
+             'DTO 计划已完成'),
+        )
+        for events, expected in cases:
+            with self.subTest(expected=expected):
+                result = self.confirm(events)
+                text = result.inner_text()
+                self.assertIn(expected, text)
+                self.assertNotIn('连接中断', text)
+                self.assertNotIn('is-interrupted', result.get_attribute('class'))
 
     def test_failed_effect_without_dto_keeps_specific_cause(self):
         result = self.confirm([_event(1, 'turn.started', {}),
@@ -135,21 +170,40 @@ class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
         self.assertIn('计划已失效', result.inner_text())
         self.assertIn('is-interrupted', result.get_attribute('class'))
 
-    def test_transport_error_after_trusted_terminal_does_not_erase_business_result(self):
+    def test_transport_error_after_trusted_effect_does_not_erase_business_result(self):
         for kind, payload in (('effect.completed', {'result': {'ok': True, 'summary': '任务已暂停'}}),
                               ('effect.failed', {'result': FAILURE, 'message': WARNING})):
             with self.subTest(kind=kind):
                 result = self.confirm([_event(1, 'turn.started', {}), _event(2, kind, payload)],
                                       malformed_tail='{invalid-json')
+                text = result.inner_text()
                 if kind == 'effect.completed':
-                    self.assertIn('任务已暂停', result.inner_text())
+                    self.assertIn('任务已暂停', text)
+                    self.assertIn('连接中断，后续结果尚未确认', text)
                     self.assertNotIn('is-interrupted', result.get_attribute('class'))
                 else:
-                    self.assertIn(WARNING, result.inner_text())
+                    self.assertIn(WARNING, text)
+                    self.assertIn('提交结果未知', text)
                     self.assertIn('is-interrupted', result.get_attribute('class'))
 
     def test_transport_error_before_terminal_reports_unknown_not_success(self):
         result = self.confirm([_event(1, 'turn.started', {})], malformed_tail='{invalid-json')
-        self.assertIn('勿直接重复提交', result.inner_text())
-        self.assertNotIn('✅', result.inner_text())
+        text = result.inner_text()
+        self.assertIn('连接中断，后续结果尚未确认', text)
+        self.assertIn('可刷新会话核对状态', text)
+        self.assertIn('不要重复提交', text)
+        self.assertNotIn('✅', text)
         self.assertIn('is-interrupted', result.get_attribute('class'))
+
+    def test_http_error_preserves_backend_reason_and_no_duplicate_submit_warning(self):
+        for status, reason in ((400, '请求参数已失效，请重新核对计划'), (409, '计划已过期，请核对当前状态')):
+            with self.subTest(status=status):
+                result = self.confirm([], http_error={
+                    'status': status,
+                    'body': {'error': reason},
+                })
+                text = result.inner_text()
+                self.assertIn(reason, text)
+                self.assertIn('请核对状态，不要重复提交', text)
+                self.assertNotIn('Expected property name', text)
+                self.assertIn('is-interrupted', result.get_attribute('class'))

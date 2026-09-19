@@ -7,7 +7,8 @@ import json
 import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from app.agent.model_context_budget import bounded_model_messages
@@ -78,7 +79,7 @@ DEFAULT_SYSTEM_PROMPT = """你是 MediaFlux Media Agent，一名可操作当前 
 副作用规则：
 - READ 工具可直接调用。
 - WRITE/DANGER 工具永远只会生成冻结 EffectPlan，不会立即写入。看到 approval_required 后，清楚概括对象、动作、影响与不可逆性，然后停止；绝不能声称已经执行。
-- 用户确认由系统独立执行，不经过你。不得猜测、修改或伪造 plan_id。
+- 用户确认后，系统先执行获准操作并等待可跟踪任务真实结果，再让你沿原始任务继续。已完成步骤不能重复执行；仍有未完成步骤可继续读取或生成下一张确认卡，新的写操作仍需再次授权。全部完成后给出明确结论；排队/运行/未知不等于完成。不得猜测、修改或伪造 plan_id。
 - 只使用工具返回的安全 opaque ref；不要猜数据库主键、Provider 对象 ID、绝对路径、令牌或内部句柄。不得自行构造或改写 URL；只可原样展示媒体工具返回的已校验 `open_url`，或追漫日历明确返回且恰为 `/discovery/calendar` 的 `calendar_url`。
 
 领域判断：
@@ -210,13 +211,10 @@ class AgentSession:
         channel: str = "api",
     ) -> AsyncIterator[AgentEvent]:
         async for event in self._run_background(
-            lambda queue: self._drive_confirmation(
-                owner=str(owner or "").strip(),
-                session_id=str(session_id or "").strip(),
-                plan_id=str(plan_id or "").strip(),
-                request_id=str(request_id or "").strip() or secrets.token_urlsafe(12),
-                channel=str(channel or "api").strip().lower(),
-                queue=queue,
+            lambda queue: self._drive(
+                AgentInput(message="继续已确认任务", owner=owner, session_id=session_id,
+                           request_id=request_id, channel=channel),
+                queue, plan_id=str(plan_id or "").strip(),
             ),
             cancel_on_consumer_close=False,
         ):
@@ -322,12 +320,91 @@ class AgentSession:
         self,
         agent_input: AgentInput,
         queue: asyncio.Queue[AgentEvent | None],
+        *, plan_id: str | None = None,
     ) -> None:
         lease: PublicationLease | None = None
         token: CancellationToken | None = None
         factory: EventFactory | None = None
         checkpoint: Callable[..., Awaitable[None]] | None = None
+        scope = ExitStack()
+        confirming = plan_id is not None
+        confirmed_result: dict[str, Any] | None = None
+        active_calls: tuple[ModelToolCall, ...] = ()
+        completed_call_ids: set[str] = set()
+        started_call_id = ""
 
+        async def persist_conversation(*, close_pending: bool = False) -> None:
+            checkpoint_messages = list(messages)
+            if close_pending:
+                for call in active_calls:
+                    if call.call_id in completed_call_ids:
+                        continue
+                    started = call.call_id == started_call_id
+                    checkpoint_messages.append(
+                        self._tool_error_message(
+                            call,
+                            ToolPipelineError(
+                                "工具执行被中断，结果未知"
+                                if started else "本调用未执行",
+                                code="result_unknown" if started else "not_executed",
+                            ),
+                        )
+                    )
+            await self.state_store.commit(
+                lease,
+                conversation=self._persisted_conversation(
+                    checkpoint_messages,
+                    current_user_index=current_user_index,
+                    original_message=agent_input.message,
+                    reply_context=agent_input.reply_context,
+                    prior_conversation=state.conversation,
+                ),
+            )
+
+        async def remember_result(
+            *,
+            tool_name: str,
+            content: str,
+            public_content: str,
+            candidate_result: Mapping[str, Any] | None = None,
+        ) -> bool:
+            """先持久化真实执行结果，再沿原始任务继续，不能靠模型改写事实。"""
+            nonlocal state, messages
+            safe_content = str(content or "").strip()
+            if not safe_content:
+                return False
+            conversation = [dict(item) for item in state.conversation]
+            item = ModelMessage(
+                role="assistant",
+                content=(
+                    "已确认操作的可信系统结果（不是待执行计划）：\n"
+                    + safe_content
+                ),
+                tool_name=tool_name,
+            ).to_dict()
+            safe_public_content = str(public_content or "").strip()
+            if safe_public_content:
+                item["public_content"] = safe_public_content
+            updates = (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),)
+            if candidate_result:
+                item["candidate_result_ref"] = candidate_result["ref"]
+                updates += (StateUpdate("metadata.ux_candidate_result", dict(candidate_result)),)
+            conversation.append(item)
+            try:
+                state = await self.state_store.commit(
+                    lease,
+                    conversation=conversation,
+                    updates=updates,
+                )
+                messages = self._restore_messages(state)
+                return True
+            except StalePublicationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 已执行副作用不得被状态写回遮蔽
+                logger.warning(
+                    "Agent 确认结果写回会话失败 type=%s", type(exc).__name__
+                )
+                return False
         async def preserve_checkpoint() -> None:
             if checkpoint is None:
                 return
@@ -345,7 +422,13 @@ class AgentSession:
                 session_id=agent_input.session_id, turn_id=secrets.token_urlsafe(12),
                 request_id=agent_input.request_id,
             )
-            event = failure_factory.create(AgentEventType.TURN_FAILED, {"code": code, "message": message})
+            if confirmed_result is not None:
+                answer = format_public_result(confirmed_result) + "\n\n后续处理未完成：" + message
+                messages.append(ModelMessage(role="assistant", content=answer))
+                await preserve_checkpoint()
+                event = failure_factory.create(AgentEventType.TURN_COMPLETED, {"status": "partial", "answer": answer})
+            else:
+                event = failure_factory.create(AgentEventType.TURN_FAILED, {"code": code, "message": message})
             if self.journal is not None:
                 await self.journal.append(event, owner=agent_input.owner)
             await queue.put(event)
@@ -382,66 +465,49 @@ class AgentSession:
             if candidate_context is not None:
                 contextual_message += "\n已校验的回复批次，仅可从该引用解析候选编号：" + str(candidate_context.guard.ref)
             admission_token = await self.turn_admission.begin(agent_input)
-            with session_scope_guard(agent_input.owner, agent_input.session_id):
+            if plan_id is not None:
+                scope.enter_context(session_scope_guard(agent_input.owner, agent_input.session_id, kind="effect"))
                 async with self._start_lock:
-                    if await self.coordinator.has_protected_turn(
-                        owner=agent_input.owner,
-                        session_id=agent_input.session_id,
-                    ):
-                        raise SessionBusyError("confirmed effect is executing")
-                    begin_options = {}
-                    if validated_selection is not None:
-                        begin_options["selection_guard"] = validated_selection.guard
-                    elif candidate_context is not None:
-                        begin_options["selection_guard"] = candidate_context.guard
-                    lease, state = await self.state_store.begin_turn(
-                        owner=agent_input.owner,
-                        session_id=agent_input.session_id,
-                        request_id=agent_input.request_id,
-                        **begin_options,
-                    )
-                    token = await self.coordinator.begin(lease)
-                    messages = self._restore_messages(state)
-                    current_user_index = len(messages)
-                    messages.append(ModelMessage(role="user", content=contextual_message))
-                    active_calls: tuple[ModelToolCall, ...] = ()
-                    completed_call_ids: set[str] = set()
-                    started_call_id = ""
-
-                    async def persist_conversation(*, close_pending: bool = False) -> None:
-                        checkpoint_messages = list(messages)
-                        if close_pending:
-                            for call in active_calls:
-                                if call.call_id in completed_call_ids:
-                                    continue
-                                started = call.call_id == started_call_id
-                                checkpoint_messages.append(
-                                    self._tool_error_message(
-                                        call,
-                                        ToolPipelineError(
-                                            "工具执行被中断，结果未知"
-                                            if started else "本调用未执行",
-                                            code="result_unknown" if started else "not_executed",
-                                        ),
-                                    )
-                                )
-                        await self.state_store.commit(
-                            lease,
-                            conversation=self._persisted_conversation(
-                                checkpoint_messages,
-                                current_user_index=current_user_index,
-                                original_message=agent_input.message,
-                                reply_context=agent_input.reply_context,
-                                prior_conversation=state.conversation,
-                            ),
+                    state = await self.state_store.load(owner=agent_input.owner, session_id=agent_input.session_id)
+                    lease = PublicationLease(agent_input.owner, agent_input.session_id, state.generation,
+                                             secrets.token_urlsafe(12), agent_input.request_id)
+                    token = await self.coordinator.begin(lease, protected=True)
+                messages = self._restore_messages(state)
+                last_user = next((row for row in reversed(state.conversation) if row.get("role") == "user"), None)
+                if last_user:
+                    agent_input = replace(agent_input, message=str(last_user.get("content") or agent_input.message),
+                                          reply_context=last_user.get("reply_context") or {})
+                    contextual_message = self._contextual_message(agent_input)
+                current_user_index = None
+            else:
+                with session_scope_guard(agent_input.owner, agent_input.session_id):
+                    async with self._start_lock:
+                        if await self.coordinator.has_protected_turn(
+                            owner=agent_input.owner,
+                            session_id=agent_input.session_id,
+                        ):
+                            raise SessionBusyError("confirmed effect is executing")
+                        begin_options = {}
+                        if validated_selection is not None:
+                            begin_options["selection_guard"] = validated_selection.guard
+                        elif candidate_context is not None:
+                            begin_options["selection_guard"] = candidate_context.guard
+                        lease, state = await self.state_store.begin_turn(
+                            owner=agent_input.owner,
+                            session_id=agent_input.session_id,
+                            request_id=agent_input.request_id,
+                            **begin_options,
                         )
-
-                    # 输入接纳和持久化必须位于同一个 start window，不能等事件发布：
-                    # journal/observer 可能挂起，此时下一条追问已取得新 generation。
-                    # 这里只写通过凭据检测的用户输入，迟到的模型/工具仍不得提交。
-                    if not sensitive_input:
-                        checkpoint = persist_conversation
-                        await persist_conversation()
+                        token = await self.coordinator.begin(lease)
+                        messages = self._restore_messages(state)
+                        current_user_index = len(messages)
+                        messages.append(ModelMessage(role="user", content=contextual_message))
+                        # 输入接纳和持久化必须位于同一个 start window，不能等事件发布：
+                        # journal/observer 可能挂起，此时下一条追问已取得新 generation。
+                        # 这里只写通过凭据检测的用户输入，迟到的模型/工具仍不得提交。
+                        if not sensitive_input:
+                            checkpoint = persist_conversation
+                            await persist_conversation()
             factory = EventFactory(
                 session_id=agent_input.session_id,
                 turn_id=lease.turn_id,
@@ -456,9 +522,9 @@ class AgentSession:
                 token.raise_if_cancelled()
                 if not await self.coordinator.is_current(lease, token):
                     raise asyncio.CancelledError("superseded")
-                if not await self.state_store.is_current(lease):
+                if not confirming and not await self.state_store.is_current(lease):
                     raise asyncio.CancelledError("stale_generation")
-                if not await self.turn_admission.is_current(
+                if not confirming and not await self.turn_admission.is_current(
                     admission_token, agent_input
                 ):
                     raise asyncio.CancelledError("runtime_changed")
@@ -472,6 +538,7 @@ class AgentSession:
                 {
                     "channel": agent_input.channel,
                     "generation": lease.generation,
+                    **({"kind": "confirmation"} if plan_id is not None else {}),
                 },
             )
             if sensitive_input:
@@ -483,6 +550,70 @@ class AgentSession:
                     },
                 )
                 return
+
+            async def progress(payload: Mapping[str, Any]) -> None:
+                await publish(AgentEventType.TOOL_STARTED if payload.get("kind") == "confirmed_effect" else AgentEventType.TOOL_PROGRESS, payload)
+
+            tool_context = ToolCallContext(
+                owner=agent_input.owner,
+                session_id=agent_input.session_id,
+                request_id=agent_input.request_id,
+                turn_id=lease.turn_id,
+                lease=lease,
+                cancellation=token,
+                report_progress=progress,
+                selection_arguments=validated_selection.arguments if validated_selection else None,
+                resource_candidate_ref=candidate_context.guard.ref if candidate_context else "",
+            )
+            if plan_id is not None:
+                result = None
+                try:
+                    result = await self.pipeline.execute_confirmed(plan_id, context=tool_context)
+                    public_result = dict(result.outcome.public_content)
+                except (asyncio.CancelledError, StalePublicationError):
+                    raise
+                except ConfirmationClaimError as exc:
+                    await failure(exc.code, str(exc))
+                    return
+                except Exception as exc:
+                    public_result = {"ok": False, "status": exc.code if isinstance(exc, ToolPipelineError) else "internal_error",
+                                     "summary": str(exc) if isinstance(exc, ToolPipelineError) else "确认执行状态未知，请先查询真实业务状态再决定是否重试。"}
+                candidate_data = public_result.get("data")
+                candidate_items = candidate_data.get("items", []) if isinstance(candidate_data, Mapping) else []
+                candidate_items = candidate_items if isinstance(candidate_items, list) else []
+                receipt_saved = await remember_result(
+                    tool_name=result.tool.name if result else "confirmed_effect",
+                    content=result.outcome.model_message() if result else json.dumps(public_result, ensure_ascii=False),
+                    public_content=format_public_result(public_result),
+                    candidate_result={
+                        "ref": result.arguments.get("resource_candidates_ref"), "text": format_public_result(public_result),
+                        "target": result.arguments.get("target"),
+                        "handled_positions": [item.get("position") for item in candidate_items if isinstance(item, dict) and type(item.get("position")) is int and item.get("status") != "failed"],
+                    } if result and result.tool.name == "ingest.submit" and result.arguments.get("source_type") == "resource_candidates" else None,
+                )
+                failed = public_result.get("ok") is False
+                await publish(AgentEventType.EFFECT_FAILED if failed else AgentEventType.EFFECT_COMPLETED, {
+                    "plan_id": plan_id, "tool": result.tool.name if result else "confirmed_effect", "result": public_result,
+                    "code": str(public_result.get("status") or "effect_failed") if failed else "",
+                    "message": str(public_result.get("error") or public_result.get("summary") or "执行未完成") if failed else "",
+                    "elapsed_ms": result.elapsed_ms if result else 0,
+                })
+                if failed:
+                    await failure(str(public_result.get("status") or "effect_failed"), str(public_result.get("summary") or "执行未完成"))
+                    return
+                if not receipt_saved:
+                    confirmed_result = public_result
+                    await failure("receipt_unavailable", "执行结果已取得，但会话记录保存失败，未继续后续步骤；请先核对任务状态。")
+                    return
+                if not last_user:
+                    await publish(AgentEventType.TURN_COMPLETED, {"status": "effect_completed", "plan_id": plan_id})
+                    return
+                confirmed_result = public_result
+                scope.close()
+                await self.coordinator.unprotect(lease, token)
+                confirming = False
+                admission_token = await self.turn_admission.begin(agent_input)
+                checkpoint = persist_conversation
 
             selection = self.retriever.retrieve(
                 contextual_message,
@@ -525,9 +656,6 @@ class AgentSession:
             tool_budget_blocked = False
             total_usage: dict[str, int] = {}
 
-            async def progress(payload: Mapping[str, Any]) -> None:
-                await publish(AgentEventType.TOOL_PROGRESS, payload)
-
             async def finish_answer(answer: str, status: str, reason: str, model_calls: int) -> None:
                 """正常回答与预算收尾共用一次持久化/终态发布，不丢失工具调用协议。"""
                 messages.append(ModelMessage(role="assistant", content=answer))
@@ -542,22 +670,11 @@ class AgentSession:
                 "未生成确认卡的写操作均未执行；你可以回复继续，我会基于现有上下文接着处理。"
             )
 
-            tool_context = ToolCallContext(
-                owner=agent_input.owner,
-                session_id=agent_input.session_id,
-                request_id=agent_input.request_id,
-                turn_id=lease.turn_id,
-                lease=lease,
-                cancellation=token,
-                report_progress=progress,
-                capability_search=discovery.search,
-                selection_arguments=validated_selection.arguments if validated_selection else None,
-                resource_candidate_ref=candidate_context.guard.ref if candidate_context else "",
-            )
+            tool_context = replace(tool_context, capability_search=discovery.search)
             # 新的自然语言回合会明确取代尚未确认的旧计划。若只提升
             # generation 而不撤销票据，历史卡片会永久显示“待确认”，
             # 但点击时又只能得到 stale plan，形成确认死状态。
-            if state.pending_effect_plan_id:
+            if state.pending_effect_plan_id and plan_id is None:
                 await self.pipeline.cancel_effect(
                     state.pending_effect_plan_id,
                     context=tool_context,
@@ -599,6 +716,8 @@ class AgentSession:
                 })
                 return
 
+            history_end = current_user_index if current_user_index is not None else next(
+                (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), len(messages))
             for round_index in range(self.limits.max_model_rounds):
                 token.raise_if_cancelled()
                 await publish(AgentEventType.MODEL_STARTED, {"round": round_index + 1})
@@ -629,7 +748,7 @@ class AgentSession:
                     system_prompt=request_system_prompt,
                     messages=bounded_model_messages(
                         messages,
-                        history_end=current_user_index,
+                        history_end=history_end,
                         tool_definitions=request_tools,
                         system_prompt=request_system_prompt,
                         context_window_tokens=self.limits.context_window_tokens,
@@ -947,216 +1066,9 @@ class AgentSession:
             logger.error("Agent turn failed type=%s", type(exc).__name__)
             await failure("internal_error", "Agent 运行失败")
         finally:
+            scope.close()
             if lease is not None and token is not None:
                 await self.coordinator.finish(lease, token)
-
-    async def _drive_confirmation(
-        self, *, owner: str, session_id: str, plan_id: str, request_id: str,
-        channel: str, queue: asyncio.Queue[AgentEvent | None],
-    ) -> None:
-        if not owner or not session_id or not plan_id:
-            return
-        try:
-            # 外层保护覆盖票据认领、远端执行、审计及 conversation 回执落盘。
-            with session_scope_guard(owner, session_id, kind="effect"):
-                async with self._start_lock:
-                    state = await self.state_store.load(owner=owner, session_id=session_id)
-                    lease = PublicationLease(
-                        owner=owner,
-                        session_id=session_id,
-                        generation=state.generation,
-                        turn_id=secrets.token_urlsafe(12),
-                        request_id=request_id,
-                    )
-                    token = await self.coordinator.begin(lease, protected=True)
-                factory = EventFactory(
-                    session_id=session_id, turn_id=lease.turn_id, request_id=request_id
-                )
-
-                async def publish(
-                    event_type: AgentEventType, payload: Mapping[str, Any] | None = None
-                ) -> None:
-                    token.raise_if_cancelled()
-                    event = factory.create(event_type, payload)
-                    if self.journal is not None:
-                        await self.journal.append(event, owner=owner)
-                    await queue.put(event)
-
-                async def progress(payload: Mapping[str, Any]) -> None:
-                    event_type = AgentEventType.TOOL_STARTED if payload.get("kind") == "confirmed_effect" else AgentEventType.TOOL_PROGRESS
-                    await publish(event_type, payload)
-
-                context = ToolCallContext(
-                    owner=owner,
-                    session_id=session_id,
-                    request_id=request_id,
-                    turn_id=lease.turn_id,
-                    lease=lease,
-                    cancellation=token,
-                    report_progress=progress,
-                )
-
-                async def remember_result(
-                    *,
-                    tool_name: str,
-                    content: str,
-                    public_content: str,
-                    candidate_result: Mapping[str, Any] | None = None,
-                ) -> None:
-                    """把确定性确认终态写回会话，供下一轮续问直接引用。"""
-                    safe_content = str(content or "").strip()
-                    if not safe_content:
-                        return
-                    conversation = [dict(item) for item in state.conversation]
-                    item = ModelMessage(
-                        role="assistant",
-                        content=(
-                            "已确认操作的可信系统结果（不是待执行计划）：\n"
-                            + safe_content
-                        ),
-                        tool_name=tool_name,
-                    ).to_dict()
-                    safe_public_content = str(public_content or "").strip()
-                    if safe_public_content:
-                        item["public_content"] = safe_public_content
-                    updates = (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),)
-                    if candidate_result:
-                        item["candidate_result_ref"] = candidate_result["ref"]
-                        updates += (StateUpdate("metadata.ux_candidate_result", dict(candidate_result)),)
-                    conversation.append(item)
-                    try:
-                        await self.state_store.commit(
-                            lease,
-                            conversation=conversation,
-                            updates=updates,
-                        )
-                    except StalePublicationError:
-                        raise
-                    except Exception as exc:  # noqa: BLE001 - 已执行副作用不得被状态写回遮蔽
-                        logger.warning(
-                            "Agent 确认结果写回会话失败 type=%s", type(exc).__name__
-                        )
-                try:
-                    await publish(
-                        AgentEventType.TURN_STARTED,
-                        {
-                            "channel": channel,
-                            "generation": lease.generation,
-                            "kind": "confirmation",
-                        },
-                    )
-                    result = await self.pipeline.execute_confirmed(plan_id, context=context)
-                    public_result = dict(result.outcome.public_content)
-                    candidate_data = public_result.get("data")
-                    candidate_items = candidate_data.get("items") if isinstance(candidate_data, Mapping) else []
-                    candidate_items = candidate_items if isinstance(candidate_items, list) else []
-                    await remember_result(
-                        tool_name=result.tool.name,
-                        content=result.outcome.model_message(),
-                        public_content=format_public_result(public_result),
-                        candidate_result={
-                            "ref": result.arguments.get("resource_candidates_ref"), "text": format_public_result(public_result),
-                            "target": result.arguments.get("target"),
-                            "handled_positions": [item.get("position") for item in candidate_items if isinstance(item, dict) and type(item.get("position")) is int and item.get("status") != "failed"],
-                        } if result.tool.name == "ingest.submit" and result.arguments.get("source_type") == "resource_candidates" else None,
-                    )
-                    if public_result.get("ok") is False:
-                        code = str(public_result.get("status") or "effect_failed")[:80]
-                        await publish(
-                            AgentEventType.EFFECT_FAILED,
-                            {
-                                "plan_id": plan_id,
-                                "tool": result.tool.name,
-                                "code": code,
-                                "message": str(
-                                    public_result.get("error")
-                                    or public_result.get("summary")
-                                    or "执行未完成"
-                                )[:500],
-                                "elapsed_ms": result.elapsed_ms,
-                                "result": public_result,
-                            },
-                        )
-                        await publish(
-                            AgentEventType.TURN_FAILED,
-                            {"code": code, "message": "已确认操作未能完成"},
-                        )
-                    else:
-                        await publish(
-                            AgentEventType.EFFECT_COMPLETED,
-                            {
-                                "plan_id": plan_id,
-                                "tool": result.tool.name,
-                                "elapsed_ms": result.elapsed_ms,
-                                "result": public_result,
-                            },
-                        )
-                        await publish(
-                            AgentEventType.TURN_COMPLETED,
-                            {"status": "effect_completed", "plan_id": plan_id},
-                        )
-                except (asyncio.CancelledError, StalePublicationError) as exc:
-                    event = factory.create(
-                        AgentEventType.TURN_CANCELLED,
-                        {"reason": str(exc) or token.reason},
-                    )
-                    if self.journal is not None:
-                        await self.journal.append(event, owner=owner)
-                    await queue.put(event)
-                except ToolPipelineError as exc:
-                    # 未领取票据的重复/失效确认不能用旧快照覆盖另一 worker 已提交的
-                    # 成功回执，也不能清除仍在执行的计划。错误仅投影到本次请求。
-                    if not isinstance(exc, ConfirmationClaimError):
-                        public_result = {"ok": False, "status": exc.code, "summary": str(exc)}
-                        await remember_result(
-                            tool_name="confirmed_effect",
-                            content=f"执行失败：{str(exc)[:500]}（错误码：{exc.code[:80]}）",
-                            public_content=format_public_result(public_result, fallback="确认执行未能完成。"),
-                        )
-                        await publish(
-                            AgentEventType.EFFECT_FAILED,
-                            {"plan_id": plan_id, "code": exc.code, "message": str(exc), "result": public_result},
-                        )
-                    await publish(
-                        AgentEventType.TURN_FAILED,
-                        {"code": exc.code, "message": str(exc)},
-                    )
-                except Exception as exc:  # noqa: BLE001 - confirmed-effect fault boundary
-                    logger.error("Agent confirmed effect failed type=%s", type(exc).__name__)
-                    await remember_result(
-                        tool_name="confirmed_effect",
-                        content=(
-                            "执行状态未知：确认执行发生内部错误"
-                            "（错误码：internal_error），请先查询真实业务状态再决定是否重试。"
-                        ),
-                        public_content=(
-                            "❌ 确认执行发生内部错误，请先查询真实业务状态再决定是否重试。"
-                        ),
-                    )
-                    await publish(
-                        AgentEventType.EFFECT_FAILED,
-                        {
-                            "plan_id": plan_id,
-                            "code": "internal_error",
-                            "message": "确认执行失败",
-                        },
-                    )
-                    await publish(
-                        AgentEventType.TURN_FAILED,
-                        {"code": "internal_error", "message": "确认执行失败"},
-                    )
-                finally:
-                    await self.coordinator.finish(lease, token)
-
-        except SessionBusyError:
-            event = EventFactory(
-                session_id=session_id, turn_id=secrets.token_urlsafe(12), request_id=request_id,
-            ).create(AgentEventType.TURN_FAILED, {
-                "code": "effect_in_progress", "message": "另一项会话操作正在执行，请稍后重试。",
-            })
-            if self.journal is not None:
-                await self.journal.append(event, owner=owner)
-            await queue.put(event)
 
     @staticmethod
     def _capability_retrieval_context(
@@ -1225,7 +1137,7 @@ class AgentSession:
     def _persisted_conversation(
         messages: Sequence[ModelMessage],
         *,
-        current_user_index: int,
+        current_user_index: int | None,
         original_message: str,
         reply_context: Mapping[str, Any] | None = None,
         prior_conversation: Sequence[Mapping[str, Any]] = (),
@@ -1247,7 +1159,7 @@ class AgentSession:
             item = message.to_dict()
             key = tuple(str(item.get(field) or "") for field in ("role", "content", "tool_call_id", "tool_name"))
             prior = public_history.get(key)
-            if index < current_user_index and prior:
+            if (current_user_index is None or index < current_user_index) and prior:
                 item.update(prior.pop(0))
             tool_calls = item.get("tool_calls")
             if isinstance(tool_calls, list):
@@ -1257,7 +1169,7 @@ class AgentSession:
                     if isinstance(call, Mapping)
                 ]
             stored.append(item)
-        if 0 <= current_user_index < len(stored):
+        if current_user_index is not None and 0 <= current_user_index < len(stored):
             stored[current_user_index] = {
                 **stored[current_user_index],
                 "content": original_message,

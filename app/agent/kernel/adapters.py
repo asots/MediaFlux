@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .events import AgentEvent, AgentEventType
@@ -157,7 +157,7 @@ class TurnViewBuilder:
             self._effect_result = (
                 deepcopy(dict(result)) if isinstance(result, Mapping) else {}
             )
-            self._status = "effect_completed"
+            self._status = "running"  # 步骤回执不是授权后整轮任务的终态。
             self._effect_failed = False
             self._error_code = ""
             self._error_message = ""
@@ -228,7 +228,15 @@ async def consume_events(
         builder.apply(event)
         if observe is not None:
             await observe(event)
-    return builder.build()
+    view = builder.build()
+    if not view.terminal:
+        return replace(
+            view, status="partial" if view.effect_result.get("ok") is True else "failed",
+            answer="已保留执行回执，但后续会话结果尚未确认；请核对任务状态，勿直接重复提交。" if view.effect_result.get("ok") is True else view.answer,
+            error_code=view.error_code or "stream_incomplete",
+            error_message=view.error_message or "事件流结束但缺少任务终态，请核对任务状态，勿直接重复提交。",
+        )
+    return view
 
 
 async def iter_ndjson(events: AsyncIterable[AgentEvent]) -> AsyncIterator[bytes]:

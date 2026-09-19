@@ -117,6 +117,23 @@ class AgentKernelAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view.error_message, "")
         self.assertIn("其余可继续", view.answer)
 
+    async def test_step_receipt_without_turn_terminal_is_incomplete_not_success(self):
+        factory = EventFactory(session_id="s", turn_id="t", request_id="r")
+        result = {"ok": True, "summary": "目录已移动"}
+        events = [factory.create(AgentEventType.TURN_STARTED), factory.create(AgentEventType.EFFECT_COMPLETED, {"result": result})]
+        builder = TurnViewBuilder()
+        for event in events:
+            builder.apply(event)
+        self.assertFalse(builder.build().terminal)
+        view = await consume_events(event_stream(events))
+        self.assertEqual(view.status, "partial")
+        self.assertEqual(view.effect_result, result)
+        self.assertIn("尚未确认", view.answer)
+        events.append(factory.create(AgentEventType.TURN_COMPLETED, {"status": "effect_completed"}))
+        terminal = await consume_events(event_stream(events))
+        self.assertEqual(terminal.status, "effect_completed")
+        self.assertFalse(terminal.error_code)
+
     def test_rejects_mixed_turns(self) -> None:
         builder = TurnViewBuilder()
         builder.apply(AgentEvent(AgentEventType.TURN_STARTED, "s", "t", "r", 1))

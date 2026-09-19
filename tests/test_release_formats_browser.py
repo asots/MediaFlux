@@ -146,5 +146,5 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
                 page.wait_for_function("() => document.querySelector('.agent-result-card')?.innerText.includes('已保存')")
                 self.assertEqual(len(formats.list_rules()), 1)
                 self.assertEqual(_parse_release_core(filename(15), PARENT).context.episode, 15)
-                self.assertEqual(len(model.requests), 2)
+                self.assertEqual(len(model.requests), 3)
                 self.assertEqual(errors, [])

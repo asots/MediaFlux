@@ -97,6 +97,10 @@ def test_both_intent_inputs_share_one_batch_plan_and_continue_after_confirm(stor
 
         async def stream(self, request, *, cancellation):
             self.calls += 1
+            if any("已确认操作的可信系统结果" in row.content for row in request.messages):
+                yield ModelEvent(ModelEventType.TEXT_DELTA, text="已提交明确接受的任务，其余结果未知，请核验。")
+                yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+                return
             yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("batch", "ingest.submit", self.intent))
             yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
 
@@ -132,7 +136,7 @@ def test_both_intent_inputs_share_one_batch_plan_and_continue_after_confirm(stor
             events = await _events(session.run(QueryEnvelope(owner=OWNER, session_id=SESSION, message="仍只做预检", selection=_selection(view, [1, 2], "both")).to_agent_input()))
             assert sum(e.type is AgentEventType.EFFECT_APPROVAL_REQUIRED for e in events) == 1
             execute.assert_called_once()
-            assert model.calls == int(natural)
+            assert model.calls == int(natural) + 1
     asyncio.run(exercise())
 
 
@@ -183,7 +187,9 @@ def test_telegram_in_place_multiselect_previews_and_confirms_once(store, monkeyp
     owner = agent_adapter.telegram_agent_owner(-100, 7)
     session_id = agent_adapter.telegram_agent_session_id(-100, 7)
     monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
-    session, pipeline, states = _runtime(store)
+    from tests.test_agent_kernel_core import ScriptedModel
+    model = ScriptedModel([[ModelEvent(ModelEventType.TEXT_DELTA, text="已接受任务请见回执；未知结果请先核验。"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
+    session, pipeline, states = _runtime(store, model=model)
     runtime = SimpleNamespace(store=store, telegram=TelegramKernelTransport(session))
     monkeypatch.setattr("app.agent.kernel.bootstrap.get_agent_kernel_runtime", lambda: runtime)
     monkeypatch.setattr(agent_adapter, "get_agent_kernel_runtime", lambda: runtime)
@@ -237,7 +243,7 @@ def test_telegram_in_place_multiselect_previews_and_confirms_once(store, monkeyp
         assert execute.call_count == 1, [edit[0] for edit in bot.edits]
         assert "结果未知" in bot.edits[-1][0] and "#81" in bot.edits[-1][0]
         assert bot.edits[-1][3]["reply_markup"].buttons[0].text == "继续挑选本批资源"
-        assert bot.sent == [] and session.model.requests == []
+        assert bot.sent == [] and len(session.model.requests) == 1
         count = len(bot.edits)
         agent_adapter.handle_agent_callback(bot, Call(f"agk:c:{plan}", message), TELEBOT)
         assert len(bot.edits) == count

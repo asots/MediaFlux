@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -216,6 +216,17 @@ class AgentKernelApiTests(unittest.TestCase):
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         self.assertEqual(confirmed.json()["status"], "effect_completed")
         self.assertEqual(len(self.web.confirmations), 1)
+
+    def test_confirmation_continuation_statuses_are_not_http_conflicts(self):
+        for status, expected in (("success", 200), ("partial", 200), ("approval_required", 200), ("failed", 409)):
+            with self.subTest(status=status), patch.object(self.web, "confirm_view", new=AsyncMock(return_value=TurnView(
+                session_id="session_1234567890", turn_id="confirmed", request_id="confirmed-request", status=status,
+            ))):
+                response = self.client.post("/api/agent/actions/confirm", json={
+                    "plan_id": "plan_1234567890abcdef", "session_id": "session_1234567890", "stream": False,
+                })
+                self.assertEqual(response.status_code, expected, response.text)
+                self.assertEqual(response.json()["status"], status)
 
     def test_invalid_fields_are_rejected_before_kernel(self):
         response = self.client.post(

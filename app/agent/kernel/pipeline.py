@@ -578,7 +578,7 @@ class ToolPipeline:
             # JSON 内持久化，使锁释放/进程结束后旧读回合仍无法覆盖确认回执。
             await self.state_store.commit(context.lease, updates=(StateUpdate(
                 "metadata.confirmed_publication",
-                {"generation": context.lease.generation, "turn_id": context.lease.turn_id},
+                {"generation": context.lease.generation, "turn_id": context.lease.turn_id, "plan_id": plan.plan_id},
             ),))
             await context.report_progress({
                 "plan_id": plan_id, "kind": "confirmed_effect", "tool": plan.tool_name,

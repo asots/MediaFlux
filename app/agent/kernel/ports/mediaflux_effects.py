@@ -128,7 +128,8 @@ class MediaFluxEffectLifecycle:
             confirmation_id=plan.plan_id,
             owner_generation=plan.owner_generation,
         )
-        if value.ok:
+        # 已受理后台作业即使只完成部分写入，也不能继续复用写入前的运行快照。
+        if value.ok or (isinstance(value.data, dict) and value.data.get("background_job")):
             invalidate_agent_runtime_generation()
 
     def failed(self, *, plan: EffectPlan, code: str, elapsed_ms: int) -> None:

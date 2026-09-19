@@ -415,8 +415,9 @@ def test_cancelled_producer_drains_external_thread_and_persists_receipt(isolated
             return {"ok": True, "task_id": "fake-gy"}
 
         isolated_chain[0].side_effect = remote_write
-        task = asyncio.create_task(writer._drive_confirmation(
-            owner=OWNER, session_id=SESSION, plan_id=plan, request_id="cancel-producer", channel="api", queue=queue,
+        task = asyncio.create_task(writer._drive(
+            QueryEnvelope(owner=OWNER, session_id=SESSION, message="继续已确认任务", request_id="cancel-producer", channel="api").to_agent_input(),
+            queue, plan_id=plan,
         ))
         try:
             assert await asyncio.to_thread(entered.wait, 5)
@@ -536,8 +537,8 @@ def test_cancellation_during_confirmed_finalization_keeps_receipt_and_terminal_f
 
         with patch.object(store, method, side_effect=persistence), \
              patch.object(pipeline.effect_lifecycle, "completed", side_effect=attach_reference):
-            task = asyncio.create_task(writer._drive_confirmation(owner=OWNER, session_id=SESSION,
-                plan_id=plan, request_id="finalization-cancel", channel="api", queue=queue))
+            task = asyncio.create_task(writer._drive(QueryEnvelope(owner=OWNER, session_id=SESSION,
+                message="继续已确认任务", request_id="finalization-cancel", channel="api").to_agent_input(), queue, plan_id=plan))
             try:
                 assert await asyncio.to_thread(entered.wait, 5)
                 assert isolated_chain[0].call_count == 1

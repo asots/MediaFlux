@@ -185,7 +185,12 @@ MOCK_FETCH = r"""
     }
     if (path === '/api/agent/query/cancel') return jsonResponse({cancelled: true});
     if (path === '/api/agent/actions/confirm') {
-      return streamResponse(window.__kernelConfig.confirmEvents || [], options, 0, false);
+      return streamResponse(
+        window.__kernelConfig.confirmEvents || [],
+        options,
+        Number(window.__kernelConfig.confirmDelayMs || 0),
+        Boolean(window.__kernelConfig.confirmHoldOpen),
+      );
     }
     if (path === '/api/agent/actions/confirm/discard') return jsonResponse({discarded: true});
     throw new Error(`unexpected endpoint: ${path}`);
@@ -504,9 +509,9 @@ Season 1 / S01E01
             "expires_at": "2026-09-03T12:05:00+00:00",
         }
         confirm_events = [
-            _event(1, "turn.started", {"kind": "confirmation"}),
-            _event(2, "effect.completed", {"result": {"summary": "下载任务已暂停"}}),
-            _event(3, "turn.completed", {"status": "effect_completed", "answer": ""}),
+            _event(4, "turn.started", {"kind": "confirmation"}),
+            _event(5, "effect.completed", {"result": {"summary": "下载任务已暂停"}}),
+            _event(6, "turn.completed", {"status": "success", "answer": "下载任务已暂停"}),
         ]
         page = self.make_page(
             {
@@ -547,6 +552,245 @@ Season 1 / S01E01
         payload = json.loads(confirm_call["body"])
         self.assertEqual(payload["plan_id"], approval["plan_id"])
         self.assertEqual(payload["session_id"], SESSION_ID)
+
+    def test_confirm_stream_accepts_legacy_effect_completed_turn_terminal(self):
+        approval = {
+            "plan_id": "plan-browser-legacy-terminal-0001",
+            "tool_name": "download.pause",
+            "effect": "WRITE",
+            "preview": {"summary": "暂停下载任务", "data": {"任务": "测试任务"}},
+            "result": {},
+            "expires_at": "2026-09-03T12:05:00+00:00",
+        }
+        page = self.make_page({
+            "sessions": {"sessions": []},
+            "queryEvents": [
+                _event(1, "turn.started", {"kind": "query"}),
+                _event(2, "effect.approval_required", {
+                    "tool": "download.pause",
+                    "plan": approval,
+                }),
+                _event(3, "turn.completed", {"status": "approval_required", "answer": ""}),
+            ],
+            "confirmEvents": [
+                _event(4, "turn.started", {"kind": "confirmation"}),
+                _event(5, "effect.completed", {
+                    "plan_id": approval["plan_id"],
+                    "result": {"ok": True, "summary": "直接 API 计划已完成"},
+                }),
+                _event(6, "turn.completed", {"status": "effect_completed", "answer": ""}),
+            ],
+        })
+        page.locator("#agentPrompt").fill("执行已有暂停计划")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.locator(".agent-confirmation-card").wait_for()
+        page.locator("[data-effect-confirm]").click()
+
+        result = page.locator(".agent-result-card.has-narrative").filter(has_text="直接 API 计划已完成")
+        result.wait_for()
+        self.assertIn("直接 API 计划已完成", result.inner_text())
+        self.assertEqual(page.locator(".agent-streaming").count(), 0)
+        self.assertTrue(page.locator("#agentStop").is_hidden())
+
+    def test_effect_completed_without_turn_terminal_reports_unknown_after_eof(self):
+        approval = {
+            "plan_id": "plan-browser-incomplete-stream-0001",
+            "tool_name": "download.pause",
+            "effect": "WRITE",
+            "preview": {"summary": "暂停下载任务", "data": {"任务": "测试任务"}},
+            "result": {},
+            "expires_at": "2026-09-03T12:05:00+00:00",
+        }
+        page = self.make_page({
+            "sessions": {"sessions": []},
+            "queryEvents": [
+                _event(1, "turn.started", {"kind": "query"}),
+                _event(2, "effect.approval_required", {
+                    "tool": "download.pause",
+                    "plan": approval,
+                }),
+                _event(3, "turn.completed", {"status": "approval_required", "answer": ""}),
+            ],
+            "confirmEvents": [
+                _event(4, "effect.completed", {
+                    "plan_id": approval["plan_id"],
+                    "result": {"ok": True, "summary": "暂停任务已提交"},
+                }),
+            ],
+        })
+        page.locator("#agentPrompt").fill("执行已有暂停计划")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.locator(".agent-confirmation-card").wait_for()
+        page.locator("[data-effect-confirm]").click()
+
+        narrative = page.locator(".agent-result-card.has-narrative")
+        narrative.wait_for()
+        text = narrative.inner_text()
+        self.assertIn("暂停任务已提交", text)
+        self.assertIn("连接中断，后续结果尚未确认", text)
+        self.assertIn("可刷新会话核对", text)
+        self.assertIn("不要重复提交", text)
+        self.assertTrue(page.locator("#agentStop").is_hidden())
+        self.assertFalse(page.locator("#agentSend").is_hidden())
+        self.assertEqual(page.locator(".agent-streaming").count(), 0)
+        self.assertEqual(page.locator(".agent-cancelled, .is-interrupted").count(), 0)
+
+    def test_confirm_stream_continues_after_effect_completion_until_partial_turn(self):
+        approval = {
+            "plan_id": "plan-browser-followup-0001",
+            "tool_name": "download.pause",
+            "effect": "WRITE",
+            "preview": {"summary": "暂停下载任务", "data": {"任务": "测试任务"}},
+            "result": {},
+            "expires_at": "2026-09-03T12:05:00+00:00",
+        }
+        query_events = [
+            _event(1, "turn.started", {"kind": "query"}),
+            _event(2, "effect.approval_required", {"tool": "download.pause", "plan": approval}),
+            _event(3, "turn.completed", {"status": "approval_required", "answer": ""}),
+        ]
+        confirm_events = [
+            _event(4, "effect.completed", {
+                "plan_id": approval["plan_id"],
+                "result": {
+                    "ok": True,
+                    "status": "submitted",
+                    "summary": "下载任务已暂停",
+                    "data": {"succeeded": 1, "operation_ref": "GY-0000-0000-0000-0000-0000-0000-0000-0001", "stats": {"renamed": 10, "moved": 10, "strm_scope_unknown": 1}},
+                },
+            }),
+            _event(5, "model.started", {"round": 2}),
+            _event(6, "model.delta", {"round": 2, "delta": "已完成写入，继续核验。"}),
+            _event(7, "tool.started", {"call_id": "verify-1", "tool": "library.check"}),
+            _event(8, "tool.progress", {
+                "tool": "library.check",
+                "phase": "background_job",
+                "summary": "正在安全等待核验回执",
+                "operation_ref": "operation-followup-0001",
+            }),
+            _event(9, "turn.completed", {
+                "status": "partial",
+                "answer": "下载任务已暂停。后续核验暂时不可用，已返回本轮部分结果。",
+            }),
+        ]
+        page = self.make_page({
+            "sessions": {"sessions": []},
+            "queryEvents": query_events,
+            "confirmEvents": confirm_events,
+            "confirmDelayMs": 40,
+        })
+        page.locator("#agentPrompt").fill("暂停测试任务并继续核验")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.locator(".agent-confirmation-card").wait_for()
+        page.locator("[data-effect-confirm]").click()
+
+        page.wait_for_function(
+            "() => document.querySelector('.agent-stream-text')?.textContent.includes('已完成写入，继续核验。')"
+        )
+        self.assertEqual(page.locator(".agent-message-assistant").count(), 1)
+        page.wait_for_function(
+            "() => document.querySelector('.agent-stream-head')?.textContent.includes('正在安全等待核验回执')"
+        )
+        self.assertIn("正在安全等待核验回执", page.locator(".agent-stream-head").inner_text())
+
+        narrative = page.locator(".agent-narrative")
+        narrative.wait_for()
+        text = narrative.inner_text()
+        self.assertIn("后续核验暂时不可用", text)
+        self.assertIn("下载任务已暂停", text)
+        self.assertIn("GY-0000-0000-0000-0000-0000-0000-0000-0001", text)
+        self.assertIn("改名 10 项", text)
+        self.assertIn("移动 10 项", text)
+        self.assertIn("未触发 STRM 联动", text)
+        self.assertNotIn("执行失败", text)
+        self.assertEqual(page.locator(".is-interrupted").count(), 0)
+
+    def test_confirm_stream_replaces_completed_step_with_a_new_plan_only(self):
+        first = {
+            "plan_id": "plan-browser-chain-0001",
+            "tool_name": "download.pause",
+            "effect": "WRITE",
+            "preview": {"summary": "暂停下载任务", "data": {"任务": "第一步"}},
+            "result": {},
+            "expires_at": "2026-09-03T12:05:00+00:00",
+        }
+        second = {
+            "plan_id": "plan-browser-chain-0002",
+            "tool_name": "download.resume",
+            "effect": "WRITE",
+            "preview": {"summary": "继续下载任务", "data": {"任务": "第二步"}},
+            "result": {},
+            "expires_at": "2026-09-03T12:06:00+00:00",
+        }
+        page = self.make_page({
+            "sessions": {"sessions": []},
+            "queryEvents": [
+                _event(1, "turn.started", {"kind": "query"}),
+                _event(2, "effect.approval_required", {"tool": "download.pause", "plan": first}),
+                _event(3, "turn.completed", {"status": "approval_required", "answer": ""}),
+            ],
+            "confirmEvents": [
+                _event(4, "effect.completed", {
+                    "plan_id": first["plan_id"],
+                    "result": {"ok": True, "summary": "第一步已完成"},
+                }),
+                _event(5, "model.started", {"round": 2}),
+                _event(6, "model.delta", {"round": 2, "delta": "准备第二步。"}),
+                _event(7, "effect.approval_required", {"tool": "download.resume", "plan": second}),
+                _event(8, "turn.completed", {"status": "approval_required", "answer": ""}),
+            ],
+        })
+        page.locator("#agentPrompt").fill("先暂停，再按条件继续")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.locator("[data-effect-confirm]").click()
+
+        next_card = page.locator('.agent-confirmation-card[data-plan-id="plan-browser-chain-0002"]')
+        next_card.wait_for()
+        self.assertEqual(page.locator(".agent-confirmation-card").count(), 1)
+        self.assertEqual(page.locator('[data-effect-confirm="plan-browser-chain-0001"]').count(), 0)
+        self.assertTrue(next_card.locator('[data-effect-confirm="plan-browser-chain-0002"]').is_enabled())
+        self.assertIn("第一步已完成", next_card.inner_text())
+        self.assertEqual(
+            page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"),
+            1,
+        )
+
+    def test_confirm_stream_keeps_trusted_receipt_when_followup_turn_fails(self):
+        approval = {
+            "plan_id": "plan-browser-partial-0001",
+            "tool_name": "download.pause",
+            "effect": "WRITE",
+            "preview": {"summary": "暂停下载任务", "data": {"任务": "测试任务"}},
+            "result": {},
+            "expires_at": "2026-09-03T12:05:00+00:00",
+        }
+        page = self.make_page({
+            "sessions": {"sessions": []},
+            "queryEvents": [
+                _event(1, "turn.started", {"kind": "query"}),
+                _event(2, "effect.approval_required", {"tool": "download.pause", "plan": approval}),
+                _event(3, "turn.completed", {"status": "approval_required", "answer": ""}),
+            ],
+            "confirmEvents": [
+                _event(4, "effect.completed", {
+                    "plan_id": approval["plan_id"],
+                    "result": {"ok": True, "summary": "下载任务已暂停"},
+                }),
+                _event(5, "model.started", {"round": 2}),
+                _event(6, "model.delta", {"round": 2, "delta": "继续查询媒体服务。"}),
+                _event(7, "turn.failed", {"message": "模型暂时不可用"}),
+            ],
+        })
+        page.locator("#agentPrompt").fill("暂停并继续查询")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.locator("[data-effect-confirm]").click()
+
+        result = page.locator(".agent-result-card.has-narrative")
+        result.wait_for()
+        text = result.inner_text()
+        self.assertIn("下载任务已暂停", text)
+        self.assertIn("后续流程未完成", text)
+        self.assertNotIn("执行失败", text)
 
     def test_release_format_hash_is_ordinary_on_desktop_and_mobile(self) -> None:
         for viewport in (

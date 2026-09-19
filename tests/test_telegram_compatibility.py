@@ -324,9 +324,11 @@ class TelegramCompatibilityTests(IsolatedDatabaseTestCase):
         ):
             progress = agent_adapter._ExistingMessageProgress(bot, _SOURCE)
             self.assertTrue(progress.update("执行中"))
-            self.assertTrue(agent_adapter._edit_final(bot, _SOURCE, "任务完成"))
-        self.assertEqual(request.call_count, 2)
-        for call in request.call_args_list:
+            self.assertTrue(progress.finish("任务完成", clear_reply_markup=True))
+        self.assertEqual(request.call_count, 3)  # typing + 进度编辑 + 终态编辑
+        edits = [call for call in request.call_args_list if call.args[1] == "editMessageText"]
+        self.assertEqual(len(edits), 2)
+        for call in edits:
             params = call.kwargs["params"]
             self.assertNotIn("disable_web_page_preview", params)
             self.assertTrue(json.loads(params["link_preview_options"])["is_disabled"])

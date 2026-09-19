@@ -26,6 +26,7 @@ from .state import (
     SelectionInvalidError,
     candidate_metadata_only,
     publication_matches,
+    publication_commit_matches,
     CandidateSelectionGuard,
     PublicationLease,
     SessionState,
@@ -483,11 +484,7 @@ class SQLiteKernelStore:
         with session_scope_guard(lease.owner, lease.session_id, kind="commit"), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, lease.owner, lease.session_id)
-            if not publication_matches(
-                lease, generation=state.generation,
-                confirmed=None if candidate_metadata_only(conversation, updates)
-                else state.metadata.get("confirmed_publication"),
-            ):
+            if not publication_commit_matches(lease, state, conversation, updates):
                 raise StalePublicationError("turn no longer owns publication authority")
             if conversation is not None:
                 state.conversation = deepcopy([dict(item) for item in conversation])[

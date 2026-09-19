@@ -277,6 +277,21 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertIn('meta[name="csrf-token"]', app_source)
         self.assertIn("X-CSRF-Token", app_source)
 
+    def test_agent_frontend_confirmation_reuses_turn_stream_until_real_terminal_status(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("applyEvent(turn, event)", source)
+        self.assertIn("phase === 'background_job'", source)
+        self.assertIn("effectResults", source)
+        self.assertIn("case 'effect.completed':", source)
+        self.assertIn("return event.type === 'turn.completed' && TERMINAL_TURN_STATUSES.includes(", source)
+        self.assertIn("status === 'effect_completed'", source)
+        self.assertIn("TERMINAL_TURN_STATUSES", source)
+        self.assertIn("连接中断，后续结果尚未确认", source)
+        self.assertNotIn("keepBusy", source)
+        self.assertNotIn("waitingForTerminal", source)
+        self.assertNotIn("effectTerminal", source)
+
     def test_agent_history_mobile_and_accessibility_contracts(self):
         source = SCRIPT.read_text(encoding="utf-8")
         styles = STYLES.read_text(encoding="utf-8")

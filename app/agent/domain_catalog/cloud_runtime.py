@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 from app.agent.models import Evidence, ToolContext, ToolResult
+from app.agent.public_safety import sanitize_public_text
 
 from .shared import _bounded_int, _now, _safe_choice, _safe_timestamp
+
+_GY_OPERATION_REF_RE = re.compile(r"GY-(?:[0-9A-F]{4}-){7}[0-9A-F]{4}")
+_GY_WAITABLE_STATUSES = {"accepted", "queued", "running"}
+_GY_ACTIVE_STATUSES = {"queued", "running", "stopping"}
+_GY_TERMINAL_STATUSES = {
+    "completed", "partial", "failed", "cancelled", "manual_review"
+}
+_GY_WAIT_TIMEOUT_SECONDS = 30 * 60
+_GY_WAIT_INTERVAL_SECONDS = 1.0
 
 
 def guangya_organize_status(
@@ -76,6 +90,17 @@ def guangya_organize_status(
         "source_dir_cleanup_failed",
         "audit_failures",
         "copied",
+        "relocated",
+        "created",
+        "trashed",
+        "strm_triggered",
+        "strm_trigger_failed",
+        "strm_scope_unknown",
+        "strm_trigger_skipped",
+        "quarantined",
+        "empty_deleted",
+        "verification_failed",
+        "precondition_failed",
     }
     stats = (
         {
@@ -142,6 +167,9 @@ def guangya_organize_status(
         )
         suggestions = []
 
+    if stats.get("strm_scope_unknown"):
+        suggestions.append("文件变更结果已记录，但同步范围未能确认，本次未触发 STRM 联动；请核对同步目录后手动同步。")
+
     task_data = {
         "status": task_status,
         "running": running,
@@ -173,3 +201,154 @@ def guangya_organize_status(
         ],
         suggestions=suggestions,
     )
+
+
+def _background_task_snapshot(snapshot: ToolResult) -> tuple[str, dict[str, Any]]:
+    payload = snapshot.data if isinstance(snapshot.data, dict) else {}
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    status = str(task.get("status") or snapshot.status or "").strip().casefold()
+    return status, dict(task)
+
+
+def _background_job_data(
+    result: ToolResult,
+    operation_ref: str,
+    status: str,
+    task: dict[str, Any],
+    *,
+    timed_out: bool = False,
+) -> dict[str, Any]:
+    data = dict(result.data) if isinstance(result.data, dict) else {}
+    # execute 的公开范围沿用了 preview DTO；最终/未知状态不能继续声称未写云端。
+    data.pop("cloud_write", None)
+    data["operation_ref"] = operation_ref
+    job = {
+        "status": status,
+        "last_status": status,
+        "timed_out": timed_out,
+    }
+    for key in ("stats", "started_at", "finished_at"):
+        value = task.get(key)
+        if value not in (None, ""):
+            job[key] = dict(value) if key == "stats" and isinstance(value, dict) else value
+    if isinstance(task.get("stats"), dict):
+        data["stats"] = dict(task["stats"])
+    data["background_job"] = job
+    return data
+
+
+def _background_model_data(result: ToolResult, data: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(result.model_data, dict):
+        return result.model_data
+    model_data = dict(result.model_data)
+    model_data.pop("cloud_write", None)
+    for key in ("operation_ref", "stats", "background_job"):
+        if key in data:
+            model_data[key] = data[key]
+    return model_data
+
+
+async def wait_for_guangya_operation(
+    result: ToolResult,
+    *,
+    tool: str,
+    context: ToolContext,
+    report_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    timeout_seconds: float = _GY_WAIT_TIMEOUT_SECONDS,
+) -> ToolResult:
+    """等待 owner 绑定的 GY 持久任务；非 GY accepted 结果原样返回。"""
+    data = result.data if isinstance(result.data, dict) else {}
+    operation_ref = str(data.get("operation_ref") or "").strip().upper()
+    status = str(result.status or "").strip().casefold()
+    if (
+        status not in _GY_WAITABLE_STATUSES
+        or not _GY_OPERATION_REF_RE.fullmatch(operation_ref)
+    ):
+        return result
+
+    async def report(snapshot: ToolResult, task_status: str) -> None:
+        if report_progress is None:
+            return
+        payload = {
+            "phase": "background_job",
+            "operation_ref": operation_ref,
+            "tool": str(tool or "")[:120],
+            "status": task_status,
+            "summary": sanitize_public_text(snapshot.summary, limit=240)
+            or "光鸭后台任务状态已更新",
+        }
+        try:
+            await report_progress(payload)
+        except Exception:  # noqa: BLE001 - 进度通道故障不应改写业务终态
+            # 进度通道不是业务终态；状态查询仍须继续完成。
+            return
+
+    def unknown(last_status: str, *, timed_out: bool = False) -> ToolResult:
+        job_status = last_status or "unknown"
+        data = _background_job_data(
+            result, operation_ref, job_status, {}, timed_out=timed_out
+        )
+        return replace(
+            result,
+            ok=False,
+            status="outcome_unknown",
+            summary=(
+                "光鸭后台任务仍在运行，等待已达上限，结果尚未确认"
+                if timed_out and last_status in _GY_ACTIVE_STATUSES
+                else "光鸭后台任务状态暂时未知，结果尚未确认"
+            ),
+            data=data,
+            model_data=_background_model_data(result, data),
+            error=result.error or "请稍后查询这个光鸭操作编号的状态",
+        )
+
+    terminal_summary = {
+        "completed": "光鸭后台任务已完成",
+        "partial": "光鸭后台任务部分完成",
+        "failed": "光鸭后台任务执行失败",
+        "cancelled": "光鸭后台任务已取消",
+        "manual_review": "光鸭后台任务结果未知，需要人工核验",
+    }
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, float(timeout_seconds))
+    last_status = ""
+    while True:
+        if context.cancelled():
+            raise asyncio.CancelledError
+        try:
+            snapshot = await asyncio.to_thread(
+                guangya_organize_status,
+                {"operation_ref": operation_ref},
+                context=context,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 查询异常只能安全降级为未知
+            return unknown(last_status)
+        task_status, task = _background_task_snapshot(snapshot)
+        if task_status in _GY_TERMINAL_STATUSES:
+            await report(snapshot, task_status)
+            data = _background_job_data(result, operation_ref, task_status, task)
+            return replace(
+                result,
+                ok=task_status == "completed",
+                status=task_status,
+                summary=terminal_summary[task_status],
+                data=data,
+                model_data=_background_model_data(result, data),
+                suggestions=list(dict.fromkeys([*result.suggestions, *snapshot.suggestions])),
+                error=result.error
+                or ("请核对任务统计和失败项" if task_status != "completed" else ""),
+            )
+        if task_status not in _GY_ACTIVE_STATUSES:
+            return unknown(
+                last_status or (
+                    "unknown" if task_status in {"", "empty", "idle"} else task_status
+                )
+            )
+        last_status = task_status
+        await report(snapshot, task_status)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return unknown(last_status, timed_out=True)
+        await asyncio.sleep(min(_GY_WAIT_INTERVAL_SECONDS, remaining))

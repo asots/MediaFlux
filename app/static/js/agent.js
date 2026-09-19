@@ -38,6 +38,9 @@
     const MAX_TRANSCRIPT_ITEMS = 120;
     const STREAM_MARKDOWN_INTERVAL_MS = 72;
     const MAX_MARKDOWN_DEPTH = 4;
+    const TERMINAL_TURN_STATUSES = ['success', 'partial', 'approval_required', 'effect_completed'];
+    const STREAM_INTERRUPTED_NOTICE = '连接中断，后续结果尚未确认；可刷新会话核对状态，不要重复提交。';
+    const CONFIRMATION_STOP_NOTICE = '已停止等待；已提交操作可能继续执行，请核对任务状态。';
     const TOOL_LABELS = {
         cloud: '读取光鸭云盘',
         guangya: '读取光鸭云盘',
@@ -717,26 +720,35 @@
         }, delay);
     }
 
-    function createAssistantTurn({recovered = false} = {}) {
-        const view = appendMessage('assistant', {recovered});
+    function createStreamingCard() {
         const card = element('section', 'agent-result-card agent-streaming');
         const head = element('div', 'agent-stream-head');
         head.append(icon('loader-circle'), element('span', '', '正在理解任务'));
         const text = element('div', 'agent-stream-text agent-rich-text');
         const steps = element('div', 'agent-stream-steps');
         card.append(head, text, steps);
-        view.body.append(card);
-        renderIcons(card);
         return {
-            ...view,
             card,
             head,
             headText: head.querySelector('span'),
             text,
             steps,
+        };
+    }
+
+    function createAssistantTurn({recovered = false} = {}) {
+        const view = appendMessage('assistant', {recovered});
+        const stream = createStreamingCard();
+        view.body.append(stream.card);
+        renderIcons(stream.card);
+        return {
+            ...view,
+            ...stream,
             rounds: new Map(),
             currentRound: 0,
             toolSteps: new Map(),
+            effectResults: [],
+            completedPlanIds: new Set(),
             approvalNode: null,
             pendingMarkdown: '',
             markdownTimer: null,
@@ -814,8 +826,10 @@
 
     function finalizeAnswer(turn, text) {
         turn.failed = false;
+        turn.followupFailed = false;
         cancelTurnMarkdownRender(turn);
-        const answer = String(text || '').trim();
+        promoteTurnCard(turn);
+        const answer = answerWithTrustedEffectReceipts(turn, text);
         if (!answer && turn.candidateGroup) {
             turn.head?.remove();
             turn.text?.remove();
@@ -829,11 +843,18 @@
         }
         turn.card.classList.remove('agent-streaming', 'is-interrupted');
         turn.card.classList.add('has-narrative', 'is-conversation');
+        turn.item?.classList.remove('is-confirmation');
         turn.head.remove();
         turn.text.className = 'agent-narrative agent-rich-text';
         replaceRichText(turn.text, answer);
         const trace = buildToolTrace(turn);
         if (trace) turn.card.append(trace);
+        if (turn.candidateGroup && !turn.card.querySelector('.agent-result-downloads')) {
+            const link = element('a', 'agent-result-downloads', '查看下载任务');
+            link.href = '/downloads';
+            turn.card.append(link);
+            syncCandidateButtons();
+        }
         scrollToBottom();
     }
 
@@ -841,10 +862,36 @@
         turn.failed = true;
         turn.cancelled = cancelled;
         cancelTurnMarkdownRender(turn);
+        const trustedReceipt = trustedEffectReceipt(turn);
+        const protectedWriteStop = cancelled && Boolean(turn.activePlanId);
+        const finalMessage = protectedWriteStop
+            ? CONFIRMATION_STOP_NOTICE
+            : message || (cancelled ? '本次任务已停止。' : 'Agent 暂时无法完成该请求。');
+        promoteTurnCard(turn);
+        if (trustedReceipt) {
+            turn.followupFailed = true;
+            turn.card.classList.remove('agent-streaming', 'is-interrupted', 'agent-cancelled');
+            turn.card.classList.add('has-narrative', 'is-conversation');
+            turn.item?.classList.remove('is-confirmation');
+            setTurnStatus(turn, '已保留已执行结果，后续流程未完成', 'triangle-alert');
+            turn.text.className = 'agent-narrative agent-rich-text';
+            replaceRichText(
+                turn.text,
+                `${trustedReceipt}\n\n⚠️ 后续流程未完成：${finalMessage}`,
+            );
+            const trace = buildToolTrace(turn);
+            if (trace) turn.card.append(trace);
+            scrollToBottom();
+            return;
+        }
         turn.card.classList.remove('agent-streaming');
-        turn.card.classList.add(cancelled ? 'agent-cancelled' : 'is-interrupted');
-        setTurnStatus(turn, cancelled ? '已停止' : '未能完成', cancelled ? 'circle-stop' : 'triangle-alert');
-        turn.text.textContent = message || (cancelled ? '本次任务已停止。' : 'Agent 暂时无法完成该请求。');
+        turn.card.classList.add(protectedWriteStop ? 'is-interrupted' : cancelled ? 'agent-cancelled' : 'is-interrupted');
+        setTurnStatus(
+            turn,
+            protectedWriteStop ? '已停止等待，状态待核对' : cancelled ? '已停止' : '未能完成',
+            protectedWriteStop ? 'triangle-alert' : cancelled ? 'circle-stop' : 'triangle-alert',
+        );
+        turn.text.textContent = finalMessage;
         const trace = buildToolTrace(turn);
         if (trace) turn.card.append(trace);
         if (turn.requestMessage && !turn.boundSelection && !turn.card.querySelector('.agent-retry-draft')) {
@@ -940,6 +987,15 @@
             for (const [key, label] of [['total', '请求'], ['succeeded', '已受理'], ['created', '已创建'], ['review_required', '待复核'], ['duplicate', '已存在'], ['failed', '未完成'], ['skipped', '已跳过']]) {
                 if (Number.isInteger(data[key])) lines.push(`- ${label}：${data[key]} 项`);
             }
+            const operationRef = String(data.operation_ref || '').trim().toUpperCase();
+            if (/^GY-(?:[0-9A-F]{4}-){7}[0-9A-F]{4}$/.test(operationRef)) lines.push(`- 操作编号：${operationRef}`);
+            if (data.stats && typeof data.stats === 'object' && !Array.isArray(data.stats)) {
+                const counts = [['renamed', '改名'], ['moved', '移动'], ['relocated', '清洗并移动'], ['copied', '复制'], ['created', '创建'], ['trashed', '回收'], ['skipped', '跳过'], ['failed', '失败']]
+                    .filter(([key]) => Number.isInteger(data.stats[key]) && data.stats[key] > 0)
+                    .map(([key, label]) => `${label} ${data.stats[key]} 项`);
+                if (counts.length) lines.push(`- 变更统计：${counts.join('；')}`);
+                if (data.stats.strm_scope_unknown) lines.push('- 提示：同步范围未能确认，本次未触发 STRM 联动；请核对同步目录。');
+            }
             if (data.source_type === 'resource_candidates' && Array.isArray(data.items)) {
                 const labels = {submitted: '已提交', duplicate: '已存在，未重复添加', failed: '提交失败', partial: '部分目标成功', manual_review: '结果未知，请先核验'};
                 for (const item of data.items.slice(0, 12)) {
@@ -968,6 +1024,23 @@
             lines.push(`- 说明：${result.error.trim()}`);
         }
         return lines.join('\n');
+    }
+
+    function trustedEffectResults(turn) {
+        if (Array.isArray(turn?.effectResults)) return turn.effectResults.filter(hasEffectResult);
+        return hasEffectResult(turn?.effectResult) ? [turn.effectResult] : [];
+    }
+
+    function trustedEffectReceipt(turn) {
+        return trustedEffectResults(turn).map(formatEffectResult).filter(Boolean).join('\n\n');
+    }
+
+    function answerWithTrustedEffectReceipts(turn, text) {
+        const answer = String(text || '').trim();
+        const missing = trustedEffectResults(turn)
+            .map(formatEffectResult)
+            .filter(receipt => receipt && !answer.includes(receipt));
+        return [answer, ...missing].filter(Boolean).join('\n\n');
     }
 
     function buildApproval(approval) {
@@ -1034,18 +1107,108 @@
     }
 
     function showApproval(turn, approval) {
+        cancelTurnMarkdownRender(turn);
+        turn.pendingMarkdown = '';
         const card = buildApproval(approval);
         const trace = buildToolTrace(turn);
+        const receipts = trustedEffectResults(turn);
         if (trace) {
             const status = card.querySelector('.agent-confirmation-status');
             card.insertBefore(trace, status || null);
         }
+        const latestReceipt = receipts.at(-1);
+        if (latestReceipt) {
+            const status = card.querySelector('.agent-confirmation-status');
+            const copy = element('p', 'agent-confirmation-copy agent-confirmation-result');
+            copy.append(
+                icon('circle-check-big'),
+                element('span', '', `上一项已完成：${publicSummary(latestReceipt) || '已确认步骤'}`),
+            );
+            card.insertBefore(copy, status || null);
+        }
         // 确认卡包含真实写操作按钮，不应继承消息入场位移动画；否则在快速
         // 预检完成时按钮会短暂移动，既影响触控，也会造成自动化点击不稳定。
         turn.item?.classList.add('is-confirmation');
-        turn.card.replaceWith(card);
+        const container = turn.approvalContainer || turn.card;
+        container.replaceWith(card);
+        turn.approvalContainer = null;
+        turn.card = card;
         turn.approvalNode = card;
+        card._agentTurn = turn;
         scrollToBottom(true);
+    }
+
+    function approvalTurnForCard(card) {
+        if (card?._agentTurn) return card._agentTurn;
+        const group = card?.closest('.agent-candidates');
+        const turn = {
+            item: card?.closest('.agent-message') || group || null,
+            card,
+            head: null,
+            headText: null,
+            text: null,
+            steps: card?.querySelector('.agent-stream-steps') || null,
+            rounds: new Map(),
+            currentRound: 0,
+            toolSteps: new Map(),
+            effectResults: [],
+            completedPlanIds: new Set(),
+            approvalNode: card,
+            approvalContainer: null,
+            activePlanId: card?.dataset.planId || '',
+            candidateGroup: group,
+            candidateSelection: card?._candidateSelection || null,
+            boundSelection: Boolean(group),
+            requestMessage: '',
+            pendingMarkdown: '',
+            markdownTimer: null,
+            markdownFrame: null,
+            lastMarkdownRender: 0,
+        };
+        if (card) card._agentTurn = turn;
+        return turn;
+    }
+
+    function showExecutingApproval(card) {
+        const preflight = card.querySelector('.agent-confirmation-preflight span');
+        if (preflight) preflight.textContent = '已确认，正在等待实际执行结果。';
+        const actions = card.querySelector('.agent-confirmation-actions');
+        const executing = element('div', 'agent-confirmation-executing');
+        const mark = element('span', 'agent-confirmation-executing-mark');
+        mark.append(icon('loader-circle'));
+        const copy = element('span', 'agent-confirmation-executing-copy');
+        copy.append(element('strong', '', '正在执行已确认计划'), element('small', '', '执行完成前不会接受另一项写操作。'));
+        executing.append(mark, copy);
+        actions?.replaceChildren(executing);
+        renderIcons(card);
+    }
+
+    function promoteTurnCard(turn) {
+        if (!turn?.approvalContainer || turn.approvalContainer === turn.card) return;
+        turn.approvalContainer.replaceWith(turn.card);
+        turn.approvalContainer = null;
+    }
+
+    function continueTurnFromApproval(turn, card) {
+        const stream = createStreamingCard();
+        const trace = card.querySelector('.agent-tool-trace');
+        if (trace) {
+            stream.steps.remove();
+            stream.card.append(trace);
+            stream.steps = trace.querySelector('.agent-stream-steps') || stream.steps;
+        } else if (turn.steps && turn.steps !== stream.steps) {
+            stream.steps.remove();
+            stream.card.append(turn.steps);
+            stream.steps = turn.steps;
+        }
+        card.append(stream.card);
+        Object.assign(turn, stream, {approvalNode: null});
+        turn.approvalContainer = card;
+        turn.item?.classList.remove('is-confirmation');
+        setTurnStatus(turn, '正在执行已确认计划');
+        showExecutingApproval(card);
+        renderIcons(stream.card);
+        return turn;
     }
 
     function replaceApprovalWithResult(card, text, {error = false, cancelled = false} = {}) {
@@ -1074,6 +1237,24 @@
             const status = card.querySelector('.agent-confirmation-preflight span');
             if (status) status.textContent = '已由新的任务替代，本计划不会执行。';
         });
+    }
+
+    function rememberCandidateEffectResult(turn, result) {
+        const state = turn?.candidateGroup?._candidateState;
+        if (!state) return;
+        const handled = Array.isArray(result?.data?.items) ? result.data.items : [];
+        for (const item of handled) {
+            if (item?.status !== 'failed' && Number.isInteger(item?.position)) state.selected.delete(item.position);
+        }
+        saveCandidateDraft(turn.candidateGroup);
+    }
+
+    function isTerminalEvent(event) {
+        if (!event) return false;
+        if (event.type === 'turn.failed' || event.type === 'turn.cancelled') return true;
+        return event.type === 'turn.completed' && TERMINAL_TURN_STATUSES.includes(
+            String(event.payload?.status || '').toLowerCase(),
+        );
     }
 
     function applyEvent(turn, event) {
@@ -1112,7 +1293,8 @@
             break;
         case 'tool.progress': {
             if (Object.prototype.hasOwnProperty.call(payload, 'candidate_view') && payload.candidate_view === null) expireCandidateCards();
-            const summary = publicSummary(payload);
+            const summary = payload.phase === 'background_job' && typeof payload.summary === 'string'
+                ? payload.summary.trim() : publicSummary(payload);
             if (summary) setTurnStatus(turn, summary.slice(0, 100));
             break;
         }
@@ -1148,18 +1330,35 @@
             break;
         case 'effect.completed':
             turn.effectResult = payload.result || {};
+            if (hasEffectResult(turn.effectResult)) {
+                if (!Array.isArray(turn.effectResults)) turn.effectResults = [];
+                turn.effectResults.push(turn.effectResult);
+                const planId = String(payload.plan_id || turn.activePlanId || '');
+                if (planId) turn.completedPlanIds?.add(planId);
+                updateStep(
+                    turn,
+                    `effect:${planId || event.sequence}`,
+                    `已完成：${publicSummary(turn.effectResult) || '已确认步骤'}`,
+                );
+                rememberCandidateEffectResult(turn, turn.effectResult);
+            }
             break;
         case 'effect.failed':
             turn.effectError = hasEffectResult(payload.result)
                 ? formatEffectResult({...payload.result, ok: false, error: payload.result.error || payload.message})
                 : payload.message || '确认执行失败。';
             break;
-        case 'turn.completed':
-            if (['success', 'partial'].includes(payload.status)) finalizeAnswer(turn, payload.answer || '');
-            else if (payload.status === 'effect_completed') {
-                finalizeAnswer(turn, formatEffectResult(turn.effectResult));
+        case 'turn.completed': {
+            const status = String(payload.status || '').toLowerCase();
+            if (['success', 'partial'].includes(status)) {
+                finalizeAnswer(turn, payload.answer || '');
+            } else if (status === 'effect_completed') {
+                const answer = String(payload.answer || '').trim();
+                if (answer || trustedEffectResults(turn).length) finalizeAnswer(turn, answer);
+                else finalizeError(turn, STREAM_INTERRUPTED_NOTICE);
             }
             break;
+        }
         case 'turn.failed':
             finalizeError(turn, turn.effectError || payload.message || 'Agent 暂时无法完成该请求。');
             break;
@@ -1176,7 +1375,9 @@
             const text = await response.text();
             let message = `请求失败（HTTP ${response.status}）`;
             try { message = JSON.parse(text).error || message; } catch (_) { /* non-json */ }
-            throw new Error(message);
+            const error = new Error(message);
+            error.httpStatus = response.status;
+            throw error;
         }
         if (!response.body?.getReader) throw new Error('当前浏览器不支持流式响应');
         const reader = response.body.getReader();
@@ -1193,10 +1394,10 @@
                     if (line) {
                         const event = JSON.parse(line);
                         consume(event);
-                        if (['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)) {
+                        if (isTerminalEvent(event)) {
                             // 业务终态已经持久化，不等待HTTP EOF，更不能让迟到Abort覆盖结果。
                             reader.cancel().catch(() => {});
-                            return;
+                            return event;
                         }
                     }
                     lineEnd = buffer.indexOf('\n');
@@ -1204,7 +1405,12 @@
                 if (done) break;
             }
             buffer += decoder.decode();
-            if (buffer.trim()) consume(JSON.parse(buffer.trim()));
+            if (buffer.trim()) {
+                const event = JSON.parse(buffer.trim());
+                consume(event);
+                if (isTerminalEvent(event)) return event;
+            }
+            return null;
         } finally {
             try { reader.releaseLock(); } catch (_) { /* already released */ }
         }
@@ -1219,6 +1425,15 @@
         }
         if (!response.ok) throw new Error(payload.error || `请求失败（HTTP ${response.status}）`);
         return payload;
+    }
+
+    function streamFailureMessage(turn, error) {
+        if (turn?.effectError) return turn.effectError;
+        if (Number.isInteger(error?.httpStatus)) {
+            const reason = String(error.message || `请求失败（HTTP ${error.httpStatus}）`).trim();
+            return `${reason}\n\n⚠️ 请核对状态，不要重复提交。`;
+        }
+        return STREAM_INTERRUPTED_NOTICE;
     }
 
     function setBusy(value, {stoppable = false} = {}) {
@@ -1279,15 +1494,27 @@
         announce(responseStatus, 'Media Agent 正在处理请求');
         try {
             const response = await queryRequest(message, requestId, controller.signal);
-            await readEventStream(response, (event) => {
+            const terminalEvent = await readEventStream(response, (event) => {
                 if (activeRequest?.requestId !== requestId) return;
                 applyEvent(turn, event);
             });
+            if (!terminalEvent) {
+                finalizeError(turn, STREAM_INTERRUPTED_NOTICE);
+                announce(responseStatus, '连接中断，后续结果尚未确认');
+                return;
+            }
             announce(responseStatus, turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : 'Media Agent 已完成');
         } catch (error) {
             if (error?.name === 'AbortError') finalizeError(turn, '本次任务已停止。', {cancelled: true});
-            else finalizeError(turn, error?.message || 'Agent 暂时不可用。');
-            announce(responseStatus, error?.name === 'AbortError' ? '请求已停止' : '请求失败');
+            else finalizeError(turn, streamFailureMessage(turn, error));
+            announce(
+                responseStatus,
+                error?.name === 'AbortError'
+                    ? '请求已停止'
+                    : turn.effectError ? '请求失败，具体原因已保留'
+                        : Number.isInteger(error?.httpStatus) ? '请求未执行，请核对状态'
+                            : '连接中断，后续结果尚未确认',
+            );
         } finally {
             if (activeRequest?.requestId === requestId) activeRequest = null;
             setBusy(false);
@@ -1318,24 +1545,18 @@
         const card = button.closest('.agent-confirmation-card');
         const planId = button.dataset.effectConfirm || '';
         if (!card || !planId) return;
+        const turn = approvalTurnForCard(card);
+        if (!turn) return;
+        if (turn.completedPlanIds?.has(String(planId))) return;
         const buttons = [...card.querySelectorAll('button')];
         buttons.forEach((item) => { item.disabled = true; });
-        const actions = card.querySelector('.agent-confirmation-actions');
-        const executing = element('div', 'agent-confirmation-executing');
-        const mark = element('span', 'agent-confirmation-executing-mark');
-        mark.append(icon('loader-circle'));
-        const copy = element('span', 'agent-confirmation-executing-copy');
-        copy.append(element('strong', '', '正在执行已确认计划'), element('small', '', '执行完成前不会接受另一项写操作。'));
-        executing.append(mark, copy);
-        actions?.replaceChildren(executing);
-        renderIcons(card);
-        setBusy(true);
+        turn.activePlanId = planId;
+        continueTurnFromApproval(turn, card);
+        setBusy(true, {stoppable: true});
         const controller = new AbortController();
         const requestId = createId('confirm');
-        let result = null;
-        let effectTerminal = '';
-        let failure = '';
-        let transportError = '';
+        activeRequest = {controller, requestId, turn, sessionId};
+        announce(responseStatus, 'Media Agent 正在执行已确认计划');
         try {
             const response = await fetch('/api/agent/actions/confirm', {
                 method: 'POST',
@@ -1348,52 +1569,37 @@
                 }),
                 signal: controller.signal,
             });
-            await readEventStream(response, (event) => {
-                const payload = event.payload || {};
-                if (event.type === 'effect.completed') {
-                    effectTerminal = 'completed';
-                    result = payload.result;
-                    failure = '';
-                } else if (event.type === 'effect.failed') {
-                    effectTerminal = 'failed';
-                    result = payload.result;
-                    failure = payload.message || '确认执行未能完成。';
-                } else if (event.type === 'turn.failed' && effectTerminal !== 'failed') {
-                    failure = payload.message || '确认执行未能完成。';
-                } else if (event.type === 'turn.cancelled' && !effectTerminal) {
-                    failure = payload.reason || unconfirmedEffectMessage;
-                }
+            const terminalEvent = await readEventStream(response, (event) => {
+                if (activeRequest?.requestId !== requestId) return;
+                applyEvent(turn, event);
             });
+            if (!terminalEvent) {
+                finalizeError(turn, STREAM_INTERRUPTED_NOTICE);
+                announce(responseStatus, '连接中断，后续结果尚未确认');
+                return;
+            }
+            const status = String(terminalEvent.payload?.status || '').toLowerCase();
+            announce(
+                responseStatus,
+                status === 'approval_required'
+                    ? '等待下一项确认'
+                    : turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : 'Media Agent 已完成',
+            );
         } catch (error) {
-            transportError = error?.message || '事件流中断';
+            if (error?.name === 'AbortError') {
+                finalizeError(turn, '本次任务已停止。', {cancelled: true});
+                announce(responseStatus, '请求已停止');
+            } else {
+                finalizeError(turn, streamFailureMessage(turn, error));
+                announce(
+                    responseStatus,
+                    turn.effectError ? '执行失败，具体原因已保留'
+                        : Number.isInteger(error?.httpStatus) ? '执行未完成，请核对状态'
+                            : '连接中断，后续结果尚未确认',
+                );
+            }
         } finally {
-            // 只有可信的 effect 终态可确认写入；EOF/缺失 DTO 不能补成成功。
-            // 已收到的业务终态优先于后续传输错误，失败 DTO 优先于笼统 turn.failed。
-            const completed = effectTerminal === 'completed' && hasEffectResult(result);
-            const failed = effectTerminal === 'failed' || Boolean(failure);
-            let text = unconfirmedEffectMessage;
-            if (effectTerminal === 'failed' && hasEffectResult(result)) {
-                text = formatEffectResult({...result, ok: false, error: result.error || failure});
-            } else if (failed) {
-                text = failure;
-            } else if (completed) {
-                text = formatEffectResult(result);
-            } else if (transportError) {
-                text += `\n${transportError}`;
-            }
-            const group = card.closest('.agent-candidates');
-            const candidateState = group?._candidateState;
-            if (candidateState) {
-                const handled = Array.isArray(result?.data?.items) ? result.data.items : [];
-                for (const item of handled) {
-                    if (item.status !== 'failed') candidateState.selected.delete(item.position);
-                }
-                if (!completed && !failed && card._candidateSelection) {
-                    for (const pos of card._candidateSelection.positions) candidateState.selected.delete(pos);
-                }
-                saveCandidateDraft(group);
-            }
-            replaceApprovalWithResult(card, text, {error: failed || !completed || result?.ok === false});
+            if (activeRequest?.requestId === requestId) activeRequest = null;
             setBusy(false);
             refreshSessions({quiet: true});
         }
@@ -1629,7 +1835,10 @@
     function renderRecoveredApproval(approval) {
         if (!approval?.plan_id) return;
         const view = appendMessage('assistant', {recovered: true});
-        view.body.append(buildApproval(approval));
+        const card = buildApproval(approval);
+        view.body.append(card);
+        const turn = approvalTurnForCard(card);
+        turn.item = view.item;
     }
 
     async function loadSession(targetId, {closeHistory = true, startup = false, signal = null} = {}) {

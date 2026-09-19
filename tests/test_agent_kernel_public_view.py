@@ -10,6 +10,16 @@ from app.agent.kernel.public_view import (
 
 
 class AgentKernelPublicViewTests(unittest.TestCase):
+    def test_background_job_receipt_exposes_public_ref_and_actual_change_counts(self):
+        operation_ref = "GY-0000-0000-0000-0000-0000-0000-0000-0001"
+        text = format_public_result({"ok": True, "status": "completed", "summary": "光鸭后台任务已完成",
+            "data": {"operation_ref": operation_ref, "stats": {"renamed": 10, "moved": 10, "strm_scope_unknown": 1, "private": 99}}})
+        self.assertIn(operation_ref, text)
+        self.assertIn("改名 10 项", text)
+        self.assertIn("移动 10 项", text)
+        self.assertIn("未触发 STRM 联动", text)
+        self.assertNotIn("private", text)
+
     def test_conversation_hides_empty_tool_turns_and_internal_confirmed_json(self) -> None:
         internal_result = {
             "ok": True,

@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from app.agent.confirmation_contract import build_confirmation_contract
+from app.agent.domain_catalog.cloud_runtime import wait_for_guangya_operation
 from app.agent.domain_tool_metadata import (
     DOMAIN_ALIASES,
     PREFIX_RETRIEVAL_TERMS,
@@ -28,6 +29,7 @@ from app.agent.public_safety import sanitize_public_text
 from ..capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from ..effects import PreparedEffect
 from ..pipeline import ToolCallContext, ToolPipelineError
+from ..session_guard import guarded_state_call
 
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
 
@@ -275,23 +277,36 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         # 只有异常或写后验证失败才进入 ToolPipelineError。
         return result
 
-    def verify(arguments: dict[str, Any], value: Any, _context: ToolCallContext) -> Any:
-        if spec.post_write_verifier is None:
-            return value
+    async def verify(arguments: dict[str, Any], value: Any, context: ToolCallContext) -> Any:
         if not isinstance(value, ToolResult):
             raise ToolPipelineError(
                 "写后验证输入无效", code="post_write_verification_failed"
             )
-        try:
-            verified = spec.post_write_verifier(arguments, value)
-        except Exception as exc:
-            raise _safe_error(
-                exc, fallback_code="post_write_verification_failed"
-            ) from exc
-        if not isinstance(verified, ToolResult):
-            raise ToolPipelineError("领域能力返回无效结果", code="invalid_tool_result")
-        # 与 execute_confirmed 一致：保留可信失败/未知 DTO，由 Kernel 发布真实终态和回执。
-        return verified
+        verified = value
+        post_write_verifier = spec.post_write_verifier
+        if post_write_verifier is not None:
+            try:
+                verified = await guarded_state_call(
+                    context.owner,
+                    context.session_id,
+                    post_write_verifier,
+                    arguments,
+                    value,
+                    kind="effect",
+                    complete_on_cancel=True,
+                )
+            except Exception as exc:
+                raise _safe_error(
+                    exc, fallback_code="post_write_verification_failed"
+                ) from exc
+            if not isinstance(verified, ToolResult):
+                raise ToolPipelineError("领域能力返回无效结果", code="invalid_tool_result")
+        return await wait_for_guangya_operation(
+            verified,
+            tool=spec.name,
+            context=_kernel_context(context),
+            report_progress=context.report_progress,
+        )
 
     return KernelToolSpec(
         name=spec.name,
@@ -305,7 +320,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         runtime_status=spec.runtime_status,
         prepare=prepare,
         execute_confirmed=execute_confirmed,
-        verify=verify if spec.post_write_verifier is not None else None,
+        verify=verify,
         cost=2.0 if effect is ToolEffect.DANGER else 1.5,
         metadata={
             "source_kind": spec.source_kind,

@@ -242,7 +242,7 @@ async def confirm_action(request: Request, data: Annotated[Any, Body()] = None):
                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
             )
         view = await transport.confirm_view(envelope)
-        status_code = 200 if view.status == "effect_completed" else 409
+        status_code = 200 if view.status in {"effect_completed", "success", "partial", "approval_required"} else 409
         return api_response(view.to_dict(), status_code)
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
         return _error(exc)

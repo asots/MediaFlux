@@ -420,6 +420,106 @@ class AgentUXBrowserTests(unittest.TestCase):
                 self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
                 self.snapshot(page, 'batch-preview-' + str(viewport['width']))
 
+    def test_confirmation_waiting_keeps_composer_slot_stable_and_shows_safe_progress(self):
+        approval = {
+            'plan_id': 'plan_ux_followup_0001',
+            'tool_name': 'download.pause',
+            'effect': 'WRITE',
+            'preview': {'summary': '暂停下载任务', 'data': {'任务': '测试任务'}},
+            'result': {},
+            'expires_at': '2026-09-03T12:05:00+00:00',
+        }
+        page = self.page({
+            'queryEvents': [
+                harness._event(1, 'turn.started', {'kind': 'query'}),
+                harness._event(2, 'effect.approval_required', {'tool': 'download.pause', 'plan': approval}),
+                harness._event(3, 'turn.completed', {'status': 'approval_required'}),
+            ],
+            'confirmEvents': [
+                harness._event(4, 'effect.completed', {
+                    'plan_id': approval['plan_id'],
+                    'result': {'ok': True, 'summary': '下载任务已暂停'},
+                }),
+                harness._event(5, 'model.started', {'round': 2}),
+                harness._event(6, 'tool.started', {'call_id': 'background-1', 'tool': 'guangya.job'}),
+                harness._event(7, 'tool.progress', {
+                    'tool': 'guangya.job',
+                    'phase': 'background_job',
+                    'summary': '已安全排队，等待实际状态回执',
+                    'operation_ref': 'operation-ux-0001',
+                }),
+                harness._event(8, 'turn.completed', {'status': 'success', 'answer': '后续核验完成。'}),
+            ],
+            'confirmDelayMs': 120,
+        }, viewport={'width': 390, 'height': 844})
+        page.locator('#agentPrompt').fill('暂停任务并继续核验')
+        page.locator('#agentSend').click()
+        page.locator('.agent-confirmation-card').wait_for()
+        before = page.locator('.agent-submit-slot').bounding_box()
+        page.locator('[data-effect-confirm]').click()
+
+        page.wait_for_function(
+            "() => document.querySelector('.agent-stream-head')?.textContent.includes('已安全排队，等待实际状态回执')"
+        )
+        during = page.locator('.agent-submit-slot').bounding_box()
+        self.assertAlmostEqual(before['width'], during['width'], delta=0.5)
+        self.assertAlmostEqual(before['height'], during['height'], delta=0.5)
+        self.assertTrue(page.locator('#agentStop').is_visible())
+        self.assertTrue(page.locator('#agentSend').is_hidden())
+        self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 390)
+
+        page.locator('.agent-narrative').wait_for()
+        self.assertIn('后续核验完成', page.locator('.agent-narrative').inner_text())
+
+    def test_confirmation_stays_busy_while_persistent_job_stream_waits(self):
+        approval = {
+            'plan_id': 'plan_ux_waiting_0001',
+            'tool_name': 'download.pause',
+            'effect': 'WRITE',
+            'preview': {'summary': '暂停下载任务', 'data': {'任务': '测试任务'}},
+            'result': {},
+            'expires_at': '2026-09-03T12:05:00+00:00',
+        }
+        page = self.page({
+            'queryEvents': [
+                harness._event(1, 'turn.started', {'kind': 'query'}),
+                harness._event(2, 'effect.approval_required', {'tool': 'download.pause', 'plan': approval}),
+                harness._event(3, 'turn.completed', {'status': 'approval_required'}),
+            ],
+            'confirmEvents': [
+                harness._event(4, 'effect.completed', {
+                    'plan_id': approval['plan_id'],
+                    'result': {'ok': True, 'summary': '暂停任务已提交，等待实际状态'},
+                }),
+                harness._event(5, 'tool.progress', {
+                    'tool': 'guangya.job',
+                    'phase': 'background_job',
+                    'summary': '安全排队中，等待实际状态回执',
+                    'operation_ref': 'operation-ux-waiting-0001',
+                }),
+            ],
+            'confirmHoldOpen': True,
+        }, viewport={'width': 390, 'height': 844})
+        page.locator('#agentPrompt').fill('暂停任务并等待实际状态')
+        page.locator('#agentSend').click()
+        page.locator('.agent-confirmation-card').wait_for()
+        page.locator('[data-effect-confirm]').click()
+        page.wait_for_function(
+            "() => document.querySelector('.agent-stream-head')?.textContent.includes('安全排队中，等待实际状态回执')"
+        )
+        self.assertTrue(page.locator('#agentStop').is_visible())
+        self.assertTrue(page.locator('#agentSend').is_hidden())
+        self.assertEqual(page.locator('.agent-streaming').count(), 1)
+
+        page.locator('#agentStop').click()
+        page.locator('.agent-narrative').wait_for()
+        text = page.locator('.agent-narrative').inner_text()
+        self.assertIn('暂停任务已提交，等待实际状态', text)
+        self.assertIn('后续流程未完成', text)
+        self.assertIn('已停止等待；已提交操作可能继续执行，请核对任务状态', text)
+        self.assertEqual(page.locator('.agent-cancelled, .is-interrupted').count(), 0)
+        self.assertIn('/api/agent/query/cancel', [call['url'] for call in page.evaluate('window.__kernelCalls')])
+
     def test_candidate_refresh_restores_choices_and_keeps_card_bound_to_search(self):
         view = candidate_view()
         payload = {'sessions': {'sessions': [], 'draft_scope': SCOPE}, 'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '搜索结果', 'candidate_view': view}, {'role': 'assistant', 'content': '不相关的后续消息'}]}}}

@@ -109,6 +109,20 @@ def publication_matches(
     return confirmed.get("turn_id") == lease.turn_id
 
 
+def publication_commit_matches(
+    lease: PublicationLease, state: SessionState,
+    conversation: Sequence[Mapping[str, Any]] | None, updates: Sequence[StateUpdate],
+) -> bool:
+    """已原子领到当前待确认票据的下一步可接管发布权，旧读回合仍被隔离。"""
+    claim = conversation is None and len(updates) == 1 and updates[0].mode == "set" and updates[0].key == "metadata.confirmed_publication"
+    value = updates[0].value if claim else None
+    handoff = isinstance(value, Mapping) and bool(state.pending_effect_plan_id) and value == {
+        "generation": lease.generation, "turn_id": lease.turn_id, "plan_id": state.pending_effect_plan_id,
+    }
+    return publication_matches(lease, generation=state.generation,
+        confirmed=None if handoff or candidate_metadata_only(conversation, updates) else state.metadata.get("confirmed_publication"))
+
+
 @dataclass(frozen=True, slots=True)
 class StateUpdate:
     key: str
@@ -269,11 +283,7 @@ class InMemorySessionStateStore:
         key = (lease.owner, lease.session_id)
         async with self._lock:
             state = self._states.get(key)
-            if state is None or not publication_matches(
-                lease, generation=state.generation,
-                confirmed=None if candidate_metadata_only(conversation, updates)
-                else state.metadata.get("confirmed_publication"),
-            ):
+            if state is None or not publication_commit_matches(lease, state, conversation, updates):
                 raise StalePublicationError("turn no longer owns publication authority")
             if conversation is not None:
                 state.conversation = deepcopy([dict(item) for item in conversation])[
@@ -353,6 +363,14 @@ class TurnCoordinator:
                 return False
             current[1].cancel(reason)
             return True
+
+    async def unprotect(self, lease: PublicationLease, token: CancellationToken) -> None:
+        """真实写入与回执持久化后，后续规划恢复为可停止的普通回合。"""
+        async with self._lock:
+            key = (lease.owner, lease.session_id)
+            current = self._active.get(key)
+            if current and current[0] == lease.turn_id and current[1] is token:
+                self._active[key] = (lease.turn_id, token, False)
 
     async def has_protected_turn(self, *, owner: str, session_id: str) -> bool:
         async with self._lock:

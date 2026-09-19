@@ -689,6 +689,8 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             state_store=state,
         )
         model.rounds.append(list(model.rounds[0]))
+        model.rounds.insert(1, [ModelEvent(ModelEventType.TEXT_DELTA, text="测试写操作已完成"),
+                                ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
         transport = TelegramKernelTransport(session)
         owner = adapter.telegram_agent_owner(-100, 7)
         session_id = adapter.telegram_agent_session_id(-100, 7)
@@ -749,7 +751,34 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         self.assertIn("已过期或已被使用", bot.sent[-1][1])
         self.assertIn("重新生成预览", bot.sent[-1][1])
         self.assertEqual(bot.sent[-1][2]["message_thread_id"], 73)
-        self.assertEqual(len(model.requests), 2)
+        self.assertEqual(len(model.requests), 3)
+
+    def test_confirm_continues_progress_and_returns_next_approval(self):
+        next_plan = ApprovalView(plan_id="next_plan_1234567890abcdef", tool_name="cloud.move", effect="WRITE",
+            preview={"summary": "下一步移动目录"}, result={}, expires_at="")
+        factory = EventFactory(session_id="tg_session", turn_id="confirm-flow", request_id="request")
+        transport = FakeTelegramTransport(None, confirm_view=TurnView(
+            session_id="tg_session", turn_id="confirm-flow", request_id="request", status="approval_required",
+            approval=next_plan, effect_result={"ok": True, "summary": "改名已完成"}), confirm_events=(
+                factory.create(AgentEventType.TOOL_STARTED, {"kind": "confirmed_effect", "tool": "cloud.change"}),
+                factory.create(AgentEventType.TOOL_PROGRESS, {"phase": "background_job", "tool": "cloud.change", "summary": "正在改名 3/10"}),
+                factory.create(AgentEventType.MODEL_STARTED, {"round": 1}),
+                factory.create(AgentEventType.MODEL_DELTA, {"round": 1, "delta": "改名完成，继续准备移动。"}),
+            ))
+        bot, observed = FakeBot(), []
+        progress_class = adapter._ExistingMessageProgress
+        def progress(*args):
+            instance = progress_class(*args)
+            observed.append(instance)
+            return instance
+        access = self._patch_access()
+        with access[0], access[1], access[2], patch.object(adapter, "get_agent_kernel_runtime", return_value=types.SimpleNamespace(telegram=transport, store=FakeStore())),              patch.object(adapter, "_ExistingMessageProgress", side_effect=progress):
+            adapter.handle_agent_callback(bot, Call("agk:c:plan_1234567890abcdef", Message("preview", user_id=0, message_id=33)), TELEBOT)
+        self.assertIn("改名已完成", bot.edits[-1][0])
+        self.assertIn("下一步移动目录", bot.edits[-1][0])
+        self.assertTrue(any(b.callback_data == "agk:c:" + next_plan.plan_id for b in bot.edits[-1][3]["reply_markup"].buttons))
+        self.assertTrue(observed[0].finished_event.is_set(), "终态必须关闭原typing/progress心跳")
+        self.assertTrue(bot.actions, "确认后应沿用typing反馈")
 
     def test_old_callback_is_explicitly_retired(self):
         bot = FakeBot()
@@ -970,6 +999,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
         catalog = ToolCatalog([tool])
         state = InMemorySessionStateStore()
         model = ScriptedModel([[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("write", "download.pause", {}))]])
+        model.rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="completed"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
             pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
         transport = TelegramKernelTransport(session)
@@ -990,7 +1020,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
             self.assertFalse(job.done())
             self.assertFalse(executed.is_set())
             release.set()
-            self.assertEqual(job.result(2).status, "effect_completed")
+            self.assertEqual(job.result(2).status, "success")
             self.assertTrue(executed.is_set())
             self.assertTrue(executor.stop(timeout=1))
         finally:

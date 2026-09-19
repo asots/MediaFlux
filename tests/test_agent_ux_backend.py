@@ -478,7 +478,9 @@ def test_selection_guard_closes_cross_store_toctou_and_expiry(store):
 
 def test_selection_click_only_previews_and_explicit_confirmation_has_one_effect(store):
     async def exercise():
-        session, pipeline, states = _runtime(store)
+        from tests.test_agent_kernel_core import ScriptedModel
+        model = ScriptedModel([[ModelEvent(ModelEventType.TEXT_DELTA, text="提交步骤已完成。"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
+        session, pipeline, states = _runtime(store, model=model)
         view, _ = await _publish_candidates(pipeline, states)
         envelope = QueryEnvelope(owner=OWNER, session_id=SESSION, message="选择并预览", selection=_selection(view))
         with patch("app.agent.indexer_candidate_actions.prepare_submit_resource") as prepare, \
@@ -503,7 +505,7 @@ def test_selection_click_only_previews_and_explicit_confirmation_has_one_effect(
             assert any(event.type is AgentEventType.EFFECT_COMPLETED for event in first)
             await _events(session.confirm(owner=OWNER, session_id=SESSION, plan_id=pending))
             execute.assert_called_once()
-            assert session.model.requests == []
+            assert len(session.model.requests) == 1  # 只有人工确认后才恢复模型续跑。
     asyncio.run(exercise())
 
 

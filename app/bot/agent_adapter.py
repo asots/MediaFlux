@@ -368,12 +368,16 @@ def _render_turn(view: TurnView) -> str:
     if view.status in {"success", "partial"}:
         chain = _tool_chain_line(view.tool_calls)
         answer = str(view.answer or "Agent 未返回可显示的回答，请重试。").replace("\x00", "").strip()
+        receipt = format_public_result(view.effect_result) if view.effect_result else ""
+        if receipt and receipt not in answer:
+            answer = receipt + "\n\n" + answer
         body = f"{answer}\n\n🔎 执行：{chain}" if chain else answer
     elif view.status == "effect_completed":
         body = (format_public_result(view.effect_result, fallback="操作已结束。")
                 if view.effect_result else "执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。")
     elif view.status == "cancelled":
-        body = "已停止本次任务。"
+        body = (format_public_result(view.effect_result) + "\n\n已停止后续处理；已完成操作不会撤销。"
+                if view.effect_result else "已停止本次任务。")
     elif view.status == "failed":
         body = (format_public_result(
             {**view.effect_result, "ok": False,
@@ -393,10 +397,16 @@ class _ExistingMessageProgress(TelegramProgress):
     def __init__(self, bot: Any, target: Any) -> None:
         super().__init__(
             bot, None, target.chat.id, "Agent 确认执行",
-            mode="edit", message_id=target.message_id,
+            mode="edit", message_id=target.message_id, source_message=target,
+            timeout_seconds=1800, prefer_persistent_message=True,
         )
+        self._started = False
 
     def update(self, rendered: str) -> bool:
+        if not self._started:
+            self._started = True
+            self.begin(rendered)
+            self._last_rendered = None  # 原消息仍是确认卡，首次进度必须真实编辑。
         return super().update(rendered, clear_reply_markup=True)
 
 
@@ -451,9 +461,11 @@ class _TelegramEventObserver:
             force = True
         elif event.type is AgentEventType.TOOL_STARTED:
             self.active_tool = str(event.payload.get("tool") or self.active_tool)
-            text = _tool_progress(self.active_tool) + "…"
+            text = "正在执行已确认操作…" if event.payload.get("kind") == "confirmed_effect" else _tool_progress(self.active_tool) + "…"
         elif event.type is AgentEventType.TOOL_PROGRESS:
-            text = _tool_progress(event.payload.get("tool") or self.active_tool) + "…"
+            text = (_safe_text(event.payload.get("summary"), limit=240)
+                    if event.payload.get("phase") == "background_job" else "")
+            text = text or _tool_progress(event.payload.get("tool") or self.active_tool) + "…"
         if text:
             await self._publish_status(text, force=force)
 
@@ -770,7 +782,8 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         call.message.chat.id,
         message_thread_id=getattr(call.message, "message_thread_id", None),
     )
-    observer = _TelegramEventObserver(_ExistingMessageProgress(bot, call.message))
+    progress = _ExistingMessageProgress(bot, call.message)
+    observer = _TelegramEventObserver(progress)
     try:
         view = asyncio.run(
             runtime.telegram.confirm(
@@ -790,12 +803,17 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
             if not result.ok:
                 logger.warning("Telegram Agent 确认拒绝提示投递失败 %s", telegram_error_summary(result))
             return
-        body = _render_turn(view)
-        markup = _candidate_result_markup(owner, session_id, envelope.plan_id, body, telebot_module)
-        _edit_final(bot, call.message, body, reply_markup=markup, rendered_html=True)
+        if view.approval is not None:
+            receipt = render_telegram_markdown(format_public_result(view.effect_result)) if view.effect_result else ""
+            body = (receipt + "\n\n" if receipt else "") + "\n".join(_preview_lines(view.approval, tool_calls=view.tool_calls))
+            markup = _approval_markup(telebot_module, view.approval)
+        else:
+            body = _render_turn(view)
+            markup = _candidate_result_markup(owner, session_id, envelope.plan_id, body, telebot_module)
+        progress.finish_many(split_telegram_html(body, limit=_MAX_MESSAGE), reply_markup=markup, clear_reply_markup=True)
     except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
         logger.warning("Telegram Agent 确认执行失败 type=%s", type(exc).__name__)
-        _edit_final(bot, call.message, "确认执行失败；操作可能未开始，请重新查询状态。")
+        progress.finish("确认执行状态尚未核实，请先查询任务状态，勿重复提交。", clear_reply_markup=True)
 
 
 def handle_agent_patrol_callback(

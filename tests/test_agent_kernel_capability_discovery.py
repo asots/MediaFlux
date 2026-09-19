@@ -198,7 +198,7 @@ class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             ["capability_discovery_pending"],
         )
 
-    async def test_discovered_write_only_prepares_and_confirmation_does_not_use_model(
+    async def test_discovered_write_prepares_then_confirm_continues_after_execution(
         self,
     ):
         written = []
@@ -225,6 +225,7 @@ class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             [
                 [call("agent.capabilities", {"tool_names": ["metadata.cancel"]})],
                 [call("metadata.cancel")],
+                final(),
             ],
         )
         events = await collect(session.run(request()))
@@ -243,7 +244,7 @@ class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(written, ["queue-v1"])
-        self.assertEqual(len(model.requests), count)
+        self.assertEqual(len(model.requests), count + 1)
         self.assertIn(
             AgentEventType.EFFECT_COMPLETED, [event.type for event in confirmed]
         )

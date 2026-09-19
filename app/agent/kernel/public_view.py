@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -126,6 +127,16 @@ def format_public_result(
             count = _int_value(data.get(key))
             if count is not None:
                 lines.append(f"- {label}：{count} 项")
+        operation_ref = str(data.get("operation_ref") or "").strip().upper()
+        if re.fullmatch(r"GY-(?:[0-9A-F]{4}-){7}[0-9A-F]{4}", operation_ref):
+            lines.append(f"- 操作编号：{operation_ref}")
+        stats = data.get("stats")
+        if isinstance(stats, Mapping):
+            counts = [f"{label} {count} 项" for key, label in (("renamed", "改名"), ("moved", "移动"), ("relocated", "清洗并移动"), ("copied", "复制"), ("created", "创建"), ("trashed", "回收"), ("skipped", "跳过"), ("failed", "失败")) if (count := _int_value(stats.get(key))) is not None and count > 0]
+            if counts:
+                lines.append("- 变更统计：" + "；".join(counts))
+            if stats.get("strm_scope_unknown"):
+                lines.append("- 提示：同步范围未能确认，本次未触发 STRM 联动；请核对同步目录。")
         lines.extend(f"- {line}" for line in candidate_result_lines(data))
         for error in _failed_item_errors(data):
             lines.append(f"- 失败原因：{error}")

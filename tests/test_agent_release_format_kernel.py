@@ -41,6 +41,10 @@ class TeachingModel:
     async def stream(self, request, *, cancellation):
         cancellation.raise_if_cancelled()
         self.requests.append(request)
+        if any("已确认操作的可信系统结果" in message.content for message in request.messages):
+            yield ModelEvent(ModelEventType.TEXT_DELTA, text="发布格式已保存，样本已复核。")
+            yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+            return
         step = len(self.requests)
         if step == 1 or (step == 2 and self.save):
             yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(
@@ -88,7 +92,8 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             confirmed = await consume_events(runtime.session.confirm(
                 owner=self.owner, session_id="teaching-session", plan_id=approval["plan_id"],
             ))
-            self.assertEqual(confirmed.status, "effect_completed", confirmed.to_dict())
+            self.assertEqual(confirmed.status, "success", confirmed.to_dict())
+            self.assertIn("已保存", confirmed.answer)
             self.assertTrue(confirmed.effect_result["ok"], confirmed.to_dict())
             self.assertEqual(len(formats.list_rules()), 1)
             self.assertEqual(_parse_release_core(filename(15), PARENT).context.episode, 15)
@@ -154,7 +159,7 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             self.assertEqual(formats.list_rules(), [])
         asyncio.run(scenario())
 
-    def test_reloaded_confirmation_uses_frozen_plan_without_another_model_call(self):
+    def test_reloaded_confirmation_executes_frozen_plan_before_model_continuation(self):
         async def scenario():
             runtime = self.runtime(TeachingModel())
             view = await consume_events(runtime.session.run(AgentInput(
@@ -166,8 +171,9 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             result = await consume_events(restored.session.confirm(
                 owner=self.owner, session_id="stored-confirm-session", plan_id=view.approval.plan_id,
             ))
-            self.assertEqual(result.status, "effect_completed", result.to_dict())
-            self.assertEqual(model.requests, [])
+            self.assertEqual(result.status, "success", result.to_dict())
+            self.assertEqual(len(model.requests), 1)
+            self.assertTrue(any("可信系统结果" in message.content for message in model.requests[0].messages))
             self.assertEqual(len(formats.list_rules()), 1)
         asyncio.run(scenario())
 
@@ -222,6 +228,7 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
                 "session_id": "teaching-http-session", "plan_id": payload["approval"]["plan_id"], "stream": False,
             }, headers=headers)
             self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.json()["status"], "effect_completed", response.text)
+            self.assertEqual(response.json()["status"], "success", response.text)
+            self.assertTrue(response.json()["effect_result"]["ok"])
             self.assertEqual(len(client.get("/api/tools/release-formats").json()["items"]), 1)
             self.assertEqual(_parse_release_core(filename(15), PARENT).context.episode, 15)
