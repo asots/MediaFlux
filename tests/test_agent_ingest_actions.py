@@ -578,6 +578,97 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "confirmation_stale")
         submit_resource.assert_not_called()
 
+    def _status_row(self, **overrides):
+        row = {
+            "id": 7,
+            "title": "Safe title",
+            "kind": "magnet",
+            "targets": "both",
+            "status": "submitted",
+            "qb_status": "submitted",
+            "gy_status": "failed",
+            "organize_status": "pending",
+            "strm_status": "pending",
+            "updated_at": "2026-09-01 12:00:00",
+            "error": "guangya: 文件违规; url=https://private.example/?token=secret-token",
+            "source_value": _MAGNET,
+        }
+        row.update(overrides)
+        return row
+
+    @patch("app.agent.ingest_actions.db.get_download_request")
+    def test_status_exposes_safe_partial_error_without_overwriting_stage_status(
+        self, get_request
+    ):
+        get_request.return_value = self._status_row()
+
+        result = self.actions.status({"request_number": 7}, self.context)
+
+        request = result.data["request"]
+        self.assertEqual(request["status"], "submitted")
+        self.assertEqual(request["qb_status"], "submitted")
+        self.assertEqual(request["guangya_status"], "failed")
+        self.assertEqual(request["error"], "光鸭返回：文件违规")
+        self.assertNotIn("private.example", repr(result.to_dict()))
+        self.assertNotIn("secret-token", repr(result.to_dict()))
+
+    @patch("app.agent.ingest_actions.db.get_download_request")
+    def test_status_exposes_safe_manual_review_reason(self, get_request):
+        get_request.return_value = self._status_row(
+            status="manual_review",
+            qb_status="outcome_unknown",
+            gy_status="failed",
+            error="qb: task_id=private-qb-task; guangya: 文件违规; url=https://private.example/x",
+        )
+
+        result = self.actions.status({"request_number": 7}, self.context)
+
+        request = result.data["request"]
+        self.assertEqual(request["status"], "manual_review")
+        self.assertEqual(request["qb_status"], "outcome_unknown")
+        self.assertEqual(request["guangya_status"], "failed")
+        self.assertEqual(
+            request["error"],
+            "下载后端提交结果未知，请先核对下载器，勿直接重复提交",
+        )
+        self.assertNotIn("private-qb-task", repr(result.to_dict()))
+        self.assertNotIn("private.example", repr(result.to_dict()))
+
+    @patch("app.agent.ingest_actions.db.get_download_request")
+    def test_status_exposes_safe_outcome_unknown_reason(self, get_request):
+        get_request.return_value = self._status_row(
+            status="submitted",
+            qb_status="outcome_unknown",
+            gy_status="not_started",
+            error="qb: provider accepted but task_id=private-qb-task is unknown",
+        )
+
+        result = self.actions.status({"request_number": 7}, self.context)
+
+        request = result.data["request"]
+        self.assertEqual(request["status"], "submitted")
+        self.assertEqual(request["qb_status"], "outcome_unknown")
+        self.assertEqual(request["guangya_status"], "not_started")
+        self.assertEqual(
+            request["error"],
+            "下载后端提交结果未知，请先核对下载器，勿直接重复提交",
+        )
+        self.assertNotIn("private-qb-task", repr(result.to_dict()))
+
+    @patch("app.agent.ingest_actions.db.get_download_request")
+    def test_status_does_not_invent_failure_for_waiting_or_skipped_rows(self, get_request):
+        cases = (
+            {"status": "pending", "qb_status": "pending", "gy_status": "pending"},
+            {"status": "pending", "qb_status": "not_started", "gy_status": "not_started"},
+            {"status": "cancelled", "qb_status": "cancelled", "gy_status": "cancelled"},
+            {"status": "skipped", "qb_status": "skipped", "gy_status": "skipped"},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                get_request.return_value = self._status_row(error="", **overrides)
+                result = self.actions.status({"request_number": 7}, self.context)
+                self.assertEqual(result.data["request"]["error"], "")
+
     @patch("app.agent.ingest_actions.db.get_download_request")
     def test_status_returns_only_public_request_projection(self, get_request):
         get_request.return_value = {

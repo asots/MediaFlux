@@ -458,6 +458,43 @@ def _public_guangya_failure(error: str) -> str:
     return "光鸭提交失败"
 
 
+def public_download_error(
+    *,
+    succeeded: Any = (),
+    failed: Any = (),
+    duplicate: bool = False,
+    existing_status: Any = "",
+    can_resubmit: bool = False,
+    review_required: bool = False,
+    error: Any = "",
+) -> str:
+    """把提交结果或持久化请求行归一为安全的公共错误原因。"""
+    succeeded_targets = _public_dispatch_targets(succeeded)
+    failed_targets = _public_dispatch_targets(failed)
+    if duplicate:
+        normalized_status = str(existing_status or "").strip().lower()
+        if can_resubmit:
+            return "已有历史任务"
+        if normalized_status in _ACTIVE_BACKEND_STATUSES | {"pending"}:
+            return "任务正在处理"
+        return {"manual_review": "等待核对"}.get(
+            normalized_status, "该下载请求已提交或正在处理"
+        )
+    if review_required:
+        review_messages = (
+            "下载后端提交结果未知，请先核对下载器，勿直接重复提交",
+            "部分下载后端已提交，其余结果待核对，请先核对下载器，勿直接重复提交",
+        )
+        return review_messages[bool(succeeded_targets)]
+    if failed_targets == ["guangya"]:
+        return _public_guangya_failure(str(error or ""))
+    return {
+        (False, False): "下载提交失败",
+        (False, True): "下载提交失败",
+        (True, False): "",
+        (True, True): "部分下载目标提交失败",
+    }[bool(succeeded_targets), bool(failed_targets)]
+
 def public_dispatch_summary(result: dict[str, Any]) -> dict[str, Any]:
     """投影稳定的公共下载结果；绝不复制 dispatcher 的原始错误和后端详情。"""
     duplicate = bool(result.get("duplicate"))
@@ -470,32 +507,24 @@ def public_dispatch_summary(result: dict[str, Any]) -> dict[str, Any]:
     )
 
     if duplicate:
-        existing_status = str(result.get("existing_status") or "").strip().lower()
-        if result.get("can_resubmit"):
-            error = "已有历史任务"
-        elif existing_status in _ACTIVE_BACKEND_STATUSES | {"pending"}:
-            error = "任务正在处理"
-        elif existing_status == "manual_review":
-            error = "等待核对"
-        else:
-            error = "该下载请求已提交或正在处理"
         status = "duplicate"
     elif review_required:
         status = "manual_review"
-        error = (
-            "部分下载后端已提交，其余结果待核对，请先核对下载器，勿直接重复提交"
-            if succeeded else
-            "下载后端提交结果未知，请先核对下载器，勿直接重复提交"
-        )
     elif succeeded and failed:
-        status, error = "partial", "部分下载目标提交失败"
+        status = "partial"
     elif succeeded:
-        status, error = "submitted", ""
+        status = "submitted"
     else:
-        status, error = "failed", "下载提交失败"
-
-    if status in {"partial", "failed"} and failed == ["guangya"]:
-        error = _public_guangya_failure(str(result.get("error") or ""))
+        status = "failed"
+    error = public_download_error(
+        succeeded=succeeded,
+        failed=failed,
+        duplicate=duplicate,
+        existing_status=result.get("existing_status"),
+        can_resubmit=bool(result.get("can_resubmit")),
+        review_required=review_required,
+        error=result.get("error"),
+    )
 
     summary = {
         "ok": status in {"submitted", "partial"},

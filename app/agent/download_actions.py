@@ -19,6 +19,7 @@ from app.clients.qbittorrent import (
     close_qbittorrent_client,
 )
 from app.logger import get_logger
+from app.modules.download_dispatcher import public_download_error
 
 logger = get_logger(__name__)
 
@@ -121,21 +122,57 @@ def _safe_targets(value: Any) -> list[str]:
     )
 
 
+_PUBLIC_TARGET_REVIEW_STATES = frozenset({
+    "manual_review",
+    "requires_manual",
+    "outcome_unknown",
+})
+
+
 def download_request_public_summary(row: Any) -> dict[str, Any]:
     """投影单条下载请求；统一供列表与资源接入状态查询复用。"""
+    targets = _safe_targets(row["targets"])
+    stage_statuses = {
+        "qb": _safe_request_status(row["qb_status"]),
+        "guangya": _safe_request_status(row["gy_status"]),
+    }
+    if not targets:
+        targets = [target for target, status in stage_statuses.items() if status != "unknown"]
+    root_status = _safe_request_status(row["status"])
+    failed = [target for target in targets if stage_statuses[target] == "failed"]
+    review_required = (
+        root_status in _PUBLIC_TARGET_REVIEW_STATES
+        or any(stage_statuses[target] in _PUBLIC_TARGET_REVIEW_STATES for target in targets)
+    )
+    has_failure_evidence = bool(
+        failed or review_required or root_status in {"failed", "partial"}
+    )
+    error = ""
+    if has_failure_evidence:
+        succeeded = [
+            target for target in targets
+            if stage_statuses[target] in {"submitted", "downloading", "completed"}
+        ]
+        raw_error = row["error"] if "error" in row.keys() else ""
+        error = public_download_error(
+            succeeded=succeeded,
+            failed=failed,
+            review_required=review_required,
+            error=raw_error,
+        )
     return {
         "request_number": int(row["id"]),
         "title": _safe_title(row["title"]),
         "kind": str(row["kind"] or "unknown")[:24],
-        "targets": _safe_targets(row["targets"]),
-        "status": _safe_request_status(row["status"]),
-        "qb_status": _safe_request_status(row["qb_status"]),
-        "guangya_status": _safe_request_status(row["gy_status"]),
+        "targets": targets,
+        "status": root_status,
+        "qb_status": stage_statuses["qb"],
+        "guangya_status": stage_statuses["guangya"],
         "organize_status": _safe_request_status(row["organize_status"]),
         "strm_status": _safe_request_status(row["strm_status"]),
         "updated_at": str(row["updated_at"] or "")[:32],
+        "error": error,
     }
-
 
 def summarize_download_requests(arguments: dict[str, Any]) -> ToolResult:
     normalized = download_request_summaries_arguments(arguments)
