@@ -27,7 +27,7 @@ from concurrent.futures import (
     wait,
 )
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
 import requests
@@ -2846,6 +2846,126 @@ def plan_strm_sources(sources: list[dict[str, str]]) -> list[dict[str, str]]:
 def configured_strm_source_plans() -> tuple[list[dict[str, str]], str]:
     sources, error = parse_strm_sources(get("GY_STRM_SOURCE_DIRS", ""))
     return (plan_strm_sources(sources), "") if not error else ([], error)
+
+
+def _scope_path(value: object) -> str:
+    path = str(value or "").strip().replace("\\", "/")
+    parts = [part for part in path.split("/") if part]
+    if not path.startswith("/") or len(path) > 2048 or any(part in {".", ".."} for part in parts):
+        return ""
+    return "/" + "/".join(parts)
+
+
+def _directory_path_by_id(
+    client: GuangYaClient | None, directory_id: str
+) -> str:
+    """用对象 ID 的祖先链解析目录路径；失败时返回未知，不猜测范围。"""
+    current_id = str(directory_id or "").strip()
+    if not current_id:
+        return ""
+    if current_id == "0":
+        return "/"
+    if client is None:
+        return ""
+    parts: list[str] = []
+    visited: set[str] = set()
+    try:
+        while current_id != "0":
+            if current_id in visited:
+                return ""
+            visited.add(current_id)
+            current = client.file_info(current_id)
+            if current is None or not current.is_dir or not str(current.name):
+                return ""
+            parts.append(str(current.name))
+            current_id = str(current.parent_id or "0").strip() or "0"
+    except Exception:  # noqa: BLE001 - 范围判定失败只能安全降级
+        return ""
+    return "/" + "/".join(reversed(parts)) if parts else "/"
+
+
+def _scope_operation_values(
+    item: dict[str, Any],
+) -> tuple[set[str], set[str], set[str]]:
+    """返回受影响 ID、路径及真实目录 source_path；不读取执行后的云端状态。"""
+    op = str(item.get("op") or "").strip().casefold()
+    source = item.get("source") if isinstance(item.get("source"), dict) else {}
+    ids: set[str] = set()
+    paths: set[str] = set()
+    source_directory_paths: set[str] = set()
+    if op not in {"copy", "create_directory"}:
+        ids.update(
+            str(source.get(key) or "").strip()
+            for key in ("file_id", "parent_id")
+        )
+        paths.update(
+            _scope_path(item.get(key))
+            for key in ("source_parent_path", "source_path")
+        )
+        if bool(source.get("is_dir")):
+            source_path = _scope_path(item.get("source_path"))
+            if source_path:
+                source_directory_paths.add(source_path)
+    if op in {"move", "relocate", "copy"}:
+        ids.add(str(item.get("target_id") or "").strip())
+        paths.update(
+            _scope_path(item.get(key))
+            for key in ("target_path", "target_create_path")
+        )
+    if op == "create_directory":
+        ids.add(str(item.get("parent_id") or "").strip())
+        paths.update(
+            _scope_path(item.get(key))
+            for key in ("parent_path", "created_path")
+        )
+    source_parent = _scope_path(item.get("source_parent_path"))
+    new_name = str(item.get("new_name") or "").strip()
+    if source_parent and new_name and "/" not in new_name and "\\" not in new_name:
+        paths.add(f"{source_parent.rstrip('/')}/{new_name}")
+    return ids - {""}, paths - {""}, source_directory_paths
+
+
+def cloud_change_sources(client: GuangYaClient | None) -> dict[str, str] | None:
+    """写入前记录已配置来源的目录身份/旧路径；None 表示配置不可确定。"""
+    try:
+        sources, error = configured_strm_source_plans()
+        if error:
+            return None
+        return {str(source["id"]): _directory_path_by_id(client, str(source["id"])) for source in sources}
+    except Exception:  # 来源异常不能覆盖真实云端写入结果
+        return None
+
+
+def trigger_cloud_changes(operations: list[dict], *, sources: dict[str, str] | None) -> dict[str, int]:
+    """两类云盘变更共用唯一联动：只校准受影响来源，不把新空目录当媒体变化。"""
+    changes = [item for item in operations if item.get("op") != "create_directory"]
+    if not changes:
+        return {"strm_trigger_skipped": 1}
+    if sources is None:
+        return {"strm_scope_unknown": 1}
+    # 已配置但路径暂不可读的来源也需校准；不能把“未知”误当成“不相关”。
+    selected = {source_id for source_id, path in sources.items() if not path}
+    unknown = bool(selected)
+    for item in changes:
+        ids, paths, directories = _scope_operation_values(item)
+        unknown |= not ids and not paths
+        for source_id, root in sources.items():
+            if source_id in ids or root and (
+                any(root == "/" or path == root or path.startswith(root + "/") for path in paths)
+                or any(root == directory or root.startswith(directory + "/") for directory in directories)
+            ):
+                selected.add(source_id)
+    stats = {"strm_scope_unknown": 1} if unknown else {}
+    if not selected:
+        return stats or {"strm_trigger_skipped": 1}
+    try:
+        from app.modules.scheduler import get_scheduler
+        result = get_scheduler().trigger("organize", sync_mode="full", selected_source_ids=sorted(selected))
+        stats["strm_triggered" if result.get("ok") else "strm_trigger_failed"] = 1
+    except Exception as exc:
+        logger.warning("云盘变更后 STRM 来源校准触发失败 type=%s", type(exc).__name__)
+        stats["strm_trigger_failed"] = 1
+    return stats
 
 
 def _retry_runtime_config() -> tuple[dict, str]:

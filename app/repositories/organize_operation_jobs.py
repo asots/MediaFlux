@@ -187,27 +187,40 @@ def verify_organize_operation_payload(row: dict[str, Any] | sqlite3.Row) -> bool
     return bool(actual) and hmac.compare_digest(actual, expected)
 
 
-def _fs_change_job_payload(
+def _cloud_plan_job_payload(
     row: dict[str, Any] | sqlite3.Row,
 ) -> dict[str, Any] | None:
-    if str(row["job_kind"] or "") != "agent_guangya_fs_change":
+    job_kind = _safe_kind(row["job_kind"])
+    if job_kind not in {"agent_guangya_rename", "agent_guangya_fs_change"}:
         return None
     if not verify_organize_operation_payload(row):
-        raise ValueError("光鸭文件变更任务参数完整性校验失败")
+        raise ValueError("光鸭云盘任务参数完整性校验失败")
     try:
         payload = json.loads(str(row["payload_json"] or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("光鸭文件变更任务参数损坏") from exc
-    if not isinstance(payload, dict):
-        raise TypeError("光鸭文件变更任务参数损坏")
+        raise ValueError("光鸭云盘任务参数损坏") from exc
+    if (
+        not isinstance(payload, dict)
+        or int(payload.get("version") or 0) != 1
+        or not hmac.compare_digest(
+            str(payload.get("owner_digest") or ""),
+            str(row["owner_digest"] or ""),
+        )
+        or not re.fullmatch(r"[0-9a-f]{32}", str(payload.get("plan_id") or ""))
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(payload.get("plan_fingerprint") or "")
+        )
+    ):
+        raise ValueError("光鸭云盘任务身份参数损坏")
     return payload
 
 
 def _bind_fs_change_plan_to_job(row: dict[str, Any] | sqlite3.Row) -> None:
     """在任务事务提交前，把通用 FS 计划绑定到数据库生成的 job_id。"""
-    payload = _fs_change_job_payload(row)
-    if payload is None:
+    if str(row["job_kind"] or "") != "agent_guangya_fs_change":
         return
+    payload = _cloud_plan_job_payload(row)
+    assert payload is not None
     from app.modules.guangya_fs_change import bind_fs_change_plan_job
 
     bind_fs_change_plan_job(
@@ -219,33 +232,45 @@ def _bind_fs_change_plan_to_job(row: dict[str, Any] | sqlite3.Row) -> None:
     )
 
 
-def _sync_fs_change_plan_terminal(
+def _sync_cloud_plan_terminal(
     row: dict[str, Any] | sqlite3.Row,
     *,
     status: str,
     result: dict[str, Any] | None = None,
     error_code: str = "",
 ) -> None:
-    """尽力把数据库终态同步到计划文件；失败不得回滚真实队列终态。"""
+    """复用唯一云盘计划终态路径；失败不得回滚真实队列终态。"""
     try:
-        payload = _fs_change_job_payload(row)
+        job_kind = _safe_kind(row["job_kind"])
+        payload = _cloud_plan_job_payload(row)
         if payload is None:
             return
-        from app.modules.guangya_fs_change import finalize_fs_change_plan_job
+        if job_kind == "agent_guangya_fs_change":
+            from app.modules.guangya_fs_change import finalize_fs_change_plan_job
 
-        stats = result.get("stats") if isinstance(result, dict) else {}
-        finalize_fs_change_plan_job(
-            str(payload.get("plan_id") or ""),
-            expected_fingerprint=str(payload.get("plan_fingerprint") or ""),
-            job_id=str(row["job_id"] or ""),
-            queue_status=status,
-            audit_failures=(
-                max(0, int(stats.get("audit_failures") or 0))
-                if isinstance(stats, dict)
-                else 0
-            ),
-            error_code=error_code,
-        )
+            stats = result.get("stats") if isinstance(result, dict) else {}
+            finalize_fs_change_plan_job(
+                str(payload["plan_id"]),
+                expected_fingerprint=str(payload["plan_fingerprint"]),
+                job_id=str(row["job_id"] or ""),
+                queue_status=status,
+                audit_failures=(
+                    max(0, int(stats.get("audit_failures") or 0))
+                    if isinstance(stats, dict)
+                    else 0
+                ),
+                error_code=error_code,
+            )
+        else:
+            from app.modules.guangya_rename import finalize_rename_plan_job
+
+            finalize_rename_plan_job(
+                str(payload["plan_id"]),
+                owner_digest=str(row["owner_digest"] or ""),
+                expected_fingerprint=str(payload["plan_fingerprint"]),
+                queue_status=status,
+                error_code=error_code,
+            )
     except Exception as exc:  # noqa: BLE001 - SQLite 终态仍是权威恢复边界
         logger.warning(
             "同步光鸭文件变更计划终态失败 job=%s status=%s type=%s",
@@ -269,7 +294,7 @@ def _expire_pending(conn: sqlite3.Connection, current_epoch: float) -> int:
         (timestamp, timestamp, float(current_epoch)),
     )
     for row in expired_rows:
-        _sync_fs_change_plan_terminal(
+        _sync_cloud_plan_terminal(
             row,
             status="cancelled",
             error_code="QueueExpired",
@@ -538,7 +563,7 @@ def finish_organize_operation_job(
         )
         if cur.rowcount != 1:
             return False
-        _sync_fs_change_plan_terminal(
+        _sync_cloud_plan_terminal(
             row,
             status=safe_status,
             result=safe_result_payload,
@@ -578,7 +603,7 @@ def fail_pending_organize_operation_job(
             ),
         )
         if cur.rowcount == 1:
-            _sync_fs_change_plan_terminal(
+            _sync_cloud_plan_terminal(
                 row,
                 status="failed",
                 error_code=safe_error_code,
@@ -604,9 +629,10 @@ def recover_orphaned_organize_operation_jobs() -> int:
     timestamp = now()
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        fs_change_rows = conn.execute(
+        cloud_rows = conn.execute(
             "SELECT * FROM organize_operation_jobs "
-            "WHERE status='running' AND job_kind='agent_guangya_fs_change'"
+            "WHERE status='running' AND job_kind IN "
+            "('agent_guangya_rename','agent_guangya_fs_change')"
         ).fetchall()
         cancelled = conn.execute(
             "UPDATE organize_operation_jobs SET status='cancelled',lease_generation=lease_generation+1,"
@@ -625,11 +651,16 @@ def recover_orphaned_organize_operation_jobs() -> int:
             "WHERE status='running'",
             (timestamp, timestamp),
         )
-        for row in fs_change_rows:
-            _sync_fs_change_plan_terminal(
+        for row in cloud_rows:
+            cancelled_by_request = bool(row["cancel_requested"])
+            _sync_cloud_plan_terminal(
                 row,
-                status="manual_review",
-                error_code="WorkerExitedUnknownOutcome",
+                status="cancelled" if cancelled_by_request else "manual_review",
+                error_code=(
+                    "PrivacyPurgeCancelled"
+                    if cancelled_by_request
+                    else "WorkerExitedUnknownOutcome"
+                ),
             )
         conn.execute(
             "DELETE FROM organize_operation_jobs WHERE purged_at IS NOT NULL "

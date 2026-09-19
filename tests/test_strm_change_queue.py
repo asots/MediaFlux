@@ -506,6 +506,21 @@ class SchedulerChangeQueueIntegrationTests(IsolatedDatabaseTestCase):
         self.assertTrue(self.scheduler._run_lock.acquire(blocking=False))
         self.scheduler._run_lock.release()
 
+    def test_scoped_organize_run_does_not_claim_or_complete_other_sources(self):
+        db.enqueue_strm_change_targets([_change(source_id="one", file_id="a"), _change(source_id="two", file_id="b")])
+        claimed = self.scheduler._claim_change_targets("organize", "full", source_ids={"one"})
+        self.assertEqual([row["source_id"] for row in claimed], ["one"])
+        with patch.object(self.scheduler, "_schedule_persisted_change_queue"):
+            self.scheduler._settle_change_targets(claimed, "completed")
+        remaining = db.claim_strm_change_targets(owner="next")
+        self.assertEqual([row["source_id"] for row in remaining], ["two"])
+        self.assertEqual(remaining[0]["lease_generation"], 1)
+
+    def test_empty_explicit_source_filter_does_not_claim_any_work(self):
+        db.enqueue_strm_change_targets([_change()])
+        self.assertEqual(db.claim_strm_change_targets(owner="test", source_ids=[]), [])
+        self.assertEqual(db.count_pending_strm_change_targets(), 1)
+
     def test_only_organize_runs_claim_persisted_targets(self):
         db.enqueue_strm_change_targets([_change(file_id="f1")])
 

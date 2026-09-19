@@ -213,49 +213,40 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
         self.assertEqual(confirmation.status, "confirmation_required")
         self.assertEqual(confirmation.data["mode"], "replace_text")
 
-    def test_durable_hygiene_execution_triggers_full_strm(self):
-        scheduler = mock.Mock()
-        scheduler.trigger.return_value = {"ok": True, "queued": True}
-        with (
-            mock.patch.object(
-                actions, "load_rename_plan", return_value={"mode": "media_hygiene"}
-            ),
-            mock.patch.object(
-                actions,
-                "execute_rename_plan",
-                return_value={"partial": False, "stats": {"renamed": 2, "failed": 0}},
-            ),
-            mock.patch("app.modules.scheduler.get_scheduler", return_value=scheduler),
-        ):
-            result = actions.execute_durable_guangya_rename_job(
-                {"plan_id": "a" * 32, "plan_fingerprint": "b" * 64}
-            )
-        scheduler.trigger.assert_called_once_with(
-            "organize", force_full=True, sync_mode="full"
-        )
-        self.assertEqual(result["stats"]["strm_triggered"], 1)
+    def test_hygiene_uses_the_same_scoped_strm_handoff(self):
+        for source_id, expected in (("root", True), ("outside", False)):
+            with self.subTest(source_id=source_id):
+                client = FakeHygieneClient()
+                client.directories["0"].append(GuangYaFile("outside", "outside", True, parent_id="0"))
+                plan = hygiene.build_media_hygiene_plan(client, owner="owner", path="/NSFW/(spam.example.com)-ABC-123", recursive=True, limit=100)
+                guangya_rename.confirm_rename_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+                scheduler = mock.Mock()
+                scheduler.trigger.return_value = {"ok": True, "queued": True}
+                with (mock.patch("app.modules.scheduler.get_scheduler", return_value=scheduler),
+                      mock.patch("app.modules.strm.configured_strm_source_plans", return_value=([{"id": source_id, "name": source_id}], "")),
+                      mock.patch.object(guangya_rename.time, "sleep")):
+                    result = guangya_rename.execute_rename_plan(
+                        {"version": 1, "plan_id": plan["plan_id"], "plan_fingerprint": plan["fingerprint"],
+                         "owner_digest": "owner-digest", "credential_generation": 11}, client_factory=lambda: client)
+                self.assertEqual(result["stats"]["renamed"], 3)
+                self.assertFalse(result["partial"])
+                if expected:
+                    scheduler.trigger.assert_called_once_with("organize", sync_mode="full", selected_source_ids=[source_id])
+                else:
+                    scheduler.trigger.assert_not_called()
+                    self.assertEqual(result["stats"]["strm_trigger_skipped"], 1)
 
     def test_removed_legacy_mode_cannot_trigger_strm(self):
-        scheduler = mock.Mock()
-        with (
-            mock.patch.object(
-                actions, "load_rename_plan", return_value={"mode": "declarative"}
-            ),
-            mock.patch.object(
-                actions,
-                "execute_rename_plan",
-                return_value={"partial": False, "stats": {"renamed": 2, "failed": 0}},
-            ),
-            mock.patch(
-                "app.modules.scheduler.get_scheduler", return_value=scheduler
-            ) as get_scheduler,
-        ):
-            result = actions.execute_durable_guangya_rename_job(
-                {"plan_id": "a" * 32, "plan_fingerprint": "b" * 64}
-            )
-        get_scheduler.assert_not_called()
-        scheduler.trigger.assert_not_called()
-        self.assertNotIn("strm_triggered", result["stats"])
+        client = FakeHygieneClient()
+        plan = hygiene.build_media_hygiene_plan(client, owner="owner", path="/NSFW/(spam.example.com)-ABC-123", recursive=True, limit=100)
+        guangya_rename.confirm_rename_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        stored = guangya_rename.load_rename_plan(plan["plan_id"], require_confirmed=True)
+        stored["mode"] = "declarative"
+        guangya_rename._atomic_write_plan(guangya_rename._plan_path(plan["plan_id"]), stored)
+        factory = mock.Mock()
+        with self.assertRaises(guangya_rename.GuangYaRenamePlanError):
+            guangya_rename.execute_rename_plan({"version": 1, "plan_id": plan["plan_id"], "plan_fingerprint": plan["fingerprint"]}, client_factory=factory)
+        factory.assert_not_called()
 
     def test_terminal_private_plan_is_removed_after_retention(self):
         client = FakeHygieneClient()

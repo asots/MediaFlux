@@ -283,7 +283,7 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                 for private in ("owner_digest", "internal_file_id", "private-item", job_id):
                     self.assertNotIn(private, json.dumps(receipt.data))
 
-    def test_legacy_frozen_plan_without_scope_metadata_fails_closed(self):
+    def test_legacy_empty_directory_plan_needs_no_media_sync(self):
         plan = self._confirmed_plan()
         plan["trigger_strm"] = True
         plan["operations"] = [{"op": "create_directory", "name": "legacy"}]
@@ -303,12 +303,10 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                 }.get(key, default),
             ),
         ):
-            should_trigger, scope_known = guangya_fs_change._strm_scope_decision(
-                plan, plan["operations"]
-            )
+            from app.modules.strm import cloud_change_sources, trigger_cloud_changes
+            stats = trigger_cloud_changes(plan["operations"], sources=cloud_change_sources(None))
 
-        self.assertFalse(should_trigger)
-        self.assertFalse(scope_known)
+        self.assertEqual(stats, {"strm_trigger_skipped": 1})
         queued, _replayed = self._enqueue(plan)
         self.assertEqual(queued["job_kind"], "agent_guangya_fs_change")
         self.assertNotIn("strm_scope", guangya_fs_change.load_fs_change_plan(plan["plan_id"]))

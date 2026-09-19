@@ -27,7 +27,6 @@ from app.modules.guangya_rename import (
     build_rename_plan,
     confirm_rename_plan,
     discard_rename_plan,
-    execute_rename_plan,
     load_rename_plan,
 )
 from app.repositories.organize_operation_jobs import (
@@ -578,7 +577,7 @@ def preview_guangya_media_hygiene(
             )
         ],
         suggestions=(
-            ["如预览无误，可以确认执行；成功后会自动触发 STRM 全量核对。"]
+            ["如预览无误，可以确认执行；成功后仅校准受影响的 STRM 来源。"]
             if count
             else [
                 "未识别到高置信番号或域名污染时会保留原名称，可缩小到更精确的目录后重试。"
@@ -752,34 +751,3 @@ def execute_guangya_rename_confirmed(
             ),
         ],
     )
-
-
-def execute_durable_guangya_rename_job(
-    payload: dict[str, Any],
-    *,
-    cancel_check=None,
-) -> dict[str, Any]:
-    plan = load_rename_plan(
-        str(payload.get("plan_id") or ""),
-        expected_fingerprint=str(payload.get("plan_fingerprint") or ""),
-        require_confirmed=True,
-    )
-    result = execute_rename_plan(payload, cancel_check=cancel_check)
-    stats = result.setdefault("stats", {})
-    plan_mode = str(plan.get("mode") or "").strip().casefold()
-    if plan_mode == "media_hygiene" and int(stats.get("renamed") or 0) > 0:
-        try:
-            from app.modules.scheduler import get_scheduler
-
-            triggered = get_scheduler().trigger(
-                "organize", force_full=True, sync_mode="full"
-            )
-        except Exception as exc:
-            logger.warning("光鸭改名后 STRM 联动失败 type=%s", type(exc).__name__)
-            triggered = {"ok": False}
-        if bool(triggered.get("ok")):
-            stats["strm_triggered"] = 1
-        else:
-            stats["strm_trigger_failed"] = 1
-            result["partial"] = True
-    return result

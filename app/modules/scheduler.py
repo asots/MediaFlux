@@ -945,7 +945,7 @@ class STRMScheduler:
             logger.exception("登记 STRM 变化目标队列失败")
             return False
 
-    def _claim_change_targets(self, trigger_type: str, sync_mode: str = "auto") -> list[dict]:
+    def _claim_change_targets(self, trigger_type: str, sync_mode: str = "auto", *, source_ids: set[str] | None = None) -> list[dict]:
         """整理联动运行前领取到期目标；领取失败不得降级为空队列继续执行。"""
         if trigger_type != "organize" and sync_mode != "fast":
             return []
@@ -953,6 +953,7 @@ class STRMScheduler:
         return db.claim_strm_change_targets(
             owner=f"strm-sync-{threading.get_ident()}",
             lease_seconds=lease_seconds,
+            source_ids=source_ids,
         )
 
     def _settle_change_targets(
@@ -1723,7 +1724,7 @@ class STRMScheduler:
             organize_changes = _merge_organize_changes(options.get("organize_changes"))
             # 持久队列是唯一权威来源：内存清单只是本轮的快捷路径，
             # 领取结果会补齐上一次进程中断或失败重试遗留的变化目标。
-            claimed_targets = self._claim_change_targets(trigger_type, requested_mode)
+            claimed_targets = self._claim_change_targets(trigger_type, requested_mode, source_ids=selected_source_ids or None)
             options["strm_claimed_targets"] = claimed_targets
             recovered_owners = db.request_owners_for_work(
                 "change", [item["id"] for item in claimed_targets if item.get("id")],

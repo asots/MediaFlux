@@ -627,7 +627,7 @@ def prepare_guangya_fs_change_confirmation(
                 "trash 只调用 Provider 回收站语义，不提供永久删除。",
                 "每项写入后都会重新读取目录或对象状态验证真实结果。",
                 *(
-                    ["至少一项成功后会触发 STRM 全量核对。"]
+                    ["媒体变更成功后仅校准受影响的 STRM 来源；新建空目录不会触发。"]
                     if flow.preview_safe["trigger_strm"]
                     else []
                 ),

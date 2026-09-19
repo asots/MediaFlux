@@ -351,7 +351,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 self.assertEqual(result["stats"]["moved" if op == "move" else "renamed"], 1)
                 if should_trigger:
                     scheduler.trigger.assert_called_once_with(
-                        "organize", force_full=True, sync_mode="full"
+                        "organize", sync_mode="full", selected_source_ids=["guoman"]
                     )
                 else:
                     scheduler.trigger.assert_not_called()
@@ -473,7 +473,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 self.assertFalse(result["partial"])
                 self.assertEqual(result["stats"]["moved"], 1)
                 scheduler.trigger.assert_called_once_with(
-                    "organize", force_full=True, sync_mode="full"
+                    "organize", sync_mode="full", selected_source_ids=["整理"]
                 )
 
     def test_copy_out_of_scope_does_not_trigger_for_unchanged_source(self):
@@ -539,14 +539,37 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         path="/other",
                     )
 
-                result, scheduler = self._execute_with_strm_scope(client, plan)
+                result, scheduler = self._execute_with_strm_scope(client, plan, strm_source_ids=("source", "target"))
 
                 self.assertFalse(result["partial"])
                 self.assertEqual(result["stats"]["moved"], 1)
                 scheduler.trigger.assert_called_once_with(
-                    "organize", force_full=True, sync_mode="full"
+                    "organize", sync_mode="full", selected_source_ids=["source" if direction == "out" else "target"]
                 )
                 self.assertEqual(result["stats"]["strm_triggered"], 1)
+
+    def test_organize_target_not_configured_as_strm_source_does_not_trigger(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(
+            GuangYaFile("other", "other", True, parent_id="0", etag="o")
+        )
+        client.directories["other"] = [
+            GuangYaFile("other-file", "Other.mp4", False, parent_id="other", size=70,
+                        etag="o1", extension="mp4")
+        ]
+        plan = self._confirmed_plan(
+            client,
+            {"op": "move", "source_name": "Other.mp4", "target_path": "/target"},
+            trigger_strm=True,
+            path="/other",
+        )
+        result, scheduler = self._execute_with_strm_scope(
+            client, plan, strm_source_ids=("source",), organize_target_id="target"
+        )
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["moved"], 1)
+        self.assertEqual(result["stats"]["strm_trigger_skipped"], 1)
+        scheduler.trigger.assert_not_called()
 
     def test_strm_trigger_covers_archive_root_object_and_root_destination(self):
         client = FakeGatewayClient()
@@ -565,16 +588,16 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
 
         result, scheduler = self._execute_with_strm_scope(
-            client, plan, strm_source_ids=("source",), organize_source_ids=(), organize_target_id="archive"
+            client, plan, strm_source_ids=("source", "archive"), organize_source_ids=(), organize_target_id="archive"
         )
 
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["moved"], 1)
         scheduler.trigger.assert_called_once_with(
-            "organize", force_full=True, sync_mode="full"
+            "organize", sync_mode="full", selected_source_ids=["archive"]
         )
 
-    def test_strm_trigger_treats_explicit_root_target_as_scope(self):
+    def test_new_empty_directory_never_triggers_strm(self):
         client = FakeGatewayClient()
         plan = self._confirmed_plan(
             client,
@@ -589,9 +612,8 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["created"], 1)
-        scheduler.trigger.assert_called_once_with(
-            "organize", force_full=True, sync_mode="full"
-        )
+        scheduler.trigger.assert_not_called()
+        self.assertEqual(result["stats"]["strm_trigger_skipped"], 1)
 
     def test_only_successful_relevant_operations_can_trigger_strm(self):
         client = FakeGatewayClient()
@@ -690,6 +712,28 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(result["stats"]["renamed"], 1)
         self.assertEqual(result["stats"]["strm_scope_unknown"], 1)
         scheduler.trigger.assert_not_called()
+
+    def test_partly_unknown_source_paths_are_reconciled_without_scanning_known_unrelated_roots(self):
+        from app.modules.strm import trigger_cloud_changes
+
+        for paths, selected in ((["/A/child/one.mp4", "/B/child/two.mp4"], ["a", "b"]),
+                                (["/B/child/two.mp4"], ["b"])):
+            with self.subTest(paths=paths):
+                operations = [
+                    {"op": "rename", "source_path": path,
+                     "source": {"file_id": str(index), "parent_id": f"child-{index}"}}
+                    for index, path in enumerate(paths)
+                ]
+                scheduler = mock.Mock()
+                scheduler.trigger.return_value = {"ok": True}
+                with mock.patch("app.modules.scheduler.get_scheduler", return_value=scheduler):
+                    result = trigger_cloud_changes(
+                        operations, sources={"a": "/A", "b": "", "c": "/C"}
+                    )
+                self.assertEqual(result, {"strm_scope_unknown": 1, "strm_triggered": 1})
+                scheduler.trigger.assert_called_once_with(
+                    "organize", sync_mode="full", selected_source_ids=selected
+                )
 
     def test_trigger_strm_false_never_reads_or_triggers_scope(self):
         client = FakeGatewayClient()

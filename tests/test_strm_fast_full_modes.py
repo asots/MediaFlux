@@ -80,6 +80,30 @@ class StrmFastFullModeTests(IsolatedDatabaseTestCase):
         incremental.assert_called_once()
         full.assert_not_called()
 
+    def test_scoped_organize_run_claims_only_selected_source_queue(self):
+        aggregate = self.scheduler._empty_stats()
+        source_results = [{"id": "source", "name": "来源", "stats": aggregate}]
+        patches = self._patch_runtime()
+
+        def run_inline(trigger_type, options):
+            self.scheduler._run_options = options
+            return self.scheduler._execute_locked(trigger_type)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], patches[8], patch.object(
+                    self.scheduler, "_start_locked_worker", side_effect=run_inline,
+                ), patch.object(
+                    self.scheduler, "_claim_change_targets", return_value=[],
+                ) as claim, patch.object(
+                    self.scheduler, "_run_full_sources",
+                    return_value=(aggregate, source_results, False),
+                ):
+            result = self.scheduler.trigger(
+                "organize", sync_mode="full", selected_source_ids=["source"]
+            )
+        self.assertTrue(result["ok"])
+        claim.assert_called_once_with("organize", "full", source_ids={"source"})
+
     def test_notification_failure_does_not_rewrite_completed_strm_run(self):
         aggregate = self.scheduler._empty_stats()
         aggregate.update({"total": 1, "generated": 1})

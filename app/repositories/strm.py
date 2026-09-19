@@ -6,6 +6,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -1058,6 +1059,7 @@ def claim_strm_change_targets(
     lease_seconds: int = DEFAULT_STRM_LEASE_SECONDS,
     limit: int = 200,
     provider: str = DEFAULT_STRM_PROVIDER,
+    source_ids: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """原子领取到期目标；租约代次隔离过期 worker 的迟到结算。"""
     database = db
@@ -1067,6 +1069,10 @@ def claim_strm_change_targets(
     safe_owner = str(owner or "").strip()
     if not safe_owner:
         raise ValueError("STRM 变化目标领取必须提供 owner")
+    selected = tuple(dict.fromkeys(str(value).strip() for value in source_ids or () if str(value).strip()))
+    if source_ids is not None and not selected:
+        return []
+    source_filter = " AND source_id IN (" + ",".join("?" for _ in selected) + ")" if selected else ""
     claimed: list[dict[str, Any]] = []
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1074,8 +1080,8 @@ def claim_strm_change_targets(
             "SELECT * FROM strm_change_queue WHERE provider=? AND ("
             "  (state='queued' AND next_attempt_at<=?)"
             "  OR (state IN ('running','dirty') AND lease_until<=?)"
-            ") ORDER BY next_attempt_at, id LIMIT ?",
-            (provider, stamp, now_epoch, max(1, int(limit or 1))),
+            ")" + source_filter + " ORDER BY next_attempt_at, id LIMIT ?",
+            (provider, stamp, now_epoch, *selected, max(1, int(limit or 1))),
         ).fetchall()
         for row in rows:
             previous_generation = int(row["lease_generation"] or 0)

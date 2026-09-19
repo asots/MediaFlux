@@ -33,6 +33,7 @@ from app.modules.organize_delete_audit import (
 )
 from app.modules.process_lock import CrossProcessLock
 from app.modules.web_secret import get_web_secret
+from app.modules.strm import cloud_change_sources, trigger_cloud_changes
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
 
@@ -628,158 +629,6 @@ def _snapshot_matches(item: GuangYaFile | None, snapshot: dict[str, Any]) -> boo
 
 def _full_path(parent_path: str, name: str) -> str:
     return (parent_path.rstrip("/") + "/" + name) if parent_path != "/" else "/" + name
-
-
-def _scope_path(value: object) -> str:
-    """复用计划路径解析；旧计划的非法路径按未知范围处理。"""
-    try:
-        return _normalize_path(value)
-    except GuangYaFSChangeError:
-        return ""
-
-
-def _directory_path_by_id(
-    client: GuangYaClient | None, directory_id: str
-) -> str:
-    """用对象 ID 的祖先链解析目录路径；失败时返回未知，不猜测范围。"""
-    current_id = str(directory_id or "").strip()
-    if not current_id:
-        return ""
-    if current_id == "0":
-        return "/"
-    if client is None:
-        return ""
-    parts: list[str] = []
-    visited: set[str] = set()
-    try:
-        while current_id != "0":
-            if current_id in visited:
-                return ""
-            visited.add(current_id)
-            current = client.file_info(current_id)
-            if current is None or not current.is_dir or not str(current.name):
-                return ""
-            parts.append(str(current.name))
-            current_id = str(current.parent_id or "0").strip() or "0"
-    except Exception:  # noqa: BLE001 - 范围判定失败只能安全降级
-        return ""
-    return "/" + "/".join(reversed(parts)) if parts else "/"
-
-
-def _scope_operation_values(
-    item: dict[str, Any],
-) -> tuple[set[str], set[str], set[str]]:
-    """返回受影响 ID、路径及真实目录 source_path；不读取执行后的云端状态。"""
-    op = str(item.get("op") or "").strip().casefold()
-    source = item.get("source") if isinstance(item.get("source"), dict) else {}
-    ids: set[str] = set()
-    paths: set[str] = set()
-    source_directory_paths: set[str] = set()
-    if op not in {"copy", "create_directory"}:
-        ids.update(
-            str(source.get(key) or "").strip()
-            for key in ("file_id", "parent_id")
-        )
-        paths.update(
-            _scope_path(item.get(key))
-            for key in ("source_parent_path", "source_path")
-        )
-        if bool(source.get("is_dir")):
-            source_path = _scope_path(item.get("source_path"))
-            if source_path:
-                source_directory_paths.add(source_path)
-    if op in {"move", "relocate", "copy"}:
-        ids.add(str(item.get("target_id") or "").strip())
-        paths.update(
-            _scope_path(item.get(key))
-            for key in ("target_path", "target_create_path")
-        )
-    if op == "create_directory":
-        ids.add(str(item.get("parent_id") or "").strip())
-        paths.update(
-            _scope_path(item.get(key))
-            for key in ("parent_path", "created_path")
-        )
-    source_parent = _scope_path(item.get("source_parent_path"))
-    new_name = str(item.get("new_name") or "").strip()
-    if source_parent and new_name and "/" not in new_name and "\\" not in new_name:
-        paths.add(_full_path(source_parent, new_name))
-    return ids - {""}, paths - {""}, source_directory_paths
-
-
-def _configured_strm_scope(
-    client: GuangYaClient | None,
-) -> tuple[set[str], set[str], bool]:
-    """返回 STRM 来源与显式整理目标 ID、路径及未知状态。"""
-    from app import config
-    from app.modules.strm import configured_strm_source_plans
-
-    try:
-        strm_plans, strm_error = configured_strm_source_plans()
-    except Exception:  # noqa: BLE001 - 不能让范围读取覆盖真实写入结果
-        return set(), set(), True
-    if strm_error:
-        return set(), set(), True
-    root_ids = {
-        str(item.get("id") or "").strip()
-        for item in (strm_plans or [])
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
-    if not root_ids:
-        return set(), set(), False
-
-    target_id = str(config.get("GY_ORGANIZE_TARGET_DIR", "") or "").strip()
-    if target_id:
-        root_ids.add(target_id)
-
-    root_paths = {
-        path
-        for root_id in root_ids
-        if (path := _scope_path(_directory_path_by_id(client, root_id)))
-    }
-    return root_ids, root_paths, len(root_paths) != len(root_ids)
-
-
-def _strm_scope_decision(
-    plan: dict[str, Any],
-    operations: list[dict[str, Any]],
-    *,
-    client: GuangYaClient | None = None,
-    scope: tuple[set[str], set[str], bool] | None = None,
-) -> tuple[bool, bool]:
-    """返回 ``(是否命中, 范围是否可确定)``；未知范围 fail-closed。"""
-    if not bool(plan.get("trigger_strm")):
-        return False, True
-    if scope is None:
-        try:
-            scope = _configured_strm_scope(client)
-        except Exception:  # noqa: BLE001 - 不能让范围判定覆盖真实写入结果
-            return False, False
-    root_ids, root_paths, scope_unknown = scope
-    if not root_ids:
-        return False, not scope_unknown
-    for item in operations:
-        if not isinstance(item, dict):
-            scope_unknown = True
-            continue
-        ids, paths, source_directory_paths = _scope_operation_values(item)
-        if not ids and not paths:
-            scope_unknown = True
-            continue
-        if ids & root_ids or any(
-            root_path == "/"
-            or path == root_path
-            or path.startswith(root_path + "/")
-            for path in paths
-            for root_path in root_paths
-        ) or any(
-            root_path == source_path
-            or root_path.startswith(source_path + "/")
-            for source_path in source_directory_paths
-            for root_path in root_paths
-        ):
-            return True, True
-    return False, not scope_unknown
 
 
 def _resolve_directory(
@@ -1440,14 +1289,8 @@ def execute_fs_change_plan(
             if cancel_check is not None:
                 cancel_check()
             _preflight_operation(client, item, allow_pending_target=True)
-        strm_scope = None
-        if bool(plan.get("trigger_strm")):
-            try:
-                # 必须在 provider 写入前冻结配置根路径；祖先目录改名/移动后，
-                # 再按 ID 回查会得到新路径，无法判断原冻结操作是否覆盖 STRM 根。
-                strm_scope = _configured_strm_scope(client)
-            except Exception:  # noqa: BLE001 - 范围未知不覆盖真实写入结果
-                strm_scope = (set(), set(), True)
+        # 来源旧路径必须在目录移动/改名之前捕获。
+        strm_scope = cloud_change_sources(client) if plan.get("trigger_strm") else None
         # 预检日志先于 running CAS 写入；若日志介质不可用，此时尚未产生任何
         # provider 副作用，可以安全失败而不会制造“远端已写、本地 failed”。
         _append_journal(
@@ -1626,29 +1469,8 @@ def execute_fs_change_plan(
         )
         partial = stats["failed"] > 0 or persistence_uncertain
         if bool(plan.get("trigger_strm")) and successful > 0:
-            strm_in_scope, scope_known = _strm_scope_decision(
-                plan, successful_operations, client=client, scope=strm_scope
-            )
-            if not scope_known:
-                # 配置/对象详情不完整；不扩大为全库扫描，
-                # 但把未知状态返回给调用方，真实云端写入结果仍按原统计收束。
-                stats["strm_scope_unknown"] = 1
-            elif not strm_in_scope:
-                stats["strm_trigger_skipped"] = 1
-            else:
-                try:
-                    from app.modules.scheduler import get_scheduler
-
-                    triggered = get_scheduler().trigger(
-                        "organize", force_full=True, sync_mode="full"
-                    )
-                except Exception:  # noqa: BLE001 - STRM 联动失败不回滚已完成云端写入
-                    triggered = {"ok": False}
-                if bool(triggered.get("ok")):
-                    stats["strm_triggered"] = 1
-                else:
-                    stats["strm_trigger_failed"] = 1
-                    partial = True
+            stats.update(trigger_cloud_changes(successful_operations, sources=strm_scope))
+            partial |= bool(stats.get("strm_trigger_failed"))
         finished_at = _now_iso()
         final_status = (
             "manual_review"

@@ -1214,11 +1214,9 @@ class OrganizeTaskManager:
                 payload, cancel_check=cancel_check
             )
         if kind == "agent_guangya_rename":
-            from app.agent.guangya_rename_actions import (
-                execute_durable_guangya_rename_job,
-            )
+            from app.modules.guangya_rename import execute_rename_plan
 
-            return execute_durable_guangya_rename_job(
+            return execute_rename_plan(
                 payload, cancel_check=cancel_check
             )
         if kind == "agent_guangya_fs_change":

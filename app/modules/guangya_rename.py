@@ -26,6 +26,7 @@ from app.config import PATHS
 from app.modules.process_lock import CrossProcessLock
 from app.modules.guangya_journal import append_guangya_journal
 from app.modules.web_secret import get_web_secret
+from app.modules.strm import cloud_change_sources, trigger_cloud_changes
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
 
@@ -51,6 +52,7 @@ _MAX_TERMINAL_PLANS = 128
 _MAX_ACTIVE_PLANS = 64
 _MAX_PLAN_STORAGE_BYTES = 512 * 1024 * 1024
 _SAFE_PLAN_ID = re.compile(r"^[0-9a-f]{32}$")
+_TERMINAL_PLAN_STATUSES = frozenset({"completed", "partial", "failed", "cancelled", "manual_review"})
 _COMPACT_BITRATE_RE = re.compile(
     r"\.(?!(?:26[0-9])\.)(?:\d+(?:\.\d+)?)\s*Mbps(?=\.|$)",
     re.IGNORECASE,
@@ -274,6 +276,53 @@ def update_rename_plan_execution(
         payload["execution"] = dict(execution)
         payload["updated_at"] = _now_iso()
         _atomic_write_plan(_plan_path(plan_id), payload)
+
+
+def finalize_rename_plan_job(
+    plan_id: str,
+    *,
+    owner_digest: str,
+    expected_fingerprint: str,
+    queue_status: str,
+    error_code: str = "",
+) -> dict[str, Any]:
+    """把可信队列终态投影到旧 rename plan，且不覆盖已知终态。"""
+    safe_status = str(queue_status or "").strip().casefold()
+    if safe_status not in _TERMINAL_PLAN_STATUSES:
+        raise GuangYaRenamePlanError("重命名任务终态无效")
+    with _plan_state_lock():
+        payload = _read_plan(plan_id)
+        if not hmac.compare_digest(
+            str(payload.get("owner_digest") or ""), str(owner_digest or "")
+        ):
+            raise GuangYaRenamePlanError("重命名任务会话不匹配")
+        if not hmac.compare_digest(
+            str(payload.get("fingerprint") or ""), str(expected_fingerprint or "")
+        ):
+            raise GuangYaRenamePlanStale("重命名计划已变化，请重新预览")
+        current_status = str(payload.get("status") or "").strip().casefold()
+        if current_status in _TERMINAL_PLAN_STATUSES:
+            return payload
+        if current_status not in {"confirmed", "running"}:
+            raise GuangYaRenamePlanStale("重命名计划状态已变化")
+        plan_status = (
+            "manual_review"
+            if current_status == "running" or safe_status == "manual_review"
+            else safe_status
+        )
+        execution = dict(payload.get("execution")) if isinstance(payload.get("execution"), dict) else {}
+        execution.update(
+            {
+                "queue_status": safe_status,
+                "queue_error_code": str(error_code or "")[:80],
+                "finished_at": str(execution.get("finished_at") or _now_iso()),
+            }
+        )
+        payload["status"] = plan_status
+        payload["execution"] = execution
+        payload["updated_at"] = _now_iso()
+        _atomic_write_plan(_plan_path(plan_id), payload)
+        return payload
 
 
 def _discard_rename_plan_unlocked(plan_id: str) -> bool:
@@ -884,6 +933,9 @@ def execute_rename_plan(
         entries = list(plan.get("entries") or [])
         if not entries:
             raise GuangYaRenamePlanError("重命名计划没有可执行对象")
+        sync_enabled = str(plan.get("mode") or "") == "media_hygiene"
+        strm_sources = cloud_change_sources(client) if sync_enabled else None
+        changed: list[dict[str, Any]] = []
         parent_snapshots: dict[str, dict[str, GuangYaFile]] = {}
         for entry in entries:
             if cancel_check is not None:
@@ -986,6 +1038,10 @@ def execute_rename_plan(
             applied = _snapshot_matches(current, entry, new=True)
             if applied:
                 renamed += 1
+                changed.append({"op": "rename", "source": entry,
+                                "source_path": entry["old_path"],
+                                "source_parent_path": str(Path(entry["old_path"]).parent),
+                                "new_name": entry["new_name"]})
             else:
                 failed += 1
                 if not error_type:
@@ -1021,14 +1077,11 @@ def execute_rename_plan(
         }
         update_rename_plan_execution(plan_id, status=status, execution=execution)
         _append_journal(plan_id, {"action": "final", "status": status, **execution})
+        strm_stats = trigger_cloud_changes(changed, sources=strm_sources) if sync_enabled and changed else {}
         return {
-            "partial": failed > 0,
-            "stats": {
-                "total": len(entries),
-                "renamed": renamed,
-                "rename_failed": failed,
-                "failed": failed,
-            },
+            "partial": failed > 0 or bool(strm_stats.get("strm_trigger_failed")),
+            "stats": {"total": len(entries), "renamed": renamed,
+                      "rename_failed": failed, "failed": failed, **strm_stats},
         }
     except BaseException as exc:
         if journal_started:
