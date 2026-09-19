@@ -1485,15 +1485,10 @@ def execute_fs_change_plan(
                     client.rename(
                         str(source.get("file_id") or ""), str(item["new_name"])
                     )
-                elif op == "move":
-                    client.move(
-                        [str(source.get("file_id") or "")],
-                        _target_id(item, created_targets),
-                    )
-                elif op == "relocate":
-                    client.rename(
-                        str(source.get("file_id") or ""), str(item["new_name"])
-                    )
+                elif op in {"move", "relocate"}:
+                    # 已符合命名时只搬目录；光鸭会拒绝改成同名的无效请求。
+                    if op == "relocate" and item["new_name"] != source.get("name"):
+                        client.rename(str(source.get("file_id") or ""), str(item["new_name"]))
                     client.move(
                         [str(source.get("file_id") or "")],
                         _target_id(item, created_targets),

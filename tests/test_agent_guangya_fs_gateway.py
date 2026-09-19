@@ -1020,6 +1020,25 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(result["stats"]["moved"], 0)
         self.assertEqual(client.file_info("folder-0").parent_id, "source")
 
+    def test_relocate_with_correct_name_moves_without_rejected_noop_rename(self):
+        client = FakeGatewayClient()
+        observed = self._query(client)
+        target = next(item for item in observed.data["entries"] if item["object_name"] == "Move.mp4")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        plan = guangya_fs_change.build_fs_change_plan(
+            client, owner="owner", observation=observation, trigger_strm=False,
+            operations=[{"op": "relocate", "object_ref": target["object_ref"], "target_path": "/target", "new_name": "Move.mp4"}],
+        )
+        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        with mock.patch.object(client, "rename", side_effect=GuangYaWriteRejected("rename", code="160")) as rename:
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["relocated"], 1)
+        self.assertEqual(result["stats"]["failed"], 0)
+        rename.assert_not_called()
+        self.assertEqual(client.file_info("move").parent_id, "target")
+        self.assertEqual(client.file_info("move").name, "Move.mp4")
+
     def test_relocate_combines_move_and_rename_for_one_observed_object(self):
         client = FakeGatewayClient()
         observed = self._query(client)
