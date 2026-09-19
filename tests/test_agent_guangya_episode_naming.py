@@ -170,6 +170,24 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
             }
         )
 
+    @staticmethod
+    def _plain_suffix_observation(*names: str) -> dict:
+        return {
+            "plan_id": "plain-suffix-audit",
+            "truncated": False,
+            "entries": [
+                {
+                    "handle": f"plain-{index}",
+                    "name": name,
+                    "is_dir": False,
+                    "media_kind": "video",
+                    "parent_path": "/Fox Spirit Matchmaker",
+                    "size": 1000 + index,
+                }
+                for index, name in enumerate(names, start=1)
+            ],
+        }
+
     def _observe(self, client: EpisodeNamingClient) -> str:
         arguments = workspace_actions.guangya_fs_query_arguments(
             {
@@ -205,6 +223,59 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(result.data["groups"][1]["positions"][0]["source_season"], 2)
         self.assertEqual(list(self.obs_dir.glob("*.json")), [])
         self.assertEqual(list(self.plan_dir.glob("*.json")), [])
+
+    def test_inspect_parses_plain_english_trailing_episodes_in_tv_mapping_context(self):
+        observation = self._plain_suffix_observation(
+            "Fox Spirit Matchmaker 001.mkv",
+            "Fox Spirit Matchmaker 014.mkv",
+        )
+        arguments = episode_actions.guangya_episode_naming_inspect_arguments(
+            {"target_root": "/Fox Spirit Matchmaker"}
+        )
+        with (
+            mock.patch.object(episode_actions, "_fresh_observation", return_value=observation),
+            mock.patch.object(episode_actions, "discard_observation"),
+        ):
+            result = episode_actions.inspect_guangya_episode_naming(
+                arguments, ToolContext(owner="owner", session_id="session")
+            )
+
+        self.assertEqual(result.data["video_count"], 2)
+        self.assertEqual(result.data["unparsed_count"], 0)
+        self.assertEqual(result.data["groups"][0]["positions"][0]["episodes"], "1,14")
+
+    def test_plain_suffix_mapping_excludes_specials_without_source_season(self):
+        observation = self._plain_suffix_observation(
+            "Fox Spirit Matchmaker 014.mkv",
+            "Fox Spirit Matchmaker Special 014.mkv",
+        )
+        group = {
+            "source_path": "/Fox Spirit Matchmaker",
+            "source_episode_start": 14,
+            "source_episode_end": 14,
+            "target_season": 1,
+            "expected_count": 1,
+        }
+        compiled = compile_episode_naming_operations(
+            observation,
+            title="Fox Spirit Matchmaker",
+            target_root="/Fox Spirit Matchmaker",
+            groups=[group],
+        )
+
+        self.assertEqual(compiled["selected_files"], 1)
+        self.assertEqual(compiled["groups"][0]["matched"], 1)
+        relocate = next(item for item in compiled["operations"] if item["op"] == "batch_relocate")
+        self.assertEqual([item["object_ref"] for item in relocate["items"]], ["PLAIN-1"])
+
+        mismatch = dict(group, expected_count=2)
+        with self.assertRaisesRegex(GuangYaEpisodeNamingError, "预期 2 集，实际匹配 1 集"):
+            compile_episode_naming_operations(
+                observation,
+                title="Fox Spirit Matchmaker",
+                target_root="/Fox Spirit Matchmaker",
+                groups=[mismatch],
+            )
 
     def test_compact_plan_freezes_two_hundred_files_once(self):
         client = EpisodeNamingClient()

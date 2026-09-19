@@ -252,6 +252,55 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(explicit, {"season": None, "episode": 1, "episode_end": 3})
         self.assertEqual(unknown, {"season": None, "episode": None, "episode_end": None})
 
+    def test_plain_trailing_episode_is_opt_in_and_specials_keep_priority(self):
+        scraper = self.recognition_module()
+        filename = "Fox Spirit Matchmaker 014.mkv"
+
+        self.assertEqual(
+            scraper.parse_release_position(filename),
+            {"season": None, "episode": None, "episode_end": None},
+        )
+        self.assertEqual(
+            scraper.parse_release_position(
+                filename,
+                tv_episode_mapping_context=True,
+            ),
+            {"season": None, "episode": 14, "episode_end": None},
+        )
+        self.assertEqual(
+            scraper.parse_release_position(
+                "Fox Spirit Matchmaker 001 [1080p].mkv",
+                tv_episode_mapping_context=True,
+            ),
+            {"season": None, "episode": 1, "episode_end": None},
+        )
+
+        for title in ("Room 104.mkv", "The 100.mkv"):
+            with self.subTest(title=title):
+                self.assertIsNone(scraper.parse_release_position(title)["episode"])
+
+        for technical in (
+            "Fox Spirit Matchmaker 2024.mkv",
+            "Fox Spirit Matchmaker 1080p.mkv",
+            "Fox Spirit Matchmaker 1080 [HEVC].mkv",
+            "Fox Spirit Matchmaker x264.mkv",
+        ):
+            with self.subTest(technical=technical):
+                self.assertIsNone(
+                    scraper.parse_release_position(
+                        technical,
+                        tv_episode_mapping_context=True,
+                    )["episode"]
+                )
+
+        self.assertEqual(
+            scraper.parse_release_position(
+                "Fox Spirit Matchmaker Special 014.mkv",
+                tv_episode_mapping_context=True,
+            ),
+            {"season": 0, "episode": 14, "episode_end": None},
+        )
+
     def test_sensitive_source_blocks_network_recognition_without_explicit_identity(self):
         scraper_module = self.recognition_module()
         matcher = scraper_module.TMDBScraper()

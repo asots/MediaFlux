@@ -69,6 +69,40 @@ class DeterministicExtractorTests(unittest.TestCase):
         self.assertTrue(deterministic._has_unaccepted_release_x_position("Demo 16x9"))
         self.assertIsNone(deterministic._extract_episode("Demo 2024 1080p"))
 
+    def test_plain_trailing_episode_requires_explicit_mapping_context(self):
+        from app.modules.recognition.extractors import deterministic
+
+        self.assertIsNone(
+            deterministic._extract_episode("Fox Spirit Matchmaker 014")
+        )
+        self.assertEqual(
+            deterministic._extract_episode(
+                "Fox Spirit Matchmaker 014",
+                allow_plain_trailing_episode=True,
+            ),
+            14,
+        )
+        self.assertEqual(
+            deterministic._extract_episode(
+                "Fox Spirit Matchmaker 001 [1080p]",
+                allow_plain_trailing_episode=True,
+            ),
+            1,
+        )
+        for filename in (
+            "Fox Spirit Matchmaker 2024",
+            "Fox Spirit Matchmaker 1080p",
+            "Fox Spirit Matchmaker 1080 [HEVC]",
+            "Fox Spirit Matchmaker x264",
+        ):
+            with self.subTest(filename=filename):
+                self.assertIsNone(
+                    deterministic._extract_episode(
+                        filename,
+                        allow_plain_trailing_episode=True,
+                    )
+                )
+
     def test_mikan_attached_season_and_dual_episode_positions(self):
         from app.modules.recognition.extractors import deterministic
 

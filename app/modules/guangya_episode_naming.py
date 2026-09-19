@@ -40,7 +40,9 @@ def _desired_name(title: str, season: int, episode: int, entry: dict[str, Any]) 
 
 
 def _episode_position(entry: dict[str, Any]) -> tuple[int | None, int | None]:
-    parsed = parse_release_position(str(entry.get("name") or ""))
+    parsed = parse_release_position(
+        str(entry.get("name") or ""), tv_episode_mapping_context=True
+    )
     season = parsed.get("season")
     episode = parsed.get("episode")
     return (
@@ -243,6 +245,9 @@ def compile_episode_naming_operations(
                 unparsed += 1
                 continue
             if source_season is not None and parsed_season != source_season:
+                continue
+            if source_season is None and target_season != 0 and parsed_season == 0:
+                # 未明确源季时，非特别篇目标季不能默默吸收 S00/番外。
                 continue
             if source_start <= parsed_episode <= source_end:
                 selected.append((parsed_episode, entry))

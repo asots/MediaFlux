@@ -1411,8 +1411,14 @@ _UNLABELED_EPISODE_RESERVED_VALUES = {
 
 
 
-def parse_release_position(value: str) -> dict[str, int | None]:
-    """从发布标题中提取可安全展示/排序的季集位置，不发起任何网络请求。"""
+def parse_release_position(
+    value: str, *, tv_episode_mapping_context: bool = False
+) -> dict[str, int | None]:
+    """从发布标题中提取可安全展示/排序的季集位置，不发起任何网络请求。
+
+    ``tv_episode_mapping_context`` 只由显式 TV 批量映射链启用，用于接受
+    ``Title 014`` 这种普通空格末尾集号；默认关闭，不改变自动识别契约。
+    """
     name = _strip_explicit_tmdb_markers(str(value or ""))
     # 资源站发布标题不一定带文件扩展名，发布组本身却可能包含点号，
     # 例如 ``[c.c动漫][约会大作战 第四季][12]``。只有结尾确实像
@@ -1422,7 +1428,9 @@ def parse_release_position(value: str) -> dict[str, int | None]:
         if re.search(r"\.[A-Za-z0-9]{2,5}$", name)
         else name
     )
-    episode = _extract_episode(stem)
+    episode = _extract_episode(
+        stem, allow_plain_trailing_episode=tv_episode_mapping_context
+    )
     season = _extract_season(stem, episode_context=episode is not None)
     compact = _parse_release_x_position(stem)
     if compact is not None:

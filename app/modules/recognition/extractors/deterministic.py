@@ -86,6 +86,14 @@ _BARE_EPISODE_SUFFIX = re.compile(
     r"(?=\s*(?:[\[【(（]|$))"
 )
 
+# 只有显式 TV 批量映射上下文才允许 ``Title 014`` 这种普通空格尾号。
+# 默认解析仍不能使用它，否则 ``Room 104`` / ``The 100`` 等正式片名会
+# 被自动识别成集数。年份、常见分辨率等最终仍由 ``_valid_unlabeled_episode``
+# 过滤；后续技术信息必须位于方括号/括号中，避免把 ``014 x264`` 当成集号。
+_PLAIN_TRAILING_EPISODE_SUFFIX = re.compile(
+    r"(?i)(?:^|\s+)(\d{1,4})(?=\s*(?:[\[【(（]|$))"
+)
+
 # 多季合集里的文件常写成 ``Show - S2 08 MULTI [1080p]``：S2 是季号，
 # 后续裸数字是季内集号。必须同时具备独立 S 标记、集号、发布尾部边界，
 # 避免把标题中的普通字母数字组合或分辨率解释成季集。
@@ -268,8 +276,14 @@ def _valid_unlabeled_episode(number: int) -> bool:
         and number not in _UNLABELED_EPISODE_RESERVED_VALUES
     )
 
-def _extract_episode(text: str) -> int | None:
-    """解析显式集号，并兼容中文数字、双编号及规格标签前的 ``[01]``。"""
+def _extract_episode(
+    text: str, *, allow_plain_trailing_episode: bool = False
+) -> int | None:
+    """解析显式集号，并兼容中文数字、双编号及规格标签前的 ``[01]``。
+
+    ``allow_plain_trailing_episode`` 只供显式 TV 批量映射使用；默认关闭，
+    保持普通自动识别对标题尾部数字的保守契约。
+    """
     # 小数集属于特别篇语义。若继续套用裸数字规则，``12.5`` 会被错误解析
     # 成第 5 集；其最终整数位置由特别篇统一分配器决定。
     if fractional_episode_position(text) is not None:
@@ -329,6 +343,12 @@ def _extract_episode(text: str) -> int | None:
         bare = int(bare_match.group(1))
         if _valid_unlabeled_episode(bare):
             return bare
+    if allow_plain_trailing_episode:
+        plain_match = _PLAIN_TRAILING_EPISODE_SUFFIX.search(source)
+        if plain_match:
+            plain = int(plain_match.group(1))
+            if _valid_unlabeled_episode(plain):
+                return plain
     for match in _BRACKET_EPISODE_TOKEN.finditer(str(text or "")):
         number = int(match.group(1))
         # 跳过年份和常见分辨率后继续检查后续括号，例如 ``[2026][04]``。
