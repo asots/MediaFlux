@@ -126,6 +126,9 @@ def get_discovery_detail(
         f"已读取《{_safe(card.title, 160) or '未命名条目'}》的发现详情",
         data={
             "provider": card.provider,
+            "external_id": _safe(card.external_id, 180),
+            "tmdb_id": _safe(card.external_id if card.provider == "tmdb" else card.tmdb_id, 32),
+            "stable_id": _safe(card.stable_id, 240),
             "media_type": card.media_type,
             "title": _safe(card.title, 160) or "未命名条目",
             "original_title": _safe(card.original_title, 160),
@@ -134,8 +137,24 @@ def get_discovery_detail(
             "rating": rating,
             "rating_source": _safe(card.rating_source, 30),
             "overview": _safe(card.overview, 500),
+            "number_of_seasons": card.number_of_seasons,
+            "number_of_episodes": card.number_of_episodes,
+            "seasons": [
+                {"season_number": item["season_number"],
+                 "name": _safe(item["name"], 160),
+                 "episode_count": item["episode_count"],
+                 "air_date": _safe(item["air_date"], 24)}
+                for item in card.seasons
+            ] if card.seasons is not None else None,
+            "seasons_note": (
+                "TMDB 默认季序，不是发布组篇章或 Episode Groups；季号 0 为特别篇，"
+                "不计入总正片季集数。总数与各季计数保留来源原值；null 表示未返回有效数据，"
+                "不能当成 0，也不能用演员出场次数推断。"
+                if card.provider == "tmdb" and card.media_type == "tv"
+                else "季集字段为 null 时表示未返回或不适用，不能当成 0。"
+            ),
             "credits_state": "not_queried",
-            "credits_note": "本详情只含作品概况，未查询演职员；未返回演员字段不表示源站为空或官方未公布。",
+            "credits_note": "本详情含作品概况与来源季集统计，未查询演职员；未返回演员字段不表示源站为空或官方未公布。",
             "mapping_confirmed": bool(
                 card.provider == "tmdb"
                 or (
@@ -151,7 +170,7 @@ def get_discovery_detail(
         evidence=[
             Evidence(
                 "discovery_detail",
-                "只读取来源概况与映射确认状态，未查询演员表；未保存映射、收藏、订阅或下载任务。",
+                "只读取来源身份、概况、默认季集统计与映射确认状态，未查询演员表；未保存映射、收藏、订阅或下载任务。",
                 _now(),
             )
         ],

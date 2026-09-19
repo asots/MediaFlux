@@ -154,6 +154,48 @@ class TMDBProviderTests(unittest.TestCase):
         )
         return TMDBProvider(client=client), session
 
+    def test_tv_detail_projects_counts_and_specials_from_one_response(self):
+        provider, session = self.make_provider({
+            "id": 75787, "name": "狐妖小红娘", "first_air_date": "2015-06-25",
+            "number_of_seasons": 1, "number_of_episodes": 183,
+            "seasons": [
+                {"id": 1, "season_number": 0, "name": "特别篇", "episode_count": 29, "air_date": None, "poster_path": "private.jpg"},
+                {"id": 2, "season_number": 1, "name": "全集", "episode_count": 183, "air_date": "2015-06-25"},
+            ],
+        })
+        card = provider.get_detail("75787", "tv")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][0], "https://tmdb.invalid/3/tv/75787")
+        self.assertEqual((card.number_of_seasons, card.number_of_episodes), (1, 183))
+        self.assertEqual(card.to_dict()["seasons"], [
+            {"season_number": 0, "name": "特别篇", "episode_count": 29, "air_date": ""},
+            {"season_number": 1, "name": "全集", "episode_count": 183, "air_date": "2015-06-25"},
+        ])
+
+    def test_tv_counts_distinguish_unknown_zero_and_invalid_values(self):
+        for value in (None, True, -1, "183", 1.5):
+            with self.subTest(value=value):
+                card = TMDBProvider._card({
+                    "id": 1, "name": "未知",
+                    "number_of_seasons": value, "number_of_episodes": value,
+                    "seasons": [{"season_number": 1, "episode_count": value}],
+                }, "tv")
+                self.assertIsNone(card.number_of_seasons)
+                self.assertIsNone(card.number_of_episodes)
+                self.assertIsNone(card.seasons[0]["episode_count"])
+        card = TMDBProvider._card({"id": 1, "name": "待播", "number_of_seasons": 0, "number_of_episodes": 0, "seasons": []}, "tv")
+        self.assertEqual((card.number_of_seasons, card.number_of_episodes), (0, 0))
+        self.assertEqual(card.to_dict()["seasons"], [])
+
+    def test_incomplete_season_list_is_unknown_not_silently_partial(self):
+        for value in (None, {}, [None], [{"season_number": True}], [{"season_number": -1}], [{"name": "缺季号"}]):
+            with self.subTest(value=value):
+                card = TMDBProvider._card({"id": 1, "name": "未知", "seasons": value}, "tv")
+                self.assertIsNone(card.seasons)
+        movie = TMDBProvider._card({"id": 1, "title": "电影", "number_of_episodes": 10, "seasons": []}, "movie")
+        self.assertIsNone(movie.number_of_episodes)
+        self.assertIsNone(movie.seasons)
+
     def test_client_logs_only_normalized_relative_path(self):
         session = FakeSession(FakeResponse({"results": [], "total_pages": 1}))
         client = TMDBClient(

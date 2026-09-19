@@ -49,6 +49,25 @@ def _poster_key(value: Any) -> str:
     return clean
 
 
+def _count(value: Any) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _seasons(value: Any) -> tuple[dict[str, Any], ...] | None:
+    """仅投影同次详情返回的默认季列表；无有效季号时不把残缺列表当作完整结果。"""
+    if not isinstance(value, list) or any(
+        not isinstance(item, dict) or _count(item.get("season_number")) is None
+        for item in value
+    ):
+        return None
+    return tuple({
+        "season_number": item["season_number"],
+        "name": str(item.get("name") or "").strip(),
+        "episode_count": _count(item.get("episode_count")),
+        "air_date": _date(item.get("air_date")),
+    } for item in value)
+
+
 class TMDBProvider(DiscoveryProvider):
     name = "tmdb"
 
@@ -172,4 +191,7 @@ class TMDBProvider(DiscoveryProvider):
             rating_source="tmdb",
             release_date=release_date,
             tmdb_id=external_id,
+            number_of_seasons=_count(raw.get("number_of_seasons")) if media_type == "tv" else None,
+            number_of_episodes=_count(raw.get("number_of_episodes")) if media_type == "tv" else None,
+            seasons=_seasons(raw.get("seasons")) if media_type == "tv" else None,
         )

@@ -163,7 +163,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="discovery.search",
-            description="搜索 TMDB、豆瓣与 Bangumi 的影视身份和概况，不含演职员表。问主演、配音或导演应先区分真人/动画/同名作品，再用 discovery.credits 读取演员角色；搜索卡未带演员不代表源站未录入。",
+            description="搜索 TMDB、豆瓣与 Bangumi 的影视身份和概况，不含演职员表。类型/年份只过滤当前页结果、不拼入片名；地区/题材作为关键词检索而非严格元数据筛选，不能据此断言每个结果符合这些条件。问主演、配音或导演应先区分真人/动画/同名作品，再用 discovery.credits 读取演员角色；搜索卡未带演员不代表源站未录入。",
             risk=RiskLevel.READ,
             domains=("discovery", "media_identity"),
             source_kind="metadata_catalog",
@@ -201,19 +201,19 @@ def register_specs(
                     "year": {
                         "type": "string",
                         "pattern": "^(?:19|20)[0-9]{2}$",
-                        "description": "用户明确给出的四位年份；不得自行猜测或替换。",
+                        "description": "用户明确给出的四位首播/上映年份；只过滤结果，不拼入片名，不得自行猜测或替换。",
                     },
                     "region": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 24,
-                        "description": "用户明确给出的地区，例如欧美、日本、中国大陆。",
+                        "description": "用户明确给出的地区，例如欧美、日本、中国大陆；作为检索关键词，不是严格地区筛选。",
                     },
                     "genre": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 24,
-                        "description": "用户明确给出的题材，例如科幻、悬疑、喜剧。",
+                        "description": "用户明确给出的题材，例如科幻、悬疑、喜剧；作为检索关键词，不是严格题材筛选。",
                     },
                     "limit": {
                         "type": "integer",
@@ -302,7 +302,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="discovery.detail",
-            description="读取精确条目的标题、年份、播出时间、简介和映射状态，不包含演职员表。字段缺失不表示官方未公布；演员、角色或导演请继续用 discovery.credits，必要时联网核实。",
+            description="读取精确来源 ID、TMDB ID、标题、年份、播出时间、简介和映射状态；TMDB 剧集还返回默认总季集数及每季计数（含第 0 季特别篇），不是发布组篇章或剧集组。null 表示未返回有效数据，不能当成 0。总季集数不包含特别篇，不能用演员出场次数推断。不包含演职员表。字段缺失不表示官方未公布；演员、角色或导演请继续用 discovery.credits，必要时联网核实。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -320,7 +320,7 @@ def register_specs(
             context_handler=get_discovery_detail,
             validator=discovery_detail_arguments,
             related_tools=("discovery.credits", "discovery.mapping_candidates", "web.search"),
-            examples=("查看刚才第 2 个影视详情",),
+            examples=("查看刚才第 2 个影视详情", "动画在TMDB默认有几季，每季多少集", "查看默认季集数和特别篇"),
         )
     )
     registry.register(

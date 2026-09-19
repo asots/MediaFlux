@@ -98,6 +98,10 @@ class MediaCard:
     douban_id: str = ""
     bangumi_id: str = ""
     state: str = "none"
+    # 旧缓存、列表卡和不提供季集数据的来源保留 None，不伪造为 0 或空季列表。
+    number_of_seasons: int | None = None
+    number_of_episodes: int | None = None
+    seasons: tuple[dict[str, Any], ...] | None = None
 
     def __post_init__(self) -> None:
         provider = str(self.provider or "").strip().lower()
@@ -123,6 +127,8 @@ class MediaCard:
             object.__setattr__(self, "weekday", value)
         if self.rating is not None:
             object.__setattr__(self, "rating", float(self.rating))
+        if self.seasons is not None:
+            object.__setattr__(self, "seasons", tuple(dict(item) for item in self.seasons))
 
     @property
     def stable_id(self) -> str:
@@ -131,6 +137,8 @@ class MediaCard:
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["stable_id"] = self.stable_id
+        if self.seasons is not None:
+            result["seasons"] = list(result["seasons"])
         return result
 
     @classmethod

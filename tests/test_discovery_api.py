@@ -285,6 +285,32 @@ class DiscoveryAPITests(_BaseClientTests):
         self.assertIsInstance(exit_args[1], ProviderTimeout)
         client.check_authentication.assert_called_once_with()
 
+    def test_tmdb_tv_detail_adds_season_counts_without_changing_web_identity_or_images(self):
+        from app.discovery.providers.tmdb import TMDBProvider
+
+        self.authenticate()
+        service = Mock()
+        service.get_detail.return_value = TMDBProvider._card({
+            "id": 75787, "name": "狐妖小红娘", "first_air_date": "2015-06-25", "poster_path": "/poster.jpg",
+            "number_of_seasons": 1, "number_of_episodes": 183,
+            "seasons": [{"season_number": 0, "name": "特别篇", "episode_count": 29, "poster_path": "/secret.jpg"},
+                        {"season_number": 1, "name": "全集", "episode_count": 183}],
+        }, "tv")
+        with patch("app.routes.discovery_api.get_discovery_service", return_value=service):
+            response = self.client.get("/api/discovery/detail/tmdb/tv/75787")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["title"], "狐妖小红娘")
+        self.assertEqual(payload["stable_id"], "tmdb:tv:75787")
+        self.assertEqual(payload["tmdb_id"], "75787")
+        self.assertEqual(payload["number_of_seasons"], 1)
+        self.assertEqual(payload["number_of_episodes"], 183)
+        self.assertEqual([(s["season_number"], s["episode_count"]) for s in payload["seasons"]], [(0, 29), (1, 183)])
+        self.assertTrue(payload["poster_url"].startswith("/discovery-poster/tmdb/"))
+        for forbidden in ("poster_key", "backdrop_key", "poster_path", "secret.jpg"):
+            self.assertNotIn(forbidden, response.text)
+        service.get_detail.assert_called_once_with("tmdb", "tv", "75787")
+
     def test_sections_items_filters_and_detail_use_safe_contract(self):
         self.authenticate()
         service = FakeDiscoveryService()

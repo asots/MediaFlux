@@ -248,19 +248,15 @@ def search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _effective_search_query(normalized: dict[str, Any]) -> str:
-    """把结构化限制稳定投影到各供应商都能理解的关键词查询。"""
+    """片名不混入类型/年份；它们由结果过滤，地区/题材仍作关键词约束。"""
     query = str(normalized["query"])
-    suffixes = [
-        str(normalized.get("year") or ""),
-        str(normalized.get("region") or ""),
-        str(normalized.get("genre") or ""),
-        {"movie": "电影", "tv": "剧集"}.get(
-            str(normalized.get("media_type") or ""), ""
-        ),
-    ]
+    suffixes = [str(normalized.get(key) or "") for key in ("region", "genre")]
     folded = unicodedata.normalize("NFKC", query).casefold()
     additions = [item for item in suffixes if item and item.casefold() not in folded]
-    return " ".join((query, *additions)).strip()[:120]
+    effective = " ".join((query, *additions)).strip()
+    if len(effective) > 120:
+        raise AgentToolError("片名与地区/题材关键词合计不能超过 120 个字符，请缩短查询")
+    return effective
 
 
 def _filter_search_result(
@@ -468,6 +464,10 @@ def _result_payload(
             key: str(normalized.get(key) or "")
             for key in ("media_type", "year", "region", "genre")
             if str(normalized.get(key) or "")
+        }
+        payload["filter_modes"] = {
+            key: "exact" if key in {"media_type", "year"} else "keyword"
+            for key in payload["filters"]
         }
     return payload
 

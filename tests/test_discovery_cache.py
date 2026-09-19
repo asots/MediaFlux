@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import threading
@@ -34,6 +35,28 @@ class DiscoveryModelTests(unittest.TestCase):
         restored = MediaCard.from_dict(card.to_dict())
         self.assertEqual(restored, card)
         self.assertEqual(restored.stable_id, "douban:movie:1292052")
+
+    def test_old_cached_cards_keep_unknown_season_defaults(self):
+        old_payload = {"provider": "tmdb", "external_id": "75787", "media_type": "tv", "title": "狐妖小红娘", "year": "2015", "stable_id": "tmdb:tv:75787"}
+        card = MediaCard.from_dict(old_payload)
+        self.assertEqual(card.title, old_payload["title"])
+        self.assertEqual(card.stable_id, old_payload["stable_id"])
+        self.assertIsNone(card.number_of_seasons)
+        self.assertIsNone(card.number_of_episodes)
+        self.assertIsNone(card.seasons)
+
+    def test_tv_season_counts_survive_json_page_cache_round_trip(self):
+        card = MediaCard(
+            provider="tmdb", external_id="75787", media_type="tv", title="狐妖小红娘",
+            number_of_seasons=1, number_of_episodes=183,
+            seasons=[{"season_number": 0, "name": "特别篇", "episode_count": 29, "air_date": ""},
+                     {"season_number": 1, "name": "全集", "episode_count": 183, "air_date": "2015-06-25"}],
+        )
+        page = DiscoveryPage(items=[card], provider=ProviderHealth(name="tmdb"))
+        restored = DiscoveryPage.from_dict(json.loads(json.dumps(page.to_dict())))
+        self.assertEqual(restored, page)
+        self.assertEqual(restored.items[0].to_dict()["seasons"], card.to_dict()["seasons"])
+        self.assertEqual(restored.items[0].number_of_episodes, 183)
 
     def test_media_card_rejects_unknown_media_type(self):
         with self.assertRaises(ValueError):
