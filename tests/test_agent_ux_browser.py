@@ -39,6 +39,14 @@ def events_for_candidates(view: dict) -> list[dict]:
     ]
 
 
+def candidate_view_variant(ref: str, selection_ref: str, *, recommended_positions: list[int] | None = None) -> dict:
+    view = candidate_view()
+    view['ref'] = ref
+    view['selection_ref'] = selection_ref
+    view['recommended_positions'] = [] if recommended_positions is None else recommended_positions
+    return view
+
+
 @unittest.skipIf(harness.sync_playwright is None, '系统环境未安装 Playwright')
 class AgentUXBrowserTests(unittest.TestCase):
     @classmethod
@@ -329,7 +337,7 @@ class AgentUXBrowserTests(unittest.TestCase):
         self.assertEqual((before['width'], before['height']), (after['width'], after['height']))
         self.snapshot(page, 'candidates-desktop')
 
-    def test_same_turn_search_invalidation_disables_previous_cards(self):
+    def test_same_turn_search_invalidation_removes_previous_cards(self):
         for signal in ('progress', 'empty_result'):
             with self.subTest(signal=signal):
                 events = events_for_candidates(candidate_view())[:2]
@@ -340,13 +348,66 @@ class AgentUXBrowserTests(unittest.TestCase):
                 page.locator('#agentPrompt').fill('搜索后调整条件')
                 page.locator('#agentSend').click()
                 page.wait_for_selector('.agent-narrative')
-                self.assertEqual(page.locator('.agent-candidate-select:not([disabled])').count(), 0)
-                self.assertIn('仅供回看', page.locator('.agent-candidates-note').inner_text())
+                self.assertEqual(page.locator('.agent-candidates').count(), 0)
+
+    def test_same_turn_candidate_views_latest_wins_in_one_group(self):
+        first = candidate_view_variant('ref_resource_candidates_same_turn_a', 'ref_selection_same_turn_a')
+        latest = candidate_view_variant('ref_resource_candidates_same_turn_b', 'ref_selection_same_turn_b')
+        events = [
+            harness._event(1, 'turn.started'),
+            harness._event(2, 'tool.completed', {'tool': 'resource.search', 'call_id': 'search-a', 'result': {'candidate_view': first}}),
+            harness._event(3, 'tool.completed', {'tool': 'resource.search', 'call_id': 'search-b', 'result': {'candidate_view': latest}}),
+            harness._event(4, 'turn.completed', {'status': 'success', 'answer': '本轮最终只保留最新搜索候选。'}),
+        ]
+        page = self.page({'queryEvents': events})
+        page.locator('#agentPrompt').fill('同一轮连续搜索')
+        page.locator('#agentSend').click()
+        page.wait_for_selector('.agent-narrative')
+        self.assertEqual(page.locator('.agent-candidates').count(), 1)
+        group = page.locator('.agent-candidates').first
+        self.assertEqual(group.get_attribute('data-candidate-view'), latest['ref'])
+        self.assertFalse(group.locator('.agent-candidates-note').inner_text().startswith('此批候选仅供回看'))
+        self.assertFalse(group.locator('[data-candidate-position]').first.is_disabled())
+
+    def test_same_turn_candidate_view_null_removes_current_group(self):
+        view = candidate_view_variant('ref_resource_candidates_same_turn_null', 'ref_selection_same_turn_null')
+        events = [
+            harness._event(1, 'turn.started'),
+            harness._event(2, 'tool.completed', {'tool': 'resource.search', 'call_id': 'search-a', 'result': {'candidate_view': view}}),
+            harness._event(3, 'tool.progress', {'tool': 'resource.search', 'candidate_view': None}),
+            harness._event(4, 'turn.completed', {'status': 'success', 'answer': '本轮候选已清空。'}),
+        ]
+        page = self.page({'queryEvents': events})
+        page.locator('#agentPrompt').fill('清空本轮候选')
+        page.locator('#agentSend').click()
+        page.wait_for_selector('.agent-narrative')
+        self.assertEqual(page.locator('.agent-candidates').count(), 0)
+        self.assertIn('本轮候选已清空', page.locator('.agent-narrative').inner_text())
+
+    def test_previous_turn_candidate_is_readonly_while_latest_turn_stays_selectable(self):
+        first = candidate_view_variant('ref_resource_candidates_previous_turn', 'ref_selection_previous_turn')
+        latest = candidate_view_variant('ref_resource_candidates_latest_turn', 'ref_selection_latest_turn')
+        page = self.page({'queryEvents': events_for_candidates(first)})
+        page.locator('#agentPrompt').fill('第一轮搜索')
+        page.locator('#agentSend').click()
+        page.wait_for_selector('.agent-candidates')
+
+        page.evaluate('(events) => { window.__kernelConfig.queryEvents = events; }', events_for_candidates(latest))
+        page.locator('#agentPrompt').fill('第二轮搜索')
+        page.locator('#agentSend').click()
+        page.wait_for_function("document.querySelectorAll('.agent-candidates').length === 2")
+
+        groups = page.locator('.agent-candidates')
+        self.assertEqual(groups.nth(0).get_attribute('data-candidate-view'), first['ref'])
+        self.assertEqual(groups.nth(1).get_attribute('data-candidate-view'), latest['ref'])
+        self.assertTrue(groups.nth(0).locator('[data-candidate-position]').first.is_disabled())
+        self.assertFalse(groups.nth(1).locator('[data-candidate-position]').first.is_disabled())
 
     def test_rejected_selection_keeps_existing_approval_and_never_offers_unbound_replay(self):
+        view = candidate_view()
         approval = {'plan_id': 'plan-already-pending-00001', 'tool_name': 'ingest.submit', 'effect': 'WRITE',
                     'preview': {'summary': '已有待确认计划'}, 'result': {}, 'expires_at': time.time() + 900}
-        page = self.page({'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '本次搜索结果', 'candidate_view': candidate_view()}], 'pending_approval': approval}},
+        page = self.page({'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '本次搜索结果', 'candidate_view': view}], 'candidate_view': view, 'pending_approval': approval}},
                           'queryEvents': [harness._event(1, 'turn.failed', {'code': 'selection_invalid', 'message': '候选已更新，请重新搜索后选择'})]},
                          stored_session=SESSION_A)
         page.wait_for_selector('.agent-candidate-select:not([disabled])')
@@ -390,7 +451,8 @@ class AgentUXBrowserTests(unittest.TestCase):
         self.assertEqual(payload['selection'], {'ref': view['selection_ref'], 'positions': [1], 'target': 'guangya'})
 
     def test_verified_candidate_view_can_be_recovered_from_session(self):
-        page = self.page({'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '搜索结果', 'candidate_view': candidate_view()}, {'role': 'assistant', 'content': '之后的无关对话'}]}}}, stored_session=SESSION_A)
+        view = candidate_view()
+        page = self.page({'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '搜索结果', 'candidate_view': view}, {'role': 'assistant', 'content': '之后的无关对话'}], 'candidate_view': view}}}, stored_session=SESSION_A)
         page.wait_for_selector('.agent-candidate-select:not([disabled])')
         self.assertEqual(page.locator('.agent-candidate-row').count(), 2)
         self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 0)
@@ -522,7 +584,7 @@ class AgentUXBrowserTests(unittest.TestCase):
 
     def test_candidate_refresh_restores_choices_and_keeps_card_bound_to_search(self):
         view = candidate_view()
-        payload = {'sessions': {'sessions': [], 'draft_scope': SCOPE}, 'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '搜索结果', 'candidate_view': view}, {'role': 'assistant', 'content': '不相关的后续消息'}]}}}
+        payload = {'sessions': {'sessions': [], 'draft_scope': SCOPE}, 'sessionDetails': {SESSION_A: {'messages': [{'role': 'assistant', 'content': '搜索结果', 'candidate_view': view}, {'role': 'assistant', 'content': '不相关的后续消息'}], 'candidate_view': view}}}
         page = self.page(payload, stored_session=SESSION_A)
         page.wait_for_selector('.agent-candidate-select:not([disabled])')
         page.locator('.agent-candidates-more > summary').click()
@@ -554,7 +616,7 @@ class AgentUXBrowserTests(unittest.TestCase):
                 page.wait_for_selector('.agent-narrative')
                 self.assertEqual(page.locator('.agent-candidates-heading strong').inner_text(), '搜索结果')
                 summary = page.locator('.agent-candidate-recommendation').inner_text()
-                self.assertIn('仅供手动挑选', summary)
+                self.assertEqual(summary, '请选择需要的版本，再预览下载。')
                 self.assertNotIn('01–04', summary)
                 self.assertTrue(page.locator('.agent-candidate-select').is_disabled())
                 self.assertEqual(page.locator('[data-candidate-position]:checked').count(), 0)

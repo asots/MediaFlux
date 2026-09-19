@@ -202,6 +202,16 @@ TOOL_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
         "Sukebei 最新",
         "成人资源索引",
     ),
+    "ingest.submit": (
+        "推送资源", "推送到云盘", "推送到光鸭", "按候选序号下载", "批量下载到云盘",
+    ),
+    "indexer.present_candidates": (
+        "展示资源候选",
+        "筛选资源候选",
+        "选择候选资源",
+        "展示第几个资源",
+        "资源候选卡",
+    ),
     "rss.subscription_summaries": (
         "配置了哪些RSS",
         "RSS订阅列表",

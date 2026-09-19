@@ -8,6 +8,10 @@ from app.agent.indexer_actions import (
 from app.agent.indexer_actions import (
     search_resources,
 )
+from app.agent.indexer_candidate_actions import (
+    present_candidates,
+    present_candidates_arguments,
+)
 from app.agent.indexer_readiness_actions import (
     diagnose_indexer_readiness,
     indexer_readiness_arguments,
@@ -56,7 +60,8 @@ def register_specs(
                 "可提交的候选会同时返回 owner/session 绑定的 resource_candidates_ref，后续资源检查或"
                 "提交必须原样使用该引用。"
                 "可用于交叉核对连载资源跟进到哪一集，但资源标题只能作为旁证，不能证明官方播出进度。"
-                "普通搜索结果不默认推荐；已确认缺集后找资源应使用 library.search_missing_episode_resources 或 library.search_missing_season_resources，避免把旧集当更新。"
+                "普通搜索只供模型研究，不自动出卡；找到符合用户要求的候选后，使用 indexer.present_candidates 挑选展示，没找到不要展示。"
+                "已确认缺集后找资源应使用 library.search_missing_episode_resources 或 library.search_missing_season_resources，避免把旧集当更新。"
             ),
             risk=RiskLevel.READ,
             domains=("resource_search", "official_progress"),
@@ -113,7 +118,7 @@ def register_specs(
             },
             handler=search_resources,
             validator=indexer_search_arguments,
-            related_tools=("ingest.inspect", "ingest.submit"),
+            related_tools=("ingest.submit", "indexer.present_candidates", "ingest.inspect"),
             examples=(
                 "搜索《某片》的下载资源",
                 "找种子或磁力资源",
@@ -123,6 +128,50 @@ def register_specs(
                 "检查订阅更新并在需要时搜索资源",
                 '最近有什么新出的步兵资源，仅用 sites=["sukebei"] 并按发布时间倒序搜索 uncensored',
                 '查看 Sukebei 最近发布的无码资源，不查询其他索引站',
+            ),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="indexer.present_candidates",
+            description=(
+                "从已有 resource_candidates_ref 的完整候选快照中，按原 position 显式筛选要展示的资源候选。"
+                "这是纯只读展示动作，不恢复 Provider、不读取最近快照、不重新搜索、不访问云盘或索引网络；"
+                "positions 为空表示本轮明确不展示候选。如需继续接入本次筛选结果，请使用本次返回的 reference_arguments.resource_candidates_ref；新引用值可能不同于输入，但仍绑定同一份候选快照，再传给 ingest.inspect 或 ingest.submit。"
+            ),
+            risk=RiskLevel.READ,
+            parameters={
+                "type": "object",
+                "required": ["resource_candidates_ref", "positions"],
+                "properties": {
+                    "resource_candidates_ref": {
+                        "type": "string",
+                        "pattern": "^ref_[A-Za-z0-9_-]{16,160}$",
+                    },
+                    "positions": {
+                        "type": "array",
+                        "maxItems": 12,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 12,
+                        },
+                        "description": "要展示的原候选位置；允许空数组以明确清除本轮候选展示。",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=present_candidates,
+            validator=present_candidates_arguments,
+            related_tools=("ingest.submit", "ingest.inspect"),
+            domains=("resource_search",),
+            source_kind="resource_presentation",
+            freshness="snapshot",
+            examples=(
+                "展示刚才第 1、3 个资源候选",
+                "只展示资源候选中的第 2 个",
+                "这轮不要展示资源候选",
             ),
         )
     )

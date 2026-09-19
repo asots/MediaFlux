@@ -153,6 +153,7 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "guangya.share.revoke": "撤销光鸭分享",
     "indexer.diagnose_readiness": "资源站就绪检查",
     "indexer.search_resources": "多站资源搜索",
+    "indexer.present_candidates": "资源候选筛选",
     "ingest.inspect": "资源接入检查",
     "ingest.status": "资源接入状态",
     "ingest.submit": "资源接入提交",

@@ -15,6 +15,10 @@ from app.agent.indexer_actions import (
     search_arguments,
     search_resources,
 )
+from app.agent.indexer_candidate_actions import (
+    present_candidates,
+    present_candidates_arguments,
+)
 from app.indexers.downloads import download_indexer_result
 from app.indexers.errors import IndexerResultExpired
 from app.indexers.models import (
@@ -110,6 +114,36 @@ def _resource_item(**overrides) -> IndexerItem:
     }
     values.update(overrides)
     return IndexerItem(**values)
+
+
+def _candidate_snapshot(*, count=2):
+    candidates = []
+    for position in range(1, count + 1):
+        candidates.append(
+            {
+                "position": position,
+                "result_id": f"opaque-result-{position:04d}",
+                "title": f"Demo Resource {position}",
+                "site_id": "nyaa",
+                "site_name": "Nyaa",
+                "size_text": "1.2 GB",
+                "download_state": "ready",
+                "_verification_context": None,
+                "download_kinds": ["magnet"],
+                "media_title": "",
+                "episode_label": "",
+                "subscription_number": None,
+            }
+        )
+    return {
+        "search_id": "rs_" + "a" * 16,
+        "search_status": "success",
+        "candidates": candidates,
+        "_private_version": 1,
+        "_private_items": [
+            {"magnet": _SECRET_MAGNET, "torrent_url": _SECRET_TORRENT_URL}
+        ],
+    }
 
 
 def _identity(arguments):
@@ -264,6 +298,62 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         self.assertNotIn(_SECRET_MAGNET, serialized)
         self.assertNotIn(_SECRET_TORRENT_URL, serialized)
         self.assertNotIn(_SECRET_DETAIL_URL, serialized)
+
+    def test_present_candidates_is_read_only_keeps_original_positions_and_hides_private_data(self):
+        snapshot = _candidate_snapshot()
+        with (
+            patch(
+                "app.agent.indexer_candidate_actions.restore_resource_candidate_reference"
+            ) as restore,
+            patch(
+                "app.agent.indexer_candidate_actions.active_agent_resource_candidates"
+            ) as active,
+        ):
+            result = present_candidates(
+                {"resource_candidates": snapshot, "positions": [2, 1]}
+            )
+
+        restore.assert_not_called()
+        active.assert_not_called()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.summary, "已筛选2项资源候选")
+        self.assertEqual(result.data, {"positions": [2, 1]})
+        self.assertEqual(len(result.references), 1)
+        self.assertEqual(result.references[0].kind, "resource_candidates")
+        self.assertIs(result.references[0].value, snapshot)
+        self.assertEqual(
+            [item["position"] for item in result.references[0].value["candidates"]],
+            [1, 2],
+        )
+        serialized = str(result.to_dict())
+        self.assertNotIn("_private_items", serialized)
+        self.assertNotIn(_SECRET_MAGNET, serialized)
+        self.assertNotIn(_SECRET_TORRENT_URL, serialized)
+
+    def test_present_candidates_rejects_invalid_or_missing_positions(self):
+        reference = "ref_" + "a" * 16
+        for positions in ([0], [13], [1, 1]):
+            with self.subTest(positions=positions), self.assertRaises(AgentToolError):
+                present_candidates_arguments(
+                    {"resource_candidates_ref": reference, "positions": positions}
+                )
+
+        with self.assertRaisesRegex(AgentToolError, "不存在"):
+            present_candidates(
+                {"resource_candidates": _candidate_snapshot(count=1), "positions": [2]}
+            )
+
+    def test_present_candidates_empty_is_explicit_clear_and_keeps_reference(self):
+        snapshot = _candidate_snapshot()
+        result = present_candidates(
+            {"resource_candidates": snapshot, "positions": []}
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "empty")
+        self.assertEqual(result.data, {"positions": []})
+        self.assertEqual(len(result.references), 1)
+        self.assertIs(result.references[0].value, snapshot)
 
     def test_search_candidate_positions_skip_unavailable_items_without_gaps(self):
         unavailable = _resource_item(

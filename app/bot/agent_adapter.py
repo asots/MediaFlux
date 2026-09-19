@@ -658,7 +658,9 @@ def _execute_query(
             chunks = split_telegram_html(_render_turn(view), limit=_MAX_MESSAGE) or ["Agent 未返回可显示的回答，请重试。"]
             markup = None
             candidates = dict(view.candidate_view or {})
-            if view.status in {"success", "partial"} and candidates.get("items") and candidates.get("recommended_positions"):
+            if view.status in {"success", "partial"} and candidates.get("items") and (
+                candidates.get("recommended_positions") or candidates.get("explicit_selection") is True
+            ):
                 from app.bot.agent_candidates import render, start_draft
 
                 draft = asyncio.run(start_draft(runtime, owner=owner, session_id=session_id, view=candidates))

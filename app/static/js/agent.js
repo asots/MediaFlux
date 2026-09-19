@@ -1292,7 +1292,7 @@
             setTurnStatus(turn, toolLabel(payload.tool, payload.label));
             break;
         case 'tool.progress': {
-            if (Object.prototype.hasOwnProperty.call(payload, 'candidate_view') && payload.candidate_view === null) expireCandidateCards();
+            if (Object.prototype.hasOwnProperty.call(payload, 'candidate_view') && payload.candidate_view === null) removeCandidateView(turn);
             const summary = payload.phase === 'background_job' && typeof payload.summary === 'string'
                 ? payload.summary.trim() : publicSummary(payload);
             if (summary) setTurnStatus(turn, summary.slice(0, 100));
@@ -1300,7 +1300,7 @@
         }
         case 'tool.completed':
             if (payload.result?.candidate_view) renderCandidateView(turn, payload.result.candidate_view);
-            else if (Object.prototype.hasOwnProperty.call(payload.result || {}, 'candidate_view')) expireCandidateCards();
+            else if (Object.prototype.hasOwnProperty.call(payload.result || {}, 'candidate_view')) removeCandidateView(turn);
             updateStep(turn, `call:${payload.call_id || event.sequence}`, `${toolLabel(payload.tool, payload.label)}完成`);
             break;
         case 'tool.failed':
@@ -1477,6 +1477,7 @@
         if (busy || initialRestore || !text.trim()) return;
         const message = text.trim();
         ++sessionLoadGeneration;
+        expireCandidateCards();
         expireVisibleApprovals();
         appendUser(message);
         const turn = createAssistantTurn();
@@ -1854,6 +1855,7 @@
             restoreDraft();
             expireCandidateCards();
             transcript?.replaceChildren();
+            const candidateGroups = new Map();
             for (const message of payload.messages || []) {
                 if (message.role === 'user') appendUser(String(message.content || ''), {recovered: true});
                 else if (message.role === 'assistant') {
@@ -1861,15 +1863,22 @@
                     const turn = createAssistantTurn({recovered: true});
                     addRecoveredToolTrace(turn, message.tools, message.tool_labels);
                     finalizeAnswer(turn, String(message.content || ''));
-                    if (message.candidate_view) renderCandidateView(turn, message.candidate_view);
+                    if (message.candidate_view) {
+                        const group = renderCandidateView(turn, message.candidate_view);
+                        if (group) {
+                            candidateGroups.set(String(message.candidate_view.ref || ''), group);
+                        }
+                    }
                 }
             }
-            const candidateGroup = transcript?.querySelector('.agent-candidates');
+            const candidateRef = String(payload.candidate_view?.ref || '');
+            const candidateGroup = candidateRef ? candidateGroups.get(candidateRef) : null;
             if (payload.pending_approval) {
                 const data = payload.pending_approval.preview?.data;
                 if (candidateGroup && data?.source_type === 'resource_candidates') candidateGroup._candidateState.output.append(buildApproval(payload.pending_approval));
                 else renderRecoveredApproval(payload.pending_approval);
             }
+            expireCandidateCards(candidateGroup || null);
             syncCandidateButtons();
             followOutput = true;
             scrollToBottom(true);
@@ -1935,10 +1944,33 @@
         historyButton?.setAttribute('aria-expanded', 'false');
     }
 
-    function expireCandidateCards() {
+    function scheduleCandidateExpiry(group) {
         if (candidateExpiryTimer !== null) clearTimeout(candidateExpiryTimer);
         candidateExpiryTimer = null;
-        transcript?.querySelectorAll('.agent-candidates').forEach(group => { group.dataset.expired = 'true'; });
+        const expiresAt = Number(group?._candidateState?.view?.expires_at);
+        if (!group || !Number.isFinite(expiresAt)) return;
+        candidateExpiryTimer = setTimeout(() => {
+            candidateExpiryTimer = null;
+            syncCandidateButtons();
+        }, Math.max(0, Math.min(2147483647, expiresAt * 1000 - Date.now() + 25)));
+    }
+
+    function expireCandidateCards(except = null) {
+        if (candidateExpiryTimer !== null) clearTimeout(candidateExpiryTimer);
+        candidateExpiryTimer = null;
+        transcript?.querySelectorAll('.agent-candidates').forEach(group => {
+            if (group !== except) group.dataset.expired = 'true';
+        });
+        syncCandidateButtons();
+        if (except?.isConnected) scheduleCandidateExpiry(except);
+    }
+
+    function removeCandidateView(turn) {
+        const group = turn?.candidateGroup;
+        if (!group) return;
+        scheduleCandidateExpiry(null);
+        group.remove();
+        turn.candidateGroup = null;
         syncCandidateButtons();
     }
 
@@ -2004,10 +2036,10 @@
 
     function renderCandidateView(turn, view) {
         if (!view || !Array.isArray(view.items) || typeof view.ref !== 'string' || !Number.isFinite(view.expires_at)) return;
-        if (turn.candidateGroup?.dataset.candidateView === view.ref) return;
+        if (turn.candidateGroup?.dataset.candidateView === view.ref) return turn.candidateGroup;
         const items = view.items.filter(item => typeof item?.title === 'string' && Number.isInteger(item.position) && item.position > 0 && item.position <= 12).slice(0, 12);
         if (!items.length) return;
-        expireCandidateCards();
+        const previousGroup = turn.candidateGroup;
         const group = element('section', 'agent-candidates');
         group.dataset.candidateView = view.ref;
         group.setAttribute('aria-label', '资源批量选择');
@@ -2016,7 +2048,7 @@
         heading.append(element('strong', '', recommended.length ? '推荐组合' : '搜索结果'), element('span', '', `${items.length} 个版本`));
         const summary = element('ul', 'agent-candidate-recommendation');
         for (const item of items.filter(item => recommended.includes(item.position))) summary.append(element('li', '', candidateShortName(item)));
-        if (!summary.childElementCount) summary.append(element('li', '', '未生成补缺集推荐；这些搜索结果仅供手动挑选，不代表有更新。'));
+        if (!summary.childElementCount) summary.append(element('li', '', '请选择需要的版本，再预览下载。'));
         let stored = null;
         try { stored = JSON.parse(sessionStorage.getItem(candidateStorageKey(view.ref)) || 'null'); } catch (_) { /* Optional draft. */ }
         const positions = Array.isArray(stored?.positions) ? stored.positions : recommended;
@@ -2081,15 +2113,17 @@
         details.addEventListener('toggle', () => saveCandidateDraft(group));
         group.append(heading, summary, toolbar, note, details, output);
         turn.candidateGroup = group;
-        turn.card.append(group);
+        if (previousGroup?.isConnected) previousGroup.replaceWith(group);
+        else turn.card.append(group);
         if (typeof view.last_result?.text === 'string' && view.last_result.text) {
             const restored = element('section');
             output.append(restored);
             replaceApprovalWithResult(restored, view.last_result.text);
         }
         syncCandidateButtons();
-        candidateExpiryTimer = setTimeout(syncCandidateButtons, Math.max(0, Math.min(2147483647, view.expires_at * 1000 - Date.now() + 25)));
+        scheduleCandidateExpiry(group);
         scrollToBottom();
+        return group;
     }
 
     async function selectCandidate(button) {

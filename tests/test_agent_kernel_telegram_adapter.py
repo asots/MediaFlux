@@ -255,6 +255,14 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
                 self.assertFalse(any("资源搜索与批选" in text for text, _ in messages))
                 start.assert_not_called()
 
+    def test_explicitly_selected_general_resources_keep_the_manual_picker(self):
+        candidates = {"items": [{"position": 2, "title": "示例资源.2160p"}],
+                      "recommended_positions": [], "explicit_selection": True}
+        messages, start = self._query_candidate_response("找到一个符合要求的版本。", candidates)
+        self.assertTrue(any("找到一个符合要求的版本" in text for text, _ in messages))
+        self.assertEqual(sum(bool(kwargs.get("reply_markup")) for _, kwargs in messages), 1)
+        start.assert_awaited_once()
+
     def test_empty_candidate_items_never_generate_preview_controls(self):
         messages, start = self._query_candidate_response(
             "未找到匹配资源。", {"items": [], "recommended_positions": [1]})

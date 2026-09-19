@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.agent.errors import AgentToolError
@@ -11,14 +12,75 @@ from app.agent.indexer_actions import (
     submit_resource_batch_confirmed,
     submit_resource_confirmed,
 )
-from app.agent.models import ToolContext, ToolResult
+from app.agent.models import ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import sanitize_resource_title
 from app.agent.recent_resource_candidates import (
     RecentResourceCandidateStore,
     normalize_resource_search_id,
     restore_resource_candidate_reference,
+    validate_safe_resource_snapshot,
 )
 from app.agent.state_commit import active_agent_resource_candidates
+
+_RESOURCE_CANDIDATES_REF_RE = re.compile(r"^ref_[A-Za-z0-9_-]{16,160}$")
+
+
+def present_candidates_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """校验显式候选展示请求；引用解析由 Kernel 在 handler 前完成。"""
+    if not isinstance(arguments, dict):
+        raise AgentToolError("资源候选筛选参数必须是对象")
+    if set(arguments) != {"resource_candidates_ref", "positions"}:
+        raise AgentToolError("资源候选筛选只接受 resource_candidates_ref 和 positions")
+    reference = arguments.get("resource_candidates_ref")
+    if (
+        not isinstance(reference, str)
+        or not _RESOURCE_CANDIDATES_REF_RE.fullmatch(reference.strip())
+    ):
+        raise AgentToolError("resource_candidates_ref 不是有效的资源候选引用")
+    positions = arguments.get("positions")
+    if (
+        not isinstance(positions, list)
+        or len(positions) > 12
+        or any(type(position) is not int or not 1 <= position <= 12 for position in positions)
+        or len(set(positions)) != len(positions)
+    ):
+        raise AgentToolError("positions 必须是 0 到 12 个不重复的 1 到 12 整数")
+    return {
+        "resource_candidates_ref": reference.strip(),
+        "positions": list(positions),
+    }
+
+
+def present_candidates(arguments: dict[str, Any]) -> ToolResult:
+    """只展示已解析的候选快照，不恢复 Provider、不读取最近候选、不发起搜索。"""
+    value = arguments.get("resource_candidates")
+    if not isinstance(value, dict):
+        raise AgentToolError("资源候选引用无效或已过期", code="confirmation_stale")
+    public_snapshot = {
+        key: value.get(key)
+        for key in ("search_id", "search_status", "candidates")
+    }
+    snapshot = validate_safe_resource_snapshot(public_snapshot)
+    if snapshot is None:
+        raise AgentToolError("资源候选引用无效或已过期", code="confirmation_stale")
+    positions = list(arguments.get("positions") or [])
+    candidate_count = len(snapshot["candidates"])
+    if any(position > candidate_count for position in positions):
+        raise AgentToolError(
+            "positions 中包含当前候选快照不存在的序号",
+            code="precondition_failed",
+        )
+    return ToolResult(
+        True,
+        "found" if positions else "empty",
+        (
+            f"已筛选{len(positions)}项资源候选"
+            if positions
+            else "本轮不展示资源候选"
+        ),
+        data={"positions": positions},
+        references=[ToolReference("resource_candidates", value)],
+    )
 
 
 def _candidate_result(result: ToolResult, candidates: list[dict[str, Any]], positions: list[int], target: str) -> ToolResult:

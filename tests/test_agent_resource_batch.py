@@ -212,7 +212,7 @@ def test_telegram_in_place_multiselect_previews_and_confirms_once(store, monkeyp
 
     assert draft["positions"] == []
     text, markup = agent_candidates.render(TELEBOT, view, draft)
-    assert "仅供手动挑选" in text and "资源推荐与批选" not in text
+    assert "请选择需要的版本" in text and "资源推荐与批选" not in text
     assert not any(button.text == "使用推荐组合" for button in markup.buttons)
     stale = draft["handle"]
     click("e")
@@ -343,10 +343,7 @@ def test_telegram_real_kernel_keeps_empty_update_answer_without_a_zero_selection
     view = agent_adapter._execute_query(bot, TELEBOT, source, chat_id="-100", user_id="7", text=source.text)
     assert model.calls == 2
     assert view.answer == "目前没有可确认覆盖目标缺集的4K推荐，不能据此断言没有更新。"
-    if scoped:
-        assert view.candidate_view is None
-    else:
-        assert view.candidate_view["items"] and view.candidate_view["recommended_positions"] == []
+    assert view.candidate_view is None
     assert view.approval is None
     messages = [(text, kwargs) for text, _, _, kwargs in bot.edits] + [(text, kwargs) for _, text, kwargs in bot.sent]
     assert any(view.answer in text for text, _ in messages)

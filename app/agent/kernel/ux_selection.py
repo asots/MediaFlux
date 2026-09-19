@@ -198,29 +198,41 @@ def _display_sources(public: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     return result
 
 
-def _candidate_summary(items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """缺集无覆盖证据不挂卡，普通搜索保留手动候选；不代替查询结论。"""
+def resource_candidate_items(value: Any, public: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """模型研究与用户展示共用同一份安全编号；有搜索引用不等于应当挂卡。"""
+    snapshot = _snapshot(value)
+    if snapshot is None:
+        return []
+    sources = _display_sources(public)
+    return [candidate_item({**candidate, **sources.get(candidate["result_id"], {})}, candidate["position"])
+            for candidate in snapshot["candidates"]]
+
+
+def _candidate_summary(items: list[dict[str, Any]], *, explicit_selection: bool = False) -> dict[str, Any] | None:
+    """已核验缺集可直接展示；普通命中必须先明确挑选，不能覆盖缺集证据不足。"""
     recommended = _recommend(items)
-    if not items or (not recommended and all(item.get("requested_episode") for item in items)):
+    if not items or (not recommended and (
+        not explicit_selection or any(item.get("requested_episode") for item in items)
+    )):
         return None
-    return {"items": items, "recommended_positions": recommended}
+    summary = {"items": items, "recommended_positions": recommended}
+    if explicit_selection:
+        summary["explicit_selection"] = True
+    return summary
 
 
 async def issue_candidate_view(
     *, store: ReferenceStore, owner: str, session_id: str, generation: int,
-    ref: str, value: Any, ttl_seconds: int, public: Mapping[str, Any], turn_id: str = "",
+    ref: str, items: list[dict[str, Any]], ttl_seconds: int, turn_id: str = "",
+    selected_positions: list[int] | None = None,
 ) -> dict[str, Any] | None:
-    snapshot = _snapshot(value)
-    if snapshot is None or not snapshot["candidates"]:
+    if selected_positions is not None:
+        items = [item for item in items if item["position"] in selected_positions]
+    summary = _candidate_summary(items, explicit_selection=selected_positions is not None)
+    if summary is None:
         return None
     ttl = max(1, min(int(ttl_seconds), 86_400))
     expires_at = time.time() + ttl
-    sources = _display_sources(public)
-    items = [candidate_item({**candidate, **sources.get(candidate["result_id"], {})}, candidate["position"])
-             for candidate in snapshot["candidates"]]
-    summary = _candidate_summary(items)
-    if summary is None:
-        return None
     selection = await store.put(
         owner=owner, session_id=session_id, kind=SELECTION_KIND, ttl_seconds=ttl,
         value={"ref": ref, "generation": generation, "expires_at": expires_at},
@@ -302,7 +314,10 @@ async def current_candidate_view(
         public = {key: deepcopy(view[key]) for key in (
             "ref", "selection_ref", "expires_at", "turn_id",
         ) if key in view}
-        summary = _candidate_summary([candidate_item(item, item["position"]) for item in view["items"]])
+        summary = _candidate_summary(
+            [candidate_item(item, item["position"]) for item in view["items"]],
+            explicit_selection=view.get("explicit_selection") is True,
+        )
         if summary is None:
             return None
         public.update(summary)

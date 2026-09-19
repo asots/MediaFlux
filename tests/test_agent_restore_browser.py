@@ -16,8 +16,27 @@ LAYOUT_KEY = 'mediaflux.agent.kernel.layout.v1'
 SCOPE = 'b' * 64
 
 
+def restored_candidate_view(ref: str, selection_ref: str) -> dict:
+    return {
+        'ref': ref,
+        'expires_at': 4_102_444_800,
+        'selection_ref': selection_ref,
+        'recommended_positions': [],
+        'target': 'guangya',
+        'target_source': 'saved_preference',
+        'targets': [
+            {'value': 'qb', 'label': 'qBittorrent', 'available': True},
+            {'value': 'guangya', 'label': '光鸭', 'available': True},
+        ],
+        'items': [
+            {'position': 1, 'title': f'{ref} 第一版', 'site_name': '资源站 A', 'size_text': '1 GB', 'tags': {}, 'reasons': [], 'warnings': []},
+            {'position': 2, 'title': f'{ref} 第二版', 'site_name': '资源站 B', 'size_text': '2 GB', 'tags': {}, 'reasons': [], 'warnings': []},
+        ],
+    }
+
+
 class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
-    def restore_page(self, *, viewport=None, stored=True, hint=None, history=True, delay=250, hold_script=False, fail=False, missing=False, ignore_abort=False, color_scheme="light", block_storage=False):
+    def restore_page(self, *, viewport=None, stored=True, hint=None, history=True, delay=250, hold_script=False, fail=False, missing=False, ignore_abort=False, color_scheme="light", block_storage=False, session_details=None, session_list=None):
         context = self.browser.new_context(viewport=viewport or {'width': 1280, 'height': 800}, color_scheme=color_scheme)
         self.addCleanup(context.close)
         pending = []
@@ -44,10 +63,10 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
         context.route('**/*', route)
         context.route_web_socket('**/*', lambda ws: ws.close())
         config = {
-            'sessions': {'draft_scope': SCOPE, 'sessions': [
+            'sessions': {'draft_scope': SCOPE, 'sessions': session_list if session_list is not None else [
                 {'session_id': SESSION, 'title': '已有会话', 'message_count': 2},
             ] if history else []},
-            'sessionDetails': {SESSION: {'messages': [
+            'sessionDetails': session_details if session_details is not None else {SESSION: {'messages': [
                 {'role': 'user', 'content': '查询媒体任务'},
                 {'role': 'assistant', 'content': '这是刷新前已有的历史回复。'},
             ] if history else []}},
@@ -115,6 +134,74 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
         self.assertLessEqual(abs(before['y'] - after['y']), 0.5)
         self.assertEqual(before['height'], after['height'])
         self.assertFalse(any(frame['empty'] for frame in page.evaluate('window.__restoreFrames')))
+        self.assertEqual(errors, [])
+        self.assertEqual(unexpected, [])
+
+    def test_pending_candidate_approval_mounts_to_matching_ref_not_first_history_card(self):
+        first = restored_candidate_view('ref_restore_candidate_first', 'ref_restore_selection_first')
+        latest = restored_candidate_view('ref_restore_candidate_latest', 'ref_restore_selection_latest')
+        approval = {
+            'plan_id': 'plan_restore_candidate_00001',
+            'tool_name': 'ingest.submit',
+            'effect': 'WRITE',
+            'preview': {'data': {'source_type': 'resource_candidates', 'count': 1, 'target': 'guangya'}},
+            'result': {},
+            'confirmation': {},
+            'expires_at': '2026-09-20T12:00:00+00:00',
+        }
+        details = {
+            SESSION: {
+                'messages': [
+                    {'role': 'assistant', 'content': '第一轮候选', 'candidate_view': first},
+                    {'role': 'assistant', 'content': '最新候选', 'candidate_view': latest},
+                ],
+                'candidate_view': latest,
+                'pending_approval': approval,
+            },
+        }
+        page, _, errors, unexpected = self.restore_page(
+            session_details=details,
+            session_list=[{'session_id': SESSION, 'title': '候选恢复', 'message_count': 2}],
+        )
+        page.wait_for_selector(f'.agent-candidates[data-candidate-view="{latest["ref"]}"] [data-effect-confirm]')
+        self.assertEqual(page.locator('.agent-candidates').count(), 2)
+        self.assertEqual(page.locator(f'.agent-candidates[data-candidate-view="{first["ref"]}"] [data-effect-confirm]').count(), 0)
+        self.assertEqual(page.locator(f'.agent-candidates[data-candidate-view="{latest["ref"]}"] [data-effect-confirm]').count(), 1)
+        self.assertTrue(page.locator(f'.agent-candidates[data-candidate-view="{first["ref"]}"] [data-candidate-position]').first.is_disabled())
+        self.assertEqual(errors, [])
+        self.assertEqual(unexpected, [])
+
+    def test_missing_current_candidate_view_keeps_history_readonly_and_detaches_approval(self):
+        first = restored_candidate_view('ref_restore_candidate_missing_first', 'ref_restore_selection_missing_first')
+        latest = restored_candidate_view('ref_restore_candidate_missing_latest', 'ref_restore_selection_missing_latest')
+        approval = {
+            'plan_id': 'plan_restore_candidate_missing_00001',
+            'tool_name': 'ingest.submit',
+            'effect': 'WRITE',
+            'preview': {'data': {'source_type': 'resource_candidates', 'count': 1, 'target': 'guangya'}},
+            'result': {},
+            'confirmation': {},
+            'expires_at': '2026-09-20T12:00:00+00:00',
+        }
+        details = {
+            SESSION: {
+                'messages': [
+                    {'role': 'assistant', 'content': '第一轮历史候选', 'candidate_view': first},
+                    {'role': 'assistant', 'content': '第二轮历史候选', 'candidate_view': latest},
+                ],
+                'candidate_view': None,
+                'pending_approval': approval,
+            },
+        }
+        page, _, errors, unexpected = self.restore_page(
+            session_details=details,
+            session_list=[{'session_id': SESSION, 'title': '缺失当前候选', 'message_count': 2}],
+        )
+        page.wait_for_selector('.agent-candidates')
+        self.assertEqual(page.locator('.agent-candidates').count(), 2)
+        self.assertEqual(page.locator('.agent-candidates .agent-confirmation-card').count(), 0)
+        self.assertEqual(page.locator('.agent-confirmation-card').count(), 1)
+        self.assertEqual(page.locator('.agent-candidates [data-candidate-position]:not([disabled])').count(), 0)
         self.assertEqual(errors, [])
         self.assertEqual(unexpected, [])
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -51,6 +52,27 @@ class SearchModel:
                     "deep-search",
                     "indexer.search_resources",
                     {"title": "Example"},
+                ),
+            )
+            yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+        elif request.round_index == 1:
+            evidence = next(
+                message.content
+                for message in reversed(request.messages)
+                if message.role == "tool"
+            )
+            refs = json.loads(
+                evidence.partition("reference_arguments=")[2].splitlines()[0]
+            )
+            yield ModelEvent(
+                ModelEventType.TOOL_CALL_COMPLETED,
+                tool_call=ModelToolCall(
+                    "deep-present",
+                    "indexer.present_candidates",
+                    {
+                        "resource_candidates_ref": refs["resource_candidates_ref"],
+                        "positions": [1, 2],
+                    },
                 ),
             )
             yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
@@ -114,14 +136,21 @@ def runtime():
 
 async def search(session, *, telegram=False):
     request = QueryEnvelope(
-        owner=OWNER, session_id=SESSION, message="搜索 Example", channel="web"
+        owner=OWNER,
+        session_id=SESSION,
+        message="搜索 Example，挑选两项资源供预览，先不要下载",
+        channel="web",
     )
     if telegram:
         view = await TelegramKernelTransport(session).query(request)
     else:
         view = await WebKernelTransport(session).query_view(request)
     assert view.status == "success" and not view.error_code, view.to_dict()
+    assert view.approval is None
+    assert view.candidate_view is not None, view.to_dict()
+    assert view.candidate_view["explicit_selection"] is True
     assert len(view.candidate_view["items"]) == 2
+    assert [item["position"] for item in view.candidate_view["items"]] == [1, 2]
     return view.candidate_view
 
 
@@ -152,6 +181,15 @@ def test_normal_web_and_telegram_share_search_facts_without_downloading(
         assert len(restored["items"]) == 2
         events = await store.list_events(owner=OWNER, session_id=SESSION)
         assert events[-1]["type"] == "turn.completed"
+        completed = [
+            event["payload"] for event in events if event["type"] == "tool.completed"
+        ]
+        assert [payload["tool"] for payload in completed] == [
+            "indexer.search_resources",
+            "indexer.present_candidates",
+        ]
+        assert completed[0]["result"]["candidate_view"] is None
+        assert completed[1]["result"]["candidate_view"] == candidates
         with db.get_conn() as conn:
             assert (
                 conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0]
@@ -249,6 +287,7 @@ def test_history_restores_confirmed_result_after_candidate_expiry(offline_chain)
         messages = public_conversation_messages(
             state.conversation, candidate_view=candidates
         )
+        assert not any(message.get("candidate_view") for message in messages)
         visible = "\n".join(message["content"] for message in messages)
         assert all(f"下载请求 #{item['request_id']}" in visible for item in items)
         assert all(transport.call_count == 2 for transport in offline_chain)

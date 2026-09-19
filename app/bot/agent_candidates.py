@@ -80,7 +80,7 @@ def render(telebot: Any, view: dict, draft: dict) -> tuple[str, Any]:
     recommended = view.get("recommended_positions") or []
     lines = ["<b>资源推荐与批选</b>" if recommended else "<b>资源搜索与批选</b>"]
     if not recommended:
-        lines.append("本次未生成补缺集推荐；搜索结果仅供手动挑选。")
+        lines.append("请选择需要的版本，再预览下载。")
     items = view["items"] if draft["expanded"] else [item for item in view["items"] if item["position"] in selected]
     for item in items:
         description = _short(item)

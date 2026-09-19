@@ -37,6 +37,7 @@ from .ux_selection import (
     RESOURCE_KIND,
     candidate_result,
     issue_candidate_view,
+    resource_candidate_items,
     resource_model_content,
 )
 
@@ -447,7 +448,8 @@ class ToolPipeline:
         if tool.effect is ToolEffect.READ:
             if tool.read is None:  # pragma: no cover - ToolSpec 已校验
                 raise ToolPipelineError("工具不可执行", code="tool_not_executable")
-            resource_search = tool.metadata.get("source_kind") == "resource_index"
+            resource_presentation = tool.metadata.get("source_kind") == "resource_presentation"
+            resource_search = resource_presentation or tool.metadata.get("source_kind") == "resource_index"
             if resource_search:
                 # 同一模型回合内重搜也使旧卡失效，包括空结果和读取失败。
                 await self._commit_updates(context.lease, (
@@ -464,7 +466,10 @@ class ToolPipeline:
                         projected.model_content, maximum=getattr(self.projector, "max_model_chars", 24_000),
                     ),
                 )
-            outcome = await self._materialize_refs(projected, context=context)
+            outcome = await self._materialize_refs(
+                projected, context=context,
+                selected_positions=normalized["positions"] if resource_presentation else None,
+            )
             await self._commit_updates(context.lease, outcome.state_updates)
             return PipelineResult(
                 tool=tool,
@@ -728,14 +733,14 @@ class ToolPipeline:
         outcome: ToolOutcome,
         *,
         context: ToolCallContext,
+        selected_positions: list[int] | None = None,
     ) -> ToolOutcome:
         if not outcome.refs:
             return outcome
         exposed: list[dict[str, str]] = []
         reference_arguments: dict[str, str] = {}
-        kinds: list[str] = []
-        ids: list[str] = []
         candidate_view = None
+        candidate_items: list[dict[str, Any]] = []
         has_candidates = False
         for item in outcome.refs:
             if not isinstance(item, ReferenceValue):
@@ -751,20 +756,17 @@ class ToolPipeline:
             )
             if reference.kind == RESOURCE_KIND:
                 has_candidates = True
+                candidate_items = resource_candidate_items(item.value, outcome.public_content)
                 candidate_view = await issue_candidate_view(
                     store=self.reference_store, owner=context.owner, session_id=context.session_id,
-                    generation=context.lease.generation, ref=reference.ref, value=item.value,
-                    ttl_seconds=item.ttl_seconds, public=outcome.public_content, turn_id=context.turn_id,
+                    generation=context.lease.generation, ref=reference.ref, items=candidate_items,
+                    ttl_seconds=item.ttl_seconds, turn_id=context.turn_id,
+                    selected_positions=selected_positions,
                 )
             exposed.append({"ref": reference.ref, "kind": reference.kind})
-            argument_name = (
-                re.sub(r"[^a-z0-9_]+", "_", reference.kind.casefold()).strip("_")
-                + "_ref"
-            )
-            if argument_name != "_ref":
-                reference_arguments[argument_name] = reference.ref
-            ids.append(reference.ref)
-            kinds.append(reference.kind)
+            kind = re.sub(r"[^a-z0-9_]+", "_", reference.kind.casefold()).strip("_")
+            if kind:
+                reference_arguments[f"{kind}_ref"] = reference.ref
         public = (
             candidate_result(outcome.public_content, candidate_view)
             if has_candidates else dict(outcome.public_content)
@@ -784,19 +786,22 @@ class ToolPipeline:
                 separators=(",", ":"),
             )
         )
-        if candidate_view:
+        numbered_items = candidate_view["items"] if candidate_view else [
+            item for item in candidate_items if not item.get("requested_episode")
+        ]
+        if numbered_items:
             model_content += "\ncandidate_numbers=" + json.dumps([
                 {key: item[key] for key in ("position", "title", "coverage", "media_title", "requested_episode")}
-                for item in candidate_view["items"]
+                for item in numbered_items
             ], ensure_ascii=False, separators=(",", ":"))
-            if candidate_view["recommended_positions"]:
+            if candidate_view and candidate_view["recommended_positions"]:
                 model_content += "\nrecommended_ingest_arguments=" + json.dumps({
                     "source_type": RESOURCE_KIND, "resource_candidates_ref": candidate_view["ref"],
                     "positions": candidate_view["recommended_positions"], "target": "preferred",
                 }, ensure_ascii=False, separators=(",", ":"))
         updates = tuple(outcome.state_updates) + (
-            StateUpdate("recent_refs", ids, mode="append"),
-            StateUpdate("ref_kinds", kinds, mode="append"),
+            StateUpdate("recent_refs", [item["ref"] for item in exposed], mode="append"),
+            StateUpdate("ref_kinds", [item["kind"] for item in exposed], mode="append"),
         )
         if has_candidates:
             updates += (StateUpdate(f"metadata.{CANDIDATE_VIEW_KEY}", candidate_view),)

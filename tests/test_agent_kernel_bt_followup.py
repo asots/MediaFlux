@@ -67,6 +67,19 @@ class AgentKernelBtFollowupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("ingest.submit", names)
                 self.assertLessEqual(len(names), session.retriever.maximum)
 
+    def test_short_cloud_followup_after_explicit_candidate_selection_keeps_submission(self):
+        session = build_agent_kernel(model=NoModel())
+        context = {
+            "owner": "fixture-owner", "session_id": "fixture-session", "channel": "test",
+            "reference_kinds": ("resource_candidates",),
+            "recent_user_messages": ("搜一下资源",),
+            "recent_tool_names": ("indexer.present_candidates", "indexer.search_resources"),
+        }
+        selected = session.retriever.retrieve("把第2个推送到光鸭", session.catalog, context=context)
+        window = CapabilityDiscovery(session.catalog, context=context, maximum=session.retriever.maximum).window(selected.tools)
+        self.assertIn("ingest.submit", [tool.name for tool in window])
+        self.assertLessEqual(len(window), session.retriever.maximum)
+
     async def test_real_catalog_followup_builds_batch_plan_and_only_executes_after_confirmation(self):
         result = _search_result()
         template = result.data["items"][0]

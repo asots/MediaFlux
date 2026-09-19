@@ -349,7 +349,7 @@ class SelectionModel:
 def _runtime(store=None, *, ttl=900, model=None):
     specs = {item.name: item for item in build_tool_specs(RecentResourceCandidateStore(), AgentIngestSessionStore())}
     specs["indexer.search_resources"] = replace(specs["indexer.search_resources"], handler=lambda _: _resources(ttl=ttl))
-    catalog = catalog_from_tool_specs((specs["indexer.search_resources"], specs["ingest.submit"]))
+    catalog = catalog_from_tool_specs((specs["indexer.search_resources"], specs["indexer.present_candidates"], specs["ingest.submit"]))
     states = store or InMemorySessionStateStore()
     pipeline = ToolPipeline(catalog=catalog, state_store=states, reference_store=store)
     session = AgentSession(model=model or SelectionModel(), catalog=catalog, retriever=CapabilityRetriever(),
@@ -363,7 +363,16 @@ async def _publish_candidates(pipeline, states, *, owner=OWNER, session_id=SESSI
         context = ToolCallContext(owner=owner, session_id=session_id, request_id="search", turn_id=lease.turn_id,
                                   lease=lease, cancellation=CancellationToken(), report_progress=AsyncMock())
     result = await pipeline.execute("indexer.search_resources", {"title": "Example"}, context=context)
-    return result.outcome.public_content["candidate_view"], context
+    view = result.outcome.public_content["candidate_view"]
+    if view is None:
+        numbers = json.loads(result.outcome.model_content.partition("candidate_numbers=")[2].splitlines()[0])
+        if not any(item["requested_episode"] for item in numbers):
+            result = await pipeline.execute("indexer.present_candidates", {
+                **result.outcome.public_content["reference_arguments"],
+                "positions": [item["position"] for item in numbers],
+            }, context=context)
+            view = result.outcome.public_content["candidate_view"]
+    return view, context
 
 
 async def _events(stream):
@@ -375,20 +384,25 @@ def test_candidate_projection_is_allowlisted_and_current_view_restores(store):
         _, pipeline, states = _runtime(store)
         view, context = await _publish_candidates(pipeline, states)
         result = await pipeline.execute("indexer.search_resources", {"title": "Example"}, context=context)
-        view = result.outcome.public_content["candidate_view"]
-        public = json.dumps(result.outcome.public_content, ensure_ascii=False)
+        assert result.outcome.public_content["candidate_view"] is None
+        presented = await pipeline.execute("indexer.present_candidates", {
+            **result.outcome.public_content["reference_arguments"], "positions": [1, 2],
+        }, context=context)
+        view = presented.outcome.public_content["candidate_view"]
+        public = json.dumps(presented.outcome.public_content, ensure_ascii=False)
         assert "result_id" not in public
         model = json.loads(result.outcome.model_content.partition("\nopaque_refs=")[0])
         assert model["data"]["items"][0]["result_id"] == "ux-resource-result-001"
         encoded = public + result.outcome.model_content
         for private in ("rawresult", "torrent_url", "SECRET", "10.0.0.9", "/private/", "https://"):
             assert private not in encoded
-        assert set(view) == {"ref", "selection_ref", "expires_at", "items", "turn_id", "recommended_positions", "target", "target_source", "targets"}
+        assert set(view) == {"ref", "selection_ref", "expires_at", "items", "turn_id", "recommended_positions", "target", "target_source", "targets", "explicit_selection"}
         assert view["expires_at"] > time.time()
         item = view["items"][0]
         assert set(item) == {"position", "title", "site_name", "size_text", "tags", "reasons", "warnings", "coverage", "media_title", "media_scope", "requested_episode", "match"}
-        assert item["tags"] == {"audio": "Atmos", "resolution": "2160p"}
-        assert item["reasons"] == ["精确匹配"] and item["warnings"] == ["需要人工确认"]
+        # 展示只信引用内的安全快照，不从早先原始结果恢复额外字段。
+        assert item["tags"] == {} and item["reasons"] == [] and item["warnings"] == []
+        assert view["explicit_selection"] is True
         assert view["selection_ref"] != view["ref"]
         reloaded = SQLiteKernelStore(secret_provider=lambda: SECRET)
         state = await reloaded.load(owner=OWNER, session_id=SESSION)
@@ -647,7 +661,7 @@ def test_same_turn_read_invalidation_reaches_real_progress_stream_before_termina
     async def exercise():
         _, original, states = _runtime(store)
         reader = Mock(side_effect=[
-            _resources(), RuntimeError("offline") if second_result == "failed" else ToolResult(True, "empty", "无候选", data={"items": []}),
+            _episode_candidates_result(match="exact_episode"), RuntimeError("offline") if second_result == "failed" else ToolResult(True, "empty", "无候选", data={"items": []}),
         ])
         catalog = type(original.catalog)([replace(original.catalog.get("indexer.search_resources"), read=reader)])
         pipeline = ToolPipeline(catalog=catalog, state_store=states, reference_store=store)
@@ -821,6 +835,7 @@ def test_general_search_does_not_recommend_old_episodes_or_suggest_ingest(store)
         assert view["recommended_positions"] == []
         assert "recommended_ingest_arguments=" not in result.outcome.model_content
         assert "candidate_numbers=" in result.outcome.model_content
+        view, _ = await _publish_candidates(pipeline, states, context=context)
         # 旧会话曾按标题给出自动推荐，重新读取时不能继续沿用。
         state = await states.load(owner=OWNER, session_id=SESSION)
         state.metadata[CANDIDATE_VIEW_KEY]["recommended_positions"] = [1]
@@ -923,4 +938,193 @@ def test_mixed_episode_candidates_keep_verified_global_positions(store):
         assert (await current_candidate_view(state=state, store=store))["recommended_positions"] == [2]
         result = await validate_selection(_selection(view, [2]), state=state, store=store)
         assert result.arguments["positions"] == [2]
+    asyncio.run(exercise())
+
+
+def test_raw_search_keeps_model_evidence_without_publishing_unselected_cards(store):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        lease, _ = await states.begin_turn(owner=OWNER, session_id=SESSION, request_id="remaining-resources")
+        context = ToolCallContext(owner=OWNER, session_id=SESSION, request_id="remaining-resources", turn_id=lease.turn_id,
+                                  lease=lease, cancellation=CancellationToken(), report_progress=AsyncMock())
+        for title in ("狐妖小红娘", "Fox Spirit Matchmaker"):
+            result = await pipeline.execute("indexer.search_resources", {"title": title}, context=context)
+            assert result.outcome.public_content["candidate_view"] is None
+            assert "candidate_numbers=" in result.outcome.model_content
+            assert "resource_candidates_ref" in result.outcome.model_content
+            assert "recommended_ingest_arguments=" not in result.outcome.model_content
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        assert state.metadata[CANDIDATE_VIEW_KEY] is None
+        assert await current_candidate_view(state=state, store=store) is None
+    asyncio.run(exercise())
+
+
+def test_legacy_generic_card_does_not_reappear_as_a_recommendation(store):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        view, _ = await _publish_candidates(pipeline, states)
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        state.metadata[CANDIDATE_VIEW_KEY].pop("explicit_selection", None)
+        state.metadata[CANDIDATE_VIEW_KEY]["recommended_positions"] = [1]
+        assert view["items"]
+        assert await current_candidate_view(state=state, store=store) is None
+    asyncio.run(exercise())
+
+
+def test_explicit_presentation_preserves_positions_and_can_clear_the_view(store):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        original, context = await _publish_candidates(pipeline, states)
+        result = await pipeline.execute("indexer.present_candidates", {
+            "resource_candidates_ref": original["ref"], "positions": [2],
+        }, context=context)
+        view = result.outcome.public_content["candidate_view"]
+        assert [item["position"] for item in view["items"]] == [2]
+        assert view["explicit_selection"] is True
+        assert view["recommended_positions"] == []
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        assert (await current_candidate_view(state=state, store=store))["items"] == view["items"]
+        assert (await validate_selection(_selection(view, [2]), state=state, store=store)).arguments["positions"] == [2]
+        with pytest.raises(SelectionInvalidError):
+            await validate_selection(_selection(view, [1]), state=state, store=store)
+        cleared = await pipeline.execute("indexer.present_candidates", {
+            "resource_candidates_ref": view["ref"], "positions": [],
+        }, context=context)
+        assert cleared.outcome.public_content["candidate_view"] is None
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        assert await current_candidate_view(state=state, store=store) is None
+    asyncio.run(exercise())
+
+
+def test_explicit_presentation_cannot_override_missing_episode_coverage(store):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        _, context = await _publish_candidates(pipeline, states)
+        with patch(__name__ + "._resources", return_value=_episode_candidates_result("unknown")):
+            searched = await pipeline.execute("indexer.search_resources", {"title": "缺集"}, context=context)
+        presented = await pipeline.execute("indexer.present_candidates", {
+            **searched.outcome.public_content["reference_arguments"], "positions": [1],
+        }, context=context)
+        assert presented.outcome.public_content["candidate_view"] is None
+        assert "recommended_ingest_arguments=" not in presented.outcome.model_content
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("scope", ["expired", "foreign_owner", "foreign_session"])
+def test_present_requires_a_live_reference_in_this_session(store, scope):
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        view, context = await _publish_candidates(pipeline, states)
+        if scope == "expired":
+            store._clock = lambda: time.time() + 901
+        else:
+            owner, session_id = ("another-owner", SESSION) if scope == "foreign_owner" else (OWNER, "another_session_123456")
+            lease, _ = await states.begin_turn(owner=owner, session_id=session_id, request_id="other")
+            context = replace(context, owner=owner, session_id=session_id, lease=lease, turn_id=lease.turn_id)
+        with pytest.raises(ToolPipelineError) as error:
+            await pipeline.execute("indexer.present_candidates", {
+                "resource_candidates_ref": view["ref"], "positions": [1],
+            }, context=context)
+        assert error.value.code == "reference_invalid"
+    asyncio.run(exercise())
+
+
+def test_cloud_remaining_resource_search_has_no_cards_without_relevant_selection(store):
+    from app.agent.kernel.adapters import TurnViewBuilder
+    from app.agent.kernel.public_view import public_conversation_messages
+
+    class ResearchModel:
+        def __init__(self):
+            self.requests = []
+
+        async def stream(self, request, *, cancellation):
+            self.requests.append(request)
+            if len(self.requests) <= 2:
+                yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(
+                    f"search-{len(self.requests)}", "indexer.search_resources",
+                    {"title": "狐妖小红娘" if len(self.requests) == 1 else "Fox Spirit Matchmaker"},
+                ))
+                yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+            else:
+                yield ModelEvent(ModelEventType.TEXT_DELTA, text="本次未找到 S01E168～S01E183 的匹配资源。已有命中仅包含旧集，不作为补缺候选。")
+                yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+
+    async def exercise():
+        model = ResearchModel()
+        session, _, states = _runtime(store, model=model)
+        lease, _ = await states.begin_turn(owner=OWNER, session_id=SESSION, request_id="cloud-observation")
+        await states.commit(lease, conversation=[
+            {"role": "user", "content": "云盘根目录/狐妖小红娘缺少哪些集数？"},
+            {"role": "assistant", "content": "目录观察已有S01E01～167；需查找的范围是S01E168～183。"},
+        ])
+        template = _resources().data["items"][0]
+        old_episodes = [{**template, "result_id": f"fox-old-result-{episode:04d}",
+                         "title": f"狐妖小红娘.S01E{episode:03d}.2160p"} for episode in range(145, 157)]
+        searched = ToolResult(True, "success", "找到12项同名旧资源", data={"items": old_episodes})
+        searched.references.append(ToolReference("resource_candidates", safe_resource_snapshot(
+            searched, search_id=new_resource_search_id(),
+        )))
+        with patch(__name__ + "._resources", return_value=searched):
+            events = await _events(session.run(AgentInput(
+                message="帮我查找剩余资源",
+                owner=OWNER, session_id=SESSION,
+            )))
+        accumulator = TurnViewBuilder()
+        for event in events:
+            accumulator.apply(event)
+            if event.type is AgentEventType.TOOL_COMPLETED:
+                assert event.payload["result"]["candidate_view"] is None
+        view = accumulator.build()
+        assert view.status == "success"
+        assert "未找到" in view.answer and "S01E168" in view.answer
+        assert view.candidate_view is None
+        assert len(model.requests) == 3
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        restored = await current_candidate_view(state=state, store=store)
+        assert restored is None
+        messages = public_conversation_messages(state.conversation, candidate_view=restored)
+        assert not any(message.get("candidate_view") for message in messages)
+        assert any("未找到" in message["content"] for message in messages)
+    asyncio.run(exercise())
+
+
+def test_general_resource_search_can_explicitly_present_a_relevant_subset(store):
+    from app.agent.kernel.adapters import TurnViewBuilder
+    from app.agent.kernel.public_view import public_conversation_messages
+
+    class PickModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def stream(self, request, *, cancellation):
+            self.calls += 1
+            if self.calls == 1:
+                tool = ModelToolCall("search", "indexer.search_resources", {"title": "Example"})
+            elif self.calls == 2:
+                evidence = next(message.content for message in reversed(request.messages) if message.role == "tool")
+                refs = json.loads(evidence.partition("reference_arguments=")[2].splitlines()[0])
+                tool = ModelToolCall("present", "indexer.present_candidates", {**refs, "positions": [2]})
+            else:
+                yield ModelEvent(ModelEventType.TEXT_DELTA, text="已挑选第2个版本，可先预览，尚未下载。")
+                yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+                return
+            yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=tool)
+            yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
+
+    async def exercise():
+        session, _, states = _runtime(store, model=PickModel())
+        events = await _events(session.run(AgentInput(message="找Example资源，挑选合适的版本", owner=OWNER, session_id=SESSION)))
+        builder = TurnViewBuilder()
+        for event in events:
+            builder.apply(event)
+        result = builder.build()
+        assert result.status == "success"
+        assert result.approval is None
+        assert result.candidate_view["explicit_selection"] is True
+        assert [item["position"] for item in result.candidate_view["items"]] == [2]
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        restored = await current_candidate_view(state=state, store=store)
+        messages = public_conversation_messages(state.conversation, candidate_view=restored)
+        assert sum(bool(message.get("candidate_view")) for message in messages) == 1
+        assert "尚未下载" in result.answer
     asyncio.run(exercise())

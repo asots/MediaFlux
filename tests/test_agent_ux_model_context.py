@@ -159,7 +159,11 @@ def test_real_resource_dto_reaches_next_model_request_without_business_field_los
     assert "candidate_view" not in actual and "selection" not in content
     assert_private_absent(content)
     assert "result_id" not in json.dumps(public)
-    assert public["candidate_view"]["selection_ref"] not in content
+    if kind == "search":
+        assert public["candidate_view"] is None
+        assert "candidate_numbers=" in suffix
+    else:
+        assert public["candidate_view"]["selection_ref"] not in content
     data = actual["data"]
     if kind == "search":
         assert data["page"] == 2 and data["has_more"] is True
@@ -251,5 +255,7 @@ def test_model_next_request_still_respects_projector_length_budget(has_refs):
     assert len(encoded) <= maximum
     # 继承原协议：JSON 预算之外仅追加一个资源引用的有界 suffix，绝不追加大卡片 DTO。
     assert len(content) <= maximum + 512
-    assert bool(suffix) is has_refs and bool(public["candidate_view"]) is has_refs
+    assert bool(suffix) is has_refs
+    assert public["candidate_view"] is None
+    assert ("candidate_numbers=" in suffix) is has_refs
     assert "candidate_view" not in content and "selection" not in content
