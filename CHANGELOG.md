@@ -4,6 +4,42 @@
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-09-19
+
+### Added
+- 媒体发现新增经过核验的动漫日历，并可通过 Agent 查询；日历卡片沿用资源展示模式（[`0dbfb99`](https://github.com/li88iioo/MediaFlux/commit/0dbfb99268881ed248e4272f3c81c7113febe7d8)、[`d2318f4`](https://github.com/li88iioo/MediaFlux/commit/d2318f46d9fa313c0ea4460b3f7aa1bb27ace207)）。
+- Agent 支持一次核对多部剧集的真实媒体库存与已播缺集，并将多作品资源候选带入同一批次预检和确认（[`4b5a484`](https://github.com/li88iioo/MediaFlux/commit/4b5a48460565819d5be4b7d5e4309ab48f6eb512)、[`6fdf6ef`](https://github.com/li88iioo/MediaFlux/commit/6fdf6efeb81d57f7cb767c23c5c2b5b34e6ffee4)）。
+- 增加复杂季集编号的受限研究能力、统一光鸭剧集命名计划，以及复用现有识别器的文件名预览工具；研究结果仍需证据与确认（[`9b05516`](https://github.com/li88iioo/MediaFlux/commit/9b05516769a32ced0547088ec7c740f579317d5d)、[`5622798`](https://github.com/li88iioo/MediaFlux/commit/5622798f1c0f19b5dedaef59f1fd010eb4cf3fe9)、[`30bc181`](https://github.com/li88iioo/MediaFlux/commit/30bc181794b1b7281acf716f2486bb4541c43ff5)）。
+- 设置页显示经实际认证核验的豆瓣 dbcl2 Cookie 状态；失败原因与未能确认状态不会被当成有效登录（[`2045ddc`](https://github.com/li88iioo/MediaFlux/commit/2045ddc569f0eae076f7b7239e1e4e84b06ff429)）。
+
+### Changed
+- 发布格式教学保留后端与 Agent 的确认后复用能力，移除独立前端教学工作台和聊天输入框教学按钮，避免重复入口（[`fb985a3`](https://github.com/li88iioo/MediaFlux/commit/fb985a32a99055094527fd829772b2171fab8e96)、[`c7689eb`](https://github.com/li88iioo/MediaFlux/commit/c7689eb3623371e54ef00252d812431c6b8af059)、[`2120fb2`](https://github.com/li88iioo/MediaFlux/commit/2120fb24bcc79574316e2c97fc107203e1c4a5f6)、[`bbb37ec`](https://github.com/li88iioo/MediaFlux/commit/bbb37ec0df330509a84c881bb619f5948f287eee)）。
+- 确认按钮统一作为任务授权继续点：Web 与 Telegram 在确认后接回同一会话执行循环，并核对真实工具回执，不把“任务已启动”当成整个请求已完成（[`2284bc5`](https://github.com/li88iioo/MediaFlux/commit/2284bc5c85b5417e6df4c782885f304a3af85219)、[`f9453db`](https://github.com/li88iioo/MediaFlux/commit/f9453db6f2678f51eb18c607c43502121771452c)、[`fbed218`](https://github.com/li88iioo/MediaFlux/commit/fbed218c8a110d6f272aecd08538fbb7bcafb927)）。
+- 云盘媒体清洗与目录迁移可合并进一次确认；普通移动不再重复改名，上传经同一可核验任务链路完成（[`1315f66`](https://github.com/li88iioo/MediaFlux/commit/1315f66ce687e1d15c2da17f055bbca0f1936d80)、[`634fd1b`](https://github.com/li88iioo/MediaFlux/commit/634fd1b9c9fd3ad12180182a096db362efb987d7)、[`caa9611`](https://github.com/li88iioo/MediaFlux/commit/caa96115d783511cf3456f0f47e95d9a54001b0e)）。
+- 统一云盘文件变更的 STRM 联动，只校准受影响的已配置来源；空目录创建和无关目录操作不触发媒体同步，同时保留原大批量改名能力（[`76cd962`](https://github.com/li88iioo/MediaFlux/commit/76cd9622b77273a4c23d998aba7a1370f71cdc14)、[`1437e51`](https://github.com/li88iioo/MediaFlux/commit/1437e51da5ac43a93f6671d81d41017e6961d13b)）。
+- 本地整理只保留持久执行链，任务与下载回执原子提交；共享目录遍历、目标批量快照和同次预览的源季集证据，减少重复解析与读取（[`d59e03e`](https://github.com/li88iioo/MediaFlux/commit/d59e03ef918e1fc1b0829a5fc4392e83700694d3)、[`4605f60`](https://github.com/li88iioo/MediaFlux/commit/4605f60680d655d0eea6028a9fecc941055ac461)、[`f1ddec2`](https://github.com/li88iioo/MediaFlux/commit/f1ddec2d3e904e231cc73a0c138907750c4f2b93)、[`812ea8d`](https://github.com/li88iioo/MediaFlux/commit/812ea8d7f5334f21dbac41b320f7a7e4c760c3cf)、[`609900a`](https://github.com/li88iioo/MediaFlux/commit/609900a6442e976315c3dbbc68900df161faa281)）。
+- 收敛数据库启动恢复与迁移入口、RSS 下载提交、订阅搜索诊断、播放 GET/HEAD 入口和 STRM 索引清理；移除未使用的发布/维护及通知续租接口（[`d06515f`](https://github.com/li88iioo/MediaFlux/commit/d06515f38d0ce72edd3b5a5e3f4ad5d12dab15cf)、[`d67968b`](https://github.com/li88iioo/MediaFlux/commit/d67968b287fb827ac3bd706e3e22d662ea1f88b7)、[`104f81b`](https://github.com/li88iioo/MediaFlux/commit/104f81b3e734d434fe5287d6ec70416f95756bbb)、[`73dfbd5`](https://github.com/li88iioo/MediaFlux/commit/73dfbd521b2bb3a2cffc638dc3b6bee50dc1a084)、[`cb3b1c8`](https://github.com/li88iioo/MediaFlux/commit/cb3b1c8f8af32f5c3a28ecb1a548b377e51fe180)、[`8412e11`](https://github.com/li88iioo/MediaFlux/commit/8412e119894d50615c5619b08cc91403c783b71f)、[`a904ad9`](https://github.com/li88iioo/MediaFlux/commit/a904ad9f30e975eceb1bd2a09766fe302ed942a8)、[`310ff76`](https://github.com/li88iioo/MediaFlux/commit/310ff763bc7743002888e3f750e08a527c54bab7)）。
+
+### Fixed
+- 修复 GM-Team 等分类双语标题、发布组季号/总集号、特别篇和正片混组；数字前缀番号、显式 TV 映射尾集号和人工季集映射不再被错误清洗或覆盖（[`e06f049`](https://github.com/li88iioo/MediaFlux/commit/e06f0492c9f31c0cdd0cbf665495ddbb4391cd27)、[`4ac9ba9`](https://github.com/li88iioo/MediaFlux/commit/4ac9ba9a10155444f983cdba601a77609d4151f7)、[`74e6a93`](https://github.com/li88iioo/MediaFlux/commit/74e6a93b654707be5601fbaa45a1200500af3aea)、[`5b69c9e`](https://github.com/li88iioo/MediaFlux/commit/5b69c9e832c5d152acb1d22960226444ec9eadb8)、[`868751f`](https://github.com/li88iioo/MediaFlux/commit/868751fcbfdcb89e960d101bcee73cf9ac1718e1)、[`17f69d0`](https://github.com/li88iioo/MediaFlux/commit/17f69d01395b25df1aa8857562f58b425b5a2cae)）。
+- 修复 Agent 工具预算耗尽或取消时丢失已完成查询结果、不完整模型流被当作成功，以及续问使用陈旧库存；保留逐项事实和未核实结论（[`8e7ee55`](https://github.com/li88iioo/MediaFlux/commit/8e7ee559e11e25c2af375b20a9d10fa87d6c9ed8)、[`dd577f8`](https://github.com/li88iioo/MediaFlux/commit/dd577f8ff58c5537f8b7505122819dc0627fe928)、[`d5c01fb`](https://github.com/li88iioo/MediaFlux/commit/d5c01fb72af309c1c97e4abebec72c6951b21efc)、[`df94759`](https://github.com/li88iioo/MediaFlux/commit/df947591ef0641068d4ddaa63d7ad258dfbadf08)、[`4b8ab5e`](https://github.com/li88iioo/MediaFlux/commit/4b8ab5e99319150011299bcc97fc9139d65a7470)、[`8ea6124`](https://github.com/li88iioo/MediaFlux/commit/8ea6124eb5a55914b76e19599bcb673ac2497856)）。
+- 只有经核验覆盖缺集的候选才生成补缺推荐；无可操作结果时不再显示空的资源批选卡片和下载按钮，正常文本回答仍保留（[`6438b87`](https://github.com/li88iioo/MediaFlux/commit/6438b8717fcfee4a40b4b1d21cd93d4d3a99e367)、[`bbf327c`](https://github.com/li88iioo/MediaFlux/commit/bbf327ccef03c3b2331a0740dcf3db7dd480aa0c)）。
+- Telegram 提交失败与 Agent 后续状态查询共享安全失败原因，例如光鸭“文件违规”；部分成功、结果未知、重复提交和普通等待状态保持区分（[`e58fe73`](https://github.com/li88iioo/MediaFlux/commit/e58fe73f273e98f638c5d3750ae465f5bf531423)、[`16abdaa`](https://github.com/li88iioo/MediaFlux/commit/16abdaa87b5058750c83c0d60f6c2149ac4ebe56)、[`3ef98d6`](https://github.com/li88iioo/MediaFlux/commit/3ef98d692cff928186165af4a728dd83f77c7d60)、[`e67ceca`](https://github.com/li88iioo/MediaFlux/commit/e67ceca764c1e7d703471a1a5dea7853bae82f78)）。
+- 修复确认过期/拒绝反馈、流结束与已提交终态不一致，以及 Telegram 取消任务后执行容量未释放；继续保留人工审查窗口（[`9e6191e`](https://github.com/li88iioo/MediaFlux/commit/9e6191eb6f320250e902209d09dd95d14f4ef7ce)、[`2f84dfe`](https://github.com/li88iioo/MediaFlux/commit/2f84dfefd32ee4620f9cc2245537dab2313c9994)、[`af23751`](https://github.com/li88iioo/MediaFlux/commit/af237518ce6deac2f21ac083e42afce677947e04)、[`e3bc984`](https://github.com/li88iioo/MediaFlux/commit/e3bc984a571a7c261e478e9953064e017f589535)）。
+- 云盘进程中断后，持久队列与签名变更计划统一收束终态；未知远端结果保留人工核对，不重放已完成操作、不让计划永久占用活动配额（[`1437e51`](https://github.com/li88iioo/MediaFlux/commit/1437e51da5ac43a93f6671d81d41017e6961d13b)）。
+- RSS 不再接受实际无法调度的新 cron 配置，明确提示使用刷新间隔；历史 cron 数据和旧客户端原值回传无损保留（[`c8fe8c4`](https://github.com/li88iioo/MediaFlux/commit/c8fe8c45c92c0a71a51bd6955fb9adfda5626854)）。
+- 修复媒体发现的标题查询与 TMDB 默认季选择、整理异常跳转和 qB 重试，并改善设置说明提示、滚动反馈和页面对齐（[`537dcd4`](https://github.com/li88iioo/MediaFlux/commit/537dcd48eb0bb7e83630de8f0e1214bceb1f7254)、[`7951fb3`](https://github.com/li88iioo/MediaFlux/commit/7951fb3ab74a64aad78d6f33fbe9a91fd489e0ac)、[`809611d`](https://github.com/li88iioo/MediaFlux/commit/809611d83dd85c1090d3396aef5a0715bc255a9e)、[`1a8cecf`](https://github.com/li88iioo/MediaFlux/commit/1a8cecfe46f85810a74d8ffbf05a169d23bf4f57)）。
+
+### 升级说明
+- 本版本数据库由 schema29 → 31；从 v0.1.12 升级时会自动执行连续迁移，保留已有配置、任务、历史记录与发布格式规则。
+- 升级前请停止服务，对数据目录和 SQLite 数据库进行完整离线备份；使用 WAL 模式时不要在运行中仅复制主 `.db` 文件。
+- 回退旧版本前必须停止服务，并按离线恢复流程恢复升级前数据库；不要直接让 schema29 程序打开 schema31 数据库。
+- 现有云盘大批量改名计划及通用文件变更计划保持各自原有签名与执行约束；中断且远端结果未知的任务需要人工核对，不自动重放写操作。
+
+### 已知限制
+- 发布组季集映射、TMDB 已播记录与索引站资源发布时间可能不一致；无足够证据时保持待核对，不承诺任意发布格式自动识别。
+- 新增 STRM 来源范围控制不会把任意移动/删除简化为仅更新新路径；需要校准时仍对受影响来源执行完整核对，避免遗留旧路径。
+
 ## [0.1.12] - 2026-09-09
 
 ### Added
@@ -276,7 +312,8 @@ MediaFlux 首个正式开源版本发布！致力于为家庭媒体中心提供�
 - **本地运行与零遥测**：100% 独立运行在用户设备，无任何远程遥测或数据上报，所有凭据与数据库均保存在本地。
 - **严格安全防护**：全局 CSRF 防护、Session 防篡改、首启绑定本地回环与生产密钥强制校验。
 
-[Unreleased]: https://github.com/li88iioo/MediaFlux/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/li88iioo/MediaFlux/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/li88iioo/MediaFlux/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/li88iioo/MediaFlux/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/li88iioo/MediaFlux/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/li88iioo/MediaFlux/compare/v0.1.9...v0.1.10
