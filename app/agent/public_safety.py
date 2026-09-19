@@ -213,6 +213,7 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "provider.change.preview": "Provider 写计划预览",
     "provider.job.status": "Provider 写计划状态",
     "provider.query": "Provider 实时查询",
+    "recognition.inspect_filenames": "文件名样本只读解析",
     "recognition.preview_release_format": "发布格式教学预览",
     "recognition.save_release_format": "保存发布格式教学",
     "recognition.set_rule_enabled": "识别规则启停",

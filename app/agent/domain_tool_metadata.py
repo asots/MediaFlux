@@ -23,6 +23,11 @@ PREFIX_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
 }
 
 TOOL_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
+    "recognition.inspect_filenames": (
+        "真实文件名", "发布格式样本", "系统怎样识别", "文件名清洗", "清洗标题", "季和集",
+        "季号", "集号", "中文英文标题", "发布组", "技术字段", "解析依据", "只读批量预览",
+        "内置解析器", "不保存规则", "不要移动或改名", "目录上下文",
+    ),
     "recognition.preview_release_format": (
         "发布格式教学", "识别错误", "识别错了", "集号识别错", "教你识别", "修订版", "字幕组格式", "先预览不要保存",
     ),
