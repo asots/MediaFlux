@@ -106,10 +106,21 @@ class FakeStore:
         return True
 
 
+class FakeEffectStore:
+    def __init__(self):
+        self.active = True
+        self.calls = []
+
+    def is_active(self, **scope):
+        self.calls.append(dict(scope))
+        return self.active
+
+
 class FakeLifecycle:
     def __init__(self):
         self.calls = []
         self.error = None
+        self.effect_store = FakeEffectStore()
 
     async def reset(self, *, owner, session_id):
         self.calls.append(("reset", owner, session_id))
@@ -279,6 +290,30 @@ class AgentKernelApiTests(unittest.TestCase):
         self.assertEqual(
             payload["pending_approval"]["confirmation"]["action"], "暂停下载任务"
         )
+        self.assertEqual(
+            self.lifecycle.effect_store.calls,
+            [{
+                "owner": "webk:v1:" + "a" * 64,
+                "session_id": "session_1234567890",
+                "generation": 4,
+                "plan_id": "plan-restore-0001",
+            }],
+        )
+
+    def test_session_restore_does_not_revive_consumed_or_expired_plan(self):
+        self.runtime.store.state = types.SimpleNamespace(
+            generation=4, conversation=[], pending_effect_plan_id="plan-stale-0001"
+        )
+        self.runtime.store.events = [{
+            "type": "effect.approval_required",
+            "payload": {"plan": {"plan_id": "plan-stale-0001"}},
+        }]
+        self.lifecycle.effect_store.active = False
+
+        response = self.client.get("/api/agent/sessions/session_1234567890")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json()["pending_approval"])
 
     def test_session_restore_filters_intermediate_tool_turns_and_uses_public_result(self):
         self.runtime.store.state = types.SimpleNamespace(

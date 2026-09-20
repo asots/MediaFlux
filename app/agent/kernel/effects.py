@@ -94,6 +94,15 @@ class EffectPlanStore(Protocol):
         plan_id: str,
     ) -> EffectPlan | None: ...
 
+    def is_active(
+        self,
+        *,
+        owner: str,
+        session_id: str,
+        generation: int,
+        plan_id: str,
+    ) -> bool: ...
+
 
 class ConfirmationEffectPlanStore:
     """在既有一次性 ConfirmationStore 之上提供 Kernel EffectPlan。"""
@@ -250,6 +259,40 @@ class ConfirmationEffectPlanStore:
             session_id=session_id,
             generation=generation,
         )
+
+    def is_active(
+        self,
+        *,
+        owner: str,
+        session_id: str,
+        generation: int,
+        plan_id: str,
+    ) -> bool:
+        """只读核对冻结计划仍有效；恢复 UI 时不得仅相信会话指针。"""
+        try:
+            scoped_owner = self._scoped_owner(owner, session_id)
+        except EffectPlanError:
+            return False
+        ticket = next(
+            (
+                item
+                for item in self.store.list_active_tickets(owner=scoped_owner)
+                if secrets.compare_digest(item.confirmation_id, str(plan_id or ""))
+            ),
+            None,
+        )
+        if ticket is None:
+            return False
+        try:
+            self._restore_plan(
+                ticket,
+                owner=owner,
+                session_id=session_id,
+                generation=generation,
+            )
+        except EffectPlanError:
+            return False
+        return True
 
     def cancel(
         self,

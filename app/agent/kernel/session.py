@@ -397,10 +397,12 @@ class AgentSession:
             safe_public_content = str(public_content or "").strip()
             if safe_public_content:
                 item["public_content"] = safe_public_content
-            updates = (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),)
+            updates: tuple[StateUpdate, ...] = ()
             if candidate_result:
                 item["candidate_result_ref"] = candidate_result["ref"]
-                updates += (StateUpdate("metadata.ux_candidate_result", dict(candidate_result)),)
+                updates = (
+                    StateUpdate("metadata.ux_candidate_result", dict(candidate_result)),
+                )
             conversation.append(item)
             try:
                 state = await self.state_store.commit(

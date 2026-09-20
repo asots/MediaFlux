@@ -198,6 +198,12 @@ class EffectPlanStoreSafetyTests(unittest.TestCase):
                 generation=1,
                 plan_id=old.plan_id,
             )
+        self.assertTrue(store.is_active(
+            owner="owner", session_id="session", generation=2, plan_id=new.plan_id,
+        ))
+        self.assertFalse(store.is_active(
+            owner="owner", session_id="session", generation=1, plan_id=new.plan_id,
+        ))
         claimed = store.claim(
             owner="owner",
             session_id="session",
@@ -205,6 +211,9 @@ class EffectPlanStoreSafetyTests(unittest.TestCase):
             plan_id=new.plan_id,
         )
         self.assertEqual(claimed.arguments, {"value": 2})
+        self.assertFalse(store.is_active(
+            owner="owner", session_id="session", generation=2, plan_id=new.plan_id,
+        ))
 
     def test_stale_generation_is_rejected_before_ticket_consumption(self) -> None:
         store = ConfirmationEffectPlanStore(ConfirmationStore())

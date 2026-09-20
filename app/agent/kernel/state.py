@@ -110,17 +110,40 @@ def publication_matches(
 
 
 def publication_commit_matches(
-    lease: PublicationLease, state: SessionState,
-    conversation: Sequence[Mapping[str, Any]] | None, updates: Sequence[StateUpdate],
+    lease: PublicationLease,
+    state: SessionState,
+    conversation: Sequence[Mapping[str, Any]] | None,
+    updates: Sequence[StateUpdate],
 ) -> bool:
     """已原子领到当前待确认票据的下一步可接管发布权，旧读回合仍被隔离。"""
-    claim = conversation is None and len(updates) == 1 and updates[0].mode == "set" and updates[0].key == "metadata.confirmed_publication"
+    claim = (
+        conversation is None
+        and len(updates) == 2
+        and updates[0].mode == "set"
+        and updates[0].key == "metadata.confirmed_publication"
+        and updates[1].mode == "clear_if_equals"
+        and updates[1].key == "pending_effect_plan_id"
+    )
     value = updates[0].value if claim else None
-    handoff = isinstance(value, Mapping) and bool(state.pending_effect_plan_id) and value == {
-        "generation": lease.generation, "turn_id": lease.turn_id, "plan_id": state.pending_effect_plan_id,
-    }
-    return publication_matches(lease, generation=state.generation,
-        confirmed=None if handoff or candidate_metadata_only(conversation, updates) else state.metadata.get("confirmed_publication"))
+    handoff = (
+        isinstance(value, Mapping)
+        and bool(state.pending_effect_plan_id)
+        and str(updates[1].value or "") == state.pending_effect_plan_id
+        and value
+        == {
+            "generation": lease.generation,
+            "turn_id": lease.turn_id,
+            "plan_id": state.pending_effect_plan_id,
+        }
+    )
+    confirmed = None if handoff or candidate_metadata_only(
+        conversation, updates
+    ) else state.metadata.get("confirmed_publication")
+    return publication_matches(
+        lease,
+        generation=state.generation,
+        confirmed=confirmed,
+    )
 
 
 @dataclass(frozen=True, slots=True)

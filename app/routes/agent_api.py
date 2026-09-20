@@ -339,18 +339,24 @@ async def get_session(request: Request, session_id: str):
     require_api_login(request)
     try:
         normalized = _session_id(session_id)
-        state = await get_agent_kernel_runtime().store.load(
-            owner=_owner(request),
-            session_id=normalized,
-        )
+        runtime = get_agent_kernel_runtime()
+        owner = _owner(request)
+        state = await runtime.store.load(owner=owner, session_id=normalized)
         candidate_view = await current_candidate_view(
-            state=state, store=get_agent_kernel_runtime().store,
+            state=state, store=runtime.store,
         )
         messages = public_conversation_messages(state.conversation, candidate_view=candidate_view)
         pending_approval = None
-        if state.pending_effect_plan_id:
-            events = await get_agent_kernel_runtime().store.list_events(
-                owner=_owner(request),
+        pending_plan_id = state.pending_effect_plan_id
+        if pending_plan_id and await asyncio.to_thread(
+            runtime.lifecycle.effect_store.is_active,
+            owner=owner,
+            session_id=normalized,
+            generation=state.generation,
+            plan_id=pending_plan_id,
+        ):
+            events = await runtime.store.list_events(
+                owner=owner,
                 session_id=normalized,
                 limit=200,
             )
@@ -364,7 +370,7 @@ async def get_session(request: Request, session_id: str):
                 plan = payload.get("plan") if isinstance(payload, dict) else None
                 if (
                     isinstance(plan, dict)
-                    and str(plan.get("plan_id") or "") == state.pending_effect_plan_id
+                    and str(plan.get("plan_id") or "") == pending_plan_id
                 ):
                     pending_approval = {
                         "plan_id": str(plan.get("plan_id") or ""),

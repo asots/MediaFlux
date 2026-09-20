@@ -1907,6 +1907,12 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await asyncio.wait_for(entered.wait(), timeout=1)
+        executing = await state.load(owner="owner", session_id="session")
+        self.assertEqual(executing.pending_effect_plan_id, "")
+        self.assertEqual(
+            executing.metadata.get("confirmed_publication", {}).get("plan_id"),
+            plan_id,
+        )
         self.assertFalse(await session.cancel(owner="owner", session_id="session"))
         blocked = await collect(
             session.run(
@@ -2044,7 +2050,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         for _ in range(100):
             current = await state.load(owner="owner", session_id="session")
-            if not session._detached_tasks and not current.pending_effect_plan_id:
+            if lifecycle.completed_plans and not session._detached_tasks:
                 break
             await asyncio.sleep(0.01)
         current = await state.load(owner="owner", session_id="session")

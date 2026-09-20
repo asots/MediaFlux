@@ -1,12 +1,11 @@
 """发布链 A：TG 下载结果隔离与 Agent pending 原子清理回归。"""
 from __future__ import annotations
 
-import tests  # noqa: F401 - 先隔离运行目录，禁止读取真实配置/数据库。
-
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import tests  # noqa: F401 - 先隔离运行目录，禁止读取真实配置/数据库。
 from app import database as db
 from app.agent.confirmation import ConfirmationStore
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
@@ -297,32 +296,41 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self._pending(state, context), "")
                 execute.assert_called_once()
 
-    async def test_same_generation_replacement_between_cleanup_request_and_commit_is_preserved(self):
+    async def test_same_generation_replacement_during_cleanup_is_preserved(self):
         for kind in ("memory", "sqlite"):
             for operation in ("cancel", "confirm"):
                 with self.subTest(store=kind, operation=operation):
                     state, context, pipeline, old_id, _, execute = await self._fixture(kind)
-                    commit = state.commit
-                    replacements = []
-                    async def publish_new_plan_before_commit(lease, *, conversation=None, updates=()):
-                        if any(update.key == "pending_effect_plan_id" for update in updates) and not replacements:
-                            new = pipeline.effect_store.freeze(owner=context.owner, session_id=context.session_id,
-                                generation=lease.generation, tool_name="downloads.submit", effect=ToolEffect.WRITE,
-                                arguments={}, prepared=PreparedEffect(preview={"summary": "new preview"},
-                                                                    snapshot_fingerprint="new-fixed"))
-                            replacements.append(new.plan_id)
-                            # 确定性交错：在原清理提交真正读取/应用状态前，同代次先写新计划。
-                            await commit(lease, updates=(StateUpdate("pending_effect_plan_id", new.plan_id),))
-                        return await commit(lease, conversation=conversation, updates=updates)
+                    commit, replacements = state.commit, []
+
+                    async def publish_new_plan_before_commit(
+                        lease, *, conversation=None, updates=(), _commit=commit,
+                        _context=context, _pipeline=pipeline, _replacements=replacements,
+                    ):
+                        if any(update.key == "pending_effect_plan_id" for update in updates) and not _replacements:
+                            new = _pipeline.effect_store.freeze(
+                                owner=_context.owner, session_id=_context.session_id,
+                                generation=lease.generation, tool_name="downloads.submit",
+                                effect=ToolEffect.WRITE, arguments={},
+                                prepared=PreparedEffect(
+                                    preview={"summary": "new preview"}, snapshot_fingerprint="new-fixed",
+                                ),
+                            )
+                            _replacements.append(new.plan_id)
+                            await _commit(lease, updates=(StateUpdate(
+                                "pending_effect_plan_id", new.plan_id),))
+                        return await _commit(lease, conversation=conversation, updates=updates)
+
                     with patch.object(state, "commit", side_effect=publish_new_plan_before_commit):
                         if operation == "cancel":
                             self.assertTrue(await pipeline.cancel_effect(old_id, context=context))
                         else:
                             await pipeline.execute_confirmed(old_id, context=context)
-                    self.assertEqual(len(replacements), 1)
                     self.assertEqual(await self._pending(state, context), replacements[0])
-                    claimed = pipeline.effect_store.claim(owner=context.owner, session_id=context.session_id,
-                        generation=context.lease.generation, plan_id=replacements[0])
+                    claimed = pipeline.effect_store.claim(
+                        owner=context.owner, session_id=context.session_id,
+                        generation=context.lease.generation, plan_id=replacements[0],
+                    )
                     self.assertEqual(claimed.plan_id, replacements[0])
                     self.assertEqual(execute.call_count, int(operation == "confirm"))
 

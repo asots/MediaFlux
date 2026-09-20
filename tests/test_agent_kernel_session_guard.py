@@ -502,7 +502,7 @@ def test_worker_owned_cancellation_never_spins_or_leaks_scope(mode):
         process.close()
 
 
-@pytest.mark.parametrize("phase", ["pending_clear", "receipt", "reference", "journal"])
+@pytest.mark.parametrize("phase", ["receipt", "reference", "journal"])
 def test_cancellation_during_confirmed_finalization_keeps_receipt_and_terminal_fact(isolated_chain, phase):
     """R2：写后任一持久化等待点取消，不能留下 submitted 但无成功回执。"""
     from app.agent.models import ToolReference

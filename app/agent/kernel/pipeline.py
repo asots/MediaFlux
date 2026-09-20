@@ -22,13 +22,13 @@ from .effects import (
     PreparedEffect,
 )
 from .projection import DefaultProjector, ReferenceValue, ToolOutcome
-from .session_guard import guarded_state_call, session_scope_guard
 from .references import InMemoryReferenceStore, ReferenceError, ReferenceStore
+from .session_guard import guarded_state_call, session_scope_guard
 from .state import (
     CancellationToken,
     PublicationLease,
-    SessionStateStore,
     SessionBusyError,
+    SessionStateStore,
     StalePublicationError,
     StateUpdate,
 )
@@ -581,10 +581,24 @@ class ToolPipeline:
         try:
             # 只有真实领到票据才接管同 generation 的发布权。该标记在原状态
             # JSON 内持久化，使锁释放/进程结束后旧读回合仍无法覆盖确认回执。
-            await self.state_store.commit(context.lease, updates=(StateUpdate(
-                "metadata.confirmed_publication",
-                {"generation": context.lease.generation, "turn_id": context.lease.turn_id, "plan_id": plan.plan_id},
-            ),))
+            await self.state_store.commit(
+                context.lease,
+                updates=(
+                    StateUpdate(
+                        "metadata.confirmed_publication",
+                        {
+                            "generation": context.lease.generation,
+                            "turn_id": context.lease.turn_id,
+                            "plan_id": plan.plan_id,
+                        },
+                    ),
+                    StateUpdate(
+                        "pending_effect_plan_id",
+                        plan.plan_id,
+                        mode="clear_if_equals",
+                    ),
+                ),
+            )
             await context.report_progress({
                 "plan_id": plan_id, "kind": "confirmed_effect", "tool": plan.tool_name,
             })
@@ -656,10 +670,8 @@ class ToolPipeline:
         outcome = await self._materialize_refs(
             self.projector.project(value), context=context
         )
-        updates = tuple(outcome.state_updates) + (
-            StateUpdate("pending_effect_plan_id", plan.plan_id, mode="clear_if_equals"),
-        )
-        outcome = replace(outcome, state_updates=updates, effect_plan=plan)
+        updates = tuple(outcome.state_updates)
+        outcome = replace(outcome, effect_plan=plan)
         await self._commit_updates(context.lease, updates)
         return PipelineResult(
             tool=tool,
