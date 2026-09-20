@@ -11,10 +11,6 @@ import pytest
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.public_view import (
-    format_public_result,
-    public_conversation_messages,
-)
 from app.agent.kernel.references import ReferenceError
 from app.agent.kernel.state import AgentInput, SelectionInvalidError
 from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
@@ -25,6 +21,10 @@ from app.agent.kernel.ux_selection import (
     normalize_selection,
 )
 from app.agent.models import ToolResult
+from app.agent.public_view import (
+    format_public_result,
+    public_conversation_messages,
+)
 from app.bot import agent_adapter, agent_candidates
 from tests import test_agent_ux_backend as ux
 from tests.test_agent_kernel_telegram_adapter import TELEBOT, Call, FakeBot, Message

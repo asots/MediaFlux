@@ -13,14 +13,21 @@ from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.public_view import public_conversation_messages
 from app.agent.kernel.transports import QueryEnvelope
 from app.agent.kernel.ux_selection import current_candidate_view
+from app.agent.public_view import public_conversation_messages
 from app.indexers.models import ResolvedDownload
 from app.modules import download_dispatcher as dispatcher
 from tests.support import isolated_test_database
 from tests.test_agent_ux_backend import (
-    OWNER, SECRET, SESSION, _events, _publish_candidates, _resources, _runtime, _selection,
+    OWNER,
+    SECRET,
+    SESSION,
+    _events,
+    _publish_candidates,
+    _resources,
+    _runtime,
+    _selection,
 )
 
 
@@ -158,6 +165,7 @@ def test_duplicate_confirmation_worker_cannot_overwrite_committed_success(isolat
 def test_provider_episode_inventory_preserves_declared_budget_and_truthful_completeness(isolated_chain, count):
     """正常/边界：真实媒体 transport 的完整清单不可在 Gateway 后静默只剩 32 集。"""
     from contextlib import nullcontext
+
     from app.agent.models import ToolContext
     from app.agent.provider_gateway import ProviderGateway
     from app.agent.provider_models import ProviderProfileView
@@ -222,7 +230,7 @@ def test_normal_preview_persists_confirmation_without_creating_download(isolated
 @pytest.mark.parametrize("cloud_ok", [True, False])
 def test_batch_both_targets_survives_preconfirm_restart_and_duplicate_replay(isolated_chain, cloud_ok):
     """批量跨模块/重启：两候选两目标，重建 runtime 确认一次，重复不新增请求。"""
-    from app.agent.kernel.public_view import format_public_result
+    from app.agent.public_view import format_public_result
 
     gy, qb = isolated_chain
     gy.return_value = {"ok": cloud_ok, "task_id": "fake-gy"} if cloud_ok else {"ok": False, "error": "目标拒绝"}
@@ -258,11 +266,12 @@ def test_batch_both_targets_survives_preconfirm_restart_and_duplicate_replay(iso
 def test_provider_extended_list_keeps_later_selection_resolvable(isolated_chain):
     """正常跨模块：目录允许 100 项时，第 50 项必须可见并能解析为后续操作对象。"""
     from dataclasses import replace
+
     from app.agent.models import ToolContext
     from app.agent.provider_catalog import ProviderCatalog
     from app.agent.provider_gateway import ProviderGateway
     from app.agent.provider_models import ProviderPayload
-    from tests.test_agent_provider_gateway import _FakeTransport, _catalog
+    from tests.test_agent_provider_gateway import _catalog, _FakeTransport
 
     catalog = ProviderCatalog()
     for spec in _catalog().operations():

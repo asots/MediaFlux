@@ -1031,7 +1031,7 @@ def test_present_requires_a_live_reference_in_this_session(store, scope):
 
 def test_cloud_remaining_resource_search_has_no_cards_without_relevant_selection(store):
     from app.agent.kernel.adapters import TurnViewBuilder
-    from app.agent.kernel.public_view import public_conversation_messages
+    from app.agent.public_view import public_conversation_messages
 
     class ResearchModel:
         def __init__(self):
@@ -1090,7 +1090,7 @@ def test_cloud_remaining_resource_search_has_no_cards_without_relevant_selection
 
 def test_general_resource_search_can_explicitly_present_a_relevant_subset(store):
     from app.agent.kernel.adapters import TurnViewBuilder
-    from app.agent.kernel.public_view import public_conversation_messages
+    from app.agent.public_view import public_conversation_messages
 
     class PickModel:
         def __init__(self):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from app.agent.kernel.public_view import (
+from app.agent.public_view import (
     format_public_result,
     public_conversation_messages,
     public_result_state,

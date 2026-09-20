@@ -27,11 +27,15 @@ from app.agent.feature_gate import (
 from app.agent.kernel.adapters import ApprovalView, TurnView
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
 from app.agent.kernel.events import AgentEvent, AgentEventType
-from app.agent.kernel.public_view import format_public_result
-from app.agent.kernel.state import CancellationToken, SelectionInvalidError, SessionBusyError
+from app.agent.kernel.state import (
+    CancellationToken,
+    SelectionInvalidError,
+    SessionBusyError,
+)
 from app.agent.kernel.transports import EffectEnvelope, QueryEnvelope
 from app.agent.owner_routes import configured_telegram_user_ids
 from app.agent.public_safety import public_tool_label
+from app.agent.public_view import format_public_result
 from app.agent.rate_limit import agent_rate_limiter
 from app.bot.progress import TelegramProgress, send_typing
 from app.bot.telegram_markdown import (

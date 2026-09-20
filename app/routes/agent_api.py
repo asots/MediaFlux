@@ -15,7 +15,6 @@ from fastapi.responses import StreamingResponse
 from app import config
 from app.agent.feature_gate import is_agent_enabled
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
-from app.agent.kernel.public_view import public_conversation_messages
 from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import (
     EffectEnvelope,
@@ -25,6 +24,7 @@ from app.agent.kernel.transports import (
 from app.agent.kernel.ux_display import next_actions_view, session_display_patch
 from app.agent.kernel.ux_selection import current_candidate_view, normalize_selection
 from app.agent.owner_routes import web_kernel_owner
+from app.agent.public_view import public_conversation_messages
 from app.agent.rate_limit import agent_rate_limiter
 from app.agent.workspace_next_actions import summarize_workspace_next_actions
 from app.modules.web_secret import get_web_secret

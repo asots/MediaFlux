@@ -16,8 +16,8 @@ from app.agent.indexer_config_actions import (
     summarize_indexer_sites,
     verify_indexer_sites_write,
 )
-from app.agent.kernel.public_view import format_public_result
 from app.agent.models import Evidence, RiskLevel, ToolReference, ToolResult
+from app.agent.public_view import format_public_result
 from app.indexers.config import (
     build_indexer_site_updates,
     normalize_indexer_site_ids,

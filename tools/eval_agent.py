@@ -33,9 +33,9 @@ from app.agent.kernel.model import (
 )
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports import catalog_from_tool_specs
-from app.agent.kernel.public_view import public_result_state
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.public_view import public_result_state
 
 DEFAULT_FIXTURE = Path("tests/fixtures/agent_kernel_capability_cases.jsonl")
 DEFAULT_LIFECYCLE_FIXTURE = Path("tests/fixtures/agent_kernel_lifecycle_cases.jsonl")

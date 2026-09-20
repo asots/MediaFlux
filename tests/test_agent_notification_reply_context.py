@@ -15,9 +15,9 @@ from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelMessage
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
-from app.agent.kernel.public_view import public_conversation_messages
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput, InMemorySessionStateStore, SessionState
+from app.agent.public_view import public_conversation_messages
 from app.bot.agent_adapter import _reply_context
 
 NOTICE = (

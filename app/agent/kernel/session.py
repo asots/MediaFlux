@@ -13,6 +13,11 @@ from typing import Any, Protocol
 
 from app.agent.model_context_budget import bounded_model_messages
 from app.agent.public_safety import public_tool_label
+from app.agent.public_view import (
+    format_public_result,
+    public_result_state,
+    sanitize_confirmed_answer,
+)
 from app.concurrency import CrossLoopAsyncLock
 from app.sensitive_data import contains_sensitive_credential
 
@@ -33,11 +38,6 @@ from .pipeline import (
     ToolPipelineError,
 )
 from .provider_model import ModelProviderError
-from .public_view import (
-    format_public_result,
-    public_result_state,
-    sanitize_confirmed_answer,
-)
 from .session_guard import session_scope_guard
 from .state import (
     AgentInput,

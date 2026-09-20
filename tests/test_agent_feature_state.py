@@ -15,8 +15,8 @@ from app.agent.feature_actions import (
     prepare_feature_state_confirmation,
     verify_feature_state_write,
 )
-from app.agent.kernel.public_view import format_public_result
 from app.agent.models import Evidence, RiskLevel, ToolReference, ToolResult
+from app.agent.public_view import format_public_result
 from tests.agent_kernel_test_harness import (
     build_kernel_test_registry as build_tool_registry,
 )
