@@ -16,7 +16,6 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import suppress
 from contextvars import ContextVar, copy_context
-from functools import partial
 from typing import Any
 
 from app import config
@@ -35,10 +34,6 @@ from app.agent.owner_routes import configured_telegram_user_ids
 from app.agent.public_safety import public_tool_label
 from app.agent.rate_limit import agent_rate_limiter
 from app.bot.progress import TelegramProgress, send_typing
-from app.bot.telegram_compat import (
-    telegram_error_summary,
-    telegram_message_options,
-)
 from app.bot.telegram_markdown import (
     render_telegram_markdown,
     split_telegram_html,
@@ -48,7 +43,6 @@ from app.modules.telegram_write_confirmations import (
     TelegramWriteConfirmationError,
     get_telegram_write_confirmation_store,
 )
-from app.notifier import call_telegram_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +422,12 @@ class _TelegramEventObserver:
             self.model_round = _positive_int(event.payload.get("round"))
             self.model_text = ""
             self.last_stream = ""
-            await self._publish_status("正在规划下一步…")
+            status = (
+                "正在整理执行结果…"
+                if event.payload.get("phase") == "confirmed_synthesis"
+                else "正在规划下一步…"
+            )
+            await self._publish_status(status)
             return
 
         if event.type is AgentEventType.MODEL_DELTA:
@@ -717,12 +716,21 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         channel="telegram",
     )
     runtime = get_agent_kernel_runtime()
+    plan_verified = False
     if getattr(runtime, "store", None) is not None:
         try:
             state = asyncio.run(runtime.store.load(owner=owner, session_id=session_id))
             if state.pending_effect_plan_id != envelope.plan_id:
+                if getattr(call.message, "reply_markup", None) is not None:
+                    with suppress(Exception):
+                        bot.edit_message_reply_markup(
+                            call.message.chat.id,
+                            call.message.message_id,
+                            reply_markup=None,
+                        )
                 bot.answer_callback_query(call.id, "该计划已处理或被替代，请使用当前消息中的按钮。", show_alert=True)
                 return
+            plan_verified = True
         except Exception:  # noqa: BLE001 - 无法核对当前计划时不触发任何写入
             bot.answer_callback_query(call.id, "当前计划暂时无法核对，请稍后重试。", show_alert=True)
             return
@@ -747,6 +755,8 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         message_thread_id=getattr(call.message, "message_thread_id", None),
     )
     progress = _ExistingMessageProgress(bot, call.message)
+    if plan_verified:
+        progress.update("<b>Media Agent</b>\n正在核对确认计划，确认接管后将继续显示执行进度…")
     observer = _TelegramEventObserver(progress)
     try:
         view = asyncio.run(
@@ -756,16 +766,10 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
             )
         )
         if not view.effect_result and view.error_code in {"effect_in_progress", "confirmation_invalid", "confirmation_stale", "stale_generation"}:
-            # 未领票也必须告知原因；另发提示，不覆盖另一请求的进度或真实终态。
             notice = "⚠️ 这次确认未被接受\n" + _render_turn(view)
             notice += "\n\n请先查询任务状态；若尚未执行，请重新生成预览后确认。"
-            result, _value = call_telegram_delivery(partial(
-                bot.send_message, call.message.chat.id, notice,
-                parse_mode="HTML", **_thread_kwargs(call.message),
-                **telegram_message_options(bot.send_message),
-            ))
-            if not result.ok:
-                logger.warning("Telegram Agent 确认拒绝提示投递失败 %s", telegram_error_summary(result))
+            _settle_candidate_draft(owner, session_id, envelope.plan_id, notice)
+            progress.finish(notice, clear_reply_markup=True)
             return
         if view.approval is not None:
             receipt = render_telegram_markdown(format_public_result(view.effect_result)) if view.effect_result else ""

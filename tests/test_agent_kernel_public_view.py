@@ -6,6 +6,7 @@ import unittest
 from app.agent.kernel.public_view import (
     format_public_result,
     public_conversation_messages,
+    sanitize_confirmed_answer,
 )
 
 
@@ -103,6 +104,41 @@ class AgentKernelPublicViewTests(unittest.TestCase):
         self.assertIn("光鸭云盘", messages[0]["content"])
         self.assertNotIn("request_id", messages[0]["content"])
         self.assertNotIn("99", messages[0]["content"])
+
+    def test_confirmed_answer_drops_embedded_internal_receipt(self) -> None:
+        result = {
+            "ok": True,
+            "status": "accepted",
+            "summary": "本地媒体任务 1 已修正为 S02E12 并重新排队",
+            "data": {"operation": "remap_episode", "task_number": 1},
+        }
+        answer = (
+            "已确认操作的可信系统结果（不是待执行计划）：\n"
+            + json.dumps({**result, "evidence": [{"source": "sqlite:private"}]}, ensure_ascii=False)
+            + "\n\n### 处理完成\n系统正在自动归档。"
+        )
+
+        public = sanitize_confirmed_answer(answer, result)
+
+        self.assertIn("重新排队", public)
+        self.assertIn("后台任务尚未完成", public)
+        self.assertNotIn("可信系统结果", public)
+        self.assertNotIn("evidence", public)
+        self.assertNotIn("处理完成", public)
+        self.assertNotIn("sqlite", public)
+
+    def test_confirmed_answer_keeps_natural_completed_followup(self) -> None:
+        result = {"ok": True, "status": "completed", "summary": "改名已完成"}
+        answer = (
+            "已确认操作的可信系统结果（不是待执行计划）：\n"
+            + json.dumps(result, ensure_ascii=False)
+            + "\n\n改名已经完成，可以继续下一步。"
+        )
+
+        self.assertEqual(
+            sanitize_confirmed_answer(answer, result),
+            "改名已经完成，可以继续下一步。",
+        )
 
     def test_partial_result_uses_compact_human_labels(self) -> None:
         text = format_public_result(

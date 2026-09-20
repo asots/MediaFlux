@@ -33,7 +33,7 @@ from .pipeline import (
     ToolPipelineError,
 )
 from .provider_model import ModelProviderError
-from .public_view import format_public_result
+from .public_view import format_public_result, sanitize_confirmed_answer
 from .session_guard import session_scope_guard
 from .state import (
     AgentInput,
@@ -666,10 +666,11 @@ class AgentSession:
 
             async def finish_answer(answer: str, status: str, reason: str, model_calls: int) -> None:
                 """正常回答与预算收尾共用一次持久化/终态发布，不丢失工具调用协议。"""
-                messages.append(ModelMessage(role="assistant", content=answer))
+                public_answer = sanitize_confirmed_answer(answer, confirmed_result) if confirmed_result is not None else answer
+                messages.append(ModelMessage(role="assistant", content=public_answer))
                 await persist_conversation()
                 await publish(AgentEventType.TURN_COMPLETED, {
-                    "status": status, "answer": answer, "finish_reason": reason,
+                    "status": status, "answer": public_answer, "finish_reason": reason,
                     "usage": total_usage, "model_calls": model_calls, "tool_calls": total_tool_calls,
                 })
 
@@ -729,7 +730,8 @@ class AgentSession:
                 (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), len(messages))
             for round_index in range(self.limits.max_model_rounds):
                 token.raise_if_cancelled()
-                await publish(AgentEventType.MODEL_STARTED, {"round": round_index + 1})
+                phase = "confirmed_synthesis" if confirmed_result is not None else "planning"
+                await publish(AgentEventType.MODEL_STARTED, {"round": round_index + 1, "phase": phase})
                 text_parts: list[str] = []
                 calls: list[ModelToolCall] = []
                 finish_reason = ""
@@ -780,10 +782,11 @@ class AgentSession:
                     if model_event.type is ModelEventType.TEXT_DELTA:
                         if model_event.text:
                             text_parts.append(model_event.text)
-                            await publish(
-                                AgentEventType.MODEL_DELTA,
-                                {"delta": model_event.text, "round": round_index + 1},
-                            )
+                            if confirmed_result is None:
+                                await publish(
+                                    AgentEventType.MODEL_DELTA,
+                                    {"delta": model_event.text, "round": round_index + 1},
+                                )
                     elif model_event.type is ModelEventType.TOOL_CALL_COMPLETED:
                         call = model_event.tool_call
                         if call is not None:

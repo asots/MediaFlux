@@ -362,6 +362,90 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         for protocol in ("chat_completions", "responses", "anthropic_messages"):
             self.assertNotIn("effect_plan_id", json.dumps(_history_for_protocol(protocol, "system", model.requests[-1].messages)))
 
+    async def test_confirmed_internal_receipt_never_reaches_public_event_stream(self):
+        tool = KernelToolSpec(
+            name="local_media.retry_task",
+            domain="local_media",
+            description="修正季集映射",
+            input_schema={"type": "object", "properties": {}},
+            effect=ToolEffect.WRITE,
+            prepare=lambda _a, _c: PreparedEffect(
+                preview={"summary": "修正为 S02E12"},
+                snapshot_fingerprint="snapshot",
+            ),
+            execute_confirmed=lambda _a, _s, _c: {
+                "ok": True,
+                "status": "accepted",
+                "summary": "本地媒体任务 1 已修正为 S02E12 并重新排队",
+                "data": {"operation": "remap_episode", "task_number": 1},
+            },
+        )
+        internal = (
+            "已确认操作的可信系统结果（不是待执行计划）：\n"
+            '{"ok":true,"status":"accepted","data":{"private_id":99}}'
+            "\n\n### 处理完成\n后台正在归档。"
+        )
+        model = ScriptedModel([
+            [
+                ModelEvent(
+                    ModelEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ModelToolCall("write", tool.name, {}),
+                ),
+                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+            ],
+            [
+                ModelEvent(ModelEventType.TEXT_DELTA, text=internal),
+                ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+            ],
+        ])
+        catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+        session = AgentSession(
+            model=model,
+            catalog=catalog,
+            retriever=CapabilityRetriever(),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state),
+            state_store=state,
+        )
+        preview = await consume_events(session.run(AgentInput(
+            message="把这个改成 S02E12", owner="owner", session_id="session",
+        )))
+
+        events = await collect(session.confirm(
+            owner="owner", session_id="session", plan_id=preview.approval.plan_id,
+        ))
+        final = await consume_events(_events_stream(events))
+        public_events = json.dumps(
+            [event.to_dict() for event in events], ensure_ascii=False,
+        )
+
+        self.assertEqual(final.status, "success")
+        self.assertIn("重新排队", final.answer)
+        self.assertIn("后台任务尚未完成", final.answer)
+        self.assertNotIn("可信系统结果", public_events)
+        self.assertNotIn("private_id", public_events)
+        self.assertNotIn("处理完成", public_events)
+        self.assertFalse(any(
+            event.type is AgentEventType.MODEL_DELTA for event in events
+        ))
+        confirmed_starts = [
+            event for event in events
+            if event.type is AgentEventType.MODEL_STARTED
+        ]
+        self.assertTrue(confirmed_starts)
+        self.assertEqual(
+            confirmed_starts[-1].payload.get("phase"), "confirmed_synthesis"
+        )
+        stored = await state.load(owner="owner", session_id="session")
+        internal_rows = [
+            row for row in stored.conversation
+            if "可信系统结果" in str(row.get("content") or "")
+        ]
+        self.assertEqual(len(internal_rows), 1)
+        self.assertIn("public_content", internal_rows[0])
+        self.assertNotIn(
+            "可信系统结果", str(stored.conversation[-1].get("content") or "")
+        )
+
     async def test_summary_failure_after_confirm_preserves_successful_write(self):
         writes = []
         tool = KernelToolSpec(name="cloud.change", domain="cloud", description="云盘变更",

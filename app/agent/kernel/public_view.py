@@ -74,7 +74,6 @@ def _failed_item_errors(data: Mapping[str, Any]) -> list[str]:
     return errors
 
 
-
 def candidate_result_lines(data: Mapping[str, Any]) -> list[str]:
     if data.get("source_type") != "resource_candidates" or not isinstance(data.get("items"), list):
         return []
@@ -109,15 +108,13 @@ def format_public_result(
     fallback: str = "操作已结束。",
 ) -> str:
     """把公开 ToolResult 压缩为适合 Web/TG 展示的 Markdown。"""
-
     result = dict(value or {})
-    summary = _safe(result.get("summary"), limit=700) or _safe(
-        result.get("message"), limit=700
-    )
-    if not summary:
-        summary = _safe(fallback, limit=700) or "操作已结束。"
-
+    summary = (_safe(result.get("summary"), limit=700)
+               or _safe(result.get("message"), limit=700)
+               or _safe(fallback, limit=700) or "操作已结束。")
     lines = [f"{_result_icon(result)} {summary}"]
+    if str(result.get("status") or "").strip().lower() == "accepted":
+        lines.append("- 状态：已受理，后台任务尚未完成")
     data = result.get("data")
     if isinstance(data, Mapping):
         target = _safe(data.get("target"), limit=40).lower()
@@ -147,28 +144,28 @@ def format_public_result(
     return "\n".join(lines)
 
 
-def legacy_confirmed_result_public_content(content: object) -> str:
-    """为旧会话中的确认结果补公开摘要；无法解析时宁可隐藏内部内容。"""
-
-    text = str(content or "").strip()
-    if not text.startswith(_CONFIRMED_RESULT_MARKER):
-        return ""
-    payload = text[len(_CONFIRMED_RESULT_MARKER) :].strip()
+def sanitize_confirmed_answer(content: object, result: Mapping[str, Any] | None = None) -> str:
+    """把确认后的内部回执投影为公开回答；无显式结果时兼容旧会话。"""
+    text = str(content or "").replace("\x00", "").strip()
+    prefix, marker, suffix = text.partition(_CONFIRMED_RESULT_MARKER)
+    if not marker:
+        return (text or format_public_result(result)) if result is not None else ""
+    payload = suffix.lstrip()
     try:
-        value = json.loads(payload)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return "✅ 已确认操作已结束，可继续查询实际状态。"
-    if not isinstance(value, Mapping):
-        return "✅ 已确认操作已结束，可继续查询实际状态。"
-    return format_public_result(value)
-
+        embedded, end = json.JSONDecoder().raw_decode(payload)
+    except ValueError:
+        embedded, end = None, 0
+    source = result if result is not None else embedded if isinstance(embedded, Mapping) else None
+    receipt = format_public_result(source) if source is not None else "✅ 已确认操作已结束，可继续查询实际状态。"
+    if result is None or not end or str(result.get("status") or "").lower() == "accepted":
+        return receipt
+    return "\n\n".join(part for part in (prefix.strip(), payload[end:].strip()) if part) or receipt
 
 def public_conversation_messages(
     conversation: Sequence[Mapping[str, Any] | object],
     *, candidate_view: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """投影可公开恢复的对话，过滤工具中间回合和空助手消息。"""
-
     messages: list[dict[str, Any]] = []
     pending_tools: list[str] = []
     pending_candidate = False
@@ -239,7 +236,7 @@ def public_conversation_messages(
             remember_tool(tool_name)
             content = str(item.get("public_content") or "").strip()
             if not content:
-                content = legacy_confirmed_result_public_content(item.get("content"))
+                content = sanitize_confirmed_answer(item.get("content"))
         else:
             content = str(item.get("content") or "").strip()
         if content:

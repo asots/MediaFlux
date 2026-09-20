@@ -512,8 +512,45 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         self.assertIn("qBittorrent", bot.edits[-1][0])
         self.assertIn("确认后会保存订阅规则", bot.edits[-1][0])
 
-    def test_confirm_callback_executes_plan_without_model_protocol(self):
+    def test_confirm_callback_clears_buttons_for_replaced_plan(self):
         transport = FakeTelegramTransport(None)
+        store = types.SimpleNamespace(load=AsyncMock(return_value=types.SimpleNamespace(
+            pending_effect_plan_id="plan_replaced_123456",
+        )))
+        runtime = types.SimpleNamespace(telegram=transport, store=store)
+        bot = FakeBot()
+        message = Message("preview", user_id=0, message_id=33)
+        message.reply_markup = Markup()
+        call = Call("agk:c:plan_1234567890abcdef", message)
+        patches = self._patch_access()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime),
+        ):
+            adapter.handle_agent_callback(bot, call, TELEBOT)
+
+        self.assertEqual(transport.confirmations, [])
+        self.assertEqual(len(bot.edits), 1)
+        self.assertEqual(bot.edits[0][0], "")
+        self.assertIsNone(bot.edits[0][3]["reply_markup"])
+        self.assertIn("已处理或被替代", bot.answers[-1][1])
+        self.assertTrue(bot.answers[-1][2]["show_alert"])
+
+    def test_confirm_callback_executes_plan_without_model_protocol(self):
+        factory = EventFactory(
+            session_id="tg_session",
+            turn_id="turn-confirm",
+            request_id="tgcb_callback-1",
+        )
+        transport = FakeTelegramTransport(
+            None,
+            confirm_events=(factory.create(
+                AgentEventType.MODEL_STARTED,
+                {"round": 2, "phase": "confirmed_synthesis"},
+            ),),
+        )
         runtime = types.SimpleNamespace(telegram=transport, store=FakeStore())
         bot = FakeBot()
         message = Message("preview", user_id=0, message_id=33)
@@ -527,6 +564,11 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         ):
             adapter.handle_agent_callback(bot, call, TELEBOT)
         self.assertEqual(len(transport.confirmations), 1)
+        self.assertIn("正在核对确认计划", bot.edits[0][0])
+        self.assertIsNone(bot.edits[0][3]["reply_markup"])
+        self.assertTrue(any(
+            "正在整理执行结果" in edit[0] for edit in bot.edits
+        ))
         self.assertIn("订阅已创建", bot.edits[-1][0])
 
     def test_confirm_callback_finishes_a_claimed_effect_failure_after_observer_progress(self):
@@ -588,14 +630,17 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             adapter.handle_agent_callback(bot, call, TELEBOT)
 
         self.assertEqual(len(transport.confirmations), 1)
-        self.assertGreaterEqual(len(bot.edits), 2)
-        self.assertIn("执行未完成，正在整理结果…", bot.edits[0][0])
+        self.assertGreaterEqual(len(bot.edits), 3)
+        self.assertIn("正在核对确认计划", bot.edits[0][0])
+        self.assertTrue(any(
+            "执行未完成，正在整理结果…" in edit[0] for edit in bot.edits
+        ))
         self.assertIn("资源快照已失效", bot.edits[-1][0])
         self.assertIn("请重新预检", bot.edits[-1][0])
         self.assertNotIn("执行未完成，正在整理结果…", bot.edits[-1][0])
         self.assertIsNone(bot.edits[-1][3]["reply_markup"])
 
-    def test_confirm_callback_keeps_unclaimed_confirmation_failure_without_result_unedited(self):
+    def test_confirm_callback_settles_unclaimed_confirmation_failure_on_original_card(self):
         transport = FakeTelegramTransport(
             TurnView(
                 session_id="tg_session",
@@ -625,12 +670,14 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             adapter.handle_agent_callback(bot, call, TELEBOT)
 
         self.assertEqual(len(transport.confirmations), 1)
-        self.assertEqual(bot.edits, [])
+        self.assertEqual(len(bot.edits), 2)
+        self.assertIn("正在核对确认计划", bot.edits[0][0])
+        self.assertIn("这次确认未被接受", bot.edits[-1][0])
+        self.assertIn("已过期或已被使用", bot.edits[-1][0])
+        self.assertIn("重新生成预览", bot.edits[-1][0])
+        self.assertIsNone(bot.edits[-1][3]["reply_markup"])
         self.assertIn("正在核对确认计划", bot.answers[-1][1])
-        self.assertEqual(len(bot.sent), 1)
-        self.assertIn("这次确认未被接受", bot.sent[0][1])
-        self.assertIn("已过期或已被使用", bot.sent[0][1])
-        self.assertIn("重新生成预览", bot.sent[0][1])
+        self.assertEqual(bot.sent, [])
 
     def test_real_kernel_duplicate_and_expired_confirm_do_not_edit_or_execute_again(self):
         import asyncio
@@ -741,7 +788,9 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             # 不应让 TG observer 把原来的终态重新改成工具进度。
             with patches[0], patches[1], patches[2]:
                 adapter.handle_agent_callback(bot, call, TELEBOT)
-            self.assertEqual(bot.edits, first_edits)
+            self.assertGreater(len(bot.edits), len(first_edits))
+            self.assertIn("这次确认未被接受", bot.edits[-1][0])
+            self.assertIsNone(bot.edits[-1][3]["reply_markup"])
             self.assertEqual(executions, ["write"])
 
             # 新预览超过默认十分钟后点击：不执行、不改原消息，但必须给明确反馈。
@@ -753,12 +802,12 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             with patches[0], patches[1], patches[2]:
                 adapter.handle_agent_callback(bot, call, TELEBOT)
 
-        self.assertEqual(bot.edits, first_edits)
+        self.assertGreater(len(bot.edits), len(first_edits))
         self.assertEqual(executions, ["write"])
-        self.assertIn("这次确认未被接受", bot.sent[-1][1])
-        self.assertIn("已过期或已被使用", bot.sent[-1][1])
-        self.assertIn("重新生成预览", bot.sent[-1][1])
-        self.assertEqual(bot.sent[-1][2]["message_thread_id"], 73)
+        self.assertIn("这次确认未被接受", bot.edits[-1][0])
+        self.assertIn("已过期或已被使用", bot.edits[-1][0])
+        self.assertIn("重新生成预览", bot.edits[-1][0])
+        self.assertIsNone(bot.edits[-1][3]["reply_markup"])
         self.assertEqual(len(model.requests), 3)
 
     def test_confirm_continues_progress_and_returns_next_approval(self):
