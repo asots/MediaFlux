@@ -17,7 +17,7 @@ _GY_OPERATION_REF_RE = re.compile(r"GY-(?:[0-9A-F]{4}-){7}[0-9A-F]{4}")
 _GY_WAITABLE_STATUSES = {"accepted", "queued", "running"}
 _GY_ACTIVE_STATUSES = {"queued", "running", "stopping"}
 _GY_TERMINAL_STATUSES = {
-    "completed", "partial", "failed", "cancelled", "manual_review"
+    "completed", "partial", "failed", "cancelled", "manual_review", "stopped"
 }
 _GY_WAIT_TIMEOUT_SECONDS = 30 * 60
 _GY_WAIT_INTERVAL_SECONDS = 1.0
@@ -308,6 +308,7 @@ async def wait_for_guangya_operation(
         "failed": "光鸭后台任务执行失败",
         "cancelled": "光鸭后台任务已取消",
         "manual_review": "光鸭后台任务结果未知，需要人工核验",
+        "stopped": "光鸭后台任务已停止",
     }
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0.0, float(timeout_seconds))
@@ -331,7 +332,7 @@ async def wait_for_guangya_operation(
             data = _background_job_data(result, operation_ref, task_status, task)
             return replace(
                 result,
-                ok=task_status == "completed",
+                ok=task_status in {"completed", "stopped"},
                 status=task_status,
                 summary=terminal_summary[task_status],
                 data=data,

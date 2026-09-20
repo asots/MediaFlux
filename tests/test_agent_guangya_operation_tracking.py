@@ -147,7 +147,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.data["stats"]["renamed"], 1)
 
     async def test_terminal_states_are_returned_without_collapsing_their_status(self) -> None:
-        for terminal in ("partial", "failed", "cancelled", "manual_review"):
+        for terminal in ("partial", "failed", "cancelled", "manual_review", "stopped"):
             with self.subTest(terminal=terminal):
                 accepted = ToolResult(
                     True,
@@ -176,7 +176,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
                         report_progress=AsyncMock(),
                     )
                 self.assertEqual(result.status, terminal)
-                self.assertFalse(result.ok)
+                self.assertEqual(result.ok, terminal == "stopped")
                 self.assertEqual(result.data["operation_ref"], _OPERATION_REF)
                 self.assertEqual(result.data["total"], 1)
                 self.assertNotIn("cloud_write", result.data)

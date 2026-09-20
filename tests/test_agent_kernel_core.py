@@ -421,20 +421,16 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.status, "success")
         self.assertIn("重新排队", final.answer)
         self.assertIn("后台任务尚未完成", final.answer)
+        self.assertTrue(final.answer.startswith("⏳ "))
         self.assertNotIn("可信系统结果", public_events)
         self.assertNotIn("private_id", public_events)
         self.assertNotIn("处理完成", public_events)
         self.assertFalse(any(
-            event.type is AgentEventType.MODEL_DELTA for event in events
+            event.type in {AgentEventType.MODEL_STARTED, AgentEventType.MODEL_DELTA}
+            for event in events
         ))
-        confirmed_starts = [
-            event for event in events
-            if event.type is AgentEventType.MODEL_STARTED
-        ]
-        self.assertTrue(confirmed_starts)
-        self.assertEqual(
-            confirmed_starts[-1].payload.get("phase"), "confirmed_synthesis"
-        )
+        self.assertEqual(len(model.requests), 1, "未完成的后台任务不应再交给模型改写终态")
+        self.assertEqual(len(model.rounds), 1)
         stored = await state.load(owner="owner", session_id="session")
         internal_rows = [
             row for row in stored.conversation
@@ -443,7 +439,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(internal_rows), 1)
         self.assertIn("public_content", internal_rows[0])
         self.assertNotIn(
-            "可信系统结果", str(stored.conversation[-1].get("content") or "")
+            "可信系统结果", str(internal_rows[0].get("public_content") or "")
         )
 
     async def test_summary_failure_after_confirm_preserves_successful_write(self):

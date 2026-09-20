@@ -33,7 +33,11 @@ from .pipeline import (
     ToolPipelineError,
 )
 from .provider_model import ModelProviderError
-from .public_view import format_public_result, sanitize_confirmed_answer
+from .public_view import (
+    format_public_result,
+    public_result_state,
+    sanitize_confirmed_answer,
+)
 from .session_guard import session_scope_guard
 from .state import (
     AgentInput,
@@ -612,6 +616,17 @@ class AgentSession:
                 if not receipt_saved:
                     confirmed_result = public_result
                     await failure("receipt_unavailable", "执行结果已取得，但会话记录保存失败，未继续后续步骤；请先核对任务状态。")
+                    return
+                result_state = public_result_state(public_result)
+                if result_state != "success":
+                    await publish(AgentEventType.TURN_COMPLETED, {
+                        "status": "success",
+                        "answer": format_public_result(public_result),
+                        "finish_reason": f"effect_{result_state}",
+                        "usage": {},
+                        "model_calls": 0,
+                        "tool_calls": 0,
+                    })
                     return
                 if not last_user:
                     await publish(AgentEventType.TURN_COMPLETED, {"status": "effect_completed", "plan_id": plan_id})

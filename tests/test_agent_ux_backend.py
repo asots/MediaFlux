@@ -519,7 +519,7 @@ def test_selection_click_only_previews_and_explicit_confirmation_has_one_effect(
             assert any(event.type is AgentEventType.EFFECT_COMPLETED for event in first)
             await _events(session.confirm(owner=OWNER, session_id=SESSION, plan_id=pending))
             execute.assert_called_once()
-            assert len(session.model.requests) == 1  # 只有人工确认后才恢复模型续跑。
+            assert session.model.requests == []  # accepted 回执由 Kernel 确定性收口，不再交给模型改写。
     asyncio.run(exercise())
 
 

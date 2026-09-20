@@ -6,6 +6,7 @@ import unittest
 from app.agent.kernel.public_view import (
     format_public_result,
     public_conversation_messages,
+    public_result_state,
     sanitize_confirmed_answer,
 )
 
@@ -139,6 +140,46 @@ class AgentKernelPublicViewTests(unittest.TestCase):
             sanitize_confirmed_answer(answer, result),
             "改名已经完成，可以继续下一步。",
         )
+
+
+    def test_pending_and_uncertain_results_have_one_canonical_public_state(self) -> None:
+        for status in ("accepted", "queued", "running", "in_progress", "retry_wait"):
+            with self.subTest(status=status):
+                result = {"ok": True, "status": status, "summary": "任务状态已更新"}
+                self.assertEqual(public_result_state(result), "pending")
+                self.assertTrue(format_public_result(result).startswith("⏳ "))
+                self.assertIn("尚未完成", format_public_result(result))
+
+        for status in ("partial", "attention", "outcome_unknown", "manual_review", "stopped", "cancelled"):
+            with self.subTest(status=status):
+                result = {"ok": status in {"stopped", "cancelled"}, "status": status, "summary": "需要核验"}
+                self.assertEqual(public_result_state(result), "warning")
+                self.assertTrue(format_public_result(result).startswith("⚠️ "))
+
+    def test_background_unknown_overrides_last_running_snapshot(self) -> None:
+        result = {
+            "ok": False,
+            "status": "outcome_unknown",
+            "summary": "等待已达上限，结果尚未确认",
+            "data": {"background_job": {"status": "running", "timed_out": True}},
+        }
+
+        self.assertEqual(public_result_state(result), "warning")
+        self.assertTrue(format_public_result(result).startswith("⚠️ "))
+
+    def test_non_success_confirmed_answer_drops_model_completion_claim(self) -> None:
+        for status in ("queued", "running", "partial", "outcome_unknown", "stopped"):
+            with self.subTest(status=status):
+                result = {"ok": status != "outcome_unknown", "status": status, "summary": "真实业务状态"}
+                answer = (
+                    "已确认操作的可信系统结果（不是待执行计划）：\n"
+                    + json.dumps(result, ensure_ascii=False)
+                    + "\n\n### 处理完成\n全部已经完成。"
+                )
+                public = sanitize_confirmed_answer(answer, result)
+                self.assertIn("真实业务状态", public)
+                self.assertNotIn("处理完成", public)
+                self.assertNotIn("全部已经完成", public)
 
     def test_partial_result_uses_compact_human_labels(self) -> None:
         text = format_public_result(

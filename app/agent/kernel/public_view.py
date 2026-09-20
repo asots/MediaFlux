@@ -35,6 +35,22 @@ _COUNT_FIELDS: tuple[tuple[str, str], ...] = (
     ("failed", "未完成"),
     ("skipped", "已跳过"),
 )
+_PENDING_RESULT_STATUSES = frozenset(
+    {"accepted", "queued", "running", "in_progress", "retry_wait"}
+)
+_WARNING_RESULT_STATUSES = frozenset(
+    {
+        "partial",
+        "degraded",
+        "incomplete",
+        "attention",
+        "inconclusive",
+        "outcome_unknown",
+        "manual_review",
+        "stopped",
+        "cancelled",
+    }
+)
 
 
 def _safe(value: object, *, limit: int = 600) -> str:
@@ -49,13 +65,34 @@ def _int_value(value: object) -> int | None:
     return None
 
 
+def public_result_state(result: Mapping[str, Any] | None) -> str:
+    """返回入口共用的结果语义，避免各处各判一套状态。"""
+    value = result or {}
+    status = str(value.get("status") or "").strip().casefold()
+    data = value.get("data")
+    background = data.get("background_job") if isinstance(data, Mapping) else None
+    background_status = (
+        str(background.get("status") or "").strip().casefold()
+        if isinstance(background, Mapping)
+        else ""
+    )
+    statuses = {status, background_status} - {""}
+    if statuses & _WARNING_RESULT_STATUSES:
+        return "warning"
+    if statuses & _PENDING_RESULT_STATUSES:
+        return "pending"
+    if value.get("ok") is False or status in {"failed", "error"}:
+        return "failed"
+    return "success"
+
+
 def _result_icon(result: Mapping[str, Any]) -> str:
-    status = str(result.get("status") or "").strip().lower()
-    if result.get("ok") is False or status in {"failed", "error"}:
-        return "❌"
-    if status in {"partial", "degraded", "incomplete", "attention"}:
-        return "⚠️"
-    return "✅"
+    return {
+        "pending": "⏳",
+        "warning": "⚠️",
+        "failed": "❌",
+        "success": "✅",
+    }[public_result_state(result)]
 
 
 def _failed_item_errors(data: Mapping[str, Any]) -> list[str]:
@@ -112,8 +149,9 @@ def format_public_result(
     summary = (_safe(result.get("summary"), limit=700)
                or _safe(result.get("message"), limit=700)
                or _safe(fallback, limit=700) or "操作已结束。")
+    state = public_result_state(result)
     lines = [f"{_result_icon(result)} {summary}"]
-    if str(result.get("status") or "").strip().lower() == "accepted":
+    if state == "pending":
         lines.append("- 状态：已受理，后台任务尚未完成")
     data = result.get("data")
     if isinstance(data, Mapping):
@@ -157,7 +195,7 @@ def sanitize_confirmed_answer(content: object, result: Mapping[str, Any] | None 
         embedded, end = None, 0
     source = result if result is not None else embedded if isinstance(embedded, Mapping) else None
     receipt = format_public_result(source) if source is not None else "✅ 已确认操作已结束，可继续查询实际状态。"
-    if result is None or not end or str(result.get("status") or "").lower() == "accepted":
+    if result is None or not end or public_result_state(result) != "success":
         return receipt
     return "\n\n".join(part for part in (prefix.strip(), payload[end:].strip()) if part) or receipt
 

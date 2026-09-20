@@ -18,6 +18,8 @@ class AgentKernelEvalTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["candidate_count_min"], 6)
         self.assertLessEqual(result["summary"]["candidate_count_max"], 12)
         self.assertTrue(result["summary"]["effect_gate_valid"])
+        self.assertEqual(result["summary"]["lifecycle_failed"], 0)
+        self.assertGreaterEqual(result["summary"]["lifecycle_cases"], 4)
         self.assertEqual(result["invalid_effect_tools"], [])
 
     def test_invalid_fixture_fails_closed(self) -> None:
@@ -28,6 +30,17 @@ class AgentKernelEvalTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 eval_agent.evaluate(path)
+
+
+    def test_invalid_lifecycle_fixture_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid-lifecycle.jsonl"
+            path.write_text(
+                '{"id":"x","message":"test","result":{},"followup":"done","expected":{}}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                eval_agent.evaluate_lifecycle(path)
 
     def test_json_cli_is_stable(self) -> None:
         output = io.StringIO()

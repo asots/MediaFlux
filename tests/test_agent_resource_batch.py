@@ -89,7 +89,7 @@ def test_recommendation_only_combines_verified_complementary_ranges():
 
 
 @pytest.mark.parametrize("natural", [False, True])
-def test_both_intent_inputs_share_one_batch_plan_and_continue_after_confirm(store, natural):
+def test_both_intent_inputs_share_one_batch_plan_and_settle_after_confirm(store, natural):
     class Model:
         def __init__(self):
             self.calls = 0
@@ -136,7 +136,7 @@ def test_both_intent_inputs_share_one_batch_plan_and_continue_after_confirm(stor
             events = await _events(session.run(QueryEnvelope(owner=OWNER, session_id=SESSION, message="仍只做预检", selection=_selection(view, [1, 2], "both")).to_agent_input()))
             assert sum(e.type is AgentEventType.EFFECT_APPROVAL_REQUIRED for e in events) == 1
             execute.assert_called_once()
-            assert model.calls == int(natural) + 1
+            assert model.calls == int(natural)
     asyncio.run(exercise())
 
 
@@ -251,7 +251,7 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
         ended = asyncio.run(states.load(owner=owner, session_id=session_id)).metadata["ux_candidate_draft"]
         assert ended["phase"] == "result" and ended["positions"] == [] and ended["plan_id"] == ""
         assert agent_candidates.render(TELEBOT, view, ended)[1] is None
-        assert bot.sent == [] and len(session.model.requests) == (1 if terminal_action == "c" else 0)
+        assert bot.sent == [] and session.model.requests == []
         count = len(bot.edits)
         agent_adapter.handle_agent_callback(bot, Call(f"agk:c:{plan}", message), TELEBOT)
         assert len(bot.edits) == count

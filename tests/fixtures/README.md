@@ -47,3 +47,14 @@ WRITE/DANGER 工具同时由离线评测器检查 Effect Gate 契约。
 python -m tools.eval_agent
 python -m tools.eval_agent --json
 ```
+
+
+## Agent Kernel 生命周期回放语料
+
+`agent_kernel_lifecycle_cases.jsonl` 通过现有 `tools.eval_agent` 真实运行
+`AgentSession -> ToolPipeline -> EffectPlan -> confirm`，冻结确认后的事件顺序、
+结果语义、模型调用次数和公开回执边界。动态的 plan/event/turn 标识不参与比较；
+用户可见文本只检查必须包含与禁止出现的关键事实。
+
+该语料不调用真实 LLM、网络或业务写接口。新增确认生命周期时应优先扩展这份语料，
+避免另建一套独立验收入口。

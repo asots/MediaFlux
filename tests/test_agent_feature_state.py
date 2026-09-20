@@ -148,7 +148,7 @@ class FeatureStateUnitTests(unittest.TestCase):
         self.assertIn("待核验", checked.error)
         self.assertIn("请先查看配置而非直接重试", checked.error)
         public = format_public_result(checked.to_dict())
-        self.assertTrue(public.startswith("❌ "))
+        self.assertTrue(public.startswith("⚠️ "))
         self.assertNotIn("✅", public)
         self.assertIn("请先查看配置而非直接重试", public)
 
