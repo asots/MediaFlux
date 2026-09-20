@@ -17,6 +17,7 @@ from app.agent.local_media_task_actions import (
 )
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.agent.state_commit import AgentStateCommitBuffer, defer_agent_state_commits
+from app.modules.local_media_scheduler import LocalMediaScheduler
 from app.modules.local_media_service import LocalMediaServiceError
 from app.modules.media_server_path_mapping import MediaServerPathMapping
 from tests.agent_kernel_test_harness import (
@@ -250,13 +251,224 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             )
         after = db.get_local_media_task(task_id, owner="admin")
         self.assertEqual(confirmed["result"]["status"], "accepted")
+        self.assertEqual(confirmed["result"]["data"]["operation"], "retry")
+        self.assertNotIn("season", confirmed["result"]["data"])
+        self.assertNotIn("episode", confirmed["result"]["data"])
         self.assertEqual(after.status, "waiting_stable")
+        self.assertEqual(
+            (after.season_override, after.episode_override),
+            (before.season_override, before.episode_override),
+        )
         self.assertEqual(after.version, before.version + 1)
         self.assertNotEqual(after.operation_token, before.operation_token)
         self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
         scheduler.reload.assert_called_once_with()
         with self.assertRaises(AgentToolError):
             service.confirm(prepared["action_plan"]["plan_id"], owner="owner-a")
+
+    def test_retry_with_episode_remap_is_confirmation_gated_and_requeues_authoritative_task(self) -> None:
+        task_id = self._task(
+            status="requires_manual", media_type="tv", season=2, episode=24,
+        )
+        db.add_local_media_task_item(
+            task_id,
+            "/private/downloads/OLD.mkv",
+            "/private/library/旧目标/OLD.mkv",
+            role="video",
+            owner="admin",
+        )
+        before = db.get_local_media_task(task_id, owner="admin")
+        service = get_agent_service()
+        service.invoke(
+            "local_media.task_summaries",
+            {"scope": "attention", "limit": 12},
+            owner="owner-a",
+        )
+        class RecordingService:
+            calls: list[tuple[str, int]] = []
+
+            def execute_task(self, owner, current_task_id, qb_client=None):
+                del qb_client
+                current = db.get_local_media_task(current_task_id, owner=owner)
+                self.assertEqual(current.status, "recognizing")
+                self.assertEqual(
+                    (current.season_override, current.episode_override), (2, 12)
+                )
+                self.calls.append((owner, current_task_id))
+                db.update_local_media_task(
+                    current_task_id, owner=owner, status="completed",
+                    completed_at=db.now(),
+                )
+                return {"status": "completed", "task_id": current_task_id}
+
+        recording = RecordingService()
+        recording.assertEqual = self.assertEqual
+        qb_client = Mock()
+        scheduler = LocalMediaScheduler(
+            service=recording, qb_factory=lambda: qb_client,
+        )
+        scheduler.reload = Mock(wraps=scheduler.reload)
+        with patch(
+            "app.agent.local_media_task_actions.get_local_media_scheduler",
+            return_value=scheduler,
+        ):
+            prepared = service.prepare(
+                "local_media.retry_task",
+                {"task_number": 1, "season": 2, "episode": 12},
+                owner="owner-a",
+            )
+            unchanged = db.get_local_media_task(task_id, owner="admin")
+            self.assertEqual(unchanged.status, "requires_manual")
+            self.assertEqual(
+                (unchanged.season_override, unchanged.episode_override), (2, 24)
+            )
+            result = prepared["result"]
+            self.assertEqual(result["status"], "confirmation_required")
+            self.assertEqual(result["data"]["current_position"], "S02E24")
+            self.assertEqual(result["data"]["target_position"], "S02E12")
+            confirmed = service.confirm(
+                prepared["action_plan"]["plan_id"], owner="owner-a"
+            )
+
+        queued = db.get_local_media_task(task_id, owner="admin")
+        self.assertEqual(confirmed["result"]["status"], "accepted")
+        self.assertEqual(queued.status, "waiting_stable")
+        self.assertEqual((queued.season_override, queued.episode_override), (2, 12))
+        self.assertEqual(queued.version, before.version + 1)
+        self.assertNotEqual(queued.operation_token, before.operation_token)
+        self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
+        scheduler.reload.assert_called_once_with()
+        with patch("app.modules.local_media_scheduler.notify_local_media_task"):
+            self.assertEqual(scheduler.run_once(), 1)
+        after = db.get_local_media_task(task_id, owner="admin")
+        self.assertEqual(after.status, "completed")
+        self.assertEqual(recording.calls, [("admin", task_id)])
+        qb_client.close.assert_called_once_with()
+        with self.assertRaises(AgentToolError):
+            service.confirm(prepared["action_plan"]["plan_id"], owner="owner-a")
+
+    def test_retry_after_human_candidate_selection_can_remap_episode(self) -> None:
+        task_id = self._task(
+            status="requires_manual", media_type="", tmdb_id="", season=None,
+            episode=None,
+        )
+        pending = db.get_local_media_task(task_id, owner="admin")
+        self.assertTrue(db.claim_local_media_confirmation_task(
+            task_id,
+            owner="admin",
+            expected_version=pending.version,
+            expected_snapshot_digest=pending.snapshot_digest,
+            tmdb_id="261403",
+            media_type="tv",
+            rules_snapshot='{"version": 1}',
+            season_override=2,
+            episode_override=24,
+            title="地狱模式 ～喜欢速通游戏的玩家在废设定异世界无双～",
+            year="2025",
+            confirmation_actor="human",
+        ))
+        self.assertTrue(db.update_local_media_task(
+            task_id,
+            owner="admin",
+            status="requires_manual",
+            error="文件集号超出 TMDB 记录范围",
+        ))
+
+        selected = db.get_local_media_task(task_id, owner="admin")
+        self.assertEqual(selected.status, "requires_manual")
+        self.assertEqual(selected.tmdb_id, "261403")
+        self.assertEqual(selected.media_type, "tv")
+        self.assertEqual(
+            (selected.season_override, selected.episode_override), (2, 24)
+        )
+
+        service = get_agent_service()
+        service.invoke(
+            "local_media.task_summaries",
+            {"scope": "attention", "limit": 12},
+            owner="owner-a",
+        )
+        scheduler = Mock()
+        with patch(
+            "app.agent.local_media_task_actions.get_local_media_scheduler",
+            return_value=scheduler,
+        ):
+            prepared = service.prepare(
+                "local_media.retry_task",
+                {"task_number": 1, "season": 2, "episode": 12},
+                owner="owner-a",
+            )
+            confirmed = service.confirm(
+                prepared["action_plan"]["plan_id"], owner="owner-a"
+            )
+
+        after = db.get_local_media_task(task_id, owner="admin")
+        self.assertEqual(confirmed["result"]["data"]["operation"], "remap_episode")
+        self.assertEqual(after.status, "waiting_stable")
+        self.assertEqual((after.season_override, after.episode_override), (2, 12))
+        scheduler.reload.assert_called_once_with()
+
+    def test_retry_with_episode_remap_rejects_unsafe_or_stale_corrections(self) -> None:
+        task_id = self._task(
+            status="requires_manual", media_type="tv", season=2, episode=24,
+        )
+        service = get_agent_service()
+        service.invoke(
+            "local_media.task_summaries",
+            {"scope": "attention", "limit": 12},
+            owner="owner-a",
+        )
+        for invalid in (
+            {"task_number": 1, "season": 2},
+            {"task_number": 1, "episode": 12},
+        ):
+            with self.assertRaisesRegex(AgentToolError, "必须同时提供"):
+                service.prepare("local_media.retry_task", invalid, owner="owner-a")
+        prepared = service.prepare(
+            "local_media.retry_task",
+            {"task_number": 1, "season": 2, "episode": 12},
+            owner="owner-a",
+        )
+        db.update_local_media_task(task_id, owner="admin", warning="changed")
+        with self.assertRaises(AgentToolError) as stale:
+            service.confirm(prepared["action_plan"]["plan_id"], owner="owner-a")
+        self.assertEqual(stale.exception.code, "confirmation_stale")
+
+        for status, media_type, tmdb_id, season, episode, error, message in (
+            ("failed", "tv", "12345", 2, 24, "", "只有待人工确认"),
+            ("requires_manual", "movie", "12345", None, None, "", "只有剧集"),
+            ("requires_manual", "tv", "", 2, 24, "", "TMDB"),
+            ("requires_manual", "tv", "12345", 2, 12, "", "已经是"),
+            (
+                "requires_manual", "tv", "12345", 2, 24,
+                f"{db.LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX}，需人工核验",
+                "写入期间中断",
+            ),
+        ):
+            reset_agent_service_for_tests()
+            with db.get_conn() as conn:
+                conn.execute("DELETE FROM local_media_tasks")
+                conn.execute("DELETE FROM local_media_sources")
+            rejected_id = self._task(
+                status=status, media_type=media_type, tmdb_id=tmdb_id,
+                season=season, episode=episode,
+            )
+            if error:
+                db.update_local_media_task(
+                    rejected_id, owner="admin", error=error,
+                )
+            service = get_agent_service()
+            service.invoke(
+                "local_media.task_summaries",
+                {"scope": "attention", "limit": 12},
+                owner="owner-a",
+            )
+            with self.assertRaisesRegex(AgentToolError, message):
+                service.prepare(
+                    "local_media.retry_task",
+                    {"task_number": 1, "season": 2, "episode": 12},
+                    owner="owner-a",
+                )
 
     def test_retry_stale_or_non_retryable_task_fails_closed(self) -> None:
         task_id = self._task(status="failed")

@@ -17,3 +17,4 @@
 {"id":"recently-added-media","message":"我的媒体库最近入库了什么内容","required":["media.recently_added"]}
 {"id": "release-format-teaching-preview", "message": "这些发布组文件集号识别错了，r2是修订版。帮我学习这个发布格式，先批量预览不要保存。", "required": ["recognition.preview_release_format"]}
 {"id": "release-format-teaching-remember", "message": "记住这个发布格式，让这些文件以后自动识别，先核对样本让我确认保存。", "required": ["recognition.preview_release_format", "recognition.save_release_format"]}
+{"id":"local-media-explicit-episode-remap","message":"本地媒体待确认任务把第2季24集识别错了，把这个改名为 S02E12 并继续入库","required":["local_media.retry_task"]}

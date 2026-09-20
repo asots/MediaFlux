@@ -1780,14 +1780,18 @@ def reset_local_media_task_if_current(
     expected_version: int,
     expected_status: str,
     confirm_interrupted_write: bool = False,
+    season_override: int | None = None,
+    episode_override: int | None = None,
 ) -> bool:
-    """版本化入口只委托统一重试事务，不再维护另一套重置 SQL。"""
+    """以强制版本条件委托统一重试事务，可选写入明确季集映射。"""
     return reset_local_media_task(
         task_id,
         owner=owner,
         expected_version=0 if expected_version is None else expected_version,
         expected_status=str(expected_status or ""),
         confirm_interrupted_write=confirm_interrupted_write,
+        season_override=season_override,
+        episode_override=episode_override,
     )
 
 

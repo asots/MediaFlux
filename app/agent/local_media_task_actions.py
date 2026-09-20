@@ -856,6 +856,34 @@ def local_media_task_number_arguments(arguments: dict[str, Any]) -> dict[str, in
     return {"task_number": _strict_number(arguments.get("task_number"), "task_number")}
 
 
+def local_media_retry_arguments(arguments: dict[str, Any]) -> dict[str, int]:
+    if not isinstance(arguments, dict) or "task_number" not in arguments or not set(
+        arguments
+    ).issubset({"task_number", "season", "episode"}):
+        raise AgentToolError("本地媒体任务重试参数无效")
+    has_season = "season" in arguments
+    has_episode = "episode" in arguments
+    if has_season != has_episode:
+        raise AgentToolError("season 和 episode 必须同时提供")
+    result = {
+        "task_number": _strict_number(arguments.get("task_number"), "task_number")
+    }
+    if not has_season:
+        return result
+    season = arguments.get("season")
+    episode = arguments.get("episode")
+    if isinstance(season, bool) or not isinstance(season, int) or not 0 <= season <= 99:
+        raise AgentToolError("season 必须是 0 到 99 的整数")
+    if (
+        isinstance(episode, bool)
+        or not isinstance(episode, int)
+        or not 1 <= episode <= 999
+    ):
+        raise AgentToolError("episode 必须是 1 到 999 的整数")
+    result.update({"season": season, "episode": episode})
+    return result
+
+
 def local_media_inspection_arguments(arguments: dict[str, Any]) -> dict[str, int]:
     if not isinstance(arguments, dict) or set(arguments) != {"inspection_number"}:
         raise AgentToolError("本地媒体检查参数无效")
@@ -1404,6 +1432,59 @@ def _fingerprint(payload: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def _episode_position(season: int | None, episode: int | None) -> str:
+    if season is None or episode is None:
+        return "未明确"
+    return f"S{int(season):02d}E{int(episode):02d}"
+
+
+def _retry_confirmation_snapshot(
+    snapshot: dict[str, Any],
+    task: Any,
+    *,
+    season: int | None,
+    episode: int | None,
+) -> dict[str, Any]:
+    if season is None or episode is None:
+        return snapshot
+    return {
+        **snapshot,
+        "media_type": str(task.media_type or ""),
+        "tmdb_id": str(task.tmdb_id or ""),
+        "current_season": task.season_override,
+        "current_episode": task.episode_override,
+        "target_season": season,
+        "target_episode": episode,
+    }
+
+
+def _validate_episode_remap(
+    task: Any, snapshot: dict[str, Any], *, season: int, episode: int,
+) -> None:
+    if task.status != "requires_manual":
+        raise AgentToolError(
+            "只有待人工确认的任务可以修正季集映射", code="precondition_failed"
+        )
+    if str(task.media_type or "").strip().lower() != "tv":
+        raise AgentToolError("只有剧集任务可以修正季集映射", code="precondition_failed")
+    tmdb_id = str(task.tmdb_id or "").strip()
+    if not tmdb_id.isascii() or not tmdb_id.isdigit():
+        raise AgentToolError(
+            "任务缺少已确认的 TMDB 剧集身份，请先完成媒体匹配",
+            code="precondition_failed",
+        )
+    if snapshot["interrupted_write"]:
+        raise AgentToolError(
+            "任务曾在文件写入期间中断，不能仅靠季集纠偏继续；请先核验文件和 qB 状态",
+            code="precondition_failed",
+        )
+    if (task.season_override, task.episode_override) == (season, episode):
+        raise AgentToolError(
+            f"任务季集映射已经是 {_episode_position(season, episode)}",
+            code="precondition_failed",
+        )
+
+
 def prepare_retry_local_media_task(
     arguments: dict[str, Any], context: ToolContext
 ) -> tuple[ToolResult, str]:
@@ -1414,11 +1495,39 @@ def prepare_retry_local_media_task(
         raise AgentToolError(
             "只有失败或待人工确认的任务可以重试", code="precondition_failed"
         )
-    return ToolResult(
-        True,
-        "confirmation_required",
-        f"确认后将重试本地媒体任务 {task_number}",
-        data={
+    season = int(arguments["season"]) if "season" in arguments else None
+    episode = int(arguments["episode"]) if "episode" in arguments else None
+    if season is not None and episode is not None:
+        _validate_episode_remap(task, snapshot, season=season, episode=episode)
+        current_position = _episode_position(
+            task.season_override, task.episode_override
+        )
+        target_position = _episode_position(season, episode)
+        summary = (
+            f"确认后将把本地媒体任务 {task_number} 从 {current_position} "
+            f"修正为 {target_position} 并重新整理"
+        )
+        data = {
+            "task_number": task_number,
+            "current_status": str(task.status),
+            "title": _safe_title(task.title),
+            "current_position": current_position,
+            "target_position": target_position,
+            "interrupted_write": False,
+            "effects": [
+                f"把本任务的明确季集映射改为 {target_position}。",
+                "任务会使用现有 TMDB 身份、整理规则、冲突策略和来源运行模式重新排队。",
+                "调度器重新规划后才会生成标准文件名；是否移动及是否联动媒体库以实际执行结果为准，本次预检不修改文件。",
+                "后续结果可在本地媒体任务状态查看；任务启用通知且非静默时，按现有配置发送完成或失败通知。",
+            ],
+        }
+        evidence_description = (
+            "已核验任务仍处于待确认状态、具备剧集 TMDB 身份且未发生写入中断；"
+            "未返回路径、哈希或内部任务 ID。"
+        )
+    else:
+        summary = f"确认后将重试本地媒体任务 {task_number}"
+        data = {
             "task_number": task_number,
             "current_status": str(task.status),
             "title": _safe_title(task.title),
@@ -1432,15 +1541,22 @@ def prepare_retry_local_media_task(
                 "会生成新的操作幂等标识；不会复用上一次中断的文件步骤。",
                 "本次确认不会直接移动、覆盖或删除媒体文件。",
             ],
-        },
+        }
+        evidence_description = (
+            "已核验任务当前版本和可重试状态；未返回路径、哈希、错误正文或操作标识。"
+        )
+    confirmation_snapshot = _retry_confirmation_snapshot(
+        snapshot, task, season=season, episode=episode,
+    )
+    return ToolResult(
+        True,
+        "confirmation_required",
+        summary,
+        data=data,
         evidence=[
-            Evidence(
-                "sqlite:local_media_tasks",
-                "已核验任务当前版本和可重试状态；未返回路径、哈希、错误正文或操作标识。",
-                _now(),
-            )
+            Evidence("sqlite:local_media_tasks", evidence_description, _now())
         ],
-    ), _fingerprint(snapshot)
+    ), _fingerprint(confirmation_snapshot)
 
 
 def retry_local_media_task_confirmed(
@@ -1448,39 +1564,69 @@ def retry_local_media_task_confirmed(
 ) -> ToolResult:
     owner = _require_owner(context)
     task_number = int(arguments["task_number"])
+    season = int(arguments["season"]) if "season" in arguments else None
+    episode = int(arguments["episode"]) if "episode" in arguments else None
     try:
         snapshot, task = _task_snapshot(owner, task_number)
     except AgentToolError as exc:
         raise AgentToolError(exc.safe_message, code="confirmation_stale") from None
-    if not secrets.compare_digest(_fingerprint(snapshot), str(expected_context or "")):
+    confirmation_snapshot = _retry_confirmation_snapshot(
+        snapshot, task, season=season, episode=episode,
+    )
+    if not secrets.compare_digest(
+        _fingerprint(confirmation_snapshot), str(expected_context or "")
+    ):
         raise AgentToolError("任务状态已变化，请重新预检", code="confirmation_stale")
+    retry_fields: dict[str, Any] = {
+        "expected_version": task.version,
+        "expected_status": task.status,
+        "confirm_interrupted_write": snapshot["interrupted_write"],
+    }
+    if season is not None and episode is not None:
+        retry_fields.update(
+            season_override=season,
+            episode_override=episode,
+            confirm_interrupted_write=False,
+        )
     if not db.reset_local_media_task_if_current(
-        task.id,
-        owner=_WORKSPACE_OWNER,
-        expected_version=task.version,
-        expected_status=task.status,
-        confirm_interrupted_write=snapshot["interrupted_write"],
+        task.id, owner=_WORKSPACE_OWNER, **retry_fields,
     ):
         raise AgentToolError("任务状态已变化，请重新预检", code="confirmation_stale")
     get_local_media_scheduler().reload()
+    remapped = season is not None and episode is not None
+    target_position = _episode_position(season, episode) if remapped else ""
+    data = {
+        "operation": "remap_episode" if remapped else "retry",
+        "task_number": task_number,
+        **({"season": season, "episode": episode} if remapped else {}),
+        "affected": 1,
+        "runtime_refreshed": True,
+    }
     return ToolResult(
         True,
         "accepted",
-        f"本地媒体任务 {task_number} 已重新排队",
-        data={
-            "operation": "retry",
-            "task_number": task_number,
-            "affected": 1,
-            "runtime_refreshed": True,
-        },
+        (
+            f"本地媒体任务 {task_number} 已修正为 {target_position} 并重新排队"
+            if remapped
+            else f"本地媒体任务 {task_number} 已重新排队"
+        ),
+        data=data,
         evidence=[
             Evidence(
                 "sqlite:local_media_tasks",
-                "使用一次性确认票据、任务版本和原子状态条件重新排队，并生成新的内部操作标识。",
+                (
+                    "使用一次性确认票据和任务版本条件原子写入明确季集映射，并通过统一重试事务重新排队。"
+                    if remapped
+                    else "使用一次性确认票据、任务版本和原子状态条件重新排队，并生成新的内部操作标识。"
+                ),
                 _now(),
             )
         ],
-        suggestions=["可稍后重新列出本地媒体任务查看进度。"],
+        suggestions=[
+            "任务已按当前来源模式重新排队；可稍后查看本地媒体任务状态，通知是否发送以现有配置为准。"
+            if remapped
+            else "可稍后重新列出本地媒体任务查看进度。"
+        ],
     )
 
 

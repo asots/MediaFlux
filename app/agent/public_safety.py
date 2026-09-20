@@ -177,7 +177,7 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "local_media.inspect_task": "本地媒体任务检查",
     "local_media.preview_task": "本地媒体整理预览",
     "local_media.refresh_task_library": "本地媒体库精准刷新",
-    "local_media.retry_task": "本地媒体任务重试",
+    "local_media.retry_task": "本地媒体任务重试/季集纠偏",
     "local_media.review_queue_summary": "本地媒体待确认摘要",
     "local_media.scan_sources": "本地媒体来源扫描",
     "local_media.set_source_trigger_enabled": "本地媒体来源触发器启停",

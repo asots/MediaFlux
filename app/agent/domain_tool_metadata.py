@@ -41,6 +41,15 @@ TOOL_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
         "项目能力",
         "支持哪些功能",
     ),
+    "local_media.retry_task": (
+        "修正季集号",
+        "纠正季集映射",
+        "S02E12",
+        "TMDB 集号超出",
+        "集数识别错误",
+        "指定第几季第几集",
+        "连续集号改为季度集号",
+    ),
     "guangya.fs.query": (
         "根目录",
         "列出目录",

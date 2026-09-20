@@ -306,8 +306,10 @@ class AgentActionHistoryCoreTests(unittest.TestCase):
             (
                 "local_media.retry_task",
                 {
-                    "operation": "retry",
+                    "operation": "remap_episode",
                     "task_number": 2,
+                    "season": 2,
+                    "episode": 12,
                     "affected": 1,
                     "runtime_refreshed": True,
                     "path": "/private/source",
@@ -342,8 +344,10 @@ class AgentActionHistoryCoreTests(unittest.TestCase):
         self.assertEqual(
             by_tool["local_media.retry_task"]["details"],
             {
-                "operation": "retry",
+                "operation": "remap_episode",
                 "task_number": 2,
+                "season": 2,
+                "episode": 12,
                 "affected": 1,
                 "runtime_refreshed": True,
             },

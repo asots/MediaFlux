@@ -1365,6 +1365,64 @@ class LocalMediaServiceTests(IsolatedDatabaseTestCase):
             self.assertEqual((stored.season_override, stored.episode_override), (2, None))
             self.assertTrue(episode.exists())
 
+    def test_manual_task_execution_remaps_absolute_release_to_explicit_season_episode(self):
+        filename = (
+            "[ANi] 地獄模式 ～喜歡挑戰特殊成就的玩家在廢設定的異世界成為無雙～ "
+            "2nd Season - 24 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
+        )
+        with tempfile.TemporaryDirectory() as root_raw:
+            root = Path(root_raw)
+            source_root = root / "downloads-explicit-remap"
+            target_root = root / "tv"
+            source_root.mkdir()
+            target_root.mkdir()
+            episode = source_root / filename
+            episode.write_bytes(b"video")
+            source_id = db.create_local_media_source(
+                name="explicit-remap-source", qb_profile="", qb_path_prefix="",
+                local_root=str(source_root), media_type="tv", mode="move",
+                stable_seconds=0, owner="admin",
+            )
+            db.upsert_local_library_target(
+                source_id, "tv", str(target_root), owner="admin"
+            )
+            service = LocalMediaService(scraper=SharedPositionFakeScraper(MatchResult(
+                tmdb_id="261403",
+                title="地狱模式 ～喜欢速通游戏的玩家在废设定异世界无双～",
+                year="2025",
+                media_type="tv",
+                confidence=1.0,
+            )))
+            inspection = service.inspect_source("admin", source_id, episode)
+            self.assertEqual(
+                (inspection["parsed_season"], inspection["parsed_episode"]), (2, 24)
+            )
+            preview = service.preview(
+                "admin", inspection["inspection_id"], tmdb_id="261403",
+                media_type="tv", season_override=2, episode_override=12,
+            )
+            self.assertEqual(preview["status"], "planned")
+            self.assertIn("S02E12", preview["plans"][0]["target_name"])
+            self.assertNotIn("S02E24", preview["plans"][0]["target_name"])
+            task_id = service.create_manual_task(
+                "admin", inspection["inspection_id"], tmdb_id="261403",
+                media_type="tv", rules_snapshot=preview["rules_snapshot"],
+                season_override=2, episode_override=12,
+            )
+            self.assertTrue(db.claim_local_media_task(task_id, owner="admin"))
+            expected_target = Path(preview["plans"][0]["target_path"])
+            result = service.execute_task("admin", task_id)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["moved"], [str(expected_target)])
+            target = Path(result["moved"][0])
+            self.assertIn("S02E12", target.name)
+            self.assertTrue(target.exists())
+            self.assertEqual(target.read_bytes(), b"video")
+            self.assertEqual(target.parent.name, "Season 2")
+            self.assertFalse(episode.exists())
+            stored = db.get_local_media_task(task_id, owner="admin")
+            self.assertEqual((stored.season_override, stored.episode_override), (2, 12))
+
     def test_single_video_directory_rejects_episode_override_like_guangya(self):
         with tempfile.TemporaryDirectory() as root_raw:
             root = Path(root_raw); source_root = root / "downloads-directory-override"; target_root = root / "tv"

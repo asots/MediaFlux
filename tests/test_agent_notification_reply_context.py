@@ -153,6 +153,30 @@ def test_reference_focus_selects_original_domain_despite_rss_history():
     assert selection.scores["local_media.task_summaries"] > selection.scores["rss.entry_summaries"]
 
 
+def test_local_media_failure_reply_selects_task_binding_and_episode_remap():
+    notice = (
+        "❌ 本地媒体确认整理失败\n"
+        "目标文件：地獄模式 2nd Season - 24.mp4\n"
+        "候选媒体：地狱模式 ～喜欢速通游戏的玩家在废设定异世界无双～\n"
+        "错误原因：文件集号超出 TMDB 记录范围"
+    )
+    state = SessionState(owner="owner", session_id="session", conversation=[
+        {
+            "role": "user",
+            "content": "你先改名为 S02E12",
+            "reply_context": {"text": notice},
+        },
+    ])
+    catalog = catalog_from_tool_specs(build_tool_specs())
+    selection = CapabilityRetriever().retrieve(
+        "你先改名为 S02E12",
+        catalog,
+        context=AgentSession._capability_retrieval_context(state),
+    )
+    assert "local_media.retry_task" in selection.names
+    assert "local_media.task_summaries" in selection.names
+
+
 def test_fast_paste_then_followup_keeps_user_notice_when_old_model_is_cancelled():
     async def scenario():
         first_started = asyncio.Event()

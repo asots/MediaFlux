@@ -28,6 +28,7 @@ from app.agent.local_media_task_actions import (
     inspect_local_media_task,
     list_local_media_task_summaries,
     local_media_inspection_arguments,
+    local_media_retry_arguments,
     local_media_task_number_arguments,
     local_media_task_summaries_arguments,
     prepare_refresh_local_media_task_library,
@@ -191,6 +192,8 @@ def register_specs(
             },
             context_handler=list_local_media_task_summaries,
             validator=local_media_task_summaries_arguments,
+            workflow="local_media_task_resolution",
+            workflow_stage=10,
             examples=("列出本地媒体任务", "查看失败的本地整理任务", "刚才本地整理通知里哪个完成哪个跳过", "查看本次扫描 LM12 的文件结果"),
         )
     )
@@ -227,18 +230,34 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="local_media.retry_task",
-            description="预检并确认后仅重试 failed 或 requires_manual 的本地媒体任务；使用版本条件原子重新排队，不直接移动文件。",
+            description="预检并确认后重试 failed 或 requires_manual 的本地媒体任务。仅当任务是已选定 TMDB 剧集候选的 requires_manual 任务时，才可同时提供用户明确指定的 season 与 episode，将错误季集（如 S02E24）修正为 S02E12 后复用统一事务重新排队。若当前会话没有最新 task_number，必须先调用 local_media.task_summaries 绑定任务，禁止猜测；这不是任意文件路径改名。",
             risk=RiskLevel.LOW_WRITE,
             parameters={
                 "type": "object",
                 "required": ["task_number"],
-                "properties": {"task_number": {"type": "integer", "minimum": 1}},
+                "properties": {
+                    "task_number": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "season": {"type": "integer", "minimum": 0, "maximum": 99},
+                    "episode": {"type": "integer", "minimum": 1, "maximum": 999},
+                },
                 "additionalProperties": False,
             },
-            validator=local_media_task_number_arguments,
+            validator=local_media_retry_arguments,
             requires_confirmation=True,
             context_confirmation_preparer=prepare_retry_local_media_task,
             context_confirmed_handler=retry_local_media_task_confirmed,
+            related_tools=(
+                "local_media.task_summaries",
+                "local_media.inspect_task",
+                "local_media.preview_task",
+            ),
+            workflow="local_media_task_resolution",
+            workflow_stage=20,
+            examples=(
+                "重试本地媒体任务 1",
+                "把这个待确认任务改成 S02E12 后继续入库",
+                "将本地媒体任务 1 的季集修正为第 2 季第 12 集",
+            ),
         )
     )
     registry.register(
