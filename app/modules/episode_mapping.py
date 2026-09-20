@@ -10,10 +10,10 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
-import unicodedata
 
 NUMBERING_MODES = {"auto", "standard", "absolute", "season_continuous"}
 NUMBERING_MODE_LABELS = {
@@ -73,6 +73,13 @@ class DirectoryEpisodeEvidence:
     episode_count: int
     contiguous: bool = True
     declared_range_matches: bool = False
+
+
+@dataclass(frozen=True)
+class EpisodePositionMatch:
+    relation: str
+    reason: str
+    mapping: EpisodeMappingPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -915,4 +922,118 @@ def infer_episode_mapping(
         confidence=0.0,
         range_start=range_start,
         range_end=range_end,
+    )
+
+def infer_release_episode_mapping(
+    *,
+    source_season: int | None,
+    source_episode: int | None,
+    detail: dict | None = None,
+    season_detail: dict | None = None,
+    parent_path: str = "",
+    directory_evidence: DirectoryEpisodeEvidence | None = None,
+    source_year: str = "",
+    mode: str = "auto",
+) -> EpisodeMappingPlan:
+    """统一解析发布位置到 TMDB 位置；证据不足时保持原位置并降低置信度。"""
+    merged = infer_merged_season_cour_mapping(
+        source_season=source_season,
+        source_episode=source_episode,
+        detail=detail,
+        season_detail=season_detail,
+        directory_evidence=directory_evidence,
+        source_year=source_year,
+    )
+    if merged.confidence >= 0.9 and merged.changed:
+        return merged
+    return infer_episode_mapping(
+        source_season=source_season,
+        source_episode=source_episode,
+        parent_path=parent_path,
+        detail=detail,
+        mode=mode,
+        directory_evidence=directory_evidence,
+    )
+
+
+def classify_episode_position(
+    *,
+    source_season: int | None,
+    source_episode: int | None,
+    source_episode_end: int | None = None,
+    target_season: int | None,
+    target_episode: int | None,
+    mapping: EpisodeMappingPlan | None = None,
+    end_mapping: EpisodeMappingPlan | None = None,
+) -> EpisodePositionMatch:
+    """用唯一映射语义判定发布位置是否覆盖目标季集。"""
+    season = _positive_int(source_season)
+    episode = _positive_int(source_episode)
+    episode_end = _positive_int(source_episode_end) or episode
+    target_s = _positive_int(target_season)
+    target_e = _positive_int(target_episode)
+
+    if target_e is None:
+        if target_s is not None and season == target_s:
+            return EpisodePositionMatch(
+                "season", "source_season_matches_target", mapping
+            )
+        return EpisodePositionMatch("unknown", "target_episode_missing", mapping)
+    if episode is None or episode_end is None:
+        if target_s is not None and season == target_s:
+            return EpisodePositionMatch(
+                "season", "source_season_matches_target", mapping
+            )
+        return EpisodePositionMatch("unknown", "source_episode_missing", mapping)
+
+    # 无季号的裸集号只有在目标为第一季同集时可直接证明；其它位置仍需映射证据。
+    if season is None:
+        if target_s == 1 and episode <= target_e <= episode_end:
+            relation = "exact" if episode == episode_end == target_e else "range"
+            return EpisodePositionMatch(
+                relation, "bare_episode_matches_target", mapping
+            )
+        return EpisodePositionMatch(
+            "unknown", "bare_episode_mapping_not_provable", mapping
+        )
+
+    def effective(
+        plan: EpisodeMappingPlan | None, raw_episode: int
+    ) -> tuple[int | None, int, bool]:
+        if (
+            plan is not None
+            and plan.confidence >= 0.9
+            and plan.target_season is not None
+            and plan.target_episode is not None
+        ):
+            return plan.target_season, plan.target_episode, True
+        return season, raw_episode, False
+
+    start_season, start_episode, start_mapped = effective(mapping, episode)
+    end_plan = end_mapping if end_mapping is not None else mapping
+    end_season, end_episode, end_mapped = effective(end_plan, episode_end)
+    if (
+        start_season == target_s == end_season
+        and start_episode <= target_e <= end_episode
+    ):
+        relation = "exact" if start_episode == end_episode == target_e else "range"
+        reason = (
+            "mapped_release_matches_target"
+            if start_mapped or end_mapped
+            else "release_matches_target"
+        )
+        return EpisodePositionMatch(relation, reason, mapping)
+
+    # 长篇动画常被发布组按篇章/年番切成 S02+，而 TMDB 仍合并在 S01。
+    # 缺少时间线证据时只能降级待核对，不能在索引初排阶段误判冲突并挤出结果。
+    if target_s == 1 and season > 1:
+        return EpisodePositionMatch(
+            "unknown", "publisher_season_mapping_not_provable", mapping
+        )
+    if start_mapped or end_mapped or season == target_s:
+        return EpisodePositionMatch(
+            "conflict", "release_position_conflicts_with_target", mapping
+        )
+    return EpisodePositionMatch(
+        "conflict", "release_season_conflicts_with_target", mapping
     )

@@ -165,6 +165,8 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
                     "aliases": ["Alias"],
                     "year": 2026,
                     "media_type": "ANIME",
+                    "season": 1,
+                    "episode": 192,
                     "sites": ["NYAA", "nyaa"],
                     "sort_mode": "PUBLISHED_DESC",
                     "limit": 12,
@@ -174,6 +176,7 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         self.assertEqual(normalized["media_type"], "anime")
         self.assertEqual(normalized["sites"], ["nyaa"])
         self.assertEqual(normalized["sort_mode"], "published_desc")
+        self.assertEqual((normalized["season"], normalized["episode"]), (1, 192))
         self.assertEqual(normalized["limit"], 12)
         invalid_payloads = (
             {"title": "Demo", "magnet": _SECRET_MAGNET},
@@ -185,6 +188,11 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             {"title": "Demo", "limit": 51},
             {"title": "Demo", "sites": ["../nyaa"]},
             {"title": "Demo", "sort_mode": "newest"},
+            {"title": "Demo", "season": True},
+            {"title": "Demo", "season": -1},
+            {"title": "Demo", "season": 101},
+            {"title": "Demo", "episode": 0},
+            {"title": "Demo", "episode": 1001},
         )
         for payload in invalid_payloads:
             with self.subTest(payload=payload), self.assertRaises(AgentToolError):

@@ -84,6 +84,16 @@ def register_specs(
                         "type": "string",
                         "enum": ["", "movie", "tv", "anime"],
                     },
+                    "season": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                    },
+                    "episode": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                    },
                     "page": {
                         "type": "integer",
                         "minimum": 1,

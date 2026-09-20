@@ -156,6 +156,90 @@ class ResourceRecommendationTests(unittest.TestCase):
         self.assertEqual(conflict["quality"]["match"], "conflict")
         self.assertFalse(conflict["quality"]["eligible"])
 
+    def test_gm_team_bare_absolute_episode_is_recommended(self):
+        ranked = rank_episode_search(
+            {
+                "items": [
+                    _item(
+                        "gm-team-absolute-159",
+                        "[GM-Team][国漫][师兄啊师兄][2026][159][GB][4K HEVC 10Bit]",
+                        seeders=36,
+                    )
+                ]
+            },
+            season=1,
+            episode=159,
+        )
+
+        quality = ranked["items"][0]["quality"]
+        self.assertEqual(quality["match"], "exact_episode")
+        self.assertEqual(quality["confidence"], "high")
+        self.assertEqual(ranked["recommendation"]["status"], "recommended")
+
+    def test_release_season_maps_to_merged_tmdb_season_with_airdate_evidence(self):
+        episodes = []
+        for number in range(1, 96):
+            if number <= 40:
+                year, day = 2024, number
+            elif number <= 69:
+                year, day = 2025, number - 40
+            else:
+                year, day = 2026, number - 69
+            episodes.append(
+                {
+                    "episode_number": number,
+                    "air_date": f"{year}-01-{min(day, 28):02d}",
+                }
+            )
+        mapping_context = {
+            "detail": {"seasons": [{"season_number": 1, "episode_count": 95}]},
+            "season_detail": {"season_number": 1, "episodes": episodes},
+        }
+        ranked = rank_episode_search(
+            {
+                "items": [
+                    _item(
+                        "gm-team-season-3-26",
+                        "[GM-Team][国漫][沧元图 第3季][2026][26][GB][4K HEVC 10Bit]",
+                        seeders=54,
+                    )
+                ]
+            },
+            season=1,
+            episode=95,
+            mapping_context=mapping_context,
+        )
+
+        quality = ranked["items"][0]["quality"]
+        self.assertEqual(quality["match"], "exact_episode")
+        self.assertEqual(quality["confidence"], "high")
+        self.assertTrue(
+            any(
+                "S03E26" in reason and "S01E95" in reason
+                for reason in quality["reasons"]
+            )
+        )
+
+    def test_unproven_arc_episode_remains_review_only(self):
+        ranked = rank_episode_search(
+            {
+                "items": [
+                    _item(
+                        "gm-team-arc-episode-16",
+                        "[GM-Team][国漫][凡人修仙传 慕兰之战][2026][16][GB][4K HEVC 10Bit]",
+                        seeders=40,
+                    )
+                ]
+            },
+            season=1,
+            episode=192,
+        )
+
+        quality = ranked["items"][0]["quality"]
+        self.assertEqual(quality["match"], "unknown")
+        self.assertTrue(quality["eligible"])
+        self.assertEqual(ranked["recommendation"]["status"], "review_required")
+
     def test_unavailable_and_empty_results_have_no_selected_plan(self):
         unavailable = rank_episode_search({"items": [
             _item("blocked-result-id-01", "示例剧 S02E03 2160p", state="unavailable", seeders=30)

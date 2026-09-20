@@ -22,7 +22,6 @@ from app.agent.recent_resource_candidates import (
     attach_resource_candidate_reference,
 )
 from app.clients.guangya import GuangYaClient, close_guangya_client
-from app.modules.download_dispatcher import public_dispatch_summary
 from app.indexers.downloads import (
     DownloadRequestCreationError,
     InvalidDownloadData,
@@ -32,6 +31,7 @@ from app.indexers.downloads import (
 from app.indexers.errors import IndexerError, IndexerValidationError
 from app.indexers.models import IndexerMediaSearchRequest
 from app.indexers.runtime import get_indexer_service, run_indexer_awaitable_sync
+from app.modules.download_dispatcher import public_dispatch_summary
 
 _SITE_ID_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 _RESULT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -124,6 +124,8 @@ def search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             "aliases",
             "year",
             "media_type",
+            "season",
+            "episode",
             "page",
             "sort_mode",
             "sites",
@@ -187,6 +189,8 @@ def search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             aliases=aliases,
             year=year,
             media_type=media_type,
+            season=arguments.get("season"),
+            episode=arguments.get("episode"),
             page=page,
             sort_mode=sort_mode,
         )
@@ -201,6 +205,8 @@ def search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         "aliases": list(request.aliases),
         "year": request.year,
         "media_type": request.media_type,
+        "season": request.season,
+        "episode": request.episode,
         "page": request.page,
         "sort_mode": request.sort_mode,
         "sites": sites,
@@ -287,6 +293,8 @@ def search_resources(
         aliases=arguments["aliases"],
         year=arguments["year"],
         media_type=arguments["media_type"],
+        season=arguments.get("season"),
+        episode=arguments.get("episode"),
         page=arguments["page"],
         sort_mode=arguments.get("sort_mode", "relevance_desc"),
     )

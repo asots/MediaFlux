@@ -1,16 +1,16 @@
 """剧集完整性审计：只比较可靠映射后的本地集号与 TMDB 已播集号。"""
 from __future__ import annotations
 
+import threading
+import time
+import unicodedata
 from copy import deepcopy
 from datetime import date, datetime
-import threading
-import unicodedata
-import time
 from typing import Any
 
 from app.agent.models import Evidence, ToolResult
 from app.clients.tmdb import TMDBClient, close_tmdb_client
-from app.discovery.models import ProviderNotConfigured, ProviderError
+from app.discovery.models import ProviderError, ProviderNotConfigured
 from app.logger import get_logger
 from app.services import inspect_series_episode_sources
 
@@ -55,6 +55,14 @@ def _result(
         suggestions=suggestions or [],
         error=error,
     )
+
+
+def _with_episode_mapping_context(
+    result: ToolResult, context: dict[str, Any]
+) -> ToolResult:
+    if context:
+        result.effect_metadata["episode_mapping_context"] = context
+    return result
 
 
 def _base_data(arguments: dict[str, Any], sources: list[dict] | None = None) -> dict[str, Any]:
@@ -400,7 +408,7 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
         data["mapping_status"] = mapping_status
         raw_seasons = details.get("seasons", [])
         if not isinstance(raw_seasons, list):
-            raise ValueError("invalid seasons")
+            raise TypeError("invalid seasons")
         season_numbers = sorted({
             int(item.get("season_number"))
             for item in raw_seasons
@@ -429,11 +437,36 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
         unknown_air_date = 0
         remote_count = 0
         remote_truncated = False
+        mapping_context: dict[str, Any] = {}
         for season_number in season_numbers:
             payload = client.tv_season_detail(tmdb_id, season_number)
             episodes = payload.get("episodes", [])
             if not isinstance(episodes, list):
-                raise ValueError("invalid episodes")
+                raise TypeError("invalid episodes")
+            if requested_season == season_number:
+                mapping_context = {
+                    "detail": {
+                        "seasons": [
+                            {
+                                "season_number": item.get("season_number"),
+                                "episode_count": item.get("episode_count"),
+                            }
+                            for item in raw_seasons
+                            if isinstance(item, dict)
+                        ]
+                    },
+                    "season_detail": {
+                        "season_number": payload.get("season_number", season_number),
+                        "episodes": [
+                            {
+                                "episode_number": item.get("episode_number"),
+                                "air_date": item.get("air_date"),
+                            }
+                            for item in episodes
+                            if isinstance(item, dict)
+                        ],
+                    },
+                }
             for item in episodes:
                 if not isinstance(item, dict):
                     continue
@@ -464,7 +497,7 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
             data=data,
             suggestions=["请先在设置中配置 TMDB API Key。"],
         )
-    except (ProviderError, ValueError) as exc:
+    except (ProviderError, TypeError, ValueError) as exc:
         logger.warning("TMDB 剧集审计失败 type=%s", type(exc).__name__)
         return _result(
             ok=False,
@@ -520,12 +553,15 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
         or "unmapped" in statuses
     )
     if incomplete:
-        return _result(
-            ok=False,
-            status="inconclusive",
-            summary="审计数据不完整，当前结果仅供参考",
-            data=data,
-            suggestions=["存在不可用、未映射或被截断的数据源，请修复后重新审计。"],
+        return _with_episode_mapping_context(
+            _result(
+                ok=False,
+                status="inconclusive",
+                summary="审计数据不完整，当前结果仅供参考",
+                data=data,
+                suggestions=["存在不可用、未映射或被截断的数据源，请修复后重新审计。"],
+            ),
+            mapping_context,
         )
     if missing:
         followups = _resource_followups(data)
@@ -534,21 +570,27 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
             data["resource_followups_truncated"] = len(sample) > len(followups) or bool(
                 data.get("missing_sample_truncated")
             )
-        return _result(
-            ok=True,
-            status="updates_available",
-            summary=f"发现 {len(missing)} 集已播但本地尚未收录",
-            data=data,
-            suggestions=["可按缺失集号继续搜索资源；当前工具不会自动下载。"],
+        return _with_episode_mapping_context(
+            _result(
+                ok=True,
+                status="updates_available",
+                summary=f"发现 {len(missing)} 集已播但本地尚未收录",
+                data=data,
+                suggestions=["可按缺失集号继续搜索资源；当前工具不会自动下载。"],
+            ),
+            mapping_context,
         )
-    return _result(
-        ok=True,
-        status="up_to_date",
-        summary=("已知播出日期与有效编号记录内暂无缺集，仍有未确定记录"
-                 if unknown_air_date or data["ignored_unknown_local"] else "截至指定日期，已播普通剧集均已收录"),
-        data=data,
-        suggestions=(["存在播出日期未知或本地缺少有效集号的条目，不能据此判断全部最新或全集齐全。"]
-                     if unknown_air_date or data["ignored_unknown_local"] else []),
+    return _with_episode_mapping_context(
+        _result(
+            ok=True,
+            status="up_to_date",
+            summary=("已知播出日期与有效编号记录内暂无缺集，仍有未确定记录"
+                     if unknown_air_date or data["ignored_unknown_local"] else "截至指定日期，已播普通剧集均已收录"),
+            data=data,
+            suggestions=(["存在播出日期未知或本地缺少有效集号的条目，不能据此判断全部最新或全集齐全。"]
+                         if unknown_air_date or data["ignored_unknown_local"] else []),
+        ),
+        mapping_context,
     )
 
 

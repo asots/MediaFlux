@@ -70,6 +70,27 @@ class IndexerQueryPlanTests(unittest.TestCase):
             ("The Mystic Nine S02E30", "Mystic Nine S02E30", "九门 S02E30"),
         )
 
+    def test_gm_team_chinese_title_keeps_broad_fallback_for_all_sites(self):
+        request = IndexerMediaSearchRequest.create(
+            title="凡人修仙传",
+            media_type="tv",
+            season=1,
+            episode=192,
+        )
+
+        self.assertEqual(
+            build_site_queries("mikan", request),
+            ("凡人修仙传 S01E192", "凡人修仙传 第1季 第192集", "凡人修仙传"),
+        )
+        self.assertEqual(
+            build_site_queries("nyaa", request),
+            ("凡人修仙传 S01E192", "凡人修仙传"),
+        )
+        self.assertEqual(
+            build_site_queries("tpb", request),
+            ("凡人修仙传 S01E192", "凡人修仙传"),
+        )
+
     def test_unknown_site_falls_back_to_stable_input_order(self):
         self.assertEqual(
             build_site_queries("custom", self.request),

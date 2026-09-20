@@ -102,7 +102,7 @@ def build_site_queries(site_id: str, request: IndexerMediaSearchRequest) -> tupl
         bases = [english, *latin_aliases]
         if _is_latin(original):
             bases.append(original)
-        if _is_latin(title):
+        if _is_latin(title) or not any(bases):
             bases.append(title)
     elif site_id == "sukebei":
         bases = [original, *latin_aliases, english, title, *other_aliases]

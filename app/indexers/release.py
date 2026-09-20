@@ -119,33 +119,3 @@ def parse_indexer_release_position(value: str) -> dict[str, int | None]:
         "episode": _valid_episode(episode),
         "episode_end": _valid_episode(episode_end),
     }
-
-
-def release_covers_target(
-    value: str,
-    *,
-    season: int | None,
-    episode: int | None,
-) -> tuple[str, dict[str, int | None]]:
-    """Classify how a release position relates to the requested season/episode."""
-
-    position = parse_indexer_release_position(value)
-    parsed_season = position["season"]
-    parsed_episode = position["episode"]
-    parsed_end = position["episode_end"] or parsed_episode
-
-    if season is not None and parsed_season is not None and parsed_season != season:
-        return "conflict", position
-    if episode is None:
-        if season is not None and parsed_season == season:
-            return "season", position
-        return "unknown", position
-    if parsed_episode is None:
-        if season is not None and parsed_season == season:
-            return "season", position
-        return "unknown", position
-    if parsed_episode <= episode <= (parsed_end or parsed_episode):
-        if parsed_episode == episode and parsed_end == episode:
-            return "exact", position
-        return "range", position
-    return "conflict", position

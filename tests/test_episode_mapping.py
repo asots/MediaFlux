@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 import unittest
-
-from tests.support import release_parse_result
 from datetime import date, timedelta
 from unittest.mock import Mock
 
 from app.modules.directory_media import DirectoryInspection, MediaSnapshot
 from app.modules.directory_scrape import DirectoryScrapeService, FixedMatchScraper
-from app.modules.scraper import MatchResult
 from app.modules.episode_mapping import (
     build_directory_episode_evidence,
+    classify_episode_position,
     extract_release_episode_range,
     infer_episode_mapping,
     infer_merged_season_cour_mapping,
     infer_overflow_tmdb_special_mapping,
+    infer_release_episode_mapping,
     match_fractional_tmdb_special,
 )
+from app.modules.scraper import MatchResult
+from tests.support import release_parse_result
 
 
 class EpisodeMappingTests(unittest.TestCase):
@@ -1138,6 +1139,88 @@ class DirectoryScrapeEpisodeMappingTests(unittest.TestCase):
         self.assertEqual(overrides[("", videos[0].name)], (1, 1))
         self.assertEqual(overrides[("", videos[-1].name)], (1, 13))
         self.assertTrue(all(item.target_season == 1 for item in mappings.values()))
+
+
+    def test_unified_position_classifier_handles_bare_absolute_episode(self):
+        exact = classify_episode_position(
+            source_season=None,
+            source_episode=192,
+            target_season=1,
+            target_episode=192,
+        )
+        unknown = classify_episode_position(
+            source_season=None,
+            source_episode=192,
+            target_season=2,
+            target_episode=1,
+        )
+
+        self.assertEqual(exact.relation, "exact")
+        self.assertEqual(unknown.relation, "unknown")
+
+    def test_unified_release_mapping_maps_publisher_season_to_merged_tmdb_season(self):
+        episodes = []
+        for number in range(1, 96):
+            if number <= 40:
+                year, day = 2024, number
+            elif number <= 69:
+                year, day = 2025, number - 40
+            else:
+                year, day = 2026, number - 69
+            episodes.append(
+                {
+                    "episode_number": number,
+                    "air_date": f"{year}-01-{min(day, 28):02d}",
+                }
+            )
+        detail = {"seasons": [{"season_number": 1, "episode_count": 95}]}
+        season_detail = {"season_number": 1, "episodes": episodes}
+
+        mapping = infer_release_episode_mapping(
+            source_season=3,
+            source_episode=26,
+            detail=detail,
+            season_detail=season_detail,
+            source_year="2026",
+        )
+        match = classify_episode_position(
+            source_season=3,
+            source_episode=26,
+            target_season=1,
+            target_episode=95,
+            mapping=mapping,
+        )
+
+        self.assertEqual((mapping.target_season, mapping.target_episode), (1, 95))
+        self.assertEqual(mapping.confidence, 1.0)
+        self.assertEqual(match.relation, "exact")
+
+    def test_unproved_publisher_season_mapping_is_unknown_not_false_conflict(self):
+        mapping = infer_release_episode_mapping(
+            source_season=3,
+            source_episode=26,
+            detail={"seasons": [{"season_number": 1, "episode_count": 95}]},
+            season_detail=None,
+            source_year="2026",
+        )
+        match = classify_episode_position(
+            source_season=3,
+            source_episode=26,
+            target_season=1,
+            target_episode=95,
+            mapping=mapping,
+        )
+
+        standard_conflict = classify_episode_position(
+            source_season=1,
+            source_episode=30,
+            target_season=2,
+            target_episode=30,
+        )
+
+        self.assertLess(mapping.confidence, 0.9)
+        self.assertEqual(match.relation, "unknown")
+        self.assertEqual(standard_conflict.relation, "conflict")
 
 
 if __name__ == "__main__":

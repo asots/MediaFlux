@@ -52,6 +52,24 @@ class IndexerRankingTests(unittest.TestCase):
         self.assertNotIn("title_contains", suffixed.match_reasons)
         self.assertGreater(correct.relevance_score or 0, (prefixed.relevance_score or 0) + 40)
 
+    def test_publisher_season_is_not_discarded_before_tmdb_mapping(self):
+        media = IndexerMediaSearchRequest.create(
+            title="沧元图",
+            media_type="tv",
+            season=1,
+            episode=95,
+        )
+
+        ranked = rank_item(
+            self._item("[GM-Team][国漫][沧元图 第3季][2026][26][GB][4K HEVC 10Bit]"),
+            media=media,
+            fallback_query="沧元图",
+            now=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        )
+
+        self.assertNotIn("episode_conflict", ranked.match_reasons)
+        self.assertGreater(ranked.relevance_score or 0, 0)
+
     def test_bracket_only_titles_keep_media_identity_for_clustering(self):
         items = [
             self._item(

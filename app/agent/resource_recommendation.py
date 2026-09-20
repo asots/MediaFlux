@@ -11,6 +11,10 @@ from app.agent.media_preference_policy import (
     resource_preference_match,
 )
 from app.indexers.release import parse_indexer_release_position
+from app.modules.episode_mapping import (
+    classify_episode_position,
+    infer_release_episode_mapping,
+)
 from app.modules.scraper import TMDBScraper
 
 _MAX_ITEMS = 50
@@ -34,47 +38,6 @@ def _normalized_title(value: Any) -> str:
     return unicodedata.normalize("NFKC", _safe_text(value, 300)).casefold()
 
 
-def _episode_positions(title: str) -> set[tuple[int, int]]:
-    positions: set[tuple[int, int]] = set()
-    patterns = (
-        r"(?<![a-z0-9])s\s*0*(\d{1,3})[ ._\-]*e\s*0*(\d{1,4})(?!\d)",
-        r"(?<!\d)0*(\d{1,3})\s*x\s*0*(\d{1,4})(?!\d)",
-        r"第\s*0*(\d{1,3})\s*季.{0,16}?第\s*0*(\d{1,4})\s*[集話话]",
-    )
-    for pattern in patterns:
-        for raw_season, raw_episode in re.findall(pattern, title, flags=re.IGNORECASE):
-            try:
-                season = int(raw_season)
-                episode = int(raw_episode)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= season <= 100 and 1 <= episode <= 1000:
-                positions.add((season, episode))
-    return positions
-
-
-def _episode_ranges(title: str) -> list[tuple[int, int, int]]:
-    ranges: list[tuple[int, int, int]] = []
-    patterns = (
-        r"(?<![a-z0-9])s\s*0*(\d{1,3})[ ._\-]*e\s*0*(\d{1,4})\s*(?:-|~|～|to|至)\s*e?\s*0*(\d{1,4})(?!\d)",
-        r"(?<!\d)0*(\d{1,3})\s*x\s*0*(\d{1,4})\s*(?:-|~|～|to|至)\s*0*(\d{1,4})(?!\d)",
-        r"第\s*0*(\d{1,3})\s*季.{0,16}?第\s*0*(\d{1,4})\s*(?:-|~|～|至)\s*0*(\d{1,4})\s*[集話话]",
-    )
-    for pattern in patterns:
-        for raw_season, raw_start, raw_end in re.findall(
-            pattern, title, flags=re.IGNORECASE
-        ):
-            try:
-                parsed = int(raw_season), int(raw_start), int(raw_end)
-            except (TypeError, ValueError):
-                continue
-            season, start, end = parsed
-            start, end = sorted((start, end))
-            if 0 <= season <= 100 and 1 <= start <= end <= 1000:
-                ranges.append((season, start, end))
-    return ranges
-
-
 def _looks_like_season_pack(title: str, season: int) -> bool:
     escaped = str(season)
     patterns = (
@@ -82,80 +45,110 @@ def _looks_like_season_pack(title: str, season: int) -> bool:
         rf"\bseason\s*0*{escaped}(?!\d)",
         rf"第\s*0*{escaped}\s*季",
     )
-    has_season = any(re.search(pattern, title, flags=re.IGNORECASE) for pattern in patterns)
-    pack_marker = bool(re.search(
-        r"complete|全集|全\s*\d+\s*[集話话]|season\s*pack|batch|合集",
-        title,
-        flags=re.IGNORECASE,
-    ))
+    has_season = any(
+        re.search(pattern, title, flags=re.IGNORECASE) for pattern in patterns
+    )
+    pack_marker = bool(
+        re.search(
+            r"complete|全集|全\s*\d+\s*[集話话]|season\s*pack|batch|合集",
+            title,
+            flags=re.IGNORECASE,
+        )
+    )
     return has_season and pack_marker
 
 
+def _release_year(title: str) -> str:
+    years = re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", title)
+    return years[-1] if years else ""
+
+
 def _episode_match(
-    title: str, *, season: int, episode: int
+    title: str,
+    *,
+    season: int,
+    episode: int,
+    mapping_context: dict[str, Any] | None = None,
 ) -> tuple[str, int, list[str], list[str]]:
-    parsed = parse_indexer_release_position(title)
-    parsed_season = parsed.get("season")
-    parsed_episode = parsed.get("episode")
-    parsed_end = parsed.get("episode_end") or parsed_episode
-    positions = _episode_positions(title)
-    ranges = _episode_ranges(title)
-    target = (season, episode)
+    position = parse_indexer_release_position(title)
+    source_season = position.get("season")
+    source_episode = position.get("episode")
+    source_end = position.get("episode_end") or source_episode
+    detail = (
+        mapping_context.get("detail") if isinstance(mapping_context, dict) else None
+    )
+    season_detail = (
+        mapping_context.get("season_detail")
+        if isinstance(mapping_context, dict)
+        else None
+    )
+    mapping = None
+    end_mapping = None
+    if isinstance(detail, dict) and isinstance(season_detail, dict):
+        mapping = infer_release_episode_mapping(
+            source_season=source_season,
+            source_episode=source_episode,
+            detail=detail,
+            season_detail=season_detail,
+            source_year=_release_year(title),
+        )
+        if source_end is not None and source_end != source_episode:
+            end_mapping = infer_release_episode_mapping(
+                source_season=source_season,
+                source_episode=source_end,
+                detail=detail,
+                season_detail=season_detail,
+                source_year=_release_year(title),
+            )
+    match = classify_episode_position(
+        source_season=source_season,
+        source_episode=source_episode,
+        source_episode_end=source_end,
+        target_season=season,
+        target_episode=episode,
+        mapping=mapping,
+        end_mapping=end_mapping,
+    )
     label = f"S{season:02d}E{episode:02d}"
-    if parsed_season == season and parsed_episode is not None and parsed_end is not None:
-        if parsed_episode == episode and parsed_end == episode:
-            return "exact_episode", 220, [f"精确匹配 {label}"], []
-    if _looks_like_season_pack(title, season):
+    if match.relation == "exact":
+        if mapping is not None and mapping.confidence >= 0.9 and mapping.changed:
+            reason = (
+                f"发布位置 S{source_season:02d}E{source_episode:02d} 映射为 {label}"
+            )
+        else:
+            reason = f"精确匹配 {label}"
+        return "exact_episode", 220, [reason], []
+    if (
+        match.relation == "range"
+        and source_episode is not None
+        and source_end is not None
+    ):
+        return (
+            "episode_pack",
+            110,
+            [f"资源范围包含 {label}（E{source_episode:02d}-E{source_end:02d}）"],
+            ["多集资源需人工核对文件清单"],
+        )
+    if match.relation == "season" and _looks_like_season_pack(title, season):
         return (
             "season_pack",
             85,
             [f"识别为第 {season} 季整季资源"],
             ["整季包需人工核对文件清单"],
         )
-    if parsed_season == season and parsed_episode is not None and parsed_end is not None:
-        if parsed_episode <= episode <= parsed_end:
-            return (
-                "episode_pack",
-                110,
-                [f"资源范围包含 {label}（E{parsed_episode:02d}-E{parsed_end:02d}）"],
-                ["多集资源需人工核对文件清单"],
-            )
-    if parsed_season is not None and parsed_season != season:
-        parsed_label = f"S{parsed_season:02d}"
-        if parsed_episode is not None:
-            parsed_label += f"E{parsed_episode:02d}"
-        return "conflict", -320, [], [f"季集标记与目标 {label} 冲突：{parsed_label}"]
-    if parsed_episode is not None and parsed_end is not None and not (
-        parsed_episode <= episode <= parsed_end
-    ):
-        parsed_label = f"E{parsed_episode:02d}"
-        if parsed_end != parsed_episode:
-            parsed_label += f"-E{parsed_end:02d}"
-        return "conflict", -320, [], [f"季集标记与目标 {label} 冲突：{parsed_label}"]
-    matching_range = next((
-        (start, end)
-        for range_season, start, end in ranges
-        if range_season == season and start <= episode <= end
-    ), None)
-    if matching_range is not None:
-        start, end = matching_range
-        return (
-            "episode_pack",
-            110,
-            [f"资源范围包含 {label}（E{start:02d}-E{end:02d}）"],
-            ["多集资源需人工核对文件清单"],
-        )
-    if target in positions:
-        return "exact_episode", 220, [f"精确匹配 {label}"], []
-    if positions or ranges:
-        samples = ", ".join(f"S{s:02d}E{e:02d}" for s, e in sorted(positions)[:3])
-        if not samples and ranges:
-            samples = ", ".join(
-                f"S{s:02d}E{start:02d}-E{end:02d}"
-                for s, start, end in ranges[:3]
-            )
-        return "conflict", -320, [], [f"季集标记与目标 {label} 冲突：{samples}"]
-    return "unknown", 20, [], [f"标题未明确标出 {label}，需人工复核"]
+    if match.relation == "conflict":
+        parsed_label = ""
+        if source_season is not None:
+            parsed_label = f"S{source_season:02d}"
+        if source_episode is not None:
+            parsed_label += f"E{source_episode:02d}"
+            if source_end is not None and source_end != source_episode:
+                parsed_label += f"-E{source_end:02d}"
+        warning = f"季集标记与目标 {label} 冲突"
+        if parsed_label:
+            warning += f"：{parsed_label}"
+        return "conflict", -320, [], [warning]
+    return "unknown", 20, [], [f"标题未能证明覆盖 {label}，需人工复核"]
 
 
 def _tag_score(title: str) -> tuple[int, dict[str, str], list[str]]:
@@ -246,10 +239,10 @@ def _activity_score(item: dict[str, Any]) -> tuple[int, list[str], list[str]]:
         score -= 5
         warnings.append("当前做种数为 0")
     else:
-        score += min(18, int(round(math.log2(seeders + 1) * 3)))
+        score += min(18, round(math.log2(seeders + 1) * 3))
         reasons.append(f"{seeders} 个做种")
     if downloads:
-        score += min(6, int(round(math.log2(downloads + 1))))
+        score += min(6, round(math.log2(downloads + 1)))
     return score, reasons, warnings
 
 
@@ -264,11 +257,17 @@ def _bounded_messages(values: list[str], maximum: int) -> list[str]:
     return result
 
 
-def _ranked_item(item: dict[str, Any], *, season: int, episode: int) -> dict[str, Any]:
+def _ranked_item(
+    item: dict[str, Any],
+    *,
+    season: int,
+    episode: int,
+    mapping_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     public = dict(item)
     title = _safe_text(public.get("title"), 300)
     match, match_score, match_reasons, match_warnings = _episode_match(
-        title, season=season, episode=episode
+        title, season=season, episode=episode, mapping_context=mapping_context
     )
     availability_score, downloadable, availability_reasons, availability_warnings = (
         _availability_score(public)
@@ -348,12 +347,18 @@ def rank_episode_search(
     episode: int,
     preferences: dict[str, Any] | None = None,
     preference_overrides: dict[str, Any] | None = None,
+    mapping_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """返回带排序解释和只读下载建议的搜索数据副本。"""
     ranked_data = dict(search_data)
     raw_items = search_data.get("items", [])
     items = [
-        _ranked_item(item, season=season, episode=episode)
+        _ranked_item(
+            item,
+            season=season,
+            episode=episode,
+            mapping_context=mapping_context,
+        )
         for item in raw_items[:_MAX_ITEMS]
         if isinstance(item, dict)
     ] if isinstance(raw_items, list) else []

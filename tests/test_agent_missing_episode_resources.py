@@ -284,9 +284,10 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             }
         )
         call = search.call_args.args[0]
-        self.assertEqual(call["title"], "示例剧 S02E03")
-        self.assertIn("示例剧 2x03", call["aliases"])
-        self.assertIn("示例剧 第2季 第3集", call["aliases"])
+        self.assertEqual(call["title"], "示例剧")
+        self.assertEqual(call["aliases"], [])
+        self.assertEqual(call["season"], 2)
+        self.assertEqual(call["episode"], 3)
         serialized = repr(result.to_dict())
         self.assertNotIn("secret-server", serialized)
         self.assertNotIn("/private/media", serialized)
@@ -481,7 +482,9 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 "library_name": "美女库",
             }
         )
-        self.assertEqual(search.call_args.args[0]["title"], "示例剧 S01E150")
+        call = search.call_args.args[0]
+        self.assertEqual(call["title"], "示例剧")
+        self.assertEqual((call["season"], call["episode"]), (1, 150))
 
     def test_preserves_verified_state_when_indexer_search_is_unavailable(self):
         arguments = missing_episode_resource_arguments(
@@ -595,8 +598,11 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         audit.assert_called_once()
         self.assertEqual(search.call_count, 3)
         self.assertEqual(
-            [call.args[0]["title"] for call in search.call_args_list],
-            ["示例剧 S02E03", "示例剧 S02E04", "示例剧 S02E05"],
+            [
+                (call.args[0]["title"], call.args[0]["season"], call.args[0]["episode"])
+                for call in search.call_args_list
+            ],
+            [("示例剧", 2, 3), ("示例剧", 2, 4), ("示例剧", 2, 5)],
         )
         self.assertTrue(
             all(call.args[0]["limit"] == 7 for call in search.call_args_list)
@@ -723,6 +729,76 @@ class MultiWorkResourceTests(unittest.TestCase):
         with self.assertRaises(AgentToolError):
             missing_season_resource_arguments({"items": [{"query": "剧", "season": 1}], "query": "另一部"})
 
+    def test_batch_exposes_unproved_arc_candidate_without_preselecting_it(self):
+        from types import SimpleNamespace
+
+        from app.indexers.models import IndexerItem
+
+        result_id = "gm-team-arc-review-001"
+        title = "[GM-Team][国漫][凡人修仙传 慕兰之战][2026][16][GB][4K HEVC 10Bit]"
+        stored = {
+            result_id: IndexerItem(
+                "mikan",
+                "Mikan",
+                title,
+                result_id=result_id,
+                download_state="ready",
+                download_kinds=("magnet",),
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+            )
+        }
+        service = SimpleNamespace(
+            result_store=SimpleNamespace(get=lambda key: stored[key], restore=Mock())
+        )
+        arguments = missing_season_resource_arguments(
+            {
+                "items": [{"query": "凡人修仙传", "season": 1}],
+                "as_of": "2026-08-01",
+            }
+        )
+        audit = _audit_result(missing=[{"season": 1, "episode": 192}])
+        audit.data.update(title="凡人修仙传", tmdb_id="44444")
+        searched = _search_result(
+            items=[
+                {
+                    "result_id": result_id,
+                    "title": title,
+                    "site_id": "mikan",
+                    "site_name": "Mikan",
+                    "download_state": "ready",
+                    "download_kinds": ["magnet"],
+                    "seeders": 40,
+                }
+            ]
+        )
+
+        with (
+            patch(
+                "app.agent.episode_resource_actions.audit_series_episodes",
+                return_value=audit,
+            ),
+            patch(
+                "app.agent.episode_resource_actions.search_resources",
+                return_value=searched,
+            ),
+            patch(
+                "app.agent.episode_resource_actions.get_indexer_service",
+                return_value=service,
+            ),
+        ):
+            result = search_missing_season_resources(arguments)
+
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.data["recommended_positions"], [])
+        self.assertEqual(result.data["review_positions"], [1])
+        self.assertEqual(result.data["groups"][0]["review_positions"], [1])
+        self.assertEqual(
+            result.data["groups"][0]["uncovered_episodes"][0]["reason"],
+            "needs_review",
+        )
+        self.assertEqual(len(result.data["items"]), 1)
+        self.assertEqual(len(result.references), 1)
+
     def test_cancelled_batch_does_not_start_audits_or_indexers(self):
         from app.agent.models import ToolContext
         arguments = missing_season_resource_arguments({"items": [{"query": f"测试作品{i}", "season": 1} for i in range(7)]})
@@ -738,7 +814,11 @@ class MultiWorkResourceTests(unittest.TestCase):
 
     def test_seven_work_batch_keeps_six_private_candidates_and_deduplicates_pack(self):
         from types import SimpleNamespace
-        from app.agent.recent_resource_candidates import restore_resource_candidate_reference, validate_safe_resource_snapshot
+
+        from app.agent.recent_resource_candidates import (
+            restore_resource_candidate_reference,
+            validate_safe_resource_snapshot,
+        )
         from app.indexers.models import IndexerItem
         names = ["光阴之外", "择日飞升", "大主宰", "牧神记", "沧元图", "一斩苍穹", "东大高武学院"]
         stored = {}

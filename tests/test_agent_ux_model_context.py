@@ -49,7 +49,11 @@ class FixtureIndexer:
         self.result_store = Mock(get=lambda result_id: self.items[result_id])
 
     async def search_media(self, request, sites=None):
-        label = request.title.rsplit(" ", 1)[-1]
+        label = (
+            f"S{request.season:02d}E{request.episode:02d}"
+            if request.season is not None and request.episode is not None
+            else request.title.rsplit(" ", 1)[-1]
+        )
         label = label if label.startswith("S02E") else "S02E03"
         items = [] if self.empty else [
             _resource_item(

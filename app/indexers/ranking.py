@@ -4,13 +4,15 @@ import hashlib
 import math
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from typing import Iterable
+
+from app.modules.episode_mapping import classify_episode_position
 
 from .models import IndexerItem, IndexerMediaSearchRequest
-from .release import parse_indexer_release_position, release_covers_target
+from .release import parse_indexer_release_position
 
 _SEPARATORS = re.compile(r"[^0-9a-z\u3400-\u9fff\u3040-\u30ff]+", re.IGNORECASE)
 _HAN_ONLY = re.compile(r"^[\u3400-\u9fff]+$")
@@ -121,11 +123,14 @@ def rank_item(
         reasons.append("year_conflict")
 
     if media is not None and (media.season is not None or media.episode is not None):
-        position_match, _position = release_covers_target(
-            item.title,
-            season=media.season,
-            episode=media.episode,
-        )
+        position = parse_indexer_release_position(item.title)
+        position_match = classify_episode_position(
+            source_season=position.get("season"),
+            source_episode=position.get("episode"),
+            source_episode_end=position.get("episode_end"),
+            target_season=media.season,
+            target_episode=media.episode,
+        ).relation
         if position_match == "exact":
             score += 18
             reasons.append("episode_exact")
