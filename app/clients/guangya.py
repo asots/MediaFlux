@@ -61,6 +61,20 @@ def guangya_offline_task_state(status: object, progress: object = 0) -> str:
     return "completed" if completed else "downloading"
 
 
+def verify_guangya_write(
+    check: Callable[[], bool], *, cancel_check: Callable[[], None] | None = None,
+) -> bool:
+    """有界重读后置条件以容忍云端索引延迟；绝不重发写请求。"""
+    for attempt in range(21):
+        if cancel_check is not None:
+            cancel_check()
+        if check():
+            return True
+        if attempt < 20:
+            sleep(0.5)
+    return False
+
+
 def close_guangya_client(client: object | None) -> bool:
     """尽力释放短生命周期光鸭 Client，不让清理异常覆盖业务结果。"""
     if client is None:
@@ -2125,10 +2139,10 @@ class GuangYaClient:
 
             if result is False:
                 raise RuntimeError(f"{failure_prefix}，目录已保留")
-            if isinstance(result, dict):
-                error = _offline_create_error(result)
-                if error:
-                    raise RuntimeError(f"{failure_prefix}：{error}")
+            try:
+                _validate_write_response(result, operation="delete_empty_directory")
+            except GuangYaWriteRejected as exc:
+                raise RuntimeError(f"{failure_prefix}：{exc.public_message or exc.code}") from exc
         return True
 
     # ===== 链接转存 =====

@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.clients.guangya import GuangYaClient, GuangYaFile
+from app.clients.guangya import GuangYaClient, GuangYaFile, verify_guangya_write
 from app.config import PATHS
 from app.modules.guangya_rename import GuangYaRenamePlanError, GuangYaRenamePlanStale
 from app.modules.organize import DEFAULT_ORGANIZE_VIDEO_EXTS
@@ -1115,13 +1115,16 @@ def execute_cleanup_plan(
                 error_type = type(exc).__name__
             verification_unavailable = False
             try:
-                moved = {
-                    str(row.file_id): row for row in client.list_dir(container_id)
-                }.get(str(root.get("file_id") or ""))
+                applied = verify_guangya_write(
+                    lambda: _matches(next((row for row in client.list_dir(container_id)
+                                           if str(row.file_id) == str(root.get("file_id") or "")), None), root),
+                    cancel_check=cancel_check,
+                )
             except Exception:
-                moved = None
+                if cancel_check is not None:
+                    cancel_check()
+                applied = False
                 verification_unavailable = True
-            applied = _matches(moved, root)
             if applied:
                 quarantined += 1
             else:
@@ -1182,14 +1185,16 @@ def execute_cleanup_plan(
                 error_type = type(exc).__name__
             verification_unavailable = False
             try:
-                parent_items = {
-                    str(row.file_id): row
-                    for row in client.list_dir(str(root.get("parent_id") or "0"))
-                }
+                applied = verify_guangya_write(
+                    lambda: all(str(row.file_id) != str(root.get("file_id") or "")
+                                for row in client.list_dir(str(root.get("parent_id") or "0"))),
+                    cancel_check=cancel_check,
+                )
             except Exception:
-                parent_items = {str(root.get("file_id") or ""): None}
+                if cancel_check is not None:
+                    cancel_check()
+                applied = False
                 verification_unavailable = True
-            applied = str(root.get("file_id") or "") not in parent_items
             if applied:
                 empty_deleted += 1
             else:

@@ -19,7 +19,12 @@ import httpx
 from fastapi.testclient import TestClient
 
 import app.clients.guangya as guangya_module
-from app.clients.guangya import GuangYaClient, GuangYaReadRejected, _to_file
+from app.clients.guangya import (
+    GuangYaClient,
+    GuangYaReadRejected,
+    GuangYaWriteRejected,
+    _to_file,
+)
 from app.config import web_credentials
 from app.main import create_app
 from tests.support import InitializedWebTestCase
@@ -503,6 +508,32 @@ class GuangYaTokenClientTests(unittest.TestCase):
                     )
 
                 raw.fs_delete_empty.assert_called_once()
+
+    def test_delete_empty_directory_rejects_failure_message_with_success_code(self):
+        response = {"code": 0, "message": "删除失败，请稍后重试"}
+        cases = (
+            (_VersionedDeleteRawClient, "fs_delete_empty"),
+            (_NoAtomicEmptyDeleteRawClient, "fs_delete"),
+        )
+        for raw_type, delete_method in cases:
+            with self.subTest(delete_method=delete_method):
+                with tempfile.TemporaryDirectory() as directory:
+                    token_file = self._token_file(directory, expires_at=time() + 7200)
+                    with patch("app.clients.guangya._load_raw", return_value=raw_type):
+                        client = GuangYaClient(token_file=token_file)
+                        raw = client._raw
+                        delete = Mock(return_value=response)
+                        setattr(raw, delete_method, delete)
+
+                        with self.assertRaisesRegex(RuntimeError, "删除失败") as raised:
+                            client.delete_empty_directory(
+                                "empty-dir",
+                                expected_etag="version-1",
+                                expected_updated_at=123,
+                            )
+
+                        self.assertIsInstance(raised.exception.__cause__, GuangYaWriteRejected)
+                        delete.assert_called_once()
 
     def test_client_startup_cleans_token_and_generation_temp_files(self):
         with tempfile.TemporaryDirectory() as directory:

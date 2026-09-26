@@ -146,6 +146,7 @@ class FakeCleanupClient:
 
 class GuangYaResidualCleanupTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(mock.patch("app.clients.guangya.sleep"))
         actions.reset_guangya_cleanup_context_for_tests()
         self.temp = tempfile.TemporaryDirectory()
         self.plan_dir = Path(self.temp.name) / "plans"
@@ -361,6 +362,52 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         self.assertTrue(result["partial"])
         self.assertEqual(result["stats"]["empty_deleted"], 0)
         self.assertEqual(result["stats"]["precondition_failed"], 1)
+        self.assertIsNotNone(client.file_info("empty"))
+
+    def test_acknowledged_delete_without_observed_effect_is_not_retried(self):
+        class AcknowledgingClient(FakeCleanupClient):
+            def __init__(self):
+                super().__init__()
+                self.delete_attempts = 0
+
+            def delete_empty_directory(
+                self, file_id, *, expected_etag="", expected_updated_at=0
+            ):
+                self.delete_attempts += 1
+                return True
+
+        client = AcknowledgingClient()
+        plan = cleanup.build_cleanup_plan(
+            client,
+            owner="owner",
+            sources=[{"id": "source", "name": "整理源"}],
+            max_candidates=20,
+        )
+        plan = cleanup.revise_cleanup_plan(
+            plan["plan_id"],
+            owner="owner",
+            expected_fingerprint=plan["fingerprint"],
+            decisions=[{"candidate_number": 1, "action": "quarantine"}],
+        )
+        cleanup.confirm_cleanup_plan(
+            plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
+        )
+        result = cleanup.execute_cleanup_plan(
+            {
+                "version": 1,
+                "plan_id": plan["plan_id"],
+                "plan_fingerprint": plan["fingerprint"],
+                "owner_digest": "owner-digest",
+                "credential_generation": 13,
+            },
+            client_factory=lambda: client,
+        )
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["stats"]["empty_deleted"], 0)
+        self.assertEqual(result["stats"]["verification_failed"], 1)
+        self.assertEqual(result["stats"]["precondition_failed"], 0)
+        self.assertEqual(client.delete_attempts, 1)
         self.assertIsNotNone(client.file_info("empty"))
 
     def test_agent_preview_and_durable_submission(self):
@@ -627,3 +674,50 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         )
         self.assertEqual(result["stats"]["quarantined"], 0)
         self.assertEqual(client.file_info("residual").parent_id, "source")
+
+    def test_delayed_directory_index_is_verified_without_resubmitting_delete(self):
+        class DelayedClient(FakeCleanupClient):
+            pending = ''
+            reads_after_delete = 0
+            delete_calls = 0
+
+            def delete_empty_directory(self, file_id, **_kwargs):
+                self.delete_calls += 1
+                self.pending = str(file_id)
+                return True
+
+            def list_dir(self, parent_id):
+                if self.pending and str(parent_id) == 'source':
+                    self.reads_after_delete += 1
+                    if self.reads_after_delete == 3:
+                        FakeCleanupClient.delete_empty_directory(self, self.pending)
+                        self.pending = ''
+                return super().list_dir(parent_id)
+
+        client = DelayedClient()
+        # 只复现空目录清理，不把其他作品或残留元数据纳入计划。
+        client.directories['source'] = [row for row in client.directories['source'] if row.file_id == 'empty']
+        plan = cleanup.build_cleanup_plan(client, owner='owner', sources=[{'id': 'source', 'name': '整理源'}])
+        cleanup.confirm_cleanup_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
+        result = cleanup.execute_cleanup_plan(
+            {'version': 1, 'plan_id': plan['plan_id'], 'plan_fingerprint': plan['fingerprint'],
+             'owner_digest': 'owner-digest', 'credential_generation': 13}, client_factory=lambda: client)
+        self.assertFalse(result['partial'])
+        self.assertEqual(result['stats']['empty_deleted'], 1)
+        self.assertEqual(result['stats']['verification_failed'], 0)
+        self.assertEqual(client.delete_calls, 1)
+        self.assertEqual(client.reads_after_delete, 3)
+
+    def test_write_verification_is_bounded_and_cancelable(self):
+        from app.clients.guangya import verify_guangya_write
+        check = mock.Mock(return_value=False)
+        with mock.patch('app.clients.guangya.sleep') as sleep:
+            self.assertFalse(verify_guangya_write(check))
+        self.assertEqual(check.call_count, 21)
+        self.assertEqual(sleep.call_count, 20)
+        check.reset_mock()
+        def cancel():
+            raise RuntimeError('cancelled')
+        with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+            verify_guangya_write(check, cancel_check=cancel)
+        check.assert_not_called()

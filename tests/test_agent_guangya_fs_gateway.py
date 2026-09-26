@@ -1254,7 +1254,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
         with mock.patch.object(client, "move", side_effect=accept_move) as write, \
                 mock.patch.object(client, "list_dir", side_effect=delayed_list), \
-                mock.patch.object(guangya_fs_change.time, "sleep"):
+                mock.patch("app.clients.guangya.sleep"):
             result = guangya_fs_change.execute_fs_change_plan(
                 self._queued_payload(plan), client_factory=lambda: client
             )

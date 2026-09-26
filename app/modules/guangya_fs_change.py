@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
+from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected, verify_guangya_write
 from app.config import PATHS
 from app.modules.guangya_journal import append_guangya_journal
 from app.modules.guangya_workspace import (
@@ -1361,27 +1361,10 @@ def execute_fs_change_plan(
                     )
                 else:  # _operation_stat_key 已阻止未知操作
                     raise GuangYaFSChangeError("光鸭变更计划包含未知操作")
-                verified = _verify_after(
-                    client,
-                    item,
-                    created_id,
-                    created_targets=created_targets,
+                verified = verify_guangya_write(
+                    lambda: _verify_after(client, item, created_id, created_targets=created_targets),
+                    cancel_check=cancel_check,
                 )
-                if not verified:
-                    # 真盘 move 和 copy 均可能先受理、后更新目录索引。
-                    # 只重读冻结后置条件，绝不再次提交写入；其他写操作同样适用。
-                    for _attempt in range(20):
-                        if cancel_check is not None:
-                            cancel_check()
-                        time.sleep(0.5)
-                        if _verify_after(
-                            client,
-                            item,
-                            created_id,
-                            created_targets=created_targets,
-                        ):
-                            verified = True
-                            break
                 if not verified:
                     stats["verification_failed"] += 1
                     raise GuangYaFSChangeError("写入后的云端状态校验失败")
@@ -1402,6 +1385,8 @@ def execute_fs_change_plan(
                 stats["failed"] += 1
                 status = "failed"
             except Exception as exc:  # noqa: BLE001 - 单项失败需收束为可审计部分完成
+                if cancel_check is not None:
+                    cancel_check()
                 error_type = type(exc).__name__
                 # provider 可能在连接中断前已经接受写入。若冻结后置条件成立，
                 # 则不能再把它算成“失败后可重试”；trash 同时标记审计缺口。
