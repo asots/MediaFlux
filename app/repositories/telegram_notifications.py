@@ -276,56 +276,48 @@ def retry_notification(
     error: str,
     retry_after_seconds: int = 0,
     clear_message_id: bool = False,
+    outcome_unknown: bool = False,
+    message_id: int = 0,
 ) -> str:
-    """重试当前 revision；迟到 worker 只能重新排队更新后的 revision。"""
+    """统一失败收敛：已知消息可幂等编辑，未知首次发送隔离，旧租约不写入。"""
     database = db
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT attempts,revision FROM telegram_notification_outbox WHERE id=? "
+            "SELECT attempts,revision,message_id FROM telegram_notification_outbox WHERE id=? "
             "AND status='sending' AND lease_generation=?",
             (int(notification_id), int(lease_generation)),
         ).fetchone()
         if row is None:
             return "stale"
-        latest_revision = int(row["revision"] or 0)
-        if latest_revision != int(claimed_revision):
-            cur = conn.execute(
-                "UPDATE telegram_notification_outbox SET status='pending',attempts=0,"
-                "message_id=CASE WHEN ? THEN NULL ELSE message_id END,"
-                "last_error=?,next_attempt_at=?,updated_at=? "
-                "WHERE id=? AND status='sending' AND lease_generation=?",
-                (
-                    int(bool(clear_message_id)),
-                    ("PriorRevisionRetry:" + str(error or "DeliveryFailed"))[:300],
-                    stamp,
-                    stamp,
-                    int(notification_id),
-                    int(lease_generation),
-                ),
-            )
-            return "pending" if cur.rowcount else "stale"
-        attempts = int(row["attempts"] or 0) + 1
-        if attempts >= _MAX_ATTEMPTS:
-            status = "failed"
-            next_attempt = stamp
+        known_message_id = 0 if clear_message_id else int(row["message_id"] or message_id or 0)
+        attempts = int(row["attempts"] or 0)
+        next_attempt = stamp
+        if outcome_unknown and not known_message_id:
+            # 包括编辑被明确拒绝后转为新发送的未知结果；不能拿旧 ID 盲目重放。
+            status = "outcome_unknown"
+        elif int(row["revision"] or 0) != int(claimed_revision):
+            status = "pending"
+            attempts = 0
+            error = "PriorRevisionRetry:" + str(error or "DeliveryFailed")
         else:
-            status = "retry_wait"
-            delay = max(
-                int(retry_after_seconds or 0),
-                min(3600, 15 * (2 ** min(attempts - 1, 7))),
-            )
-            next_attempt = _future_stamp(delay, base_stamp=stamp)
+            attempts += 1
+            status = "failed" if attempts >= _MAX_ATTEMPTS else "retry_wait"
+            if status == "retry_wait":
+                delay = max(
+                    int(retry_after_seconds or 0),
+                    min(3600, 15 * (2 ** min(attempts - 1, 7))),
+                )
+                next_attempt = _future_stamp(delay, base_stamp=stamp)
         conn.execute(
             "UPDATE telegram_notification_outbox SET status=?,attempts=?,"
-            "message_id=CASE WHEN ? THEN NULL ELSE message_id END,last_error=?,"
-            "next_attempt_at=?,updated_at=? WHERE id=? AND status='sending' "
-            "AND lease_generation=?",
+            "message_id=?,last_error=?,next_attempt_at=?,updated_at=? "
+            "WHERE id=? AND status='sending' AND lease_generation=?",
             (
                 status,
                 attempts,
-                int(bool(clear_message_id)),
+                known_message_id or None,
                 str(error or "DeliveryFailed")[:300],
                 next_attempt,
                 stamp,
@@ -438,87 +430,24 @@ def suppress_notification(
         return bool(cur.rowcount)
 
 
-def mark_outcome_unknown(
-    notification_id: int,
-    *,
-    lease_generation: int,
-    claimed_revision: int,
-    error: str,
-    message_id: int = 0,
-    clear_message_id: bool = False,
-) -> bool:
-    database = db
-    stamp = database.now()
-    with database.get_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT revision,message_id FROM telegram_notification_outbox WHERE id=? "
-            "AND status='sending' AND lease_generation=?",
-            (int(notification_id), int(lease_generation)),
-        ).fetchone()
-        if row is None:
-            return False
-        latest_revision = int(row["revision"] or 0)
-        known_message_id = 0 if clear_message_id else int(
-            message_id or row["message_id"] or 0
-        )
-        # 旧 revision 的编辑结果未知，但消息身份已知时，最新 revision 仍可
-        # 安全地再次原位编辑；不能把尚未发送的新终态一起吞进 unknown。
-        if latest_revision != int(claimed_revision) and known_message_id > 0:
-            cur = conn.execute(
-                "UPDATE telegram_notification_outbox SET status='pending',"
-                "message_id=?,last_error=?,next_attempt_at=?,updated_at=? "
-                "WHERE id=? AND status='sending' AND lease_generation=?",
-                (
-                    known_message_id,
-                    ("PriorRevisionOutcomeUnknown:" + str(error or "OutcomeUnknown"))[:300],
-                    stamp,
-                    stamp,
-                    int(notification_id),
-                    int(lease_generation),
-                ),
-            )
-            return bool(cur.rowcount)
-        cur = conn.execute(
-            "UPDATE telegram_notification_outbox SET status='outcome_unknown',"
-            "message_id=CASE WHEN ? THEN NULL "
-            "ELSE COALESCE(NULLIF(?,0),message_id) END,"
-            "last_error=?,updated_at=? "
-            "WHERE id=? AND status='sending' AND lease_generation=?",
-            (
-                int(bool(clear_message_id)),
-                int(message_id or 0),
-                str(error or "OutcomeUnknown")[:300],
-                stamp,
-                int(notification_id),
-                int(lease_generation),
-            ),
-        )
-        return bool(cur.rowcount)
+def _recover_deliveries(conn: sqlite3.Connection, stamp: str) -> int:
+    """启动和数据库重开共用恢复规则；保留预算，不重放没有回执的新发送。"""
+    cur = conn.execute(
+        "UPDATE telegram_notification_outbox SET status=CASE "
+        "WHEN COALESCE(message_id,0)=0 THEN 'outcome_unknown' "
+        "WHEN attempts>=? THEN 'failed' ELSE 'retry_wait' END,"
+        "lease_generation=lease_generation+1,next_attempt_at=?,"
+        "last_error=CASE WHEN COALESCE(message_id,0)>0 "
+        "THEN 'ProcessInterrupted' ELSE 'DeliveryOutcomeUnknown' END,updated_at=? "
+        "WHERE status='sending' OR (status='outcome_unknown' AND COALESCE(message_id,0)>0)",
+        (_MAX_ATTEMPTS, stamp, stamp),
+    )
+    return int(cur.rowcount or 0)
 
 
 def recover_notifications() -> int:
-    """恢复进程中断的租约，同时避免未知首次发送被盲目重放。
-
-    已知 ``message_id`` 的线程执行的是幂等编辑，可以安全重试；首次发送没有
-    远端消息身份，进程中断时无法判断 Telegram 是否已接收，必须保留为
-    ``outcome_unknown`` 供诊断，而不是制造重复通知。
-    """
-    database = db
-    stamp = database.now()
-    with database.get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE telegram_notification_outbox SET "
-            "status=CASE WHEN COALESCE(message_id,0)>0 "
-            "THEN 'retry_wait' ELSE 'outcome_unknown' END,"
-            "lease_generation=lease_generation+1,next_attempt_at=?,"
-            "last_error=CASE WHEN COALESCE(message_id,0)>0 "
-            "THEN 'ProcessInterrupted' ELSE 'DeliveryOutcomeUnknown' END,"
-            "updated_at=? "
-            "WHERE status='sending'",
-            (stamp, stamp),
-        )
-        return int(cur.rowcount or 0)
+    with db.get_conn() as conn:
+        return _recover_deliveries(conn, db.now())
 
 
 def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
@@ -555,16 +484,7 @@ def _recover_after_restart(conn, timestamp: str) -> None:
         "next_attempt_at=?,updated_at=? WHERE status='sending'",
         (timestamp, timestamp),
     )
-    conn.execute(
-        "UPDATE telegram_notification_outbox "
-        "SET status=CASE WHEN COALESCE(message_id,0)>0 "
-        "THEN 'retry_wait' ELSE 'outcome_unknown' END,"
-        "lease_generation=lease_generation+1,next_attempt_at=?,"
-        "last_error=CASE WHEN COALESCE(message_id,0)>0 "
-        "THEN 'ProcessInterrupted' ELSE 'DeliveryOutcomeUnknown' END,"
-        "updated_at=? WHERE status='sending'",
-        (timestamp, timestamp),
-    )
+    _recover_deliveries(conn, timestamp)
     for table in ("agent_download_verification_notification_outbox", "agent_library_patrol_notification_outbox"):
         conn.execute(
             f"UPDATE {table} SET status='discarded',lease_generation=lease_generation+1,"

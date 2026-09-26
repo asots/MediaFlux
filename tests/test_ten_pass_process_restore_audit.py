@@ -145,11 +145,12 @@ raise AssertionError("child did not reach retirement")
             claimed = notifications.claim_due_notifications(
                 event_key="restore-receipt"
             )[0]
-            notifications.mark_outcome_unknown(
+            notifications.retry_notification(
                 claimed["id"],
                 lease_generation=claimed["lease_generation"],
                 claimed_revision=1,
                 error="lost response",
+                outcome_unknown=True,
             )
             archive = backup.create_backup(paths)
             db.kv_set("rss.scheduler.last_admitted_id", "9999")

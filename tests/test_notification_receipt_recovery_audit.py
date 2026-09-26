@@ -105,13 +105,15 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         claimed = repository.claim_due_notifications(event_key=first.event_key)[0]
         updated = self.publish(self.terminal, message_id=77, deliver_now=False)
         self.assertEqual(updated.status, "sending")
-        self.assertTrue(
-            repository.mark_outcome_unknown(
+        self.assertEqual(
+            repository.retry_notification(
                 claimed["id"],
                 lease_generation=claimed["lease_generation"],
                 claimed_revision=claimed["revision"],
                 error="old send outcome unknown",
-            )
+                outcome_unknown=True,
+            ),
+            "pending",
         )
         self.assertTrue(center.drain_telegram_notifications(event_key=first.event_key))
         row = repository.get_notification(first.event_key)
@@ -120,3 +122,107 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         )
         self.sender.assert_not_called()
         self.editor.assert_called_once()
+
+    def test_terminal_edit_timeout_retries_same_message_without_republication(self):
+        self.sender.return_value = TelegramSendResult(ok=True, message_id=77)
+        self.assertTrue(self.publish(self.initial).delivered)
+        self.editor.side_effect = [
+            TelegramSendResult(ok=False, status_code=408, error="ReadTimeout"),
+            TelegramSendResult(ok=True, message_id=77),
+        ]
+        result = self.publish(self.terminal)
+        row = repository.get_notification(result.event_key)
+        self.assertEqual((row["status"], row["attempts"]), ("retry_wait", 1))
+        self.assertEqual((row["message_id"], row["delivered_revision"]), (77, 1))
+        self.assertFalse(center.drain_telegram_notifications(event_key=result.event_key))
+        self.assertEqual(self.editor.call_count, 1)
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE telegram_notification_outbox SET next_attempt_at=? WHERE id=?",
+                (db.now(), row["id"]),
+            )
+        self.assertTrue(center.drain_telegram_notifications(event_key=result.event_key))
+        row = repository.get_notification(result.event_key)
+        self.assertEqual((row["status"], row["revision"], row["delivered_revision"]), ("sent", 2, 2))
+        self.assertEqual(self.editor.call_args.kwargs["message_id"], 77)
+        self.assertEqual(self.editor.call_args.args[0].actions, ())
+        self.sender.assert_called_once()
+
+    def test_unknown_edit_retries_are_bounded_and_restart_does_not_reset_budget(self):
+        self.editor.return_value = TelegramSendResult(
+            ok=False, status_code=408, error="ReadTimeout"
+        )
+        result = self.publish(self.terminal, message_id=77)
+        for attempt in range(1, repository._MAX_ATTEMPTS + 1):
+            row = repository.get_notification(result.event_key)
+            self.assertEqual(row["attempts"], attempt)
+            if attempt == repository._MAX_ATTEMPTS:
+                self.assertEqual(row["status"], "failed")
+                break
+            self.assertEqual(row["status"], "retry_wait")
+            db.init_db()
+            repository.recover_notifications()
+            self.assertEqual(repository.get_notification(result.event_key)["attempts"], attempt)
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE telegram_notification_outbox SET next_attempt_at=? WHERE id=?",
+                    (db.now(), row["id"]),
+                )
+            center.drain_telegram_notifications(event_key=result.event_key)
+        db.init_db()
+        repository.recover_notifications()
+        self.assertFalse(center.drain_telegram_notifications(event_key=result.event_key))
+        self.assertEqual(self.editor.call_count, repository._MAX_ATTEMPTS)
+        self.sender.assert_not_called()
+
+    def test_legacy_known_unknown_edits_recover_through_both_startup_paths(self):
+        for recovery in (repository.recover_notifications, db.init_db):
+            with self.subTest(recovery=recovery.__name__), isolated_test_database():
+                known = self.publish(self.terminal, message_id=77, deliver_now=False)
+                unknown = center.publish_notification_thread(
+                    "unknown-without-receipt", self.terminal,
+                    topic="confirmation", chat_id="100", deliver_now=False,
+                )
+                with db.get_conn() as conn:
+                    conn.execute(
+                        "UPDATE telegram_notification_outbox SET status='outcome_unknown',attempts=2"
+                    )
+                recovery()
+                row = repository.get_notification(known.event_key)
+                self.assertEqual((row["status"], row["attempts"]), ("retry_wait", 2))
+                self.assertEqual(repository.get_notification(unknown.event_key)["status"], "outcome_unknown")
+                self.assertTrue(center.drain_telegram_notifications(event_key=known.event_key))
+                self.assertFalse(center.drain_telegram_notifications(event_key=unknown.event_key))
+        self.sender.assert_not_called()
+
+    def test_legacy_exhausted_edit_is_not_revived_by_restart(self):
+        result = self.publish(self.terminal, message_id=77, deliver_now=False)
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE telegram_notification_outbox SET status='outcome_unknown',attempts=?",
+                (repository._MAX_ATTEMPTS,),
+            )
+        self.assertEqual(repository.recover_notifications(), 1)
+        self.assertEqual(repository.get_notification(result.event_key)["status"], "failed")
+        db.init_db()
+        self.assertFalse(center.drain_telegram_notifications(event_key=result.event_key))
+        self.editor.assert_not_called()
+        self.sender.assert_not_called()
+
+    def test_late_unknown_result_cannot_change_recovered_edit_lease(self):
+        result = self.publish(self.terminal, message_id=77, deliver_now=False)
+        old = repository.claim_due_notifications(event_key=result.event_key)[0]
+        repository.recover_notifications()
+        current = repository.claim_due_notifications(event_key=result.event_key)[0]
+        before = repository.get_notification(result.event_key)
+        status = repository.retry_notification(
+            old["id"], lease_generation=old["lease_generation"],
+            claimed_revision=old["revision"], error="late timeout",
+            outcome_unknown=True, clear_message_id=True,
+        )
+        self.assertEqual(status, "stale")
+        self.assertEqual(repository.get_notification(result.event_key), before)
+        self.assertTrue(repository.complete_notification(
+            current["id"], lease_generation=current["lease_generation"],
+            claimed_revision=current["revision"], message_id=77,
+        ))

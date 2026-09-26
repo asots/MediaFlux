@@ -29,7 +29,6 @@ from app.repositories.telegram_notifications import (
     complete_notification,
     fail_notification,
     get_notification,
-    mark_outcome_unknown,
     purge_notifications,
     recover_notifications,
     retry_notification,
@@ -415,21 +414,11 @@ def _dispatch_item(item: dict) -> bool:
                 or 0
             ),
         )
-    if outcome.outcome_unknown:
-        mark_outcome_unknown(
-            notification_id,
-            lease_generation=generation,
-            claimed_revision=claimed_revision,
-            error=outcome.error or "OutcomeUnknown",
-            message_id=int(
-                outcome.message_id
-                or (0 if fallback_to_new_message else message_id)
-                or 0
-            ),
-            clear_message_id=fallback_to_new_message,
-        )
-        return False
-    if 400 <= int(outcome.status_code or 0) < 500 and int(outcome.status_code) not in {408, 429}:
+    if (
+        not outcome.outcome_unknown
+        and 400 <= int(outcome.status_code or 0) < 500
+        and int(outcome.status_code) not in {408, 429}
+    ):
         fail_notification(
             notification_id,
             lease_generation=generation,
@@ -445,6 +434,8 @@ def _dispatch_item(item: dict) -> bool:
         error=outcome.error or "TelegramUnavailable",
         retry_after_seconds=outcome.retry_after_seconds,
         clear_message_id=fallback_to_new_message,
+        outcome_unknown=outcome.outcome_unknown,
+        message_id=int(outcome.message_id or 0),
     )
     return False
 
