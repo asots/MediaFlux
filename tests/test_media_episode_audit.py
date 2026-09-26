@@ -552,6 +552,74 @@ class EpisodeAuditTests(unittest.TestCase):
             self.assertEqual(reused.data["local_episode_count"], 3)
             self.assertEqual(inspect.call_count, 2)
 
+    def test_explicit_refresh_replaces_only_target_cache_and_preserves_default_reuse(self):
+        other = {**self.arguments, "query": "Other Show"}
+        with patch("app.agent.episode_audit._audit_uncached", side_effect=[
+            ToolResult(True, "updates_available", "old"),
+            ToolResult(True, "up_to_date", "other"),
+            ToolResult(True, "up_to_date", "fresh"),
+        ]) as read:
+            audit_series_episodes(self.arguments)
+            audit_series_episodes(other)
+            self.assertEqual(audit_series_episodes(self.arguments).summary, "old")
+            self.assertEqual(audit_series_episodes(self.arguments, refresh=True).summary, "fresh")
+            self.assertEqual(audit_series_episodes(self.arguments).summary, "fresh")
+            self.assertEqual(audit_series_episodes(other).summary, "other")
+            self.assertEqual(read.call_count, 3)
+
+    def test_explicit_refresh_fences_old_flight_and_keeps_new_readers_singleflight(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app.agent import episode_audit as module
+
+        for old_refresh, old_first in ((False, True), (False, False), (True, True), (True, False)):
+            with self.subTest(old_refresh=old_refresh, old_first=old_first):
+                reset_episode_audit_cache_for_tests()
+                started = [threading.Event(), threading.Event()]
+                release = [threading.Event(), threading.Event()]
+                joined = threading.Event()
+                calls = []
+
+                def read(_arguments, *, calls=calls, started=started, release=release):
+                    number = len(calls)
+                    calls.append(number)
+                    started[number].set()
+                    self.assertTrue(release[number].wait(3))
+                    return ToolResult(True, "up_to_date", str(number))
+
+                with patch.object(module, "_audit_uncached", side_effect=read), ThreadPoolExecutor(max_workers=3) as pool:
+                    try:
+                        old = pool.submit(audit_series_episodes, self.arguments, refresh=old_refresh)
+                        self.assertTrue(started[0].wait(3))
+                        fresh = pool.submit(audit_series_episodes, self.arguments, refresh=True)
+                        self.assertTrue(started[1].wait(3))
+                        flight = next(iter(module._inflight.values()))
+                        wait = flight.wait
+
+                        def wait_for_fresh(*args, joined=joined, wait=wait, **kwargs):
+                            joined.set()
+                            return wait(*args, **kwargs)
+
+                        with patch.object(flight, "wait", side_effect=wait_for_fresh):
+                            reader = pool.submit(audit_series_episodes, self.arguments)
+                            self.assertTrue(joined.wait(3))
+                            if old_first:
+                                release[0].set()
+                                self.assertEqual(old.result(3).summary, "0")
+                                self.assertEqual(list(module._inflight.values()), [flight])
+                            release[1].set()
+                            self.assertEqual(fresh.result(3).summary, "1")
+                            self.assertEqual(reader.result(3).summary, "1")
+                            release[0].set()
+                            self.assertEqual(old.result(3).summary, "0")
+                        self.assertEqual(audit_series_episodes(self.arguments).summary, "1")
+                        self.assertEqual(calls, [0, 1])
+                        self.assertFalse(module._inflight)
+                    finally:
+                        for event in release:
+                            event.set()
+
     def test_unknown_air_dates_are_not_presented_as_definitively_current(self):
         with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=[_ready([(1, 1), (1, 2), (2, 1)])]), patch(
             "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()

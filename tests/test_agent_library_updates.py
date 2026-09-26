@@ -428,7 +428,8 @@ class LibraryUpdateActionTests(unittest.TestCase):
                 }
             )
         audit.assert_called_once_with(
-            {"query": "黑镜", "tmdb_id": "42009", "season": 7, "as_of": "2026-08-01"}
+            {"query": "黑镜", "tmdb_id": "42009", "season": 7, "as_of": "2026-08-01"},
+            refresh=True,
         )
         self.assertEqual(result.status, "updates_available")
         self.assertEqual(result.data["media_type"], "tv")
@@ -436,6 +437,15 @@ class LibraryUpdateActionTests(unittest.TestCase):
             result.data["check_definition"],
             "aired_normal_episodes_missing_from_enabled_media_servers",
         )
+
+    def test_tv_forwards_explicit_refresh_policy_to_shared_audit(self):
+        arguments = {"query": "Fixture", "tmdb_id": "7", "season": 1, "as_of": "2020-02-01"}
+        for refresh in (True, False):
+            with self.subTest(refresh=refresh), patch(
+                "app.agent.update_actions.audit_series_episodes", return_value=_audit_result(),
+            ) as audit:
+                check_library_updates({**arguments, "media_type": "tv", "refresh": refresh})
+                audit.assert_called_once_with(arguments, refresh=refresh)
 
     def test_auto_not_found_does_not_claim_movie_or_series_is_current(self):
         with patch(
@@ -473,8 +483,9 @@ class LibraryUpdateActionTests(unittest.TestCase):
         active = 0
         max_active = 0
 
-        def audit_side_effect(arguments):
+        def audit_side_effect(arguments, *, refresh):
             nonlocal active, max_active
+            self.assertFalse(refresh)
             query = arguments["query"]
             with state_lock:
                 seen_queries.append(query)
@@ -563,7 +574,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
         titles = ["可判定剧一", "可判定剧二"]
         with patch(
             "app.agent.update_actions.audit_series_episodes",
-            side_effect=lambda arguments: _query_audit_result(
+            side_effect=lambda arguments, *, refresh: _query_audit_result(
                 arguments["query"], status="up_to_date"
             ),
         ):
@@ -588,7 +599,8 @@ class LibraryUpdateActionTests(unittest.TestCase):
         titles = [f"投影剧集 {index:02d}" for index in range(1, 21)]
         all_missing = [{"season": 1, "episode": episode} for episode in range(1, 8)]
 
-        def audit_side_effect(arguments):
+        def audit_side_effect(arguments, *, refresh):
+            self.assertFalse(refresh)
             result = _query_audit_result(
                 arguments["query"], status="updates_available"
             )
@@ -632,7 +644,8 @@ class LibraryUpdateActionTests(unittest.TestCase):
 
     def test_twenty_long_titles_keep_every_fact_under_model_projection_budget(self):
         titles = [f"第{i:02d}部" + "长标题样本" * 23 for i in range(20)]
-        def audit(arguments):
+        def audit(arguments, *, refresh):
+            self.assertTrue(refresh)
             result = _query_audit_result(arguments["query"], status="updates_available")
             result.summary = "存在已播缺集，请结合实际媒体库版本及季集编号核对。" * 6
             result.data["sources"] = [{"server_type": "jellyfin", "server_name": f"服务器{i}" + "媒体资料" * 16,
@@ -676,7 +689,8 @@ class LibraryUpdateActionTests(unittest.TestCase):
         names = [f"取消测试作品{i}" for i in range(10)]
         started, release = threading.Event(), threading.Event()
         lock, reads = threading.Lock(), []
-        def audit(arguments):
+        def audit(arguments, *, refresh):
+            self.assertTrue(refresh)
             with lock:
                 reads.append(arguments["query"])
                 if len(reads) == 3:

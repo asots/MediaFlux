@@ -594,15 +594,22 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
     )
 
 
-def audit_series_episodes(arguments: dict[str, Any]) -> ToolResult:
-    key = (
-        arguments["query"].casefold(),
-        arguments.get("tmdb_id", ""),
+def _audit_cache_key(arguments: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(arguments.get("query") or "").casefold(),
+        str(arguments.get("tmdb_id") or ""),
         str(arguments.get("library_name") or "").casefold(),
         arguments.get("season"),
         arguments.get("target_episode"),
-        arguments["as_of"],
+        str(arguments.get("as_of") or ""),
     )
+
+
+def audit_series_episodes(arguments: dict[str, Any], *, refresh: bool = False) -> ToolResult:
+    """默认复用短期审计；显式刷新撤销旧查询发布权，不承诺并发刷新合并。"""
+    if refresh:
+        invalidate_episode_audit_cache(arguments)
+    key = _audit_cache_key(arguments)
     while True:
         now = time.monotonic()
         with _cache_lock:
@@ -644,15 +651,8 @@ def audit_series_episodes(arguments: dict[str, Any]) -> ToolResult:
 
 
 def invalidate_episode_audit_cache(arguments: dict[str, Any]) -> None:
-    """在入库核验前仅失效目标审计缓存，避免读取下载前的旧缺集结果。"""
-    key = (
-        str(arguments.get("query") or "").casefold(),
-        str(arguments.get("tmdb_id") or ""),
-        str(arguments.get("library_name") or "").casefold(),
-        arguments.get("season"),
-        arguments.get("target_episode"),
-        str(arguments.get("as_of") or ""),
-    )
+    """仅失效目标审计缓存并撤销旧查询发布权，供实时库存核对复用。"""
+    key = _audit_cache_key(arguments)
     with _cache_lock:
         _cache.pop(key, None)
         previous = _inflight.pop(key, None)

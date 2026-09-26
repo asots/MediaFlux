@@ -7,7 +7,7 @@ import unicodedata
 from datetime import datetime
 from typing import Any
 
-from app.agent.episode_audit import audit_series_episodes, invalidate_episode_audit_cache
+from app.agent.episode_audit import audit_series_episodes
 from app.agent.models import Evidence, ToolContext, ToolResult
 from app.services import search_media_servers
 from app.logger import get_logger
@@ -285,9 +285,7 @@ def check_library_updates(arguments: dict[str, Any], context: ToolContext | None
         "season": arguments.get("season"),
         "as_of": arguments["as_of"],
     }
-    if arguments.get("refresh", True):
-        invalidate_episode_audit_cache(audit_arguments)
-    result = audit_series_episodes(audit_arguments)
+    result = audit_series_episodes(audit_arguments, refresh=arguments.get("refresh", True))
     result.data = dict(result.data)
     result.data.update({
         "media_type": "tv" if media_type == "tv" else "auto",

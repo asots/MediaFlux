@@ -299,7 +299,7 @@ def search_missing_episode_resources(
     }
     if arguments.get("library_name"):
         audit_arguments["library_name"] = arguments["library_name"]
-    audit = audit_series_episodes(audit_arguments)
+    audit = audit_series_episodes(audit_arguments, refresh=True)
     verification = _verification(arguments, audit, verified=False)
 
     if not audit.ok or audit.status != "updates_available":
@@ -414,7 +414,7 @@ def search_missing_season_resources(
     }
     if arguments.get("library_name"):
         audit_arguments["library_name"] = arguments["library_name"]
-    audit = audit_series_episodes(audit_arguments)
+    audit = audit_series_episodes(audit_arguments, refresh=True)
     verification = _season_verification(arguments, audit)
     audit_data = audit.data if isinstance(audit.data, dict) else {}
 

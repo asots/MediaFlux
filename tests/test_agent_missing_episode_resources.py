@@ -281,7 +281,8 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 "season": 2,
                 "target_episode": 3,
                 "as_of": date.today().isoformat(),
-            }
+            },
+            refresh=True,
         )
         call = search.call_args.args[0]
         self.assertEqual(call["title"], "示例剧")
@@ -480,7 +481,8 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 "target_episode": 150,
                 "as_of": date.today().isoformat(),
                 "library_name": "美女库",
-            }
+            },
+            refresh=True,
         )
         call = search.call_args.args[0]
         self.assertEqual(call["title"], "示例剧")
@@ -824,7 +826,8 @@ class MultiWorkResourceTests(unittest.TestCase):
         stored = {}
         service = SimpleNamespace(result_store=SimpleNamespace(get=lambda key: stored[key], restore=Mock()))
         args = missing_season_resource_arguments({"items": [{"query": name, "season": 1} for name in names], "as_of": "2026-08-01"})
-        def audit(arguments):
+        def audit(arguments, *, refresh=False):
+            self.assertTrue(refresh)
             result = _audit_result(missing=[{"season": 1, "episode": e} for e in ((8, 9) if arguments["query"] == names[0] else (8,))])
             result.data.update(title=arguments["query"], tmdb_id=str(1000 + names.index(arguments["query"])))
             return result
@@ -856,3 +859,126 @@ class MultiWorkResourceTests(unittest.TestCase):
         self.assertEqual([c["_verification_context"]["title"] for c in restored["candidates"]], names[:6])
         self.assertNotIn("magnet:", str(result.to_dict()))
         self.assertNotIn("_verification_context", str(result.to_dict()))
+
+
+class MissingResourceInventoryFreshnessTests(unittest.TestCase):
+    """资源入口运行真实审计/缓存/媒体清单链；仅外部客户端为替身。"""
+
+    def setUp(self):
+        from app.agent import episode_audit
+        from app.clients.base import (
+            SeriesCandidate,
+            SeriesEpisodeInventory,
+            SeriesSearchResult,
+        )
+
+        self.audit = episode_audit
+        self.audit.reset_episode_audit_cache_for_tests()
+        self.addCleanup(self.audit.reset_episode_audit_cache_for_tests)
+        self.inventory = []
+        self.identity = {"query": "Fixture Show", "tmdb_id": "12345", "season": 1}
+        self.as_of = "2020-02-01"
+        self.media = Mock()
+        self.media.search_series_candidates.return_value = SeriesSearchResult(
+            candidates=[SeriesCandidate(id="fixture", name="Fixture Show", year="2020", tmdb_id="12345")], total=1,
+        )
+        self.media.find_series_candidates_by_tmdb.return_value = self.media.search_series_candidates.return_value
+        self.media.list_series_episode_inventory.side_effect = lambda *_a, **_kw: SeriesEpisodeInventory(
+            episodes=list(self.inventory), total=len(self.inventory),
+        )
+        self.sources = [("jellyfin", "Jellyfin", "https://fixture.invalid", self.media)]
+        tmdb = Mock()
+        tmdb.detail.return_value = {
+            "name": "Fixture Show", "first_air_date": "2020-01-01",
+            "seasons": [{"season_number": 1, "episode_count": 3}],
+        }
+        tmdb.tv_season_detail.return_value = {
+            "season_number": 1,
+            "episodes": [{"episode_number": episode, "air_date": "2020-01-01"} for episode in range(1, 4)],
+        }
+        for target, options in (
+            ("app.services._configured_media_sources", {"side_effect": lambda: list(self.sources)}),
+            ("app.agent.episode_audit.TMDBClient", {"return_value": tmdb}),
+            ("app.agent.episode_resource_actions.get_indexer_service", {"return_value": Mock()}),
+        ):
+            patcher = patch(target, **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch(
+            "app.agent.episode_resource_actions.search_resources",
+            side_effect=lambda *_a, **_kw: _search_result(status="empty", items=[]),
+        )
+        self.search = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _warm_cache(self, mode, inventory):
+        self.audit.reset_episode_audit_cache_for_tests()
+        self.inventory[:] = inventory
+        self.search.reset_mock()
+        self.media.list_series_episode_inventory.reset_mock()
+        arguments = {**self.identity, "as_of": self.as_of}
+        if mode == "single":
+            arguments["target_episode"] = 2
+        return self.audit.audit_series_episodes(arguments)
+
+    def _search(self, mode):
+        if mode == "single":
+            return search_missing_episode_resources(missing_episode_resource_arguments(
+                {**self.identity, "as_of": self.as_of, "episode": 2}
+            ))
+        arguments = (
+            # 重复的同剧同季输入仍只核对一次，三个缺集不各自重新扫描。
+            {"items": [dict(self.identity), dict(self.identity)], "as_of": self.as_of}
+            if mode == "batch" else {**self.identity, "as_of": self.as_of}
+        )
+        return search_missing_season_resources(missing_season_resource_arguments(arguments))
+
+    def _assert_freshness(self, mode):
+        complete = [(1, episode) for episode in range(1, 4)]
+        for before, after in (([], complete), (complete, [])):
+            with self.subTest(mode=mode, before=before):
+                cached = self._warm_cache(mode, before)
+                self.assertEqual(cached.status, "up_to_date" if before else "updates_available")
+                self.inventory[:] = after
+                result = self._search(mode)
+                self.assertEqual(self.media.list_series_episode_inventory.call_count, 2)
+                self.assertEqual(self.search.call_count, 0 if after else (1 if mode == "single" else 3))
+                if mode == "batch":
+                    self.assertEqual(len(result.data["groups"]), 1)
+                    group = result.data["groups"][0]
+                    self.assertEqual(group["status"], "not_missing" if after else "needs_review")
+                    if not after:
+                        self.assertEqual(group["missing_total"], 3)
+                        self.assertEqual(group["remaining"], 0)
+                elif after:
+                    self.assertEqual(result.status, "not_missing")
+                    self.assertFalse(result.data["verification"]["verified_missing"])
+                else:
+                    self.assertTrue(result.data["verification"]["verified_missing"])
+                    if mode == "season":
+                        self.assertEqual((result.data["missing_total"], result.data["processed"]), (3, 3))
+
+    def test_single_search_refreshes_both_cached_inventory_verdicts(self):
+        self._assert_freshness("single")
+
+    def test_season_search_refreshes_once_for_all_missing_episodes(self):
+        self._assert_freshness("season")
+
+    def test_batch_search_refreshes_once_for_duplicate_series_and_all_episodes(self):
+        self._assert_freshness("batch")
+
+    def test_partial_media_source_failure_cannot_reuse_cached_up_to_date(self):
+        for mode in ("single", "season", "batch"):
+            with self.subTest(mode=mode):
+                self.sources[:] = self.sources[:1]
+                self._warm_cache(mode, [(1, episode) for episode in range(1, 4)])
+                self.inventory.clear()
+                failed = Mock()
+                failed.search_series_candidates.side_effect = OSError("fixture unavailable")
+                self.sources.append(("emby", "Emby", "https://failed.invalid", failed))
+                result = self._search(mode)
+                status = result.data["groups"][0]["status"] if mode == "batch" else result.status
+                self.assertEqual(status, "inconclusive")
+                self.assertFalse(result.ok)
+                self.search.assert_not_called()
+                self.assertEqual(self.media.list_series_episode_inventory.call_count, 2)
