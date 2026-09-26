@@ -13,6 +13,8 @@ from app.agent.feature_gate import (
     is_agent_enabled,
 )
 from app.agent.owner_routes import telegram_owner_route_is_currently_authorized
+from app.agent.provider_actions import get_provider_gateway
+from app.agent.provider_models import ProviderGatewayError
 from app.agent.rate_limit import allow_agent_tool
 
 from ..capabilities import KernelToolSpec
@@ -79,9 +81,25 @@ class MediaFluxAuthorizationPolicy:
 class MediaFluxToolRateLimiter:
     """复用现有 SQLite 共享预算，不因多 Worker 重置工具限流。"""
 
-    async def acquire(self, *, owner: str, tool_name: str, cost: float) -> None:
+    async def acquire(
+        self, *, owner: str, tool_name: str, cost: float, arguments: Mapping[str, Any]
+    ) -> None:
         del cost
         canonical = str(tool_name or "").removeprefix("confirm:")
-        allowed = await asyncio.to_thread(allow_agent_tool, owner, canonical)
+        scope_suffix = ""
+        if canonical == "provider.query":
+            # 只按静态目录的 Provider 拆分；换会话、operation 或 profile 不会刷新预算。
+            try:
+                spec = get_provider_gateway().catalog.get(arguments.get("operation", ""))
+                scope_suffix = spec.provider
+            except ProviderGatewayError as exc:
+                raise ToolPipelineError(exc.safe_message, code=exc.code) from exc
+        allowed = await asyncio.to_thread(
+            allow_agent_tool, owner, canonical, scope_suffix=scope_suffix
+        )
         if not allowed:
-            raise ToolPipelineError("工具调用过于频繁，请稍后重试", code="rate_limited")
+            raise ToolPipelineError(
+                "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；"
+                "请稍后重试，不能据此判断后端故障或没有数据。",
+                code="rate_limited",
+            )

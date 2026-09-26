@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import uuid
 from unittest.mock import patch
 
 from app.agent.kernel.capabilities import KernelToolSpec, ToolEffect
@@ -128,9 +129,14 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
             return_value=True,
         ) as allowed:
             await limiter.acquire(
-                owner="owner", tool_name="confirm:rss.create_subscription", cost=2
+                owner="owner",
+                tool_name="confirm:rss.create_subscription",
+                cost=2,
+                arguments={},
             )
-        allowed.assert_called_once_with("owner", "rss.create_subscription")
+        allowed.assert_called_once_with(
+            "owner", "rss.create_subscription", scope_suffix=""
+        )
         with (
             patch(
                 "app.agent.kernel.ports.mediaflux_policy.allow_agent_tool",
@@ -138,5 +144,137 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaises(ToolPipelineError) as raised,
         ):
-            await limiter.acquire(owner="owner", tool_name="library.search", cost=1)
+            await limiter.acquire(
+                owner="owner", tool_name="library.search", cost=1, arguments={}
+            )
         self.assertEqual(raised.exception.code, "rate_limited")
+
+    async def test_provider_query_budget_is_shared_by_provider_and_owner(self) -> None:
+        from app import database as db
+        from app.agent.provider_actions import get_provider_gateway
+
+        db.init_db()
+        catalog = get_provider_gateway().catalog
+        media_operation = catalog.get("media.system.info")
+        other_media_operation = catalog.get("media.items.counts")
+        qbittorrent_operation = catalog.get("qb.app.version")
+        self.assertEqual(media_operation.provider, "media")
+        self.assertEqual(other_media_operation.provider, "media")
+        self.assertEqual(qbittorrent_operation.provider, "qbittorrent")
+
+        # tests package pins the shared limiter to its isolated SQLite database.
+        first_limiter = MediaFluxToolRateLimiter()
+        second_limiter = MediaFluxToolRateLimiter()
+        owner = f"live-p2-01:{uuid.uuid4().hex}"
+        for index in range(8):
+            await (first_limiter if index % 2 == 0 else second_limiter).acquire(
+                owner=owner,
+                tool_name="provider.query",
+                cost=1,
+                arguments={
+                    "profile_ref": "media-profile-a",
+                    "operation": media_operation.operation_id,
+                    "arguments": {},
+                },
+            )
+
+        # Operation and profile changes do not mint another media-provider bucket.
+        with self.assertRaises(ToolPipelineError) as changed_operation:
+            await second_limiter.acquire(
+                owner=owner,
+                tool_name="provider.query",
+                cost=1,
+                arguments={
+                    "profile_ref": "media-profile-a",
+                    "operation": other_media_operation.operation_id,
+                    "arguments": {},
+                },
+            )
+        self.assertEqual(changed_operation.exception.code, "rate_limited")
+        self.assertIn("MediaFlux", str(changed_operation.exception))
+        self.assertIn("本地", str(changed_operation.exception))
+        self.assertIn("未访问后端", str(changed_operation.exception))
+
+        with self.assertRaises(ToolPipelineError) as changed_profile:
+            await first_limiter.acquire(
+                owner=owner,
+                tool_name="provider.query",
+                cost=1,
+                arguments={
+                    "profile_ref": "media-profile-b",
+                    "operation": media_operation.operation_id,
+                    "arguments": {},
+                },
+            )
+        self.assertEqual(changed_profile.exception.code, "rate_limited")
+
+        # A different owner has an independent budget; a different static provider
+        # has a separate suffix even for the original owner.
+        await second_limiter.acquire(
+            owner=f"live-p2-01:{uuid.uuid4().hex}",
+            tool_name="provider.query",
+            cost=1,
+            arguments={
+                "profile_ref": "media-profile-a",
+                "operation": media_operation.operation_id,
+                "arguments": {},
+            },
+        )
+        await second_limiter.acquire(
+            owner=owner,
+            tool_name="provider.query",
+            cost=1,
+            arguments={
+                "profile_ref": "qb-profile-a",
+                "operation": qbittorrent_operation.operation_id,
+                "arguments": {},
+            },
+        )
+
+    async def test_unknown_provider_operation_does_not_consume_budget(self) -> None:
+        limiter = MediaFluxToolRateLimiter()
+        with (
+            patch(
+                "app.agent.kernel.ports.mediaflux_policy.allow_agent_tool",
+                return_value=True,
+            ) as allowed,
+            self.assertRaises(ToolPipelineError) as raised,
+        ):
+            await limiter.acquire(
+                owner="owner",
+                tool_name="provider.query",
+                cost=1,
+                arguments={
+                    "profile_ref": "not-used",
+                    "operation": "media.operation.not_registered",
+                    "arguments": {},
+                },
+            )
+        self.assertEqual(raised.exception.code, "operation_not_allowed")
+        allowed.assert_not_called()
+
+    async def test_confirm_write_shares_the_canonical_tool_budget(self) -> None:
+        from app import database as db
+
+        db.init_db()
+        first_limiter = MediaFluxToolRateLimiter()
+        second_limiter = MediaFluxToolRateLimiter()
+        owner = f"live-p2-01-confirm:{uuid.uuid4().hex}"
+        for _ in range(4):
+            await first_limiter.acquire(
+                owner=owner,
+                tool_name="rss.create_subscription",
+                cost=1,
+                arguments={},
+            )
+
+        with self.assertRaises(ToolPipelineError) as raised:
+            await second_limiter.acquire(
+                owner=owner,
+                tool_name="confirm:rss.create_subscription",
+                cost=1,
+                arguments={},
+            )
+        self.assertEqual(raised.exception.code, "rate_limited")
+        self.assertIn("本地", str(raised.exception))
+        self.assertIn("未访问后端", str(raised.exception))

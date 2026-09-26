@@ -1,4 +1,4 @@
-"""Agent API 与 LLM 回退共用的轻量进程内限流。"""
+"""Agent 工具的统一限流策略与跨 Worker 共享预算。"""
 from __future__ import annotations
 
 import hashlib
@@ -438,10 +438,12 @@ def tool_rate_limit_policy(tool_name: str) -> tuple[str, int, int]:
     return scope, limit, cost
 
 
-def allow_agent_tool(identity: str, tool_name: str) -> bool:
+def allow_agent_tool(identity: str, tool_name: str, *, scope_suffix: str = "") -> bool:
     """按调用身份和真实工具执行预算限流。"""
     owner = str(identity or "unknown").strip() or "unknown"
     scope, limit, cost = tool_rate_limit_policy(tool_name)
+    if scope_suffix:
+        scope = f"{scope}:{scope_suffix}"
     return agent_rate_limiter.allow(
         f"{owner}:{scope}", limit=limit, window_seconds=60, cost=cost
     )

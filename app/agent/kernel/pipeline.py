@@ -98,7 +98,9 @@ class AuthorizationPolicy(Protocol):
 
 
 class RateLimiter(Protocol):
-    async def acquire(self, *, owner: str, tool_name: str, cost: float) -> None: ...
+    async def acquire(
+        self, *, owner: str, tool_name: str, cost: float, arguments: Mapping[str, Any]
+    ) -> None: ...
 
 
 class EffectLifecycle(Protocol):
@@ -197,7 +199,10 @@ class InMemoryRateLimiter:
         self._lock = CrossLoopAsyncLock()
         self._events: dict[tuple[str, str], list[tuple[float, float]]] = {}
 
-    async def acquire(self, *, owner: str, tool_name: str, cost: float) -> None:
+    async def acquire(
+        self, *, owner: str, tool_name: str, cost: float, arguments: Mapping[str, Any]
+    ) -> None:
+        del arguments
         now = time.monotonic()
         key = (owner, tool_name)
         weighted_cost = max(0.1, float(cost or 1.0))
@@ -443,6 +448,7 @@ class ToolPipeline:
             owner=context.owner,
             tool_name=tool.name,
             cost=tool.cost,
+            arguments=resolved,
         )
         context.cancellation.raise_if_cancelled()
 
@@ -627,6 +633,7 @@ class ToolPipeline:
                 owner=context.owner,
                 tool_name=f"confirm:{tool.name}",
                 cost=max(1.0, tool.cost),
+                arguments=resolved_arguments,
             )
             context.cancellation.raise_if_cancelled()
             if tool.execute_confirmed is None:  # pragma: no cover - ToolSpec 已校验
