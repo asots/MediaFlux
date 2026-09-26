@@ -12,6 +12,7 @@ from app.agent.kernel.ports.mediaflux_policy import (
     MediaFluxTurnAdmission,
 )
 from app.agent.kernel.state import AgentInput, CancellationToken, PublicationLease
+from tests.support import isolated_test_database
 
 
 async def _progress(_payload):
@@ -278,3 +279,106 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "rate_limited")
         self.assertIn("本地", str(raised.exception))
         self.assertIn("未访问后端", str(raised.exception))
+
+    async def test_guangya_directory_scrape_reads_have_independent_budgets(self) -> None:
+        with isolated_test_database("guangya-scrape-rate-limit.db"):
+            first_limiter = MediaFluxToolRateLimiter()
+            second_limiter = MediaFluxToolRateLimiter()
+            owner = "webk:v1:" + uuid.uuid4().hex * 2
+            other_owner = "webk:v1:" + uuid.uuid4().hex * 2
+
+            async def acquire(
+                limiter: MediaFluxToolRateLimiter, principal: str, tool_name: str
+            ) -> None:
+                await limiter.acquire(
+                    owner=principal,
+                    tool_name=tool_name,
+                    cost=1,
+                    arguments={},
+                )
+
+            # Different sessions/workers with the same owner share SQLite budgets.
+            for _ in range(2):
+                await acquire(
+                    first_limiter, owner, "guangya.directory_scrape.inspect"
+                )
+                await acquire(
+                    second_limiter, owner, "guangya.directory_scrape.search"
+                )
+
+            # Two inspect calls must not spend the search budget; search call 3
+            # and preview call 1 both remain available.
+            await acquire(
+                first_limiter, owner, "guangya.directory_scrape.search"
+            )
+            await acquire(
+                second_limiter, owner, "guangya.directory_scrape.preview"
+            )
+
+            # Each read tool independently allows four calls, then rejects call 5.
+            await acquire(
+                first_limiter, owner, "guangya.directory_scrape.search"
+            )
+            with self.assertRaises(ToolPipelineError) as search_limited:
+                await acquire(
+                    second_limiter, owner, "guangya.directory_scrape.search"
+                )
+            self.assertEqual(search_limited.exception.code, "rate_limited")
+
+            for _ in range(2):
+                await acquire(
+                    second_limiter, owner, "guangya.directory_scrape.inspect"
+                )
+            with self.assertRaises(ToolPipelineError) as inspect_limited:
+                await acquire(
+                    first_limiter, owner, "guangya.directory_scrape.inspect"
+                )
+            self.assertEqual(inspect_limited.exception.code, "rate_limited")
+
+            for _ in range(3):
+                await acquire(
+                    first_limiter, owner, "guangya.directory_scrape.preview"
+                )
+            with self.assertRaises(ToolPipelineError) as preview_limited:
+                await acquire(
+                    second_limiter, owner, "guangya.directory_scrape.preview"
+                )
+            self.assertEqual(preview_limited.exception.code, "rate_limited")
+
+            # A different owner has an independent per-tool budget.
+            for tool_name in (
+                "guangya.directory_scrape.inspect",
+                "guangya.directory_scrape.search",
+                "guangya.directory_scrape.preview",
+            ):
+                await acquire(second_limiter, other_owner, tool_name)
+
+    async def test_guangya_directory_scrape_run_confirm_share_write_budget(self) -> None:
+        with isolated_test_database("guangya-scrape-run-rate-limit.db"):
+            first_limiter = MediaFluxToolRateLimiter()
+            second_limiter = MediaFluxToolRateLimiter()
+            owner = "webk:v1:" + uuid.uuid4().hex * 2
+
+            for _ in range(2):
+                await first_limiter.acquire(
+                    owner=owner,
+                    tool_name="guangya.directory_scrape.run",
+                    cost=1,
+                    arguments={},
+                )
+
+            # Confirmation canonicalizes to run and consumes the third write call.
+            await second_limiter.acquire(
+                owner=owner,
+                tool_name="confirm:guangya.directory_scrape.run",
+                cost=1,
+                arguments={},
+            )
+            with self.assertRaises(ToolPipelineError) as raised:
+                await first_limiter.acquire(
+                    owner=owner,
+                    tool_name="guangya.directory_scrape.run",
+                    cost=1,
+                    arguments={},
+                )
+            self.assertEqual(raised.exception.code, "rate_limited")
