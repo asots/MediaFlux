@@ -687,7 +687,7 @@ def provider_finish_reason(protocol: str, reason: object) -> str:
     return "stop" if protocol == "responses" else reason
 
 
-class _ReasoningDeltaFilter:
+class ReasoningDeltaFilter:
     """跨 SSE 分片移除兼容模型混入正文的 ``<think>`` 段。"""
 
     def __init__(self) -> None:
@@ -813,7 +813,7 @@ async def iter_provider_text_deltas(
     if normalized == "auto":
         raise ValueError("流式解析需要具体协议")
     completed = False
-    reasoning_filter = _ReasoningDeltaFilter()
+    reasoning_filter = ReasoningDeltaFilter()
 
     async for data in _iter_sse_data(chunks, max_event_bytes=max_event_bytes):
         if normalized == "chat_completions" and data.strip() == "[DONE]":

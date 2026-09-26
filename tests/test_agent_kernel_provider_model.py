@@ -459,3 +459,124 @@ class CompleteTurnContractTests(unittest.IsolatedAsyncioTestCase):
                         async for event in adapter.stream(ModelRequest(system_prompt="test", messages=(), tools=()), cancellation=CancellationToken()):
                             seen.append(event)
                     self.assertEqual(seen, [])
+
+
+class AnswerCompletionContractTests(unittest.IsolatedAsyncioTestCase):
+    async def run_adapter(self, protocol, *, streamed=True, complete=True, tool=False, text='核对完成，未执行写操作。', trailing=''):
+        import re
+        from app.agent.kernel.model import ModelMessage
+
+        class Client:
+            calls = 0
+
+            @asynccontextmanager
+            async def stream_post_json(self, _url, *, json, **_kwargs):
+                self.calls += 1
+                encoded = __import__('json').dumps(json, ensure_ascii=False)
+                marker = re.search(r'<\|mf_answer_end_[0-9a-f]+\|>', encoded).group()
+                body = text + ('\n' + marker if complete else '') + trailing
+                if protocol == 'chat_completions':
+                    content = {'content': body}
+                    if tool:
+                        content['tool_calls'] = [{'index': 0, 'id': 'c1', 'type': 'function', 'function': {'name': 'read_status', 'arguments': '{}'}}]
+                    envelope = {'choices': [{'message': content, 'finish_reason': 'stop'}]}
+                    frames = [{'choices': [{'delta': content, 'finish_reason': 'stop'}]}, '[DONE]']
+                elif protocol == 'responses':
+                    item = ({'type': 'function_call', 'id': 'item1', 'call_id': 'c1', 'name': 'read_status', 'arguments': '{}'} if tool else
+                            {'type': 'message', 'content': [{'type': 'output_text', 'text': body}]})
+                    envelope = {'status': 'completed', 'output': [item]}
+                    frames = ([{'type': 'response.output_item.done', 'item': item}] if tool else
+                              [{'type': 'response.output_text.delta', 'delta': body}])
+                    frames.append({'type': 'response.completed', 'response': envelope})
+                else:
+                    block = ({'type': 'tool_use', 'id': 'c1', 'name': 'read_status', 'input': {}} if tool else {'type': 'text', 'text': body})
+                    envelope = {'stop_reason': 'tool_use' if tool else 'end_turn', 'content': [block]}
+                    frames = [{'type': 'content_block_start', 'index': 0, 'content_block': block},
+                              {'type': 'message_delta', 'delta': {'stop_reason': envelope['stop_reason']}},
+                              {'type': 'message_stop'}]
+
+                class Response:
+                    status_code = 200
+                    headers = {'content-type': 'text/event-stream' if streamed else 'application/json'}
+
+                    async def aiter_bytes(self):
+                        if streamed:
+                            async for chunk in chunks(frames, split=3):
+                                yield chunk
+                        else:
+                            yield __import__('json').dumps(envelope).encode()
+
+                yield Response()
+
+            async def aclose(self):
+                pass
+
+        client = Client()
+        adapter = OpenAICompatibleModelAdapter(
+            ProviderSettings(api_url='https://api.example.com/v1', model='sample', protocol=protocol),
+            client_factory=lambda **_kwargs: client,
+        )
+        events = []
+        error = None
+        try:
+            async for event in adapter.stream(ModelRequest(
+                system_prompt='文件管理', messages=(ModelMessage(role='user', content='检查状态'),), tools=(),
+                require_complete_answer=True,
+            ), cancellation=CancellationToken()):
+                events.append(event)
+        except ModelProviderError as exc:
+            error = exc
+        self.assertEqual(client.calls, 1, '不因缺少正文结束标记自动重发原模型请求')
+        self.assertNotIn('mf_answer_end_', ''.join(event.text for event in events))
+        return events, error
+
+    async def test_all_protocols_require_complete_natural_answer_for_stream_and_json(self):
+        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        for protocol in ('chat_completions', 'responses', 'anthropic_messages'):
+            for streamed in (True, False):
+                for complete in (True, False):
+                    with self.subTest(protocol=protocol, streamed=streamed, complete=complete):
+                        text = '核对完毕。' if complete else '2. **`044'
+                        events, error = await self.run_adapter(protocol, streamed=streamed, complete=complete, text=text)
+                        if complete:
+                            self.assertIsNone(error)
+                            self.assertEqual(events[-1].type, ModelEventType.FINISH)
+                            self.assertEqual(''.join(e.text for e in events).strip(), text)
+                        else:
+                            self.assertIsInstance(error, IncompleteModelAnswer)
+                            self.assertNotIn(ModelEventType.FINISH, [e.type for e in events])
+
+    async def test_complete_native_tool_rounds_do_not_require_final_answer_marker(self):
+        for protocol in ('chat_completions', 'responses', 'anthropic_messages'):
+            for streamed in (True, False):
+                with self.subTest(protocol=protocol, streamed=streamed):
+                    events, error = await self.run_adapter(protocol, streamed=streamed, complete=False, tool=True, text='')
+                    self.assertIsNone(error)
+                    self.assertEqual(events[-1].type, ModelEventType.FINISH)
+                    self.assertEqual(len([e for e in events if e.tool_call]), 1)
+
+    async def test_text_after_marker_is_not_a_valid_completion(self):
+        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        events, error = await self.run_adapter('responses', trailing='还有遗漏')
+        self.assertIsInstance(error, IncompleteModelAnswer)
+        self.assertNotIn(ModelEventType.FINISH, [e.type for e in events])
+
+    def test_marker_is_hidden_at_every_delta_boundary(self):
+        from app.agent.kernel.provider_model import _AnswerCompletion, IncompleteModelAnswer
+        from app.agent.kernel.model import ModelEvent
+        for split in range(1, 60):
+            contract = _AnswerCompletion()
+            body = '已检查；待确认。\n' + contract.marker
+            visible = ''.join(contract.feed(body[i:i + split]) for i in range(0, len(body), split))
+            self.assertEqual(visible.strip(), '已检查；待确认。')
+            contract.accept(ModelEvent(ModelEventType.FINISH, finish_reason='stop'))
+        contract = _AnswerCompletion()
+        self.assertEqual(contract.feed('半截' + contract.marker[:12]), '半截')
+        with self.assertRaises(IncompleteModelAnswer):
+            contract.accept(ModelEvent(ModelEventType.FINISH, finish_reason='stop'))
+
+    async def test_marker_without_body_is_not_a_complete_answer(self):
+        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        events, error = await self.run_adapter('responses', text='')
+        self.assertIsInstance(error, IncompleteModelAnswer)
+        self.assertNotIn(ModelEventType.FINISH, [e.type for e in events])

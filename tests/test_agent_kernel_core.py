@@ -2880,3 +2880,126 @@ class AgentPartialProgressTests(unittest.IsolatedAsyncioTestCase):
                 events = await collect(session.run(AgentInput(message="查看状态", owner="owner", session_id="negative")))
                 self.assertEqual(events[-1].payload["status"], "success")
                 self.assertEqual(events[-1].payload["answer"], "当前状态已说明，不需要执行变更。")
+
+
+class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def scenario(self, *, recovery='success', max_rounds=5):
+        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        reads = []
+        state = InMemorySessionStateStore()
+        catalog = ToolCatalog([read_tool('cloud.inspect', handler=lambda *_: reads.append('read') or {
+            'ok': True, 'summary': '已检查4个目录；尚未刮削入库',
+        })])
+
+        class Model:
+            requests = []
+
+            async def stream(self, request, *, cancellation):
+                self.requests.append(request)
+                index = len(self.requests)
+                if index == 1:
+                    yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall('read1', 'cloud.inspect', {}))
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')
+                elif index == 2 or recovery == 'failure':
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text='2. **`044')
+                    raise IncompleteModelAnswer('模型回复未完整结束：未收到正文结束标记')
+                elif recovery == 'tool':
+                    yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall('forbidden', 'cloud.inspect', {}))
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')
+                elif recovery == 'cancel':
+                    cancellation.cancel('user cancelled')
+                    cancellation.raise_if_cancelled()
+                else:
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text='已检查4个目录，尚未完成识别或入库。')
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason='stop')
+
+        model = Model()
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                               pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state,
+                               limits=SessionLimits(max_model_rounds=max_rounds))
+        events = await collect(session.run(AgentInput(owner='owner', session_id='recovery', message='清洗入库')))
+        saved = await state.load(owner='owner', session_id='recovery')
+        self.assertEqual(reads, ['read'], '回复恢复不得重放任何业务工具')
+        self.assertTrue(all(r.require_complete_answer for r in model.requests))
+        self.assertLessEqual(len(model.requests), max_rounds)
+        self.assertNotIn('**`044', str(saved.conversation), '未完成草稿不得成为下一轮可信历史')
+        if len(model.requests) == 3:
+            self.assertEqual(model.requests[-1].tools, ())
+            self.assertIn('不要重复调用任何工具', model.requests[-1].system_prompt)
+            self.assertNotIn('**`044', str(model.requests[-1].messages))
+        return events, model.requests
+
+    async def test_truncated_stop_is_recovered_once_without_repeating_tools(self):
+        events, requests = await self.scenario()
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(events[-1].payload['answer'], '已检查4个目录，尚未完成识别或入库。')
+        self.assertEqual(events[-1].payload['model_calls'], 3)
+        phases = [e.payload['phase'] for e in events if e.type == AgentEventType.MODEL_STARTED]
+        self.assertEqual(phases[-1], 'answer_recovery')
+
+    async def test_repeated_incomplete_answer_falls_back_to_complete_facts(self):
+        events, requests = await self.scenario(recovery='failure')
+        self.assertEqual(len(requests), 3)
+        final = await consume_events(_events_stream(events))
+        self.assertEqual(final.status, 'partial')
+        self.assertIn('已检查4个目录', final.answer)
+        self.assertIn('模型回复未完整生成', final.answer)
+        self.assertNotIn('**`044', final.answer)
+        from app.bot.agent_adapter import _render_turn
+        self.assertNotIn('**`044', _render_turn(final))
+        self.assertIn('部分完成', _render_turn(final))
+
+    async def test_no_budget_left_does_not_create_extra_model_request(self):
+        events, requests = await self.scenario(max_rounds=2)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(events[-1].payload['status'], 'partial')
+        self.assertIn('尚未刮削入库', events[-1].payload['answer'])
+
+    async def test_recovery_refuses_unrequested_tools(self):
+        events, _ = await self.scenario(recovery='tool')
+        self.assertEqual(events[-1].payload['status'], 'partial')
+        self.assertTrue(any(e.type == AgentEventType.TOOL_FAILED and e.payload['code'] == 'not_executed_final_round' for e in events))
+
+    async def test_user_can_cancel_recovery(self):
+        events, _ = await self.scenario(recovery='cancel')
+        self.assertEqual(events[-1].type, AgentEventType.TURN_CANCELLED)
+
+    async def test_confirmed_write_survives_reply_recovery_and_duplicate_click(self):
+        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        writes = []
+        tool = KernelToolSpec(
+            name='cloud.change', domain='cloud', description='改名',
+            input_schema={'type': 'object', 'properties': {}}, effect=ToolEffect.WRITE,
+            prepare=lambda *_: PreparedEffect(preview={'summary': '改名预览'}, snapshot_fingerprint='snapshot'),
+            execute_confirmed=lambda *_: writes.append(1) or {'ok': True, 'summary': '改名1项已完成，未移动或归档'},
+        )
+        class Model(ScriptedModel):
+            async def stream(self, request, *, cancellation):
+                if self.requests:
+                    self.requests.append(request)
+                    if len(self.requests) == 2:
+                        yield ModelEvent(ModelEventType.TEXT_DELTA, text='2. **`044')
+                        raise IncompleteModelAnswer('模型回复未完整结束')
+                    self_request = self.requests[-1]
+                    if self_request.tools:
+                        raise AssertionError('恢复时不能再暴露写工具')
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text='改名已经完成，尚未移动或归档。')
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason='stop')
+                else:
+                    async for event in super().stream(request, cancellation=cancellation):
+                        yield event
+        model = Model([[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall('rename', tool.name, {})),
+                        ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')]])
+        catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                               pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        preview = await consume_events(session.run(AgentInput(message='改名', owner='owner', session_id='confirm-recovery')))
+        self.assertEqual(writes, [])
+        final = await consume_events(session.confirm(owner='owner', session_id='confirm-recovery', plan_id=preview.approval.plan_id))
+        self.assertTrue(final.effect_result['ok'])
+        self.assertEqual(writes, [1])
+        self.assertIn('尚未移动或归档', final.answer)
+        self.assertNotIn('**`044', final.answer)
+        await consume_events(session.confirm(owner='owner', session_id='confirm-recovery', plan_id=preview.approval.plan_id))
+        self.assertEqual(writes, [1])
+        self.assertEqual(len(model.requests), 3)

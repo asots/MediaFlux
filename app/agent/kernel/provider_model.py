@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import codecs
 import json
+import secrets
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
 
 from app.clients.openai_compatible import (
     ProviderStreamError,
+    ReasoningDeltaFilter,
     extract_provider_usage,
     native_tool_definitions,
     native_tool_request_body,
@@ -22,7 +24,6 @@ from app.clients.openai_compatible import (
     provider_headers,
     provider_finish_reason,
     resolve_protocol,
-    strip_reasoning_markup,
 )
 from app.indexers.http import FixedHostHttpClient
 
@@ -39,6 +40,57 @@ from .state import CancellationToken
 
 class ModelProviderError(RuntimeError):
     pass
+
+
+class IncompleteModelAnswer(ModelProviderError):
+    """上游正常 stop，但用户可见答复未履行结束契约。"""
+
+
+class _AnswerCompletion:
+    """逐片隐藏请求级结束标记；不通过文件名、标点或正文长短猜测完整性。"""
+
+    def __init__(self) -> None:
+        self.marker = f"<|mf_answer_end_{secrets.token_hex(8)}|>"
+        self.pending = ""
+        self.complete = False
+        self.has_tool_calls = False
+        self.has_text = False
+
+    def feed(self, text: str) -> str:
+        if self.complete:
+            if text.strip():
+                raise IncompleteModelAnswer("模型回复未完整结束：结束标记之后仍有正文")
+            return ""
+        self.pending += text
+        index = self.pending.find(self.marker)
+        if index >= 0:
+            visible, trailing = self.pending[:index], self.pending[index + len(self.marker):]
+            self.pending = ""
+            self.complete = True
+            if trailing.strip():
+                raise IncompleteModelAnswer("模型回复未完整结束：结束标记之后仍有正文")
+            self.has_text = self.has_text or bool(visible.strip())
+            return visible
+        keep = min(len(self.pending), len(self.marker) - 1)
+        while keep and not self.pending.endswith(self.marker[:keep]):
+            keep -= 1
+        visible = self.pending[:-keep] if keep else self.pending
+        self.pending = self.pending[-keep:] if keep else ""
+        self.has_text = self.has_text or bool(visible.strip())
+        return visible
+
+    def accept(self, event: ModelEvent) -> tuple[ModelEvent, ...]:
+        if event.type is ModelEventType.TEXT_DELTA:
+            text = self.feed(event.text)
+            return (replace(event, text=text),) if text else ()
+        if event.type is ModelEventType.TOOL_CALL_COMPLETED:
+            self.has_tool_calls = True
+        if event.type is ModelEventType.FINISH:
+            if not self.has_tool_calls and not (self.complete and self.has_text):
+                raise IncompleteModelAnswer("模型回复未完整结束：缺少正文或结束标记")
+            # 带工具调用的中间轮次不要求最终答复标记，但也不展示半个控制标记。
+            self.pending = ""
+        return (event,)
 
 
 _MODEL_IDLE_TIMEOUT_FLOOR_SECONDS = 30
@@ -105,67 +157,6 @@ class ProviderSettings:
                 min(120, config.get_int("AGENT_LLM_TIMEOUT_SECONDS", 30)),
             ),
         )
-
-
-class _ReasoningFilter:
-    def __init__(self) -> None:
-        self.pending = ""
-        self.inside = False
-
-    @staticmethod
-    def _suffix_length(value: str, marker: str) -> int:
-        lowered = value.casefold()
-        target = marker.casefold()
-        for length in range(min(len(lowered), len(target) - 1), 0, -1):
-            if lowered.endswith(target[:length]):
-                return length
-        return 0
-
-    def feed(self, value: str) -> str:
-        self.pending += value
-        visible: list[str] = []
-        while self.pending:
-            lowered = self.pending.casefold()
-            if self.inside:
-                close_at = lowered.find("</think")
-                if close_at < 0:
-                    keep = self._suffix_length(self.pending, "</think")
-                    self.pending = self.pending[-keep:] if keep else ""
-                    return "".join(visible)
-                close_end = self.pending.find(">", close_at)
-                if close_end < 0:
-                    self.pending = self.pending[close_at:]
-                    return "".join(visible)
-                self.pending = self.pending[close_end + 1 :]
-                self.inside = False
-                continue
-            open_at = lowered.find("<think")
-            if open_at >= 0:
-                visible.append(self.pending[:open_at])
-                open_end = self.pending.find(">", open_at)
-                if open_end < 0:
-                    self.pending = self.pending[open_at:]
-                    return "".join(visible)
-                self.pending = self.pending[open_end + 1 :]
-                self.inside = True
-                continue
-            keep = self._suffix_length(self.pending, "<think")
-            if keep:
-                visible.append(self.pending[:-keep])
-                self.pending = self.pending[-keep:]
-            else:
-                visible.append(self.pending)
-                self.pending = ""
-            return "".join(visible)
-        return "".join(visible)
-
-    def finalize(self) -> str:
-        if self.inside:
-            self.pending = ""
-            return ""
-        result = strip_reasoning_markup(self.pending)
-        self.pending = ""
-        return result
 
 
 async def _iter_sse_data(
@@ -257,7 +248,7 @@ async def iter_protocol_model_events(
 ) -> AsyncIterator[ModelEvent]:
     """把三个 Provider 的真实 SSE 统一为 Kernel ModelEvent。"""
     normalized = resolve_protocol(protocol)
-    reasoning = _ReasoningFilter()
+    reasoning = ReasoningDeltaFilter()
     calls: dict[str, dict[str, Any]] = {}
     emitted_calls: set[str] = set()
     finish_reason = ""
@@ -614,6 +605,19 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
         *,
         cancellation: CancellationToken,
     ) -> AsyncIterator[ModelEvent]:
+        completion = _AnswerCompletion() if request.require_complete_answer else None
+        if completion is not None:
+            request = replace(request, system_prompt=request.system_prompt + (
+                "\n\n用户可见答复结束契约：需要调用工具时正常调用，不加结束标记。"
+                "本轮不再调用工具、完整回答用户或明确说明无法完成/拒绝原因之后，"
+                f"必须在正文末尾另起一行原样输出 {completion.marker}。"
+                "这只是传输校验标记，不代表业务任务已完成；不要解释标记，不要放在代码块内，"
+                "标记之后不要输出任何内容。"
+            ))
+
+        def checked(event: ModelEvent) -> tuple[ModelEvent, ...]:
+            return completion.accept(event) if completion is not None else (event,)
+
         location = normalize_provider_location(
             self.settings.api_url,
             https_only=True,
@@ -697,7 +701,8 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                     ):
                                         cancellation.raise_if_cancelled()
                                         emitted = True
-                                        yield event
+                                        for output in checked(event):
+                                            yield output
                                     return
                                 raw = bytearray()
                                 async for chunk in response.aiter_bytes():
@@ -720,29 +725,32 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                     break
                                 if turn.text:
                                     emitted = True
-                                    yield ModelEvent(
+                                    for output in checked(ModelEvent(
                                         ModelEventType.TEXT_DELTA, text=turn.text
-                                    )
+                                    )):
+                                        yield output
                                 for call in turn.tool_calls:
                                     emitted = True
-                                    yield ModelEvent(
+                                    for output in checked(ModelEvent(
                                         ModelEventType.TOOL_CALL_COMPLETED,
                                         tool_call=ModelToolCall(
                                             call_id=call.call_id,
                                             name=call.name,
                                             arguments=call.arguments,
                                         ),
-                                    )
+                                    )):
+                                        yield output
                                 if turn.usage is not None:
                                     yield ModelEvent(
                                         ModelEventType.USAGE,
                                         usage=turn.usage.to_dict(),
                                     )
-                                yield ModelEvent(
+                                for output in checked(ModelEvent(
                                     ModelEventType.FINISH, finish_reason=turn.finish_reason
-                                )
+                                )):
+                                    yield output
                                 return
-                        except asyncio.CancelledError:
+                        except (asyncio.CancelledError, IncompleteModelAnswer):
                             raise
                         except Exception as exc:
                             last_error = exc

@@ -37,7 +37,7 @@ from .pipeline import (
     ToolPipeline,
     ToolPipelineError,
 )
-from .provider_model import ModelProviderError
+from .provider_model import IncompleteModelAnswer, ModelProviderError
 from .session_guard import session_scope_guard
 from .state import (
     AgentInput,
@@ -802,9 +802,12 @@ class AgentSession:
 
             history_end = current_user_index if current_user_index is not None else next(
                 (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), len(messages))
+            answer_recovery = False
             for round_index in range(self.limits.max_model_rounds):
                 token.raise_if_cancelled()
-                phase = "confirmed_synthesis" if confirmed_result is not None else "planning"
+                phase = "answer_recovery" if answer_recovery else (
+                    "confirmed_synthesis" if confirmed_result is not None else "planning"
+                )
                 await publish(AgentEventType.MODEL_STARTED, {"round": round_index + 1, "phase": phase})
                 text_parts: list[str] = []
                 calls: list[ModelToolCall] = []
@@ -813,7 +816,8 @@ class AgentSession:
                 # 否则第 12 轮仍执行工具后没有第 13 轮收束，会真实完成调用却
                 # 对用户报 model_round_budget_exceeded，并丢失可续跑上下文。
                 final_synthesis_round = (
-                    tool_budget_blocked
+                    answer_recovery
+                    or tool_budget_blocked
                     or total_tool_calls >= self.limits.max_tool_calls
                     or (round_index == self.limits.max_model_rounds - 1 and total_tool_calls > 0)
                 )
@@ -842,6 +846,13 @@ class AgentSession:
                         "给出简洁结论；若任务尚未完整完成，明确写‘部分完成’，说明未执行的"
                         "写操作，并提示用户可继续，不得声称已生成不存在的确认计划。"
                     )
+                if answer_recovery:
+                    request_system_prompt += (
+                        "\n上一轮模型正文未完整结束，本轮只重新汇总已经取得的真实工具结果。"
+                        "不要续写残句，不要重复调用任何工具，不要描述媒体情节或复述完整原始文件标题。"
+                        "简洁说明已完成的检查、没有执行的操作与真实阻塞；未核验的识别原因不能当作事实。"
+                        "如无法继续处理，明确说明，不要虚构完成或让用户以为已经入库。"
+                    )
                 request = ModelRequest(
                     system_prompt=request_system_prompt,
                     messages=bounded_model_messages(
@@ -855,47 +866,55 @@ class AgentSession:
                     tools=request_tools,
                     max_output_tokens=self.limits.effective_output_tokens,
                     round_index=round_index,
+                    require_complete_answer=True,
                 )
-                async for model_event in self.model.stream(request, cancellation=token):
-                    token.raise_if_cancelled()
-                    if model_event.type is ModelEventType.TEXT_DELTA:
-                        if model_event.text:
-                            text_parts.append(model_event.text)
-                            if confirmed_result is None:
+                try:
+                    async for model_event in self.model.stream(request, cancellation=token):
+                        token.raise_if_cancelled()
+                        if model_event.type is ModelEventType.TEXT_DELTA:
+                            if model_event.text:
+                                text_parts.append(model_event.text)
+                                if confirmed_result is None:
+                                    await publish(
+                                        AgentEventType.MODEL_DELTA,
+                                        {"delta": model_event.text, "round": round_index + 1},
+                                    )
+                        elif model_event.type is ModelEventType.TOOL_CALL_COMPLETED:
+                            call = model_event.tool_call
+                            if call is not None:
+                                calls.append(call)
+                                try:
+                                    public_tool_name = self.catalog.get(call.name).name
+                                except KeyError:
+                                    public_tool_name = call.name
                                 await publish(
-                                    AgentEventType.MODEL_DELTA,
-                                    {"delta": model_event.text, "round": round_index + 1},
+                                    AgentEventType.MODEL_TOOL_CALL,
+                                    {
+                                        "call_id": call.call_id,
+                                        "tool": public_tool_name,
+                                        "label": public_tool_label(public_tool_name),
+                                        "argument_keys": sorted(
+                                            str(key)[:80] for key in call.arguments
+                                        )[:50],
+                                        "round": round_index + 1,
+                                    },
                                 )
-                    elif model_event.type is ModelEventType.TOOL_CALL_COMPLETED:
-                        call = model_event.tool_call
-                        if call is not None:
-                            calls.append(call)
-                            try:
-                                public_tool_name = self.catalog.get(call.name).name
-                            except KeyError:
-                                public_tool_name = call.name
-                            await publish(
-                                AgentEventType.MODEL_TOOL_CALL,
-                                {
-                                    "call_id": call.call_id,
-                                    "tool": public_tool_name,
-                                    "label": public_tool_label(public_tool_name),
-                                    "argument_keys": sorted(
-                                        str(key)[:80] for key in call.arguments
-                                    )[:50],
-                                    "round": round_index + 1,
-                                },
-                            )
-                    elif model_event.type is ModelEventType.USAGE:
-                        for key, value in model_event.usage.items():
-                            try:
-                                total_usage[key] = total_usage.get(key, 0) + max(
-                                    0, int(value)
-                                )
-                            except (TypeError, ValueError):
-                                continue
-                    elif model_event.type is ModelEventType.FINISH:
-                        finish_reason = model_event.finish_reason
+                        elif model_event.type is ModelEventType.USAGE:
+                            for key, value in model_event.usage.items():
+                                try:
+                                    total_usage[key] = total_usage.get(key, 0) + max(
+                                        0, int(value)
+                                    )
+                                except (TypeError, ValueError):
+                                    continue
+                        elif model_event.type is ModelEventType.FINISH:
+                            finish_reason = model_event.finish_reason
+                except IncompleteModelAnswer:
+                    # 同一模型循环内最多恢复一次，消耗原轮次预算；不存残稿、不重放工具。
+                    if answer_recovery or round_index + 1 >= self.limits.max_model_rounds:
+                        raise
+                    answer_recovery = True
+                    continue
 
                 if not finish_reason:
                     raise ModelProviderError("Provider 回复未完整结束：缺少模型回合结束事件")
