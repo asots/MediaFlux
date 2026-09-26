@@ -36,6 +36,7 @@ class CalendarEchoModel:
             assert "discovery__anime_calendar" in {tool["name"] for tool in request.tools}
             yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
                              tool_call=ModelToolCall("calendar-read", "discovery__anime_calendar", self.arguments))
+            yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
             return
         assert len(self.requests) == 2
         messages = [message for message in request.messages if message.role == "tool"]
@@ -52,6 +53,7 @@ class CalendarEchoModel:
             text = self.facts["summary"]
         await asyncio.sleep(0)
         yield ModelEvent(ModelEventType.TEXT_DELTA, text=text)
+        yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
 
 
 class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -134,8 +136,8 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         for owner in ("not-a-web-principal", "tg:v1:123\x1f456"):
             with self.subTest(owner=owner), patch("app.agent.kernel.ports.mediaflux_policy.telegram_owner_route_is_currently_authorized", return_value=False):
                 model = ScriptedModel([
-                    [call("discovery__anime_calendar", {"source": "youku"})],
-                    [ModelEvent(ModelEventType.TEXT_DELTA, text="当前身份无权读取。")],
+                    [call("discovery__anime_calendar", {"source": "youku"}), ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")],
+                    [ModelEvent(ModelEventType.TEXT_DELTA, text="当前身份无权读取。"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
                 ])
                 events = await collect(self.session(model).run(AgentInput(message="今天优酷追漫日历", owner=owner, session_id="denied-session")))
                 failed = [event for event in events if event.type == AgentEventType.TOOL_FAILED]

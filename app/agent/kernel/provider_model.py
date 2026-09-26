@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from app.clients.openai_compatible import (
+    ProviderStreamError,
     extract_provider_usage,
     native_tool_definitions,
     native_tool_request_body,
@@ -19,6 +20,7 @@ from app.clients.openai_compatible import (
     parse_native_tool_turn,
     protocol_attempts,
     provider_headers,
+    provider_finish_reason,
     resolve_protocol,
     strip_reasoning_markup,
 )
@@ -285,7 +287,7 @@ async def iter_protocol_model_events(
 
     async for event in _iter_sse_json(chunks):
         if event.get("__done__"):
-            completed = True
+            completed = normalized == "chat_completions"
             break
         if normalized == "responses":
             event_type = str(event.get("type") or "")
@@ -349,7 +351,7 @@ async def iter_protocol_model_events(
                     usage = _usage_dict(response, "responses")
                     if usage:
                         yield ModelEvent(ModelEventType.USAGE, usage=usage)
-                    finish_reason = "stop"
+                    finish_reason = str(response.get("status") or "")
                 completed = True
                 break
             elif event_type in {"response.failed", "response.incomplete", "error"}:
@@ -460,15 +462,17 @@ async def iter_protocol_model_events(
 
     if not completed:
         raise ModelProviderError("Provider 流在完成事件前中断")
-    if finish_reason in {"length", "max_tokens", "content_filter", "model_context_window_exceeded"}:
-        raise ModelProviderError("Provider 回复被截断，未完整结束")
+    try:
+        finish_reason = provider_finish_reason(normalized, finish_reason)
+    except ProviderStreamError as exc:
+        raise ModelProviderError(str(exc)) from exc
     for key in list(calls):
         async for output in emit_call(key):
             yield output
     tail = reasoning.finalize()
     if tail:
         yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
-    yield ModelEvent(ModelEventType.FINISH, finish_reason=finish_reason or "stop")
+    yield ModelEvent(ModelEventType.FINISH, finish_reason=finish_reason)
 
 
 def _history_for_protocol(
@@ -701,6 +705,8 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                 try:
                                     envelope = json.loads(raw.decode("utf-8"))
                                     turn = parse_native_tool_turn(envelope, protocol)
+                                except ProviderStreamError as exc:
+                                    raise ModelProviderError(str(exc)) from exc
                                 except (
                                     UnicodeDecodeError,
                                     json.JSONDecodeError,
@@ -733,7 +739,7 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                         usage=turn.usage.to_dict(),
                                     )
                                 yield ModelEvent(
-                                    ModelEventType.FINISH, finish_reason="stop"
+                                    ModelEventType.FINISH, finish_reason=turn.finish_reason
                                 )
                                 return
                         except asyncio.CancelledError:

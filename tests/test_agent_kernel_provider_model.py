@@ -381,3 +381,81 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.name, "download.list")
         self.assertEqual(call.arguments, {"limit": 10})
         self.assertEqual(events[-1].finish_reason, "tool_use")
+
+
+class CompleteTurnContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_done_without_finish_reason_rejects_text_and_tool_execution(self):
+        seen = []
+        with self.assertRaises(ModelProviderError):
+            async for item in iter_protocol_model_events(chunks([
+                {"choices": [{"delta": {
+                    "content": "### 第1项：`sample-",
+                    "tool_calls": [{"index": 0, "id": "write-1", "function": {
+                        "name": "cloud.rename", "arguments": "{}",
+                    }}],
+                }, "finish_reason": None}]},
+                "[DONE]",
+            ]), protocol="chat_completions"):
+                seen.append(item)
+        self.assertTrue(any(item.type == ModelEventType.TEXT_DELTA for item in seen))
+        self.assertFalse(any(item.type in {
+            ModelEventType.FINISH, ModelEventType.TOOL_CALL_COMPLETED,
+        } for item in seen))
+
+    async def test_protocol_completion_markers_cannot_mask_missing_or_failed_reason(self):
+        cases = [
+            ("chat_completions", [{"choices": [{"delta": {"content": "partial"}, "finish_reason": reason}]}, "[DONE]"])
+            for reason in ("length", "content_filter", "unknown", "")
+        ] + [
+            ("responses", [{"type": "response.output_text.delta", "delta": "partial"},
+                           {"type": "response.completed", "response": {"status": reason}}])
+            for reason in ("incomplete", "failed", "", None)
+        ] + [
+            ("anthropic_messages", [{"type": "message_delta", "delta": {"stop_reason": reason}},
+                                    {"type": "message_stop"}])
+            for reason in ("max_tokens", "pause_turn", "refusal", "", None)
+        ] + [
+            (protocol, ["[DONE]"]) for protocol in ("responses", "anthropic_messages")
+        ]
+        for protocol, events in cases:
+            with self.subTest(protocol=protocol, events=events), self.assertRaises(ModelProviderError):
+                await collect(iter_protocol_model_events(chunks(events), protocol=protocol))
+
+    async def test_json_fallback_validates_finish_before_exposing_calls(self):
+        class Response:
+            status_code = 200
+            headers = {"content-type": "application/json"}
+
+            async def aiter_bytes(self):
+                yield json.dumps(envelope).encode()
+
+        class Client:
+            @asynccontextmanager
+            async def stream_post_json(self, *_args, **_kwargs):
+                yield Response()
+
+            async def aclose(self):
+                pass
+
+        for reason in ("length", None, "tool_calls"):
+            envelope = {"choices": [{"finish_reason": reason, "message": {
+                "role": "assistant", "content": "partial", "tool_calls": [{
+                    "id": "call-1", "type": "function", "function": {
+                        "name": "cloud.rename", "arguments": "{}",
+                    },
+                }],
+            }}]}
+            adapter = OpenAICompatibleModelAdapter(
+                ProviderSettings(api_url="https://api.example.com/v1", model="test", protocol="chat_completions"),
+                client_factory=lambda **_: Client(),
+            )
+            seen = []
+            with self.subTest(reason=reason):
+                if reason == "tool_calls":
+                    seen = await collect(adapter.stream(ModelRequest(system_prompt="test", messages=(), tools=()), cancellation=CancellationToken()))
+                    self.assertEqual(seen[-1].finish_reason, "tool_calls")
+                else:
+                    with self.assertRaises(ModelProviderError):
+                        async for event in adapter.stream(ModelRequest(system_prompt="test", messages=(), tools=()), cancellation=CancellationToken()):
+                            seen.append(event)
+                    self.assertEqual(seen, [])

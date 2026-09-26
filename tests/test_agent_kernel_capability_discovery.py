@@ -69,7 +69,12 @@ def session_for(targets, rounds, *, projector=None):
         ]
     )
     store = InMemorySessionStateStore()
-    model = ScriptedModel(rounds)
+    # This helper describes complete scripted rounds, not interrupted protocol streams.
+    model = ScriptedModel([
+        [*events, ModelEvent(ModelEventType.FINISH, finish_reason=(
+            "tool_calls" if any(e.type == ModelEventType.TOOL_CALL_COMPLETED for e in events) else "stop"
+        ))] for events in rounds
+    ])
     pipeline = ToolPipeline(catalog=catalog, state_store=store, projector=projector)
     session = AgentSession(
         model=model,

@@ -85,7 +85,7 @@ class LLMProviderProtocolTests(unittest.TestCase):
     def test_native_turn_carries_provider_usage(self):
         turn = parse_native_tool_turn(
             {
-                "choices": [{"message": {"role": "assistant", "content": "完成"}}],
+                "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "完成"}}],
                 "usage": {
                     "prompt_tokens": 8,
                     "completion_tokens": 2,
@@ -95,6 +95,7 @@ class LLMProviderProtocolTests(unittest.TestCase):
             "chat_completions",
         )
         self.assertEqual(turn.usage, ProviderUsage(8, 2, 10))
+        self.assertEqual(turn.finish_reason, "stop")
 
     def test_explicit_endpoint_inference_and_location_normalization(self):
         cases = {
@@ -164,7 +165,7 @@ class LLMProviderProtocolTests(unittest.TestCase):
 
     def test_reasoning_markup_is_removed_from_non_stream_turns(self):
         content = extract_output_text(
-            {"choices": [{"message": {
+            {"choices": [{"finish_reason": "stop", "message": {
                 "reasoning_content": "private chain",
                 "content": "<think>private chain</think>最终答案",
             }}]},
@@ -172,13 +173,14 @@ class LLMProviderProtocolTests(unittest.TestCase):
         )
         self.assertEqual(content, "最终答案")
         turn = parse_native_tool_turn(
-            {"choices": [{"message": {
+            {"choices": [{"finish_reason": "stop", "message": {
                 "reasoning_content": "private chain",
                 "content": "<think>private chain</think>已完成。",
             }}]},
             "chat_completions",
         )
         self.assertEqual(turn.text, "已完成。")
+        self.assertEqual(turn.finish_reason, "stop")
         self.assertNotIn("reasoning_content", turn.assistant_entry)
 
     def test_protocol_endpoints_are_distinct(self):
@@ -320,6 +322,7 @@ class LLMProviderProtocolTests(unittest.TestCase):
 
     def test_parse_and_append_responses_native_tool_turn(self):
         turn = parse_native_tool_turn({
+            "status": "completed",
             "output": [{
                 "type": "function_call",
                 "call_id": "call_1",
@@ -328,6 +331,7 @@ class LLMProviderProtocolTests(unittest.TestCase):
             }],
         }, "responses")
         self.assertEqual(turn.tool_calls[0].name, "mf_workspace_health")
+        self.assertEqual(turn.finish_reason, "stop")
         history = append_native_tool_results(
             "responses", [], turn, [(turn.tool_calls[0], '{"ok":true}')],
         )
@@ -336,7 +340,7 @@ class LLMProviderProtocolTests(unittest.TestCase):
 
     def test_parse_and_append_chat_native_tool_turn(self):
         turn = parse_native_tool_turn({
-            "choices": [{"message": {
+            "choices": [{"finish_reason": "tool_calls", "message": {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [{
@@ -350,6 +354,7 @@ class LLMProviderProtocolTests(unittest.TestCase):
             }}],
         }, "chat_completions")
         self.assertEqual(turn.tool_calls[0].arguments, {"limit": 5})
+        self.assertEqual(turn.finish_reason, "tool_calls")
         history = append_native_tool_results(
             "chat_completions", [], turn, [(turn.tool_calls[0], '{"ok":true}')],
         )
@@ -368,16 +373,49 @@ class LLMProviderProtocolTests(unittest.TestCase):
             }],
         }, "anthropic_messages")
         self.assertEqual(turn.tool_calls[0].call_id, "toolu_1")
+        self.assertEqual(turn.finish_reason, "tool_use")
         history = append_native_tool_results(
             "anthropic_messages", [], turn, [(turn.tool_calls[0], '{"ok":true}')],
         )
         self.assertEqual(history[-1]["role"], "user")
         self.assertEqual(history[-1]["content"][0]["type"], "tool_result")
 
+    def test_native_tool_turn_rejects_missing_or_truncated_finish_reason(self):
+        chat_call = {
+            "id": "call_chat",
+            "type": "function",
+            "function": {"name": "mf_workspace_health", "arguments": "{}"},
+        }
+        responses_call = {
+            "type": "function_call",
+            "call_id": "call_responses",
+            "name": "mf_workspace_health",
+            "arguments": "{}",
+        }
+        anthropic_call = {
+            "type": "tool_use",
+            "id": "call_anthropic",
+            "name": "mf_workspace_health",
+            "input": {},
+        }
+        cases = (
+            ("chat_completions", {"choices": [{"message": {"tool_calls": [chat_call]}}]}),
+            ("chat_completions", {"choices": [{"finish_reason": "length", "message": {"tool_calls": [chat_call]}}]}),
+            ("responses", {"output": [responses_call]}),
+            ("responses", {"status": "incomplete", "output": [responses_call]}),
+            ("anthropic_messages", {"type": "message", "content": [anthropic_call]}),
+            ("anthropic_messages", {"type": "message", "stop_reason": "max_tokens", "content": [anthropic_call]}),
+        )
+        for protocol, envelope in cases:
+            with self.subTest(protocol=protocol, envelope=envelope), self.assertRaises(
+                ProviderStreamError
+            ):
+                parse_native_tool_turn(envelope, protocol)
+
     def test_native_tool_arguments_must_be_complete_json_object(self):
         with self.assertRaises(ValueError):
             parse_native_tool_turn({
-                "choices": [{"message": {
+                "choices": [{"finish_reason": "tool_calls", "message": {
                     "tool_calls": [{
                         "id": "call_bad",
                         "type": "function",

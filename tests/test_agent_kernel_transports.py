@@ -39,6 +39,7 @@ class ReadThenAnswerModel:
                 ModelEventType.TOOL_CALL_COMPLETED,
                 tool_call=ModelToolCall("call-1", "library__count", {}),
             )
+            yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
         else:
             yield ModelEvent(ModelEventType.TEXT_DELTA, text="媒体库共有 37 集")
             yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")

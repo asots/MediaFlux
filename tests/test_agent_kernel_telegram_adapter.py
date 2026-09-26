@@ -1057,7 +1057,10 @@ class TelegramAgentExecutorTests(unittest.TestCase):
         )
         catalog = ToolCatalog([tool])
         state = InMemorySessionStateStore()
-        model = ScriptedModel([[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("write", "download.pause", {}))]])
+        model = ScriptedModel([[
+            ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("write", "download.pause", {})),
+            ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+        ]])
         model.rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="completed"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
             pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)

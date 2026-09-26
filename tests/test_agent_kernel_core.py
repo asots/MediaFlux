@@ -339,8 +339,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             execute_confirmed=lambda a, _s, _c: writes.append(a["step"]) or {"ok": True, "summary": f"已完成{a['step']}"},
         )
         model = ScriptedModel([
-            [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(f"call-{step}", tool.model_name, {"step": step})) for step in (1, 2)],
-            [ModelEvent(ModelEventType.TEXT_DELTA, text="第一步完成，第二步未执行。")],
+            [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(f"call-{step}", tool.model_name, {"step": step})) for step in (1, 2)]
+            + [ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")],
+            [ModelEvent(ModelEventType.TEXT_DELTA, text="第一步完成，第二步未执行。"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
         ])
         catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
@@ -1533,8 +1534,11 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        self.assertEqual(events[-1].type, AgentEventType.TURN_FAILED)
-        self.assertEqual(events[-1].payload["code"], "model_provider_error")
+        self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
+        self.assertEqual(events[-1].payload["status"], "partial")
+        self.assertEqual(events[-1].payload["finish_reason"], "model_provider_error")
+        self.assertIn("第一部已检查", events[-1].payload["answer"])
+        self.assertIn("未执行新的写操作", events[-1].payload["answer"])
 
         saved = await state.load(owner="owner-1", session_id="session-1")
         assistant = next(item for item in saved.conversation if item.get("tool_calls"))
@@ -2685,3 +2689,126 @@ class LatestWinsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "old-fact-must-not-win", json.dumps(saved.conversation, ensure_ascii=False)
         )
+
+
+class AgentPartialProgressTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def tool_round(name, number):
+        return [
+            ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
+                       tool_call=ModelToolCall(f"call-{number}", name, {})),
+            ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+        ]
+
+    async def run_scrape(self, *, recovered=False):
+        search_calls = 0
+
+        def search(_arguments, _context):
+            nonlocal search_calls
+            search_calls += 1
+            if search_calls == 3:
+                raise ToolPipelineError("本地调用频率已达上限，本次未访问后端", code="rate_limited")
+            return {"ok": True, "status": "empty", "summary": "本目录没有匹配候选"}
+
+        catalog = ToolCatalog([
+            read_tool("guangya.directory_scrape.inspect", domain="guangya",
+                      handler=lambda *_: {"ok": True, "summary": "已检查目录，视频尚未归档"}),
+            read_tool("guangya.directory_scrape.search", domain="guangya", handler=search),
+            read_tool("agent.capabilities", domain="agent"),
+        ])
+        sequence = ["agent.capabilities", "guangya.directory_scrape.inspect",
+                    "guangya.directory_scrape.search", "guangya.directory_scrape.search",
+                    "guangya.directory_scrape.inspect", "guangya.directory_scrape.search",
+                    "agent.capabilities"]
+        if recovered:
+            sequence.append("guangya.directory_scrape.search")
+        rounds = [self.tool_round(name, number) for number, name in enumerate(sequence)]
+        rounds.append([
+            ModelEvent(ModelEventType.TEXT_DELTA, text="仍未找到匹配候选。" if recovered else "已开始处理\n### 第1项：`sample-"),
+            ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+        ])
+        state = InMemorySessionStateStore()
+        session = AgentSession(
+            model=ScriptedModel(rounds), catalog=catalog,
+            retriever=CapabilityRetriever(minimum=3, maximum=3),
+            pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state,
+        )
+        events = await collect(session.run(AgentInput(message="按顺序检查目录", owner="owner", session_id="scrape")))
+        return events, await state.load(owner="owner", session_id="scrape")
+
+    async def test_production_scrape_limit_and_half_heading_publish_truthful_partial(self):
+        events, saved = await self.run_scrape()
+        final = await consume_events(_events_stream(events))
+        self.assertEqual(final.status, "partial")
+        self.assertIn("没有匹配候选", final.answer)
+        self.assertIn("频率限制", final.answer)
+        self.assertIn("本轮未执行新的写操作", final.answer)
+        self.assertNotIn("sample-", final.answer)
+        self.assertNotIn("已开始处理", final.answer)
+        self.assertEqual(saved.conversation[-1]["content"], final.answer)
+        self.assertFalse(any(event.type in {AgentEventType.EFFECT_APPROVAL_REQUIRED, AgentEventType.EFFECT_COMPLETED} for event in events))
+        # Web/TG share this TurnView. Telegram's terminal body must replace the preview fragment.
+        from app.bot.agent_adapter import _render_turn
+        rendered = _render_turn(final)
+        self.assertIn("部分完成", rendered)
+        self.assertIn("没有匹配候选", rendered)
+        self.assertNotIn("sample-", rendered)
+
+    async def test_recovered_rate_limit_does_not_poison_a_successful_turn(self):
+        events, _ = await self.run_scrape(recovered=True)
+        self.assertEqual(events[-1].payload["status"], "success")
+        self.assertEqual(events[-1].payload["answer"], "仍未找到匹配候选。")
+
+    async def test_model_eof_without_finish_never_prepares_a_write(self):
+        from unittest.mock import Mock
+        prepare = Mock(return_value=PreparedEffect(preview={"summary": "write"}, snapshot_fingerprint="snapshot"))
+        tool = KernelToolSpec(
+            name="cloud.rename", domain="cloud", description="改名",
+            input_schema={"type": "object", "properties": {}}, effect=ToolEffect.WRITE,
+            prepare=prepare, execute_confirmed=lambda *_: {"ok": True},
+        )
+        catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+        # A faulty/custom adapter returns a complete-looking call but no model FINISH event.
+        model = ScriptedModel([[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
+                                         tool_call=ModelToolCall("write-1", tool.name, {}))]])
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                               pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        events = await collect(session.run(AgentInput(message="改名", owner="owner", session_id="incomplete")))
+        self.assertEqual(events[-1].type, AgentEventType.TURN_FAILED)
+        self.assertEqual(events[-1].payload["code"], "model_provider_error")
+        prepare.assert_not_called()
+        self.assertFalse(any(event.type == AgentEventType.EFFECT_APPROVAL_REQUIRED for event in events))
+
+    async def test_unrelated_success_cannot_erase_a_limited_entry(self):
+        for changed_context in (False, True):
+            with self.subTest(changed_context=changed_context):
+                calls = 0
+
+                def search(_arguments, _context):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        raise ToolPipelineError("条目A搜索受限", code="rate_limited")
+                    return {"ok": True, "status": "empty", "summary": "另一个条目没有匹配候选"}
+
+                tool = KernelToolSpec(
+                    name="cloud.search", domain="cloud", description="检索",
+                    input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+                    effect=ToolEffect.READ, read=search,
+                )
+                catalog = ToolCatalog([tool, read_tool("cloud.inspect", domain="cloud")])
+                state = InMemorySessionStateStore()
+                args = {} if changed_context else {"query": "A"}
+                rounds = [[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("first", tool.name, args)),
+                           ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")]]
+                if changed_context:
+                    rounds.append(self.tool_round("cloud.inspect", "switch"))
+                rounds.append([ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("other", tool.name, {} if changed_context else {"query": "B"})),
+                               ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")])
+                rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="全部完成"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
+                session = AgentSession(model=ScriptedModel(rounds), catalog=catalog, retriever=CapabilityRetriever(minimum=2, maximum=2),
+                                       pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+                events = await collect(session.run(AgentInput(message="检查两个条目", owner="owner", session_id="entries")))
+                self.assertEqual(events[-1].payload["status"], "partial")
+                self.assertIn("条目A搜索受限", events[-1].payload["answer"])
+                self.assertNotIn("全部完成", events[-1].payload["answer"])

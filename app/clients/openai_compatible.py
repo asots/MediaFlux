@@ -102,6 +102,7 @@ class ProviderUsage:
 class NativeToolTurn:
     text: str
     tool_calls: tuple[NativeToolCall, ...]
+    finish_reason: str
     assistant_entry: object | None = None
     usage: ProviderUsage | None = None
 
@@ -671,7 +672,19 @@ def text_stream_request_body(
 
 
 class ProviderStreamError(ValueError):
-    """Provider 流不完整、越界或返回错误。"""
+    """Provider 响应不完整、越界或返回错误。"""
+
+
+def provider_finish_reason(protocol: str, reason: object) -> str:
+    """流式和 JSON 回合共用的终态校验；缺失结束原因不冒充正常 stop。"""
+    allowed = {
+        "chat_completions": {"stop", "tool_calls"},
+        "responses": {"completed"},
+        "anthropic_messages": {"end_turn", "stop_sequence", "tool_use"},
+    }
+    if not isinstance(reason, str) or reason not in allowed.get(protocol, set()):
+        raise ProviderStreamError("Provider 回复未完整结束：结束原因缺失或非成功终态")
+    return "stop" if protocol == "responses" else reason
 
 
 class _ReasoningDeltaFilter:
@@ -905,6 +918,7 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
     usage = extract_provider_usage(envelope, protocol)
 
     if protocol == "responses":
+        finish_reason = provider_finish_reason(protocol, envelope.get("status"))
         output = envelope.get("output")
         if not isinstance(output, list):
             raise ValueError("AI 响应格式无效")
@@ -944,12 +958,15 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
         return NativeToolTurn(
             text=visible_text,
             tool_calls=tuple(calls),
+            finish_reason=finish_reason,
             assistant_entry=assistant_items,
             usage=usage,
         )
 
     if protocol == "chat_completions":
-        message = envelope["choices"][0]["message"]
+        choice = envelope["choices"][0]
+        finish_reason = provider_finish_reason(protocol, choice.get("finish_reason"))
+        message = choice["message"]
         if not isinstance(message, dict):
             raise ValueError("AI 响应格式无效")
         raw_content = message.get("content")
@@ -995,12 +1012,12 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
         return NativeToolTurn(
             text=visible_text,
             tool_calls=tuple(calls),
+            finish_reason=finish_reason,
             assistant_entry=assistant_entry,
             usage=usage,
         )
 
-    if envelope.get("stop_reason") in {"max_tokens", "refusal"}:
-        raise ValueError("AI 响应未完整结束")
+    finish_reason = provider_finish_reason(protocol, envelope.get("stop_reason"))
     content = envelope.get("content")
     if not isinstance(content, list):
         raise ValueError("AI 响应格式无效")
@@ -1031,6 +1048,7 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
     return NativeToolTurn(
         text="".join(text_parts),
         tool_calls=tuple(calls),
+        finish_reason=finish_reason,
         assistant_entry={"role": "assistant", "content": assistant_blocks},
         usage=usage,
     )

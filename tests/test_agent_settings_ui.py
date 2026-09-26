@@ -762,13 +762,13 @@ class AgentSettingsUiTests(unittest.TestCase):
                     SimpleNamespace(
                         status_code=200,
                         text=json.dumps({
-                            "choices": [{"message": {"content": '{"ok": true}'}}]
+                            "choices": [{"finish_reason": "stop", "message": {"content": '{"ok": true}'}}]
                         }),
                     ),
                     SimpleNamespace(
                         status_code=200,
                         text=json.dumps({
-                            "choices": [{"message": {
+                            "choices": [{"finish_reason": "tool_calls", "message": {
                                 "content": None,
                                 "tool_calls": [{
                                     "id": "call_probe",
@@ -862,13 +862,13 @@ class AgentSettingsUiTests(unittest.TestCase):
                     SimpleNamespace(
                         status_code=200,
                         text=json.dumps({
-                            "choices": [{"message": {"content": '{"ok": true}'}}]
+                            "choices": [{"finish_reason": "stop", "message": {"content": '{"ok": true}'}}]
                         }),
                     ),
                     SimpleNamespace(
                         status_code=200,
                         text=json.dumps({
-                            "choices": [{"message": {"content": "工具不可用"}}]
+                            "choices": [{"finish_reason": "stop", "message": {"content": "工具不可用"}}]
                         }),
                     ),
                 ]
