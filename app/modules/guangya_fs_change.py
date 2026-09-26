@@ -907,6 +907,11 @@ def build_fs_change_plan(
         if item.get("op") in {"move", "relocate", "trash"}
         and bool((item.get("source") or {}).get("is_dir"))
     ]
+    # 保留签名计划已有的 rename_dependencies 字段，统一表示前置对象操作，
+    # 不引入新旧两套依赖读取路径；旧计划仍按原有子文件改名依赖执行。
+    by_id = {str(item["source"]["file_id"]): item for item in frozen if "source" in item}
+    if len(by_id) != object_count:
+        raise GuangYaFSChangeError("计划不能通过不同引用重复操作同一个对象")
     for item in frozen:
         source_path = str(item.get("source_path") or "")
         if not source_path:
@@ -914,12 +919,52 @@ def build_fs_change_plan(
         for parent in structural_moves:
             parent_path = str(parent["source_path"])
             if source_path != parent_path and source_path.startswith(parent_path + "/"):
-                if parent["op"] == "move" and item["op"] == "rename" and not item["source"]["is_dir"]:
-                    parent.setdefault("rename_dependencies", []).append(str(item["source"]["file_id"]))
-                else:
-                    raise GuangYaFSChangeError("同一计划的父子变更仅支持先改名子文件、再移动父目录")
-    # 同一冻结计划内先完成文件清洗，再搬整目录；其它操作保持原有相对顺序。
-    frozen.sort(key=lambda item: bool(item.get("rename_dependencies")))
+                if parent["op"] == "trash":
+                    target = str(item.get("target_path") or "")
+                    escapes = item["op"] in {"move", "relocate"} and not (
+                        target == parent_path or target.startswith(parent_path + "/")
+                    )
+                    if not escapes and not (item["op"] == "trash" and item["source"]["is_dir"]):
+                        raise GuangYaFSChangeError("清理父目录前必须先移出内容；不能混合改名、复制或回收非空内容")
+                    parent["require_empty"] = True
+                    if item["op"] == "trash":
+                        item["require_empty"] = True
+                elif item["op"] not in {"rename", "move", "relocate", "trash"}:
+                    raise GuangYaFSChangeError("父目录迁移不能与子项复制混合，请分开预览")
+                elif item["op"] == "trash" and item["source"]["is_dir"]:
+                    item["require_empty"] = True
+                parent.setdefault("rename_dependencies", []).append(str(item["source"]["file_id"]))
+
+    for item in frozen:
+        if not item.get("require_empty"):
+            continue
+        path = str(item["source_path"])
+        children = _list_map(client, str(item["source"]["file_id"]), cache)
+        for file_id in children:
+            child = by_id.get(file_id, {})
+            target = str(child.get("target_path") or "")
+            escapes = child.get("op") in {"move", "relocate"} and not (
+                target == path or target.startswith(path + "/")
+            )
+            if not escapes and not (child.get("op") == "trash" and child.get("require_empty")):
+                raise GuangYaFSChangeError("父目录仍有未安排移出的内容，不能作为空目录清理")
+        # 不能一边向目录放入文件、一边把它当成即将变空的目录回收。
+        if any(str(other.get("target_path") or "") == path or
+               str(other.get("target_path") or "").startswith(path + "/") for other in frozen):
+            raise GuangYaFSChangeError("计划不能把对象移入或复制到待清理目录")
+
+    # 独立操作维持原顺序；依赖项只在全部前置对象完成后排列，支持多层目录。
+    pending = sorted(frozen, key=lambda item: bool(item.get("rename_dependencies")))
+    frozen = []
+    ordered_ids: set[str] = set()
+    while pending:
+        item = next((item for item in pending if set(item.get("rename_dependencies") or ()).issubset(ordered_ids)), None)
+        if item is None:
+            raise GuangYaFSChangeError("光鸭变更计划存在无法满足的操作依赖")
+        pending.remove(item)
+        frozen.append(item)
+        if "source" in item:
+            ordered_ids.add(str(item["source"]["file_id"]))
 
     counts = {
         key: 0
@@ -1064,13 +1109,16 @@ def _preflight_operation(
     dependencies = set(item.get("rename_dependencies") or ())
     if dependencies and completed_objects is not None:
         if not dependencies.issubset(completed_objects):
-            raise GuangYaFSChangeStale("子文件改名未全部成功，未执行整目录移动")
-        # 子文件改名会更新目录版本；仍冻结目录身份/名称/位置，不能搬走别的目录。
+            raise GuangYaFSChangeStale("前置子项变更未全部成功，未执行父目录操作")
+        # 本计划的子项变更会更新目录版本；身份/名称/位置必须仍一致。
         source_matches = _verify_directory_snapshot(client, str((source or {}).get("file_id") or ""), source)
     else:
         source_matches = isinstance(source, dict) and _snapshot_matches(_find_current(client, source), source)
     if not source_matches:
         raise GuangYaFSChangeStale("光鸭对象已变化，请重新预览")
+    if item.get("require_empty") and (completed_objects is not None or not dependencies):
+        if client.list_dir(str(source["file_id"])):
+            raise GuangYaFSChangeStale("目录仍包含内容，未执行空目录清理")
     if op == "rename":
         siblings = {
             str(row.file_id): row
@@ -1342,6 +1390,15 @@ def execute_fs_change_plan(
                         _target_id(item, created_targets),
                     )
                 elif op == "trash":
+                    delete_operation = None
+                    if item.get("require_empty"):
+                        current = client.file_info(str(source["file_id"]))
+                        if current is None:
+                            raise GuangYaFSChangeStale("待清理目录已变化，请重新核对")
+                        delete_operation = lambda: client.delete_empty_directory(
+                            str(source["file_id"]), expected_etag=str(current.etag or ""),
+                            expected_updated_at=max(0, int(current.updated_at or 0)),
+                        )
                     execute_recycle_bin_delete(
                         client,
                         trigger="agent_guangya_fs_change",
@@ -1354,6 +1411,7 @@ def execute_fs_change_plan(
                             gcid=str(source.get("etag") or ""),
                         ),
                         safe_failure_message="光鸭对象移入回收站失败",
+                        delete_operation=delete_operation,
                     )
                 elif op == "create_directory":
                     created_id = client.create_dir(

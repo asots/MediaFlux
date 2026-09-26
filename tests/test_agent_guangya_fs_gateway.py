@@ -1753,3 +1753,129 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertIsNone(change_actions._flow(owner))
         self.assertNotIn(owner, workspace_actions._flows)
         self.assertNotIn(owner, change_actions._flows)
+
+    def _nested_archive_plan(self, *, extra_file=False):
+        class Client(FakeGatewayClient):
+            def touch(self, *ids):
+                for entries in self.directories.values():
+                    for item in entries:
+                        if item.file_id in ids:
+                            item.etag += '-changed'
+                            item.updated_at += 1
+
+            def move(self, file_ids, parent_id):
+                parents = [self.file_info(file_id).parent_id for file_id in file_ids]
+                result = super().move(file_ids, parent_id)
+                self.touch(*parents, parent_id)
+                return result
+
+            def delete_empty_directory(self, file_id, *, expected_etag='', expected_updated_at=0):
+                current = self.file_info(file_id)
+                if current is None or current.etag != expected_etag or self.list_dir(file_id):
+                    raise RuntimeError('目录已变化，保留')
+                result = super().delete([file_id])
+                self.touch(current.parent_id)
+                return result
+
+        client = Client()
+        client.directories['source'] = [
+            GuangYaFile('work', 'Work-A', True, parent_id='source', etag='work'),
+            GuangYaFile('peer', 'Work-B', True, parent_id='source', etag='peer'),
+        ]
+        client.directories['work'] = [GuangYaFile('mid', 'pack', True, parent_id='work', etag='mid')]
+        client.directories['mid'] = [GuangYaFile('leaf', 'V', True, parent_id='mid', etag='leaf')]
+        client.directories['leaf'] = [GuangYaFile('video', 'movie.mp4', False, parent_id='leaf', etag='video', size=100)]
+        client.directories['peer'] = [GuangYaFile('peer-video', 'code.mp4', False, parent_id='peer', etag='peer-video', size=200)]
+        if extra_file:
+            client.directories['leaf'].append(GuangYaFile('poster', 'poster.jpg', False, parent_id='leaf', etag='poster'))
+        observed = self._query(client, operation='tree', page_size=50)
+        entries = {item['object_name']: item['object_ref'] for item in observed.data['entries']}
+        operations = [
+            {'op': 'move', 'object_ref': entries['Work-A'], 'target_path': '/target'},
+            {'op': 'move', 'object_ref': entries['Work-B'], 'target_path': '/target'},
+            {'op': 'trash', 'object_ref': entries['pack']},
+            {'op': 'trash', 'object_ref': entries['V']},
+            {'op': 'move', 'object_ref': entries['movie.mp4'], 'target_path': '/source/Work-A'},
+        ]
+        observation = guangya_workspace.load_directory_observation(observed.data['observation_ref'], owner='owner')
+        plan = guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation,
+                                                    operations=operations, trigger_strm=False)
+        guangya_fs_change.confirm_fs_change_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
+        return client, plan
+
+    def test_nested_video_extraction_empty_cleanup_and_folder_archival_share_one_plan(self):
+        client, plan = self._nested_archive_plan()
+        order = [item['source']['file_id'] for item in plan['operations']]
+        self.assertLess(order.index('video'), order.index('leaf'))
+        self.assertLess(order.index('leaf'), order.index('mid'))
+        self.assertLess(order.index('mid'), order.index('work'))
+        self.assertTrue(all(item.get('require_empty') for item in plan['operations'] if item['op'] == 'trash'))
+        self.assertTrue(client.file_info('leaf'), '预览阶段不能动文件')
+        payload = self._queued_payload(plan)
+        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+        self.assertFalse(result['partial'])
+        self.assertEqual(result['stats']['moved'], 3)
+        self.assertEqual(result['stats']['trashed'], 2)
+        self.assertEqual(client.file_info('video').parent_id, 'work')
+        self.assertEqual(client.file_info('work').parent_id, 'target')
+        self.assertEqual(client.file_info('peer').parent_id, 'target')
+        self.assertEqual(client.file_info('peer-video').parent_id, 'peer')
+        self.assertIsNone(client.file_info('leaf'))
+        self.assertIsNone(client.file_info('mid'))
+        with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+
+    def test_unmoved_companion_blocks_empty_directory_cleanup_at_preview(self):
+        with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, '未安排移出'):
+            self._nested_archive_plan(extra_file=True)
+
+    def test_failed_extraction_blocks_all_dependent_cleanup_and_parent_move(self):
+        client, plan = self._nested_archive_plan()
+        original_move = client.move
+        def move(file_ids, parent_id):
+            if 'video' in file_ids:
+                raise GuangYaWriteRejected('move', code='rejected')
+            return original_move(file_ids, parent_id)
+        with mock.patch.object(client, 'move', side_effect=move), mock.patch.object(client, 'delete_empty_directory', side_effect=AssertionError('不得删目录')):
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertTrue(result['partial'])
+        self.assertEqual(result['stats']['moved'], 1, '独立作品仍可以完成')
+        self.assertEqual(client.file_info('video').parent_id, 'leaf')
+        self.assertEqual(client.file_info('work').parent_id, 'source')
+        self.assertTrue(client.file_info('mid'))
+
+    def test_new_child_between_extraction_and_cleanup_is_never_deleted(self):
+        client, plan = self._nested_archive_plan()
+        original_move = client.move
+        def move(file_ids, parent_id):
+            result = original_move(file_ids, parent_id)
+            if 'video' in file_ids:
+                client.directories['leaf'].append(GuangYaFile('new-file', 'new.mp4', False, parent_id='leaf', etag='new'))
+            return result
+        with mock.patch.object(client, 'move', side_effect=move):
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertTrue(result['partial'])
+        self.assertEqual(result['stats']['trashed'], 0)
+        self.assertEqual(client.file_info('new-file').parent_id, 'leaf')
+        self.assertEqual(client.file_info('work').parent_id, 'source')
+        self.assertEqual(client.file_info('video').parent_id, 'work')
+
+    def test_cancel_after_nested_extraction_cannot_replay_the_plan(self):
+        client, plan = self._nested_archive_plan()
+        payload = self._queued_payload(plan)
+        def cancel():
+            if client.file_info('video').parent_id == 'work':
+                raise RuntimeError('cancelled')
+        with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, cancel_check=cancel)
+        self.assertTrue(client.file_info('mid'))
+        self.assertTrue(client.file_info('leaf'))
+        self.assertEqual(client.file_info('work').parent_id, 'source')
+        with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+
+    def test_operation_field_error_explains_schema_without_silently_dropping_fields(self):
+        with self.assertRaisesRegex(AgentToolError, '缺少 target_path；多余 new_name'):
+            change_actions.guangya_fs_change_preview_arguments({'operations': [
+                {'op': 'move', 'object_ref': 'OBJ' + 'A' * 24, 'new_name': 'wrong'}
+            ]})

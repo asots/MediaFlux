@@ -408,8 +408,15 @@ def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, 
                 "name": name,
             }
             expected = {"op", "parent_path", "name"}
-        if expected is None or set(raw) != expected:
-            raise AgentToolError("光鸭变更操作字段与 op 不匹配")
+        if expected is None:
+            raise AgentToolError("不支持的光鸭变更 op；请按工具 Schema 选择操作")
+        if set(raw) != expected:
+            missing = ", ".join(sorted(expected - set(raw))) or "无"
+            extra = ", ".join(sorted(set(raw) - expected)) or "无"
+            raise AgentToolError(
+                f"光鸭变更操作字段与 op 不匹配（{op}）：缺少 {missing}；多余 {extra}；"
+                f"仅允许 {', '.join(sorted(expected))}。请修正后重新预览，本次未执行。"
+            )
         normalized: dict[str, Any] = {"op": op}
         if op != "create_directory":
             object_ref = str(raw.get("object_ref") or "").strip().upper()
@@ -742,6 +749,7 @@ def execute_guangya_fs_change_confirmed(
         "accepted",
         ("光鸭文件变更已排队：" if queued else "光鸭文件变更任务已启动：") + _change_summary(plan.get('stats') or {}),
         data={
+            "operation": "filesystem_change",
             "queued": queued,
             "queue_position": max(0, int(task.get("queue_position") or 0)),
             "replayed": bool(task.get("replayed")),
