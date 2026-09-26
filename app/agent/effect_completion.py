@@ -179,6 +179,7 @@ def _background_model_data(
         "background_job",
         "verified",
         "verification_pending",
+        "scope_note",
     ):
         if key in data:
             model_data[key] = data[key]
@@ -470,6 +471,11 @@ def _terminal_result(
                 summary = f"全库检查已在取消生效前结束：{summary}"
 
     data = _background_data(result, snapshot, status, task, tracker)
+    if tracker.kind == "guangya_operation" and data.get("operation") == "filesystem_change":
+        data["scope_note"] = (
+            "本次仅核验文件系统变更；改名或移动不代表已完成元数据识别、刮削归档或媒体库入库。"
+            "仍有这些步骤时应继续核验，不能保证下次扫库就能自动识别。"
+        )
     return replace(
         result,
         ok=ok,

@@ -819,3 +819,46 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_verification_failure_reaches_terminal_receipt_without_private_error(self):
+        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        from app.agent.public_view import format_public_result
+        snapshot = _project_guangya_status(
+            {'status': 'partial', 'stats': {'total': 2, 'failed': 2, 'verification_failed': 2},
+             'error': 'private /folder token=do-not-expose'},
+            overview={}, operation_ref=_OPERATION_REF,
+        )
+        accepted = ToolResult(True, 'accepted', '清理已提交', data={'operation_ref': _OPERATION_REF})
+        with patch('app.agent.domain_catalog.cloud_runtime.guangya_organize_status', return_value=snapshot):
+            result = await wait_for_effect_completion(accepted, tool='guangya.organize.cleanup.execute', context=ToolContext(owner='owner'))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 'partial')
+        self.assertIn('2 项写后状态未核验通过', result.error)
+        self.assertIn('请勿直接重复提交', format_public_result(result.to_dict()))
+        self.assertNotIn('do-not-expose', str(result.to_dict()))
+        self.assertNotIn('private', str(result.to_dict()))
+
+    async def test_filesystem_success_receipt_does_not_claim_media_recognition_or_archival(self):
+        from app.agent.public_view import format_public_result
+        accepted = ToolResult(True, 'accepted', '文件变更已提交',
+                              data={'operation_ref': _OPERATION_REF, 'operation': 'filesystem_change'},
+                              model_data={'operation': 'filesystem_change'})
+        snapshot = _snapshot('completed', stats={'renamed': 6, 'moved': 0})
+        with patch('app.agent.domain_catalog.cloud_runtime.guangya_organize_status', return_value=snapshot):
+            result = await wait_for_effect_completion(accepted, tool='guangya.fs.change.execute', context=ToolContext(owner='owner'))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data['scope_note'], result.model_data['scope_note'])
+        text = format_public_result(result.to_dict())
+        self.assertIn('改名 6 项', text)
+        self.assertIn('不代表已完成元数据识别', text)
+        self.assertNotIn('移动 6 项', text)
+
+    def test_preflight_and_audit_failure_counts_have_distinct_explanations(self):
+        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        result = _project_guangya_status({'status': 'manual_review', 'stats': {'precondition_failed': 1, 'audit_failures': 2}}, overview={})
+        self.assertIn('1 项写前条件已变化，未执行', result.error)
+        self.assertIn('2 项执行审计未完整保存', result.error)
+        success = _project_guangya_status({'status': 'completed', 'stats': {}}, overview={})
+        self.assertEqual(success.error, '')

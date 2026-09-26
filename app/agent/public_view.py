@@ -184,6 +184,9 @@ def format_public_result(
                 lines.append("- 变更统计：" + "；".join(counts))
             if stats.get("strm_scope_unknown"):
                 lines.append("- 提示：同步范围未能确认，本次未触发 STRM 联动；请核对同步目录。")
+        scope_note = _safe(data.get("scope_note"), limit=300)
+        if scope_note:
+            lines.append(f"- 执行范围：{scope_note}")
         lines.extend(f"- {line}" for line in candidate_result_lines(data))
         for error in _failed_item_errors(data):
             lines.append(f"- 失败原因：{error}")

@@ -132,6 +132,17 @@ def _project_guangya_status(
             "文件变更结果已记录，但同步范围未能确认，本次未触发 STRM 联动；请核对同步目录后手动同步。"
         )
 
+    # 只公开有明确统计依据的故障阶段，不转发 Provider 原始异常或私有路径。
+    problems = []
+    if task_status in {"partial", "failed", "manual_review"}:
+        for key, description in (
+            ("precondition_failed", "项写前条件已变化，未执行"),
+            ("verification_failed", "项写后状态未核验通过，不能据此认定未执行，请勿直接重复提交"),
+            ("audit_failures", "项执行审计未完整保存，需要核对实际状态"),
+        ):
+            if stats.get(key):
+                problems.append(f"{stats[key]} {description}")
+
     task_data = {
         "status": task_status,
         "running": running,
@@ -162,6 +173,7 @@ def _project_guangya_status(
             )
         ],
         suggestions=suggestions,
+        error="；".join(problems),
     )
 
 
