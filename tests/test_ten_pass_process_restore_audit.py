@@ -74,7 +74,8 @@ with patch("app.modules.local_media_service.OrganizeRules.from_config", return_v
  preview = service.preview("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie")
  target = Path(preview["plans"][0]["target_path"])
  target.parent.mkdir(parents=True); target.write_bytes(b"old-process-media")
- task = service.create_manual_task("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie", rules_snapshot=preview["rules_snapshot"])
+ preview = service.preview("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie")
+ task = service.create_manual_task("admin", inspection["inspection_id"], preview_digest=preview["preview_digest"])
  assert db.claim_local_media_task(task, owner="admin")
  (root / "process-manifest.json").write_text(json.dumps({"task": task, "source": source, "incoming": str(incoming), "target": str(target)}))
  original = LocalMoveTransaction._backup_replaced_target
@@ -95,7 +96,7 @@ raise AssertionError("child did not reach retirement")
             self.assertTrue(db.is_interrupted_local_media_write_error(recovered.error))
             with self.assertRaisesRegex(ValueError, "核验"):
                 db.prepare_manual_local_media_task(
-                    manifest["source"], manifest["incoming"], owner="admin"
+                    manifest["source"], manifest["incoming"], snapshot_digest="preview:fixture", owner="admin"
                 )
             self.assertFalse(db.reset_local_media_task(task_id, owner="admin"))
             db.init_db()

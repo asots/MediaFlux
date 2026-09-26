@@ -1,6 +1,7 @@
 """本地媒体检查、识别预览和移动编排服务。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -143,6 +144,7 @@ class _Inspection:
     digest: str
     created_at: float
     media_type: str = "movie"
+    manual_task: dict[str, Any] | None = None
 
 
 class _InspectionStore:
@@ -1068,6 +1070,7 @@ class LocalMediaService:
         numbering_mode: str = "auto",
     ) -> dict[str, Any]:
         inspection = self.inspections.get(owner, inspection_id)
+        inspection.manual_task = None
         normalized_numbering_mode = self._normalize_numbering_mode(numbering_mode)
         season_override, episode_override = self._normalize_position_overrides(
             inspection, season_override, episode_override,
@@ -1489,10 +1492,30 @@ class LocalMediaService:
                 "numbering_mode": normalized_numbering_mode,
             }
 
+        # Web 写票据覆盖整个计划，扫描/通知的源 digest 保持原契约。
+        preview_digest = f"preview:{inspection.digest}:" + hashlib.sha256(json.dumps({
+            "source": inspection.digest,
+            "root": str(inspection.root),
+            "selected_path": str(inspection.selected_path),
+            "mode": source.mode,
+            "rules": effective_rules_snapshot,
+            "candidate": [requested_tmdb_id, effective_media_type],
+            "position": [season_override, episode_override, normalized_numbering_mode],
+            "plans": [asdict(item) for item in local_plans],
+            "cleanup": [asdict(item) for item in cleanup_candidates],
+        }, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
+        inspection.manual_task = {
+            "snapshot_digest": preview_digest,
+            "tmdb_id": requested_tmdb_id, "media_type": effective_media_type,
+            "rules_snapshot": effective_rules_snapshot,
+            "season_override": season_override, "episode_override": episode_override,
+            "numbering_mode": normalized_numbering_mode,
+        }
         return {
             "inspection_id": inspection_id,
             "status": "planned",
             "digest": inspection.digest,
+            "preview_digest": preview_digest,
             "cloud_write": False,
             "rules_snapshot": effective_rules_snapshot,
             "numbering_mode": normalized_numbering_mode,
@@ -1763,21 +1786,40 @@ class LocalMediaService:
         try:
             if task.qb_hash and qb_client is None:
                 raise LocalMediaServiceError("qB 任务缺少可用客户端，已拒绝移动源文件")
-            inspection = self.inspect_source(owner, task.source_id, task.content_path)
-            preview = self.preview(
-                owner, inspection["inspection_id"], task.tmdb_id, task.media_type,
-                rules_snapshot=task.rules_snapshot,
-                automatic=task.trigger in {"scan", "qb_completed"},
-                season_override=task.season_override, episode_override=task.episode_override,
-                numbering_mode=task.numbering_mode,
+            web_preview = task.snapshot_digest.startswith("preview:")
+            try:
+                inspection = self.inspect_source(owner, task.source_id, task.content_path)
+                preview = self.preview(
+                    owner, inspection["inspection_id"], task.tmdb_id, task.media_type,
+                    rules_snapshot=task.rules_snapshot,
+                    automatic=not web_preview and task.trigger in {"scan", "qb_completed"},
+                    season_override=task.season_override, episode_override=task.episode_override,
+                    numbering_mode=task.numbering_mode,
+                )
+            except (LocalMediaServiceError, LocalStorageError) as exc:
+                if not web_preview:
+                    raise
+                preview = {"status": "requires_manual", "repreview_required": True,
+                           "reason": f"预览前检查失败：{exc}；请重新检查并生成预览"}
+            if not preview.get("repreview_required") and (
+                (web_preview and preview.get("preview_digest") != task.snapshot_digest)
+                or (task.confirmation_actor and inspection["digest"] != task.snapshot_digest)
+                or (task.trigger == "manual" and not web_preview and not task.confirmation_actor)
+            ):
+                preview = {"status": "requires_manual", "repreview_required": True,
+                           "reason": "缺少有效预览或整理计划已变化，请重新检查并生成预览；本次未移动或清理文件"}
+            execution_digest = (
+                task.snapshot_digest if web_preview or task.confirmation_actor
+                else str(preview.get("digest") or inspection.get("digest") or "")
             )
             if preview.get("status") != "planned":
                 db.update_local_media_task(
                     task_id, owner=owner, status="requires_manual",
-                    snapshot_digest=str(preview.get("digest") or inspection.get("digest") or ""),
+                    snapshot_digest=execution_digest,
                     error=str(preview.get("reason") or "TMDB 结果需要人工确认"),
                 )
-                return {"status": "requires_manual", "task_id": task_id, "preview": preview}
+                return {"status": "requires_manual", "task_id": task_id, "preview": preview,
+                        "repreview_required": bool(preview.get("repreview_required"))}
             pending_confirmations = list(preview.get("pending_confirmations") or [])
             if pending_confirmations:
                 reason = (
@@ -1788,7 +1830,7 @@ class LocalMediaService:
                     task_id,
                     owner=owner,
                     status="requires_manual",
-                    snapshot_digest=str(preview.get("digest") or inspection.get("digest") or ""),
+                    snapshot_digest=execution_digest,
                     error=reason,
                     completed_at=None,
                 )
@@ -1809,7 +1851,7 @@ class LocalMediaService:
             recognition_fields: dict[str, object] = {
                 "status": "planned",
                 "error": "",
-                "snapshot_digest": str(preview.get("digest") or inspection.get("digest") or ""),
+                "snapshot_digest": execution_digest,
                 "recognition_summary": serialize_recognition_summary(recognition),
             }
             resolved_media = recognition.get("media") if recognition.get("status") == "resolved" else None
@@ -1954,54 +1996,19 @@ class LocalMediaService:
             raise
 
     @_local_media_operation
-    def create_manual_task(
-        self, owner: str, inspection_id: str, *, tmdb_id: str = "", media_type: str = "",
-        rules_snapshot: str = "", season_override: int | None = None,
-        episode_override: int | None = None, numbering_mode: str = "auto",
-    ) -> int:
-        inspection = self.inspections.get(owner, inspection_id)
-        normalized_numbering_mode = self._normalize_numbering_mode(numbering_mode)
-        season_override, episode_override = self._normalize_position_overrides(
-            inspection, season_override, episode_override,
-        )
-        normalized_type = str(media_type or "").strip().lower()
-        if normalized_type not in {"", "auto", "movie", "tv"}:
-            raise LocalMediaServiceError("媒体类型必须是 auto、movie 或 tv")
-        source = db.get_local_media_source(inspection.source_id, owner=owner)
-        nsfw_only = source is not None and source.media_type == "nsfw"
-        if nsfw_only and str(tmdb_id or "").strip():
-            raise LocalMediaServiceError(
-                "成人番号专用来源不能套用 TMDB 候选，只接受 MetaTube 精确番号结果"
+    def create_manual_task(self, owner: str, inspection_id: str, *, preview_digest: str) -> int:
+        # 与预览共享锁，确认只消费服务端归一化上下文，不再接受第二套写入参数。
+        with self._operation_lock:
+            inspection = self.inspections.get(owner, inspection_id)
+            context = inspection.manual_task
+            if not context or preview_digest != context["snapshot_digest"]:
+                raise LocalMediaServiceError("预览已失效，请重新检查并生成预览后确认")
+            task_id = db.prepare_manual_local_media_task(
+                inspection.source_id, str(inspection.selected_path), owner=owner, **context,
             )
-        effective_type = (
-            "movie"
-            if nsfw_only
-            else normalized_type
-            if normalized_type in {"movie", "tv"}
-            else inspection.media_type or (source.media_type if source else "")
-        )
-        if effective_type not in {"movie", "tv"}:
-            raise LocalMediaServiceError("无法确定媒体类型，请先选择电影或剧集")
-        if (season_override is not None or episode_override is not None) and effective_type != "tv":
-            raise LocalMediaServiceError("只有剧集整理可以指定季数或集数")
-        if normalized_numbering_mode != "auto" and effective_type != "tv":
-            raise LocalMediaServiceError("只有剧集整理可以指定编号方式")
-        normalized_snapshot = ""
-        if rules_snapshot:
-            normalized_snapshot = self._serialize_rules_snapshot(
-                self._restore_rules_snapshot(rules_snapshot)
-            )
-        task_id = db.prepare_manual_local_media_task(
-            inspection.source_id, str(inspection.selected_path), owner=owner,
-            tmdb_id=str(tmdb_id or "").strip(), media_type=effective_type,
-            rules_snapshot=normalized_snapshot, season_override=season_override,
-            episode_override=episode_override,
-            numbering_mode=normalized_numbering_mode,
-        )
-        # 检查快照已转化为持久化任务，继续保留只会重复占用大量路径/
-        # inode 快照内存。数据库写入成功后再消费，失败时仍允许用户重试。
-        self.inspections.discard(owner, inspection_id)
-        return task_id
+            self.inspections.discard(owner, inspection_id)
+            return task_id
+
 
 _service: LocalMediaService | None = None
 _service_lock = threading.Lock()

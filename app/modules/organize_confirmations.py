@@ -2186,6 +2186,7 @@ def _execute_local_media_confirmation(
             owner=owner,
             expected_version=expected_version,
             expected_snapshot_digest=str(task.snapshot_digest or ""),
+            confirmed_snapshot_digest=expected_digest,
             tmdb_id=tmdb_id,
             media_type=media_type,
             rules_snapshot=rules_snapshot,

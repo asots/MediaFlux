@@ -107,7 +107,7 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
                     else:
                         self.assertEqual(
                             db.prepare_manual_local_media_task(
-                                self.source_id, str(path), owner="admin"
+                                self.source_id, str(path), snapshot_digest="preview:fixture", owner="admin"
                             ),
                             task_id,
                         )
@@ -142,7 +142,7 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
                 self.assertTrue(db.is_interrupted_local_media_write_error(before.error))
                 with self.assertRaisesRegex(ValueError, "核验"):
                     db.prepare_manual_local_media_task(
-                        self.source_id, str(path), owner="admin"
+                        self.source_id, str(path), snapshot_digest="preview:fixture", owner="admin"
                     )
                 self.assertEqual(db.get_local_media_task(task_id), before)
                 self.assertTrue(
@@ -200,12 +200,12 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
         target = Path(preview["plans"][0]["target_path"])
         target.parent.mkdir(parents=True)
         target.write_bytes(b"old-library-media")
+        preview = service.preview(
+            "admin", inspection["inspection_id"], tmdb_id="1", media_type="movie"
+        )
         task_id = service.create_manual_task(
-            "admin",
-            inspection["inspection_id"],
-            tmdb_id="1",
-            media_type="movie",
-            rules_snapshot=preview["rules_snapshot"],
+            "admin", inspection["inspection_id"],
+            preview_digest=preview["preview_digest"],
         )
         self.assertTrue(db.claim_local_media_task(task_id, owner="admin"))
         original_backup = LocalMoveTransaction._backup_replaced_target

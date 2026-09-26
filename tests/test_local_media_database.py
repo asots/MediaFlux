@@ -1101,7 +1101,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             local_root="/tmp/manual-position", media_type="tv", owner="admin",
         )
         task_id = db.prepare_manual_local_media_task(
-            source_id, "/tmp/manual-position/Show.S01E07.mkv", owner="admin",
+            source_id, "/tmp/manual-position/Show.S01E07.mkv", snapshot_digest="preview:fixture", owner="admin",
             tmdb_id="42", media_type="tv", season_override=2, episode_override=7,
             numbering_mode="season_continuous",
         )
@@ -1280,7 +1280,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
 
         self.assertFalse(db.claim_local_media_confirmation_task(
             task_id,
-            owner="admin",
+            confirmed_snapshot_digest="confirmed-source-digest", owner="admin",
             expected_version=task.version + 1,
             expected_snapshot_digest="digest-1",
             tmdb_id="101",
@@ -1289,7 +1289,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         ))
         self.assertTrue(db.claim_local_media_confirmation_task(
             task_id,
-            owner="admin",
+            confirmed_snapshot_digest="confirmed-source-digest", owner="admin",
             expected_version=task.version,
             expected_snapshot_digest="digest-1",
             tmdb_id="101",
@@ -1310,7 +1310,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         )
         content_path = "/tmp/manual-retry/Movie.mkv"
         task_id = db.prepare_manual_local_media_task(
-            source_id, content_path, owner="admin", tmdb_id="1", media_type="movie",
+            source_id, content_path, snapshot_digest="preview:fixture", owner="admin", tmdb_id="1", media_type="movie",
         )
         original = db.get_local_media_task(task_id, owner="admin")
         db.add_local_media_task_item(
@@ -1322,7 +1322,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         )
 
         reused_id = db.prepare_manual_local_media_task(
-            source_id, content_path, owner="admin", tmdb_id="2", media_type="movie",
+            source_id, content_path, snapshot_digest="preview:fixture", owner="admin", tmdb_id="2", media_type="movie",
         )
         retried = db.get_local_media_task(reused_id, owner="admin")
         self.assertEqual(reused_id, task_id)
@@ -1337,12 +1337,12 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             name="manual-race", qb_profile="", qb_path_prefix="", local_root="/tmp/manual", owner="admin"
         )
         task_id = db.prepare_manual_local_media_task(
-            source_id, "/tmp/manual/Movie.mkv", owner="admin", tmdb_id="1", media_type="movie"
+            source_id, "/tmp/manual/Movie.mkv", snapshot_digest="preview:fixture", owner="admin", tmdb_id="1", media_type="movie"
         )
         self.assertTrue(db.claim_local_media_task(task_id, owner="admin"))
         with self.assertRaisesRegex(ValueError, "正在处理中"):
             db.prepare_manual_local_media_task(
-                source_id, "/tmp/manual/Movie.mkv", owner="admin", tmdb_id="2", media_type="movie"
+                source_id, "/tmp/manual/Movie.mkv", snapshot_digest="preview:fixture", owner="admin", tmdb_id="2", media_type="movie"
             )
         task = db.get_local_media_task(task_id, owner="admin")
         self.assertEqual(task.status, "recognizing")

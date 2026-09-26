@@ -40,6 +40,7 @@ from app.modules.local_media_service import (
     LocalMediaServiceError,
     get_local_media_service,
 )
+from app.modules.local_storage import LocalStorageError
 from app.modules.media_server_path_mapping import (
     MediaServerPathMapping,
     configured_media_server_refresh_options,
@@ -1278,6 +1279,11 @@ def inspect_local_media_task(
     )
 
 
+def _task_source_digest(task: Any) -> str:
+    digest = str(task.snapshot_digest or "")
+    return digest.split(":")[1] if digest.startswith("preview:") else digest
+
+
 def _current_inspection(owner: str, number: int) -> tuple[_InspectionRef, Any]:
     ref = _context_store.inspection(owner=owner, number=number)
     if ref is None:
@@ -1289,8 +1295,8 @@ def _current_inspection(owner: str, number: int) -> tuple[_InspectionRef, Any]:
         int(task.version) != ref.task.version
         or str(task.status) != ref.task.status
         or (
-            bool(str(task.snapshot_digest or ""))
-            and str(task.snapshot_digest or "") != str(ref.digest or "")
+            bool(_task_source_digest(task))
+            and _task_source_digest(task) != str(ref.digest or "")
         )
     ):
         raise AgentToolError(
@@ -1446,9 +1452,32 @@ def _retry_confirmation_snapshot(
     episode: int | None,
 ) -> dict[str, Any]:
     if season is None or episode is None:
-        return snapshot
+        if task.trigger != "manual" or not task.confirmation_actor or snapshot["interrupted_write"]:
+            return snapshot
+        # TG 确认后的手动任务普通重试同样重新安装票据，不依赖清空后的 actor。
+        season, episode = task.season_override, task.episode_override
+    else:
+        _validate_episode_remap(task, snapshot, season=season, episode=episode)
+    service = get_local_media_service()
+    try:
+        inspection = service.inspect_source(_WORKSPACE_OWNER, task.source_id, task.content_path)
+        if inspection["digest"] != _task_source_digest(task):
+            raise AgentToolError("源文件范围已变化，请重新检查并确认整理预览", code="precondition_failed")
+        preview = service.preview(
+            _WORKSPACE_OWNER, inspection["inspection_id"], task.tmdb_id, task.media_type,
+            rules_snapshot=task.rules_snapshot, season_override=season, episode_override=episode,
+            numbering_mode=task.numbering_mode,
+        )
+    except AgentToolError:
+        raise
+    except (LocalMediaServiceError, LocalStorageError, ValueError, OSError):
+        raise AgentToolError("无法生成重试预览，请重新检查任务", code="precondition_failed") from None
+    if preview.get("status") != "planned" or preview.get("pending_confirmations"):
+        raise AgentToolError("重试计划仍需人工确认，请重新检查任务", code="precondition_failed")
     return {
         **snapshot,
+        "preview_digest": preview["preview_digest"],
+        "rules_snapshot": preview["rules_snapshot"],
         "media_type": str(task.media_type or ""),
         "tmdb_id": str(task.tmdb_id or ""),
         "current_season": task.season_override,
@@ -1498,7 +1527,6 @@ def prepare_retry_local_media_task(
     season = int(arguments["season"]) if "season" in arguments else None
     episode = int(arguments["episode"]) if "episode" in arguments else None
     if season is not None and episode is not None:
-        _validate_episode_remap(task, snapshot, season=season, episode=episode)
         current_position = _episode_position(
             task.season_override, task.episode_override
         )
@@ -1517,7 +1545,7 @@ def prepare_retry_local_media_task(
             "effects": [
                 f"把本任务的明确季集映射改为 {target_position}。",
                 "任务会使用现有 TMDB 身份、整理规则、冲突策略和来源运行模式重新排队。",
-                "调度器重新规划后才会生成标准文件名；是否移动及是否联动媒体库以实际执行结果为准，本次预检不修改文件。",
+                "只纠偏已确认的源文件；确认时复核源快照与计划，变化后须重新预检，本次预检不修改文件。",
                 "后续结果可在本地媒体任务状态查看；任务启用通知且非静默时，按现有配置发送完成或失败通知。",
             ],
         }
@@ -1568,11 +1596,11 @@ def retry_local_media_task_confirmed(
     episode = int(arguments["episode"]) if "episode" in arguments else None
     try:
         snapshot, task = _task_snapshot(owner, task_number)
+        confirmation_snapshot = _retry_confirmation_snapshot(
+            snapshot, task, season=season, episode=episode,
+        )
     except AgentToolError as exc:
         raise AgentToolError(exc.safe_message, code="confirmation_stale") from None
-    confirmation_snapshot = _retry_confirmation_snapshot(
-        snapshot, task, season=season, episode=episode,
-    )
     if not secrets.compare_digest(
         _fingerprint(confirmation_snapshot), str(expected_context or "")
     ):
@@ -1587,6 +1615,11 @@ def retry_local_media_task_confirmed(
             season_override=season,
             episode_override=episode,
             confirm_interrupted_write=False,
+        )
+    if "preview_digest" in confirmation_snapshot:
+        retry_fields.update(
+            preview_digest=confirmation_snapshot["preview_digest"],
+            rules_snapshot=confirmation_snapshot["rules_snapshot"],
         )
     if not db.reset_local_media_task_if_current(
         task.id, owner=_WORKSPACE_OWNER, **retry_fields,

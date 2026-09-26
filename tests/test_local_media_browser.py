@@ -104,10 +104,8 @@ class LocalMediaBrowserTests(IsolatedDatabaseTestCase):
             "inspection?.inspection_id !== context.inspectionId",
             "positionControls.payload(mediaType",
             "appliedPreviewContext = Object.freeze",
-            "tmdb_id: confirmedContext.tmdbId",
-            "season: confirmedContext.season",
-            "episode: confirmedContext.episode",
-            "rules_snapshot: confirmedPreview.rules_snapshot",
+            "preview_digest: confirmedPreview.preview_digest",
+            "if (result.repreview_required) invalidatePreview()",
             "const firstLoad = !hasLoadedLocalMedia",
             "hasLoadedLocalMedia = Object.values(loadedResources).some(Boolean)",
             "await settleInitialLoading()",
@@ -181,6 +179,15 @@ class LocalMediaBrowserTests(IsolatedDatabaseTestCase):
         ):
             self.assertIn(contract, js)
         self.assertNotIn("window.addEventListener('scroll', closeItemContextMenu, true)", js)
+
+    def test_execute_submits_only_the_confirmed_preview_identity(self):
+        js = Path("app/static/js/local-media.js").read_text(encoding="utf-8")
+        execute = js.split("async function execute()", 1)[1].split("async function ", 1)[0]
+        payload = execute.split("body: JSON.stringify({", 1)[1].split("}),", 1)[0]
+        self.assertIn("inspection_id: confirmedContext.inspectionId", payload)
+        self.assertIn("preview_digest: confirmedPreview.preview_digest", payload)
+        for field in ("tmdb_id:", "media_type:", "season:", "episode:", "rules_snapshot:"):
+            self.assertNotIn(field, payload)
 
     def test_scrape_modal_uses_shared_modal_lifecycle(self):
         js = Path("app/static/js/local-media.js").read_text(encoding="utf-8")

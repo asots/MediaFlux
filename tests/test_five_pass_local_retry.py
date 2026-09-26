@@ -19,7 +19,7 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
     def _task(self, *, interrupted=False):
         task_id = db.prepare_manual_local_media_task(
             self.source_id, "/synthetic/five-pass/Show.S02E03.mkv",
-            owner="admin", tmdb_id="42", media_type="tv",
+            snapshot_digest="preview:fixture", owner="admin", tmdb_id="42", media_type="tv",
             season_override=2, episode_override=3,
         )
         db.add_local_media_task_item(

@@ -48,9 +48,6 @@ class ReleaseChainNamingTests(IsolatedDatabaseTestCase):
                         media_type=media_type,
                     )
                     db.upsert_local_library_target(source_id, media_type, str(target))
-                    task_id = db.create_local_media_task(
-                        source_id, "", str(video), trigger="manual"
-                    )
                     scraper = FakeScraper(
                         MatchResult(
                             tmdb_id="123",
@@ -78,6 +75,16 @@ class ReleaseChainNamingTests(IsolatedDatabaseTestCase):
                                 return_value=None,
                             ),
                         ):
+                            inspection = service.inspect_source("admin", source_id, video)
+                            preview = service.preview(
+                                "admin", inspection["inspection_id"], "123", media_type,
+                            )
+                            self.assertEqual(preview["status"], "planned")
+                            task_id = service.create_manual_task(
+                                "admin", inspection["inspection_id"],
+                                preview_digest=preview["preview_digest"],
+                            )
+                            self.assertTrue(db.claim_local_media_task(task_id, owner="admin"))
                             result = service.execute_task("admin", task_id)
                         self.assertEqual(result["status"], "completed")
                         self.assertFalse(video.exists())

@@ -693,19 +693,12 @@ def execute_media(request: Request, data: dict | None = Body(default=None)):
     payload = data or {}
     qb_client = None
     try:
+        if not _text(payload, "preview_digest", max_length=144):
+            raise LocalMediaServiceError("缺少预览确认，请重新检查并生成预览后确认")
         service = get_local_media_service()
         task_id = service.create_manual_task(
             _OWNER, _text(payload, "inspection_id", required=True, max_length=64),
-            tmdb_id=_text(payload, "tmdb_id", max_length=32),
-            media_type=_text(payload, "media_type", max_length=16),
-            rules_snapshot=_text(payload, "rules_snapshot", max_length=20000),
-            season_override=_optional_integer(
-                payload, "season", minimum=0, maximum=99, label="季数",
-            ),
-            episode_override=_optional_integer(
-                payload, "episode", minimum=1, maximum=999, label="集数",
-            ),
-            numbering_mode=_text(payload, "numbering_mode", max_length=32) or "auto",
+            preview_digest=_text(payload, "preview_digest", max_length=144),
         )
         if not db.claim_local_media_task(task_id, expected="waiting_stable", owner=_OWNER):
             raise LocalMediaServiceError("任务已被其他操作认领")

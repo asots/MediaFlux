@@ -911,13 +911,15 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
             previewed = self.client.post(
                 "/api/local-media/preview",
                 json={"inspection_id": "inspect-1", "tmdb_id": "1", "media_type": "tv",
-                      "season": 2, "episode": 7, "numbering_mode": "season_continuous"},
+                      "season": 2, "episode": 7, "numbering_mode": "season_continuous",
+                      "preview_digest": "preview:fixture", "rules_snapshot": "{}"},
                 headers=headers,
             )
             executed = self.client.post(
                 "/api/local-media/execute",
                 json={"inspection_id": "inspect-1", "tmdb_id": "1", "media_type": "tv",
-                      "season": 2, "episode": 7, "numbering_mode": "season_continuous"},
+                      "season": 2, "episode": 7, "numbering_mode": "season_continuous",
+                      "preview_digest": "preview:fixture", "rules_snapshot": "{}"},
                 headers=headers,
             )
             hinted = self.client.post(
@@ -931,15 +933,26 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         self.assertEqual(preview_call.kwargs["season_override"], 2)
         self.assertEqual(preview_call.kwargs["episode_override"], 7)
         self.assertEqual(preview_call.kwargs["numbering_mode"], "season_continuous")
-        create_call = service.create_manual_task.call_args
-        self.assertEqual(create_call.kwargs["season_override"], 2)
-        self.assertEqual(create_call.kwargs["episode_override"], 7)
-        self.assertEqual(create_call.kwargs["numbering_mode"], "season_continuous")
+        self.assertEqual(service.create_manual_task.call_args.kwargs, {
+            "preview_digest": "preview:fixture",
+        })
         self.assertEqual(executed.json()["status"], "completed")
         self.assertEqual(hinted.json()["items"][0]["title"], "Example")
         service.external_hints.assert_called_once_with(
             "admin", "inspect-1", "Example", "auto",
         )
+
+    def test_execute_without_preview_digest_requires_repreview_and_creates_no_task(self):
+        csrf = self.login()
+        with patch("app.routes.local_media_api.get_local_media_service") as service:
+            response = self.client.post(
+                "/api/local-media/execute", json={"inspection_id": "old-browser-tab"},
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("重新", response.text)
+        service.assert_not_called()
+        self.assertEqual(db.list_local_media_tasks(owner="admin"), [])
 
     def _manual_qb_execute_case(self, *, qb_hash="fixture-qb-hash"):
         source_id = db.create_local_media_source(
@@ -952,7 +965,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         db.update_local_media_task(task_id, owner="admin", status="requires_manual")
         service = Mock()
         service.create_manual_task.side_effect = lambda *_args, **_kwargs: db.prepare_manual_local_media_task(
-            source_id, str(path), owner="admin", tmdb_id="1", media_type="movie",
+            source_id, str(path), snapshot_digest="preview:fixture", owner="admin", tmdb_id="1", media_type="movie",
         )
         service.execute_task.return_value = {"status": "completed", "task_id": task_id}
         return task_id, path, service
@@ -965,7 +978,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
             "app.routes.local_media_api.get_local_media_scheduler", return_value=scheduler
         ), patch("app.routes.local_media_api.notify_local_media_task"):
-            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture", "preview_digest": "preview:fixture", "rules_snapshot": "{}"}, headers={"X-CSRF-Token": csrf})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(db.get_local_media_task(task_id, owner="admin").qb_hash, "fixture-qb-hash")
         service.execute_task.assert_called_once_with("admin", task_id, qb_client=qb_client)
@@ -979,7 +992,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
             "app.routes.local_media_api.get_local_media_scheduler"
         ) as scheduler, patch("app.routes.local_media_api.notify_local_media_task"):
-            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture", "preview_digest": "preview:fixture", "rules_snapshot": "{}"}, headers={"X-CSRF-Token": csrf})
         self.assertEqual(response.status_code, 200, response.text)
         scheduler.assert_not_called()
         service.execute_task.assert_called_once_with("admin", task_id, qb_client=None)
@@ -993,7 +1006,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
             "app.routes.local_media_api.get_local_media_scheduler", return_value=SimpleNamespace(qb_factory=lambda: qb_client)
         ), patch("app.routes.local_media_api.notify_local_media_task"):
-            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture", "preview_digest": "preview:fixture", "rules_snapshot": "{}"}, headers={"X-CSRF-Token": csrf})
         self.assertEqual(response.status_code, 400)
         service.execute_task.assert_called_once_with("admin", task_id, qb_client=qb_client)
         qb_client.close.assert_called_once_with()
@@ -1011,7 +1024,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
                 with patch("app.routes.local_media_api.get_local_media_service", return_value=service), patch(
                     "app.routes.local_media_api.get_local_media_scheduler", return_value=SimpleNamespace(qb_factory=factory)
                 ), patch("app.routes.local_media_api.notify_local_media_task"):
-                    response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+                    response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture", "preview_digest": "preview:fixture", "rules_snapshot": "{}"}, headers={"X-CSRF-Token": csrf})
                 self.assertEqual(response.status_code, 400, response.text)
                 self.assertNotIn("private credential", response.text)
                 service.execute_task.assert_not_called()
@@ -1026,7 +1039,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         ), patch("app.routes.local_media_api.get_local_media_scheduler") as scheduler, patch(
             "app.routes.local_media_api.notify_local_media_task"
         ):
-            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture"}, headers={"X-CSRF-Token": csrf})
+            response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture", "preview_digest": "preview:fixture", "rules_snapshot": "{}"}, headers={"X-CSRF-Token": csrf})
         self.assertEqual(response.status_code, 400)
         scheduler.assert_not_called()
         service.execute_task.assert_not_called()

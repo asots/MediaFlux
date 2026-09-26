@@ -1144,6 +1144,7 @@ def prepare_manual_local_media_task(
     source_id: int,
     content_path: str,
     *,
+    snapshot_digest: str,
     owner: str = "admin",
     tmdb_id: str = "",
     media_type: str = "",
@@ -1155,6 +1156,8 @@ def prepare_manual_local_media_task(
     """原子创建或重置可重试的手动任务；活动任务绝不被改回等待态。"""
     from app.modules.local_media_models import renew_local_media_operation_token
 
+    if not str(snapshot_digest).startswith("preview:"):
+        raise ValueError("缺少已确认的整理计划，请重新生成预览")
     safe_owner = _local_media_owner(owner)
     safe_path = _canonical_local_media_content_path(content_path)
     normalized_type = str(media_type or "").strip().lower()
@@ -1213,13 +1216,14 @@ def prepare_manual_local_media_task(
             task_id = int(existing["id"])
             cur = conn.execute(
                 "UPDATE local_media_tasks SET content_path=?,status='waiting_stable',"
-                "stable_since='',snapshot_digest='',"
+                "stable_since='',snapshot_digest=?,"
                 "recognition_summary='',rules_snapshot=?,tmdb_id=?,media_type=?,"
                 "season_override=?,episode_override=?,numbering_mode=?,title='',year='',"
                 "operation_token=?,confirmation_actor='',error='',warning='',completed_at=NULL,"
                 "version=version+1,updated_at=? WHERE id=? AND owner=? AND status IN ('failed','requires_manual')",
                 (
                     safe_path,
+                    snapshot_digest,
                     str(rules_snapshot or ""),
                     str(tmdb_id or "").strip(),
                     normalized_type,
@@ -1241,14 +1245,15 @@ def prepare_manual_local_media_task(
             return task_id
         cur = conn.execute(
             "INSERT INTO local_media_tasks(owner,source_id,qb_hash,content_path,trigger,status,"
-            "operation_token,rules_snapshot,tmdb_id,media_type,season_override,episode_override,"
+            "operation_token,snapshot_digest,rules_snapshot,tmdb_id,media_type,season_override,episode_override,"
             "numbering_mode,created_at,updated_at) "
-            "VALUES(?,?,NULL,?,'manual','waiting_stable',?,?,?,?,?,?,?,?,?)",
+            "VALUES(?,?,NULL,?,'manual','waiting_stable',?,?,?,?,?,?,?,?,?,?)",
             (
                 safe_owner,
                 int(source_id),
                 safe_path,
                 token,
+                snapshot_digest,
                 str(rules_snapshot or ""),
                 str(tmdb_id or "").strip(),
                 normalized_type,
@@ -1289,6 +1294,7 @@ def claim_local_media_confirmation_task(
     owner: str = "admin",
     expected_version: int,
     expected_snapshot_digest: str = "",
+    confirmed_snapshot_digest: str,
     tmdb_id: str,
     media_type: str,
     rules_snapshot: str,
@@ -1300,6 +1306,8 @@ def claim_local_media_confirmation_task(
     confirmation_actor: str = "human",
 ) -> bool:
     """把仍然有效的本地待确认任务原子转换为执行态。"""
+    if not confirmed_snapshot_digest or confirmed_snapshot_digest.startswith("preview:"):
+        raise ValueError("本地媒体确认源快照无效，请重新检查")
     normalized_type = str(media_type or "").strip().lower()
     normalized_tmdb_id = str(tmdb_id or "").strip()
     from app.modules.episode_mapping import NUMBERING_MODES, normalize_numbering_mode
@@ -1332,6 +1340,7 @@ def claim_local_media_confirmation_task(
 
     where = "id=? AND owner=? AND status='requires_manual' AND version=?"
     params: list[object] = [
+        confirmed_snapshot_digest,
         str(rules_snapshot or ""),
         normalized_tmdb_id,
         normalized_type,
@@ -1353,7 +1362,7 @@ def claim_local_media_confirmation_task(
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE local_media_tasks SET status='recognizing',attempts=attempts+1,"
-            "recognition_summary='',rules_snapshot=?,tmdb_id=?,media_type=?,"
+            "snapshot_digest=?,recognition_summary='',rules_snapshot=?,tmdb_id=?,media_type=?,"
             "season_override=?,episode_override=?,numbering_mode=?,"
             "title=?,year=?,confirmation_actor=?,error='',warning='',completed_at=NULL,"
             "version=version+1,updated_at=? "
@@ -1656,6 +1665,8 @@ def reset_local_media_task(
     media_type: str | None = None,
     season_override: int | None = None,
     episode_override: int | None = None,
+    preview_digest: str = "",
+    rules_snapshot: str = "",
     numbering_mode: str | None = None,
     confirm_interrupted_write: bool = False,
     expected_version: int | None = None,
@@ -1703,10 +1714,11 @@ def reset_local_media_task(
         raise ValueError("电影任务不能指定季数或集数")
     if normalized_type == "movie":
         normalized_numbering_mode = "auto"
+    if preview_digest and (not preview_digest.startswith("preview:") or not rules_snapshot):
+        raise ValueError("季集纠偏缺少有效预览，请重新确认")
     assignments = [
         "status='waiting_stable'",
         "stable_since=''",
-        "snapshot_digest=''",
         "recognition_summary=''",
         "title=''",
         "year=''",
@@ -1719,6 +1731,11 @@ def reset_local_media_task(
         "updated_at=?",
     ]
     params: list[object] = ["", db.now()]
+    if preview_digest:
+        assignments.extend(["snapshot_digest=?", "rules_snapshot=?"])
+        params.extend([preview_digest, rules_snapshot])
+    else:
+        assignments.append("snapshot_digest=CASE WHEN snapshot_digest LIKE 'preview:%' THEN snapshot_digest ELSE '' END")
     if tmdb_id is not None:
         assignments.append("tmdb_id=?")
         params.append(str(tmdb_id or "").strip())
@@ -1782,6 +1799,8 @@ def reset_local_media_task_if_current(
     confirm_interrupted_write: bool = False,
     season_override: int | None = None,
     episode_override: int | None = None,
+    preview_digest: str = "",
+    rules_snapshot: str = "",
 ) -> bool:
     """以强制版本条件委托统一重试事务，可选写入明确季集映射。"""
     return reset_local_media_task(
@@ -1792,6 +1811,8 @@ def reset_local_media_task_if_current(
         confirm_interrupted_write=confirm_interrupted_write,
         season_override=season_override,
         episode_override=episode_override,
+        preview_digest=preview_digest,
+        rules_snapshot=rules_snapshot,
     )
 
 

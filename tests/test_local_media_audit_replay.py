@@ -26,7 +26,10 @@ def test_completed_task_replay_preserves_result_and_new_source(tmp_path, recreat
         with patch("app.modules.local_media_service.OrganizeRules.from_config", return_value=rules):
             inspection = service.inspect_source("admin", source_id, incoming)
             preview = service.preview("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie")
-            task_id = service.create_manual_task("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie", rules_snapshot=preview["rules_snapshot"])
+            task_id = service.create_manual_task(
+                "admin", inspection["inspection_id"],
+                preview_digest=preview["preview_digest"],
+            )
             assert db.claim_local_media_task(task_id, owner="admin")
             first = service.execute_task("admin", task_id)
             assert first["status"] == "completed"

@@ -68,8 +68,6 @@ class LocalMoveRecoveryBoundariesTests(IsolatedDatabaseTestCase):
             source_id = db.create_local_media_source(name='recovery-boundary', qb_profile='',
                 qb_path_prefix='', local_root=str(src), owner='admin')
             db.upsert_local_library_target(source_id, 'movie', str(dst), owner='admin')
-            task_id = db.create_local_media_task(source_id, '', str(source), owner='admin', trigger='manual')
-            self.assertTrue(db.claim_local_media_task(task_id, owner='admin'))
             service = LocalMediaService(scraper=FakeScraper(MatchResult(
                 tmdb_id='1', title='Movie', year='2026', media_type='movie', confidence=1.0)))
             real_lstat = Path.lstat
@@ -86,6 +84,12 @@ class LocalMoveRecoveryBoundariesTests(IsolatedDatabaseTestCase):
             try:
                 with patch('app.modules.local_media_service.probe_local_media_profile', return_value=None), \
                      patch.object(Path, 'lstat', new=fail_published_lstat):
+                    inspection = service.inspect_source('admin', source_id, source)
+                    preview = service.preview('admin', inspection['inspection_id'], '1', 'movie')
+                    task_id = service.create_manual_task(
+                        'admin', inspection['inspection_id'], preview_digest=preview['preview_digest'],
+                    )
+                    self.assertTrue(db.claim_local_media_task(task_id, owner='admin'))
                     with self.assertRaises(LocalMoveError) as caught:
                         service.execute_task('admin', task_id)
             finally:

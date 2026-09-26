@@ -306,12 +306,14 @@ def test_normal_local_recognition_move_probe_and_refresh(tmp_path):
             rules = service._serialize_rules_snapshot(
                 OrganizeRules(small_file_mb=0, clean_empty=False)
             )
+            with patch.object(media_probe, "_run_ffprobe", return_value=ffprobe_result) as preview_probe:
+                preview = service.preview(
+                    "admin", inspection["inspection_id"], tmdb_id="88", media_type="tv",
+                    rules_snapshot=rules,
+                )
             task_id = service.create_manual_task(
-                "admin",
-                inspection["inspection_id"],
-                tmdb_id="88",
-                media_type="tv",
-                rules_snapshot=rules,
+                "admin", inspection["inspection_id"],
+                preview_digest=preview["preview_digest"],
             )
             with patch.object(
                 media_probe, "_run_ffprobe", return_value=ffprobe_result
@@ -324,7 +326,7 @@ def test_normal_local_recognition_move_probe_and_refresh(tmp_path):
             assert all("Audit Series" in str(p) for p in moved)
             assert all("1080p" in p.name for p in moved if p.suffix == ".mkv")
             assert list(source.iterdir()) == []
-            assert probe.call_count == 2
+            assert preview_probe.call_count + probe.call_count == 2
             assert len(db.list_local_media_operation_steps(task_id)) == 4
             assert db.get_local_media_task(task_id).status == "completed"
             assert queue.media_refresh_queue_status()["paths"] == 1

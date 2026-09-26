@@ -266,6 +266,15 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         with self.assertRaises(AgentToolError):
             service.confirm(prepared["action_plan"]["plan_id"], owner="owner-a")
 
+    @staticmethod
+    def _remap_preview_service(digest="digest-1"):
+        service = Mock()
+        service.inspect_source.return_value = {"inspection_id": "remap-inspection", "digest": digest}
+        service.preview.return_value = {
+            "status": "planned", "preview_digest": f"preview:{digest}:plan", "rules_snapshot": "{}",
+        }
+        return service
+
     def test_retry_with_episode_remap_is_confirmation_gated_and_requeues_authoritative_task(self) -> None:
         task_id = self._task(
             status="requires_manual", media_type="tv", season=2, episode=24,
@@ -311,6 +320,9 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         with patch(
             "app.agent.local_media_task_actions.get_local_media_scheduler",
             return_value=scheduler,
+        ), patch(
+            "app.agent.local_media_task_actions.get_local_media_service",
+            return_value=self._remap_preview_service("digest-1"),
         ):
             prepared = service.prepare(
                 "local_media.retry_task",
@@ -355,7 +367,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         pending = db.get_local_media_task(task_id, owner="admin")
         self.assertTrue(db.claim_local_media_confirmation_task(
             task_id,
-            owner="admin",
+            confirmed_snapshot_digest="confirmed-source-digest", owner="admin",
             expected_version=pending.version,
             expected_snapshot_digest=pending.snapshot_digest,
             tmdb_id="261403",
@@ -392,6 +404,9 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         with patch(
             "app.agent.local_media_task_actions.get_local_media_scheduler",
             return_value=scheduler,
+        ), patch(
+            "app.agent.local_media_task_actions.get_local_media_service",
+            return_value=self._remap_preview_service("confirmed-source-digest"),
         ):
             prepared = service.prepare(
                 "local_media.retry_task",
@@ -424,11 +439,15 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         ):
             with self.assertRaisesRegex(AgentToolError, "必须同时提供"):
                 service.prepare("local_media.retry_task", invalid, owner="owner-a")
-        prepared = service.prepare(
-            "local_media.retry_task",
-            {"task_number": 1, "season": 2, "episode": 12},
-            owner="owner-a",
-        )
+        with patch(
+            "app.agent.local_media_task_actions.get_local_media_service",
+            return_value=self._remap_preview_service(),
+        ):
+            prepared = service.prepare(
+                "local_media.retry_task",
+                {"task_number": 1, "season": 2, "episode": 12},
+                owner="owner-a",
+            )
         db.update_local_media_task(task_id, owner="admin", warning="changed")
         with self.assertRaises(AgentToolError) as stale:
             service.confirm(prepared["action_plan"]["plan_id"], owner="owner-a")

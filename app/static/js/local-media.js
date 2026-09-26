@@ -1590,12 +1590,7 @@
                 method: 'POST',
                 body: JSON.stringify({
                     inspection_id: confirmedContext.inspectionId,
-                    tmdb_id: confirmedContext.tmdbId,
-                    media_type: confirmedContext.mediaType,
-                    season: confirmedContext.season,
-                    episode: confirmedContext.episode,
-                    numbering_mode: confirmedContext.numberingMode,
-                    rules_snapshot: confirmedPreview.rules_snapshot || '',
+                    preview_digest: confirmedPreview.preview_digest,
                 }),
             });
             appAlert({
@@ -1605,6 +1600,7 @@
                     ? `已移动 ${result.moved?.length || 0} 项，清理 ${result.deleted_junk?.length || 0} 项。`
                     : (result.preview?.reason || '请在待确认任务中继续处理。'),
             });
+            if (result.repreview_required) invalidatePreview();
             if (result.status === 'completed') closeScrape();
             await loadAll(false, {includeItems: true});
         } catch (error) {
