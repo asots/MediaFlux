@@ -1002,10 +1002,10 @@ def register_specs(
         ToolSpec(
             name="guangya.directory_scrape.inspect",
             description=(
-                "按当前整理规则只读检查一个准备直接识别并归档入媒体库的精确光鸭目录或视频；"
-                "后续可搜索 TMDB、预览最终归档目录与编号方案。跨发布组创建临时目录、仅重命名/移动"
-                "原文件或为后续识别做前置规整属于通用 fs.query 与 fs.change 的适用范围。"
-                "路径只在服务端解析，不向外返回对象 ID。"
+                "只读检查单个作品的精确光鸭目录或视频，用于直接识别并归档；"
+                "混合根目录先用 fs.query 列出子目录，跨发布组临时归并及仅重命名/移动或前置规整用 fs.change。"
+                "必须先完成专用 guangya.directory_scrape.search，再 inspect 下一目录。"
+                "TMDB/MetaTube 为内置匹配来源（无需另装插件）；路径仅在服务端解析，不返回对象 ID。"
             ),
             risk=RiskLevel.READ,
             parameters={
@@ -1028,6 +1028,7 @@ def register_specs(
             },
             context_handler=inspect_directory_scrape,
             validator=directory_scrape_inspect_arguments,
+            related_tools=("guangya.directory_scrape.search",),
             domains=("organize", "media_identity", "cloud_files"),
             source_kind="system_state",
             workflow="guangya_directory_scrape",
@@ -1042,7 +1043,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="guangya.directory_scrape.search",
-            description="基于当前会话最近一次光鸭刮削检查搜索 TMDB/MetaTube 匹配候选；不写入映射或云盘。",
+            description="只针对最近一次检查搜索内置 TMDB/MetaTube 候选；不写映射或云盘。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -1059,6 +1060,7 @@ def register_specs(
             },
             context_handler=search_directory_scrape,
             validator=directory_scrape_search_arguments,
+            related_tools=("guangya.directory_scrape.preview",),
             domains=("organize", "media_identity", "discovery"),
             source_kind="metadata_catalog",
             workflow="guangya_directory_scrape",

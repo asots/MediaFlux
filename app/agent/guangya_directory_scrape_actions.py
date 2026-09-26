@@ -738,6 +738,18 @@ def inspect_directory_scrape(
             "manual_match_reason": sanitize_public_text(
                 payload.get("manual_match_reason"), limit=160
             ),
+            "tmdb_enabled": bool(payload.get("tmdb_enabled")),
+            "metatube_configured": bool(payload.get("metatube_configured")),
+            "source_configuration_note": (
+                "tmdb_enabled 仅表示本次冻结规则允许 TMDB；metatube_configured 仅表示 MetaTube 已启用且 endpoint 非空。"
+                "两者均不表示已搜索或网络可用。"
+            ),
+            "next_tool": "guangya.directory_scrape.search",
+            "workflow_guidance": (
+                "此搜索只服务最近一次 inspect；新的 inspect 会覆盖该上下文。"
+                "必须先完成当前目录搜索，再 inspect 下一个目录。"
+                "通用 discovery.search 不能替代本链路的 TMDB/MetaTube 查找或候选绑定。"
+            ),
             "counts": {
                 str(key): max(0, int(value or 0))
                 for key, value in counts.items()
@@ -753,7 +765,7 @@ def inspect_directory_scrape(
                 _now(),
             )
         ],
-        suggestions=["可继续说：搜索匹配。"],
+        suggestions=["下一步调用 guangya.directory_scrape.search 搜索本目录候选。"],
     )
 
 

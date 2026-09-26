@@ -1654,6 +1654,59 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
             rules_loader=lambda: self.rules,
         )
 
+    def test_inspect_reports_configured_match_sources_from_scoped_rules(self):
+        cases = (
+            (replace(self.rules, nsfw_enabled=False), True, False, False),
+            (
+                replace(
+                    self.rules,
+                    nsfw_enabled=True,
+                    nsfw_metatube_endpoint="https://metatube.invalid/private",
+                    nsfw_metatube_token="private-token",
+                ),
+                True,
+                True,
+                False,
+            ),
+            (
+                replace(
+                    self.rules,
+                    nsfw_enabled=True,
+                    nsfw_exclusive=True,
+                    nsfw_metatube_endpoint="https://metatube.invalid/private",
+                    nsfw_metatube_token="private-token",
+                ),
+                False,
+                True,
+                True,
+            ),
+            (
+                replace(self.rules, nsfw_enabled=True, nsfw_metatube_endpoint=" "),
+                True,
+                False,
+                False,
+            ),
+        )
+
+        with patch("app.modules.directory_scrape.DirectoryMediaInspector") as inspector:
+            inspector.return_value.inspect.return_value = self.inspection
+            for rules, tmdb, metatube, nsfw_only in cases:
+                scoped_rules = SimpleNamespace(
+                    for_source=lambda _source_id, *, client, rules=rules: rules
+                )
+                self.service.rules_loader = lambda scoped_rules=scoped_rules: scoped_rules
+                with self.subTest(
+                    tmdb=tmdb, metatube=metatube, nsfw_only=nsfw_only
+                ):
+                    payload = self.service.inspect("owner", "movie-dir")
+
+                self.assertIs(payload["tmdb_enabled"], tmdb)
+                self.assertIs(payload["metatube_configured"], metatube)
+                self.assertIs(payload["nsfw_only"], nsfw_only)
+                serialized = json.dumps(payload, ensure_ascii=False)
+                self.assertNotIn("metatube.invalid", serialized)
+                self.assertNotIn("private-token", serialized)
+
     def test_store_rejects_another_session_owner(self):
         with self.assertRaisesRegex(KeyError, "检查记录不存在或已过期"):
             self.store.get_inspection("owner-b", self.inspection_id)

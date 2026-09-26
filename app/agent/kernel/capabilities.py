@@ -424,7 +424,8 @@ class CapabilityRetriever:
         count = min(base_limit, max(self.minimum, positive))
         selected = list(ranked[:count])
         selected_names = {tool.name for tool in selected}
-        related_candidates: list[KernelToolSpec] = []
+        related_candidates: list[tuple[int, KernelToolSpec]] = []
+        workflow_neighbors: dict[str, int] = {}
         # 邻接依赖仍按当前相关性排序；最近真实调用的来源仅得到有限加权。
         # 无条件让历史来源优先会挤掉新任务的必需读取入口；无条件让写工具
         # 优先则会让无关写能力挤掉搜索→提交。这里不按业务意图或风险分流。
@@ -450,10 +451,15 @@ class CapabilityRetriever:
                 target = catalog.get(str(related_name))
                 if target.name in selected_names or target not in visible:
                     continue
-                related_candidates.append(target)
+                workflow = str(source.metadata.get("workflow") or target.name)
+                position = workflow_neighbors.get(workflow, 0)
+                related_candidates.append((position, target))
+                workflow_neighbors[workflow] = position + 1
                 selected_names.add(target.name)
-        # 保持来源工具的相关性顺序；高排名来源声明的邻接能力优先。
-        selected.extend(related_candidates[: self.maximum - len(selected)])
+        # 同一流程不能独占邻接预留位；先覆盖各流程的下一步，再补后续阶段。
+        # 稳定排序保留原相关性顺序，未声明 workflow 的工具仍按原优先级处理。
+        neighbors = sorted(related_candidates, key=lambda item: item[0])
+        selected.extend(tool for _, tool in neighbors[: self.maximum - len(selected)])
         selected.sort(
             key=lambda item: (-scores.get(item.name, 0.0), item.cost, item.name)
         )

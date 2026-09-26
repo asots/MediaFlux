@@ -901,6 +901,10 @@ class DirectoryScrapeService:
             "season_inferred": inspection.season_inferred,
             "requires_manual_match": inspection.requires_manual_match,
             "nsfw_only": bool(rules.nsfw_exclusive),
+            "tmdb_enabled": not bool(rules.nsfw_exclusive),
+            "metatube_configured": bool(
+                rules.nsfw_enabled and str(rules.nsfw_metatube_endpoint or "").strip()
+            ),
             "manual_match_reason": inspection.manual_match_reason,
             "counts": dict(inspection.counts),
             "pending_videos": [

@@ -344,9 +344,14 @@ class AgentSession:
         limited_tools: set[tuple[str, int, str]] = set()
         last_business_tool = ""
         context_revision = 0
+        last_tool_error: ToolPipelineError | None = None
+        has_tool_result = False
 
-        def record_result(name: str, arguments: Mapping[str, Any], result: Mapping[str, Any]) -> None:
-            nonlocal last_business_tool, context_revision
+        def record_result(
+            name: str, arguments: Mapping[str, Any], result: Mapping[str, Any],
+            *, error: ToolPipelineError | None = None,
+        ) -> None:
+            nonlocal last_business_tool, context_revision, last_tool_error, has_tool_result
             if name == DISCOVERY_TOOL:
                 return
             # 同名工具可能已经切换到另一条目；仅同参数、未换业务上下文的重试能解除阻塞。
@@ -355,9 +360,11 @@ class AgentSession:
             last_business_tool = name
             attempt = (name, context_revision, json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, default=str))
             progress_results.append((public_tool_label(name), dict(result)))
+            last_tool_error = error
+            has_tool_result = has_tool_result or error is None
             if result.get("status") == "rate_limited":
                 limited_tools.add(attempt)
-            elif public_result_state(result) == "success":
+            elif error is None:
                 limited_tools.discard(attempt)
 
         def progress_answer(reason: str) -> str:
@@ -478,7 +485,7 @@ class AgentSession:
                 session_id=agent_input.session_id, turn_id=secrets.token_urlsafe(12),
                 request_id=agent_input.request_id,
             )
-            if confirmed_result is not None or any(public_result_state(result) != "failed" for _, result in progress_results):
+            if confirmed_result is not None or has_tool_result:
                 answer = progress_answer(message)
                 messages.append(ModelMessage(role="assistant", content=answer))
                 await preserve_checkpoint()
@@ -814,7 +821,11 @@ class AgentSession:
                 request_system_prompt = self.system_prompt + (
                     f"\n本轮系统预算：工具调用已使用 {total_tool_calls}/{self.limits.max_tool_calls}，"
                     f"当前模型轮次 {round_index + 1}/{self.limits.max_model_rounds}。"
+                    f"实际剩余工具调用 {max(0, self.limits.max_tool_calls - total_tool_calls)} 次；"
+                    f"本次回复后仍可继续 {self.limits.max_model_rounds - round_index - 1} 轮模型调用。"
                     "未收到预算耗尽错误或最终汇总要求时，不得自行声称工具额度不足。"
+                    "若还有已获准的只读检查未完成，应继续处理，不能把已检查的部分条目当成全部任务结束；"
+                    "需要写入授权、真实故障或用户补充信息时才说明阻塞并停下。"
                 )
                 if confirmed_result is not None:
                     request_system_prompt += (
@@ -998,7 +1009,7 @@ class AgentSession:
                             if tool.name == DISCOVERY_TOOL:
                                 # 仅撤销本次失败的发现，不能丢掉同批之前成功的结果。
                                 discovery.restore(discovery_checkpoint)
-                            record_result(tool.name, call.arguments, {"ok": False, "status": exc.code, "summary": str(exc)})
+                            record_result(tool.name, call.arguments, {"ok": False, "status": exc.code, "summary": str(exc)}, error=exc)
                             messages.append(self._tool_error_message(call, exc))
                             completed_call_ids.add(call.call_id)
                             await publish(
@@ -1120,8 +1131,10 @@ class AgentSession:
                         "模型没有返回回答或工具调用",
                         code="empty_model_response",
                     )
-                if limited_tools:
-                    await failure("rate_limited", "仍有工具调用受到频率限制，后续步骤未完成。")
+                if limited_tools or last_tool_error is not None:
+                    code = "rate_limited" if limited_tools else last_tool_error.code
+                    message = "仍有工具调用受到频率限制，后续步骤未完成。" if limited_tools else str(last_tool_error)
+                    await failure(code, message)
                     return
                 await finish_answer(final_text, "success", finish_reason, round_index + 1)
                 return

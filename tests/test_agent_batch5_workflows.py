@@ -74,6 +74,40 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
     def tearDown(self) -> None:
         _flows.clear()
 
+    def test_cloud_directory_scrape_catalog_exposes_linear_builtin_search_workflow(
+        self,
+    ) -> None:
+        from app.agent.domain_catalog.cloud import register_specs
+
+        registry = Mock()
+        register_specs(
+            registry,
+            resource_store=None,
+            active_ingest_store=None,
+            ingest_actions=None,
+        )
+        specs = {
+            call.args[0].name: call.args[0]
+            for call in registry.register.call_args_list
+        }
+        inspect = specs["guangya.directory_scrape.inspect"]
+        search = specs["guangya.directory_scrape.search"]
+        preview = specs["guangya.directory_scrape.preview"]
+        run = specs["guangya.directory_scrape.run"]
+
+        self.assertEqual(inspect.related_tools, ("guangya.directory_scrape.search",))
+        self.assertEqual(search.related_tools, ("guangya.directory_scrape.preview",))
+        self.assertEqual(preview.related_tools, ("guangya.directory_scrape.run",))
+        self.assertIn("单个作品", inspect.description)
+        self.assertIn("混合根目录", inspect.description)
+        self.assertIn("仅重命名/移动", inspect.description)
+        self.assertIn("完成专用 guangya.directory_scrape.search", inspect.description)
+        self.assertIn("内置匹配来源", inspect.description)
+        self.assertIn("无需另装插件", inspect.description)
+        self.assertNotIn("discovery.search", inspect.related_tools)
+        self.assertNotIn("discovery.search", search.related_tools)
+        self.assertEqual(run.workflow_stage, 40)
+
     def _rss(self) -> tuple[int, int, int]:
         sid = db.add_rss_subscription(
             name="安全订阅",
@@ -504,6 +538,10 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             "manual_match_reason": "",
             "counts": {"videos": 2},
             "directory": {"id": "PRIVATE-DIR", "name": "PRIVATE DIR"},
+            "tmdb_enabled": True,
+            "metatube_configured": True,
+            "nsfw_metatube_endpoint": "https://private.invalid/endpoint",
+            "nsfw_metatube_token": "private-token",
         }
         service.search.return_value = [
             {
@@ -563,6 +601,20 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
                 }
                 accepted = run_directory_scrape_confirmed({}, fingerprint, context)
         self.assertTrue(inspected.ok and searched.ok and previewed.ok and prepared.ok)
+        self.assertTrue(inspected.data["tmdb_enabled"])
+        self.assertTrue(inspected.data["metatube_configured"])
+        self.assertEqual(
+            inspected.data["next_tool"], "guangya.directory_scrape.search"
+        )
+        self.assertIn("最近一次 inspect", inspected.data["workflow_guidance"])
+        self.assertIn("新的 inspect 会覆盖", inspected.data["workflow_guidance"])
+        self.assertIn("当前目录搜索", inspected.data["workflow_guidance"])
+        self.assertIn("discovery.search", inspected.data["workflow_guidance"])
+        self.assertIn("候选绑定", inspected.data["workflow_guidance"])
+        self.assertIn("冻结规则", inspected.data["source_configuration_note"])
+        self.assertIn("规则允许 TMDB", inspected.data["source_configuration_note"])
+        self.assertIn("MetaTube 已启用且 endpoint 非空", inspected.data["source_configuration_note"])
+        self.assertIn("不表示已搜索或网络可用", inspected.data["source_configuration_note"])
         self.assertEqual(accepted.status, "accepted")
         with self.assertRaises(AgentToolError) as consumed:
             run_directory_scrape_confirmed({}, fingerprint, context)
@@ -587,6 +639,8 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             "/private/c",
             "/private/d",
             "PRIVATE-ACTION",
+            "private.invalid",
+            "private-token",
         ):
             self.assertNotIn(secret, rendered)
 

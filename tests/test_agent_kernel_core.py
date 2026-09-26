@@ -97,6 +97,27 @@ def _run_thread(coroutine_factory, errors: list[BaseException]) -> None:
 
 
 class CapabilityRetrieverTests(unittest.TestCase):
+    def test_workflow_neighbors_share_reserved_slots_without_expanding_window(self):
+        from dataclasses import replace
+
+        targets = [read_tool(name, domain="cloud", description="下游能力")
+                   for name in ("cloud.search", "cloud.run", "cloud.plan")]
+        sources = [replace(
+            read_tool(name, domain="cloud", description="整理目标", examples=("整理目标",)),
+            metadata={"workflow": workflow, "related_tools": (target,)},
+        ) for name, workflow, target in (
+            ("cloud.a_inspect", "scrape", "cloud.search"),
+            ("cloud.b_preview", "scrape", "cloud.run"),
+            ("cloud.c_inspect", "naming", "cloud.plan"),
+        )]
+        selection = CapabilityRetriever(minimum=3, maximum=5).retrieve(
+            "整理目标", ToolCatalog([*sources, *targets]),
+        )
+        self.assertEqual(len(selection.tools), 5)
+        self.assertIn("cloud.search", selection.names)
+        self.assertIn("cloud.plan", selection.names)
+        self.assertNotIn("cloud.run", selection.names)
+
     def test_retrieves_six_to_twelve_atomic_tools_without_deciding_intent(self) -> None:
         tools = [
             read_tool(
@@ -799,6 +820,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(observed, ["one", "two"])
+        for index, request in enumerate(model.requests):
+            self.assertIn(f"实际剩余工具调用 {session.limits.max_tool_calls - index} 次", request.system_prompt)
+            self.assertIn(f"仍可继续 {session.limits.max_model_rounds - index - 1} 轮", request.system_prompt)
         self.assertEqual(tuple(model.requests[-1].tools), ())
         self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
         self.assertEqual(events[-1].payload["status"], "success")
@@ -2812,3 +2836,47 @@ class AgentPartialProgressTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(events[-1].payload["status"], "partial")
                 self.assertIn("条目A搜索受限", events[-1].payload["answer"])
                 self.assertNotIn("全部完成", events[-1].payload["answer"])
+
+    async def test_unresolved_business_error_is_not_relabelled_as_budget_exhaustion(self):
+        def inspect(_arguments, _context):
+            raise ToolPipelineError("目录内没有支持的视频文件", code="precondition_failed")
+
+        catalog = ToolCatalog([
+            read_tool("cloud.list", domain="cloud", handler=lambda *_: {"ok": True, "summary": "根目录包含4个子目录"}),
+            read_tool("cloud.inspect", domain="cloud", handler=inspect),
+            read_tool("agent.capabilities", domain="agent"),
+        ])
+        state = InMemorySessionStateStore()
+        model = ScriptedModel([
+            self.tool_round("cloud.list", 1), self.tool_round("cloud.inspect", 2),
+            self.tool_round("agent.capabilities", 3),
+            [ModelEvent(ModelEventType.TEXT_DELTA, text="已完成，因工具预算耗尽不能继续。"),
+             ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
+        ])
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(minimum=3, maximum=3),
+                               pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        events = await collect(session.run(AgentInput(message="检查每个目录", owner="owner", session_id="empty")))
+        self.assertEqual(events[-1].payload["status"], "partial")
+        self.assertEqual(events[-1].payload["finish_reason"], "precondition_failed")
+        self.assertIn("根目录包含4个子目录", events[-1].payload["answer"])
+        self.assertIn("目录内没有支持的视频文件", events[-1].payload["answer"])
+        self.assertNotIn("预算耗尽", events[-1].payload["answer"])
+        self.assertNotIn("已完成，", events[-1].payload["answer"])
+
+    async def test_valid_negative_read_results_are_not_execution_exceptions(self):
+        for status in ("loading", "disabled", "not_missing", "not_found"):
+            with self.subTest(status=status):
+                tool = read_tool("library.state", handler=lambda *_: {
+                    "ok": False, "status": status, "summary": "已读取当前业务状态",
+                })
+                catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+                model = ScriptedModel([
+                    self.tool_round(tool.name, 1),
+                    [ModelEvent(ModelEventType.TEXT_DELTA, text="当前状态已说明，不需要执行变更。"),
+                     ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
+                ])
+                session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                                       pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+                events = await collect(session.run(AgentInput(message="查看状态", owner="owner", session_id="negative")))
+                self.assertEqual(events[-1].payload["status"], "success")
+                self.assertEqual(events[-1].payload["answer"], "当前状态已说明，不需要执行变更。")
