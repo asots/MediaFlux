@@ -440,59 +440,6 @@ class FixedMatchScraper:
         return dict(result) if isinstance(result, dict) else {}
 
 
-class ScopedGuangYaClient:
-    # 作用域过滤是一次性的自顶向下扫描窗口：逐媒体组枚举会先消耗掉该窗口，
-    # 导致后续扫描看到未过滤内容并移动范围外文件，因此禁用媒体组流水线。
-    supports_group_pipeline = False
-
-    def __init__(
-        self,
-        client,
-        source_parent_id: str,
-        allowed_file_ids: set[str],
-        *,
-        recursive: bool = False,
-    ) -> None:
-        self._client = client
-        self._source_parent_id = str(source_parent_id)
-        self._allowed_file_ids = {str(file_id) for file_id in allowed_file_ids}
-        self._recursive = bool(recursive)
-        self._source_scan_pending = False
-        self._source_tree_ids: set[str] = set()
-        self._filtered_tree_ids: set[str] = set()
-
-    def begin_source_scan(self) -> None:
-        self._source_scan_pending = True
-        self._source_tree_ids = {self._source_parent_id}
-        self._filtered_tree_ids = set()
-
-    def list_dir(self, parent_id: str):
-        items = self._client.list_dir(parent_id)
-        current_id = str(parent_id)
-        if not self._source_scan_pending or current_id not in self._source_tree_ids:
-            return items
-        if current_id in self._filtered_tree_ids:
-            return items
-        self._filtered_tree_ids.add(current_id)
-        if not self._recursive:
-            self._source_scan_pending = False
-            return [
-                item
-                for item in items
-                if str(item.file_id) in self._allowed_file_ids
-            ]
-        directories = [item for item in items if item.is_dir]
-        self._source_tree_ids.update(str(item.file_id) for item in directories)
-        return [
-            item
-            for item in items
-            if item.is_dir or str(item.file_id) in self._allowed_file_ids
-        ]
-
-    def __getattr__(self, name):
-        return getattr(self._client, name)
-
-
 class PreviewSnapshotGuangYaClient:
     """在一次预览内复用刚完成的目录检查快照。
 
@@ -1392,10 +1339,12 @@ class DirectoryScrapeService:
                 notify_enabled=record.rules.notify_enabled,
                 topic_enabled=record.rules.notify_enabled and record.rules.library_notify,
             )
-            organizer = self._organizer(
-                record.scope_type,
-                current,
-                FixedMatchScraper(
+            source_member_ids = frozenset(
+                item.file_id for item in (*current.videos, *current.companions, *current.directories)
+            )
+            organizer = Organizer(
+                client=self.client,
+                scraper=FixedMatchScraper(
                     self.scraper,
                     record.match,
                     record.detail,
@@ -1417,6 +1366,7 @@ class DirectoryScrapeService:
                 record.rules,
                 dry_run=True,
                 post_actions=False,
+                source_member_ids=source_member_ids,
             )
             current_companions = self._companion_plans(
                 current, current_plans, signature_organizer,
@@ -1424,12 +1374,13 @@ class DirectoryScrapeService:
             if self._plan_signature(current_plans, current_companions) != record.signature:
                 raise DirectoryScrapeConflictError("归档计划已变化，请重新检查并确认")
             check_cancel()
-            self._begin_source_scan(organizer)
             _plans, stats = organizer.organize(
                 record.inspection.directory_id,
                 record.rules,
                 dry_run=False,
                 post_actions=False,
+                source_member_ids=source_member_ids,
+                group_pipeline=record.scope_type == "directory" and not current.pending_videos,
                 source_name=record.inspection.directory_name,
                 require_complete_scan=True,
                 # 执行阶段只读探测缓存，保证最终文件名与用户确认过的预览
@@ -1704,43 +1655,6 @@ class DirectoryScrapeService:
         if scope_type == "directory":
             return inspector.inspect(scope_id, rules)
         raise DirectoryScrapeConflictError("刮削作用域无效，请重新检查")
-
-    @staticmethod
-    def _begin_source_scan(organizer: Organizer) -> None:
-        if isinstance(organizer.client, ScopedGuangYaClient):
-            organizer.client.begin_source_scan()
-
-    def _organizer(
-        self,
-        scope_type: str,
-        inspection: DirectoryInspection,
-        scraper,
-    ) -> Organizer:
-        client = self.client
-        if scope_type == "file":
-            allowed_file_ids = {
-                item.file_id
-                for item in (*inspection.videos, *inspection.companions)
-            }
-            client = ScopedGuangYaClient(
-                self.client,
-                inspection.directory_id,
-                allowed_file_ids,
-            )
-        elif scope_type == "directory" and inspection.pending_videos:
-            allowed_file_ids = {
-                item.file_id
-                for item in (*inspection.videos, *inspection.companions)
-            }
-            client = ScopedGuangYaClient(
-                self.client,
-                inspection.directory_id,
-                allowed_file_ids,
-                recursive=True,
-            )
-        elif scope_type != "directory":
-            raise DirectoryScrapeConflictError("刮削作用域无效，请重新检查")
-        return Organizer(client=client, scraper=scraper)
 
     @staticmethod
     def _apply_pending_stats(stats: dict, inspection: DirectoryInspection) -> None:

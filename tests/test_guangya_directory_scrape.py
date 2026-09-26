@@ -2145,6 +2145,8 @@ class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(result["stats"]["moved"], 4)
         self.assertEqual(result["stats"]["pending_confirmation"], 1)
+        self.assertNotIn("group_results", result["stats"])
+        self.assertNotIn("group_progress", result["stats"])
         self.assertEqual(self.client.infos["unknown"].parent_id, "show-dir")
         self.assertIn("show-dir", self.client.infos)
         for episode in range(1, 5):
@@ -2374,6 +2376,29 @@ class SingleFileScrapeScopeTests(IsolatedDatabaseTestCase):
             expected_parent = "extras" if file_id == "extra-video" else "source"
             self.assertEqual(self.client.infos[file_id].parent_id, expected_parent)
 
+    def test_file_execute_excludes_companions_added_after_preview_validation(self):
+        inspection_id = self._inspect_file()
+        preview = self.service.preview("owner", inspection_id, "1726", "movie")
+        late = _file("late-subtitle", "Supergirl.2026.en.srt", "source", size=1024)
+        plan_signature = self.service._plan_signature
+
+        def add_after_validation(*args):
+            signature = plan_signature(*args)
+            self.client.tree["source"].append(late)
+            self.client.infos[late.file_id] = late
+            return signature
+
+        with patch.object(self.service, "_plan_signature", side_effect=add_after_validation):
+            result = self.service.execute_preview("owner", preview["preview_id"])
+
+        self.assertEqual(result["stats"]["moved"], 1)
+        self.assertEqual(result["stats"]["subtitle_moved"], 1)
+        self.assertNotIn("group_results", result["stats"])
+        self.assertNotIn("group_progress", result["stats"])
+        self.assertNotEqual(self.client.infos["supergirl-sub"].parent_id, "source")
+        self.assertEqual(self.client.infos[late.file_id].parent_id, "source")
+        self.assertEqual(self.client.infos[late.file_id].name, late.name)
+
 
 class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
     class SeasonScraper(_DirectoryScrapeTMDB):
@@ -2468,6 +2493,101 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         service.execute_preview("owner", preview["preview_id"])
         self.assertIn("S02E01", client.infos["episode-1"].name)
         self.assertIn("S02E02", client.infos["episode-2"].name)
+
+    def test_execute_freezes_confirmed_members_and_keeps_live_source_cleanup(self):
+        stem = "Arifureta Shokugyou de Sekai Saikyou - 01"
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                parent_id = "season" if nested else "source"
+                confirmed = [
+                    _file("episode-1", f"{stem}.mkv", parent_id),
+                    _file("subtitle-1", f"{stem}.zh.srt", parent_id, size=1024),
+                    _file("metadata-1", f"{stem}.nfo", parent_id, size=1024),
+                ]
+                service, _store, client = self._build(
+                    clean_empty=True,
+                    source_items=(
+                        [_dir("season", "Season 2", "source")]
+                        if nested else list(confirmed)
+                    ),
+                )
+                self.addCleanup(service.close)
+                if nested:
+                    client.tree[parent_id] = list(confirmed)
+                    client.infos.update({item.file_id: item for item in confirmed})
+                known_empty = _dir("known-empty", "Waiting", parent_id)
+                client.tree[parent_id].append(known_empty)
+                client.tree[known_empty.file_id] = []
+                client.infos[known_empty.file_id] = known_empty
+                inspected = service.inspect("owner", "source")
+                preview = service.preview(
+                    "owner", inspected["inspection_id"], "86034", "tv"
+                )
+                self.assertEqual([plan["file_id"] for plan in preview["plans"]], ["episode-1"])
+                self.assertEqual(
+                    {item["file_id"] for item in preview["companion_plans"]},
+                    {"subtitle-1", "metadata-1"},
+                )
+                late = [
+                    _file("late-video", "Arifureta Shokugyou de Sekai Saikyou - 03.mkv", parent_id),
+                    _file("late-subtitle", f"{stem}.en.srt", parent_id, size=1024),
+                    _file("late-artwork", f"{stem}.jpg", parent_id, size=1024),
+                    _dir("late-dir", "Season 2", parent_id),
+                    _dir("late-empty", "Empty", parent_id),
+                ]
+                late_child = _file(
+                    "late-child", "Arifureta Shokugyou de Sekai Saikyou - 04.mkv", "late-dir"
+                )
+                late_in_empty = _file("late-in-empty", "New.Upload.mkv", "known-empty")
+                plan_signature = service._plan_signature
+
+                def add_after_validation(*args):
+                    signature = plan_signature(*args)
+                    # 快照/目标已复核、签名已计算；模拟真实执行扫描前的并发上传。
+                    client.tree[parent_id].extend(late)
+                    client.infos.update({item.file_id: item for item in [*late, late_child, late_in_empty]})
+                    client.tree["late-dir"] = [late_child]
+                    client.tree["late-empty"] = []
+                    client.tree["known-empty"] = [late_in_empty]
+                    return signature
+
+                with patch.object(
+                    service, "_plan_signature", side_effect=add_after_validation
+                ) as boundary, patch.object(client, "list_dir", wraps=client.list_dir) as listings:
+                    result = service.execute_preview("owner", preview["preview_id"])
+
+                boundary.assert_called_once()
+                for item in [*late, late_child, late_in_empty, known_empty]:
+                    self.assertIn(item.file_id, client.infos)
+                    current = client.infos[item.file_id]
+                    self.assertEqual(current.parent_id, item.parent_id, "未预览成员不得被移动")
+                    self.assertEqual(current.name, item.name, "未预览成员不得被改名")
+                for item in confirmed:
+                    self.assertNotEqual(client.infos[item.file_id].parent_id, parent_id)
+                self.assertEqual(result["stats"]["total"], 1)
+                self.assertEqual(result["stats"]["moved"], 1)
+                self.assertEqual(result["stats"]["subtitle_moved"], 1)
+                # 既有 metadata_moved 计数包含字幕和 NFO 两个伴随文件。
+                self.assertEqual(result["stats"]["metadata_moved"], 2)
+                self.assertEqual(result["stats"]["failed"], 0)
+                expected_groups = 1 if nested else 2
+                self.assertEqual(len(result["stats"]["group_results"]), expected_groups)
+                self.assertEqual(result["stats"]["group_progress"]["total"], expected_groups)
+                self.assertEqual(result["stats"]["source_groups_total"], expected_groups)
+                self.assertEqual(result["stats"]["source_groups_completed"], expected_groups)
+                self.assertIn("source", client.infos)
+                self.assertIn(parent_id, client.infos)
+                self.assertFalse(client.deleted)
+                self.assertNotIn("late-dir", [call.args[0] for call in listings.call_args_list])
+                self.assertNotIn("late-empty", [call.args[0] for call in listings.call_args_list])
+                self.assertEqual(
+                    {
+                        str(item["file_id"])
+                        for log_id in result["log_ids"]
+                        for item in db.list_organize_log_items(log_id)
+                    },
+                    {item.file_id for item in confirmed},
+                )
 
     def test_multi_season_subdirectories_preview_duplicate_episode_names_safely(self):
         from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
@@ -3007,47 +3127,6 @@ class SingleEpisodeOverrideTests(IsolatedDatabaseTestCase):
 
         service.execute_preview("owner", preview["preview_id"])
         self.assertIn("S00E03", client.infos["episode-3"].name)
-
-class ScopedGuangYaClientTests(unittest.TestCase):
-    def test_source_parent_is_filtered_only_when_source_scan_is_armed(self):
-        from app.modules.directory_scrape import ScopedGuangYaClient
-
-        selected = _file("selected", "Selected.mkv", "source")
-        other = _file("other", "Other.mkv", "source")
-        archived = _file("archived", "Archived.mkv", "archive")
-        client = _TreeClient(
-            {"source": [selected, other], "archive": [archived]},
-            {
-                "source": _dir("source", "下载目录"),
-                "archive": _dir("archive", "媒体库"),
-                "selected": selected,
-                "other": other,
-                "archived": archived,
-            },
-        )
-
-        scoped = ScopedGuangYaClient(client, "source", {"selected"})
-
-        scoped.begin_source_scan()
-        self.assertEqual(
-            [item.file_id for item in scoped.list_dir("source")],
-            ["selected"],
-        )
-        self.assertEqual(
-            [item.file_id for item in scoped.list_dir("source")],
-            ["selected", "other"],
-        )
-        scoped.begin_source_scan()
-        self.assertEqual(
-            [item.file_id for item in scoped.list_dir("source")],
-            ["selected"],
-        )
-        self.assertEqual(
-            [item.file_id for item in scoped.list_dir("archive")],
-            ["archived"],
-        )
-        self.assertIs(scoped.file_info("other"), other)
-
 
 class _RouteService:
     def __init__(self):

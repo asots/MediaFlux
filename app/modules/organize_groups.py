@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from app.logger import get_logger
+from app.modules.organize_scan import filter_source_entries
 
 logger = get_logger("app.modules.organize")
 
@@ -317,6 +318,7 @@ def enumerate_group_tasks(
     trigger: str = "manual",
     nsfw_enabled: bool = False,
     cancelled: Callable[[], bool] | None = None,
+    source_member_ids: frozenset[str] | None = None,
 ) -> GroupEnumeration:
     """只列举根目录直属媒体与第一层媒体目录，不触发识别或探测。
 
@@ -340,7 +342,7 @@ def enumerate_group_tasks(
         pass
 
     try:
-        entries = client.list_dir(source_dir_id)
+        entries = filter_source_entries(client.list_dir(source_dir_id), source_member_ids)
     except Exception as exc:
         logger.error(
             "媒体组枚举失败 source=%s type=%s", source_dir_id, type(exc).__name__

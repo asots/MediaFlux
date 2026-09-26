@@ -117,7 +117,7 @@ class OrganizeContext:
     automatic: bool = False
     # 组级流水线的实时进度回调；只用于观测，异常不得影响整理结果。
     group_progress: Callable[[dict], None] | None = None
-    # 选择整源快照规划；预览、max_files 和受限目录来源不能逐组重新枚举。
+    # 显式选择整源快照规划；预览和 max_files 保持整源语义。
     group_pipeline: bool = True
     # 单次调用的审计归属键；用于精确回读本轮日志，避免并发任务污染。
     operation_token: str = ""
@@ -145,6 +145,8 @@ class OrganizeContext:
 
     # 服务端冻结的父生命周期/收件范围，必须早于 probe 入队。
     notification_context: dict | None = None
+    # None 保留自动整理实时发现语义；空集合表示不接纳任何来源成员。
+    source_member_ids: frozenset[str] | None = None
 
     @property
     def probe_cache_only(self) -> bool:

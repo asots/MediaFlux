@@ -26,6 +26,15 @@ DEFAULT_TRAVERSAL_MAX_DIRS = 50_000
 DEFAULT_TRAVERSAL_MAX_ENTRIES = 250_000
 
 
+def filter_source_entries(
+    entries: list[GuangYaFile], source_member_ids: frozenset[str] | None,
+) -> list[GuangYaFile]:
+    """只约束来源发现，绝不改变真实 client 的目标/写前/清理回读。"""
+    if source_member_ids is None:
+        return entries
+    return [item for item in entries if str(item.file_id) in source_member_ids]
+
+
 @dataclass(frozen=True)
 class ScanRestriction:
     """把一次扫描限制在单个媒体组子树内。
@@ -269,6 +278,7 @@ class OrganizerScanner:
             stats["scan_list_dir_calls"] += 1
             files = self.client.list_dir(dir_id)
             accumulator.traversal.consume_entries(len(files))
+            files = filter_source_entries(files, context.source_member_ids)
         except TraversalLimitExceeded:
             raise
         except Exception as exc:

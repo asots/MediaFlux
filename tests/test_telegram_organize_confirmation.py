@@ -1102,7 +1102,6 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
             tmdb_id="105556", title="不要欺负我，长瀞同学", year="2021",
             media_type="tv", confidence=1.0, need_confirm=False,
         )
-        fake_scoped = SimpleNamespace(begin_source_scan=lambda: None)
 
         class FailingWriteOrganizer:
             def _validate_target_outside_source(self, *_args):
@@ -1126,9 +1125,6 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
         ), patch(
             "app.modules.organize_confirmations._resolve_guangya_confirmation_candidate",
             return_value=(fake_scraper, fake_match, {"id": 105556}, "tmdb"),
-        ), patch(
-            "app.modules.organize_confirmations.ScopedGuangYaClient",
-            return_value=fake_scoped,
         ), patch(
             "app.modules.organize_confirmations.FixedMatchScraper",
             return_value=SimpleNamespace(),
@@ -1442,6 +1438,8 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
 
             def organize(self, *_args, **kwargs):
                 calls.append(("organize", kwargs["dry_run"]))
+                assert kwargs["source_member_ids"] == frozenset({"file-4"})
+                assert kwargs["group_pipeline"] is False
                 plans = [SimpleNamespace(file_id="file-4")]
                 return plans, ({"moved": 1} if not kwargs["dry_run"] else {})
 
@@ -1465,7 +1463,6 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
             match_from_tmdb=lambda *_args: fake_match,
             confirm=lambda *args, **kwargs: confirmation_calls.append((args, kwargs)),
         )
-        fake_scoped = SimpleNamespace(begin_source_scan=lambda: calls.append("scan"))
         with patch(
             "app.modules.organize_tasks.get_organize_manager", return_value=manager
         ):
@@ -1480,9 +1477,6 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
         ), patch(
             "app.modules.organize_confirmations.TMDBScraper",
             return_value=fake_scraper,
-        ), patch(
-            "app.modules.organize_confirmations.ScopedGuangYaClient",
-            return_value=fake_scoped,
         ), patch(
             "app.modules.organize_confirmations.FixedMatchScraper",
             return_value=SimpleNamespace(),
@@ -1550,7 +1544,6 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
                     "confirmations": ["文件集号超出 TMDB 记录范围"],
                 }
 
-        fake_scoped = SimpleNamespace(begin_source_scan=lambda: None)
         published = []
         with patch(
             "app.modules.organize_confirmations.OrganizeRules.from_config",
@@ -1561,9 +1554,6 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
         ), patch(
             "app.modules.organize_confirmations._resolve_guangya_confirmation_candidate",
             return_value=(fake_scraper, fake_match, {"id": 105556}, "tmdb"),
-        ), patch(
-            "app.modules.organize_confirmations.ScopedGuangYaClient",
-            return_value=fake_scoped,
         ), patch(
             "app.modules.organize_confirmations.FixedMatchScraper",
             return_value=SimpleNamespace(),

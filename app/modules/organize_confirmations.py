@@ -19,7 +19,7 @@ from app import database as db
 from app.clients.guangya import GuangYaClient, close_guangya_client
 from app.config import get
 from app.logger import get_logger
-from app.modules.directory_scrape import FixedMatchScraper, ScopedGuangYaClient
+from app.modules.directory_scrape import FixedMatchScraper
 from app.modules.directory_scrape_errors import DirectoryScrapeConflictError
 from app.modules.nsfw import (
     MetaTubeError,
@@ -2520,11 +2520,10 @@ def _execute_guangya_confirmation(
             str(item.get("file_id") or "") for item in (*files, *companions)
             if str(item.get("file_id") or "")
         }
-        scoped = ScopedGuangYaClient(client, parent_id, allowed_ids)
         # 自动清洗不授权清理源空目录或旧版本，规则快照验证仍针对原配置。
         execution_rules = replace(current_rules, clean_empty=False) if write_boundary else current_rules
         organizer = Organizer(
-            client=scoped,
+            client=client,
             **({"before_plan_write": write_boundary} if write_boundary is not None else {}),
             scraper=FixedMatchScraper(
                 scraper,
@@ -2537,7 +2536,6 @@ def _execute_guangya_confirmation(
             ),
         )
         organizer._validate_target_outside_source(parent_id, current_rules.target_dir_id)
-        scoped.begin_source_scan()
         plans, _preview_stats = organizer.organize(
             parent_id,
             execution_rules,
@@ -2545,6 +2543,8 @@ def _execute_guangya_confirmation(
             post_actions=False,
             source_name=str(payload.get("directory") or payload.get("source_name") or ""),
             require_complete_scan=True,
+            source_member_ids=frozenset(allowed_ids),
+            group_pipeline=False,
             # 预览在线探测并预热缓存，保证随后只读缓存的执行阶段命名一致。
             media_probe_cache_only=False,
         )
@@ -2562,7 +2562,6 @@ def _execute_guangya_confirmation(
         if write_boundary is not None:
             for plan in plans:
                 write_boundary(plan, "prepare")
-        scoped.begin_source_scan()
         from app.modules.organize_probe_notifications import build_notification_context
         notification_context = build_notification_context(
             confirmation_token=token,
@@ -2585,6 +2584,8 @@ def _execute_guangya_confirmation(
             post_actions=False,
             source_name=str(payload.get("directory") or payload.get("source_name") or ""),
             require_complete_scan=True,
+            source_member_ids=frozenset(allowed_ids),
+            group_pipeline=False,
             # 执行阶段只读缓存，保持与确认预览一致；缓存由预览阶段预热。
             media_probe_cache_only=True,
             operation_token=operation_token,

@@ -471,7 +471,7 @@ class _PipelineHarness:
         self.execute_hook = None
         self.plan_hook = None
 
-    def _build_plans(self, scan_result, context, rules, stats, performance_before):
+    def _build_plans(self, scan_result, context, rules, stats, performance_before, **_kwargs):
         group = ""
         plans = []
         for item in scan_result.scanned_videos:
@@ -924,18 +924,87 @@ class GroupPipelineRollbackTests(unittest.TestCase):
 
         self.assertFalse(harness.organizer._group_pipeline_enabled(context))
 
-    def test_scoped_client_disables_group_pipeline(self):
+    def test_frozen_members_keep_group_pipeline(self):
+        harness = _PipelineHarness(_sample_tree())
+        frozen = frozenset({"root-video", "group-a", "nested-a", "a-video", "group-b", "b-video"})
+
+        plans, stats = harness.run(source_member_ids=frozen)
+
+        self.assertEqual({plan.file_id for plan in plans}, {"root-video", "a-video", "b-video"})
+        self.assertEqual(len(stats["group_results"]), 3)
+        self.assertEqual(stats["group_progress"]["total"], 3)
+        self.assertEqual(harness.events.count("plan:__root__"), 1)
+        self.assertEqual(len([event for event in harness.events if event.startswith("plan:")]), 3)
+
+    def test_frozen_members_reach_parallel_planners_without_disabling_workers(self):
+        from app.modules.scraper import TMDBScraper
+
         client = _sample_tree()
-        client.supports_group_pipeline = False
+        client.tree["nested-a"].append(_video("late", "A.S01E02.mkv", "nested-a"))
         harness = _PipelineHarness(client)
-        batches: list[int] = []
-        harness.execute_hook = lambda _group, stats: batches.append(stats["moved"])
+        scraper = TMDBScraper("offline-fixture")
+        self.addCleanup(scraper.close)
+        harness.organizer.scraper = scraper
+        frozen = frozenset({"group-a", "nested-a", "a-video", "group-b", "b-video"})
+        barrier = threading.Barrier(2)
+        harness.plan_hook = lambda *_args: barrier.wait(timeout=5)
+        source_scan = Organizer._scan_source
+        contexts = []
 
-        _plans, stats = harness.run()
+        def scan(instance, context, *args, **kwargs):
+            contexts.append((context.source_member_ids, threading.get_ident()))
+            return source_scan(instance, context, *args, **kwargs)
 
-        # 一次性作用域扫描窗口不得被逐组枚举提前消耗。
-        self.assertEqual(batches, [3])
-        self.assertNotIn("group_results", stats)
+        with patch.object(Organizer, "_scan_source", scan), patch.object(
+            Organizer, "_finalize_planning_result",
+            lambda _self, _scan, planning, *_args, **_kwargs: planning,
+        ):
+            plans, stats = harness.run(
+                source_member_ids=frozen, planning_workers=2, media_probe_cache_only=True,
+            )
+
+        self.assertEqual({plan.file_id for plan in plans}, {"a-video", "b-video"})
+        self.assertEqual([scope for scope, _thread in contexts], [frozen, frozen])
+        self.assertEqual(len({thread for _scope, thread in contexts}), 2)
+        self.assertEqual(stats["planning_workers"], 2)
+        self.assertEqual(len(stats["group_results"]), 2)
+        self.assertEqual(stats["group_progress"]["total"], 2)
+        self.assertEqual(stats["moved"], 2)
+        self.assertIs(harness.organizer.client, client)
+        self.assertEqual(len(client.list_dir("nested-a")), 2)
+
+    def test_empty_frozen_members_are_not_unrestricted(self):
+        harness = _PipelineHarness(_sample_tree())
+
+        plans, stats = harness.run(source_member_ids=frozenset())
+
+        self.assertEqual(plans, [])
+        self.assertEqual(stats["moved"], 0)
+        self.assertNotIn("group-a", harness.client.calls)
+        self.assertNotIn("group-b", harness.client.calls)
+
+    def test_group_rescan_excludes_members_added_after_enumeration(self):
+        client = _sample_tree()
+        harness = _PipelineHarness(client)
+        frozen = frozenset({"root-video", "group-a", "nested-a", "a-video"})
+
+        def after_root_plan(group, _stats):
+            if group == GROUP_ROOT_PATH:
+                client.tree["nested-a"].append(_video("late-video", "A.S01E02.mkv", "nested-a"))
+                client.tree["group-a"].append(_dir("late-dir", "Season 2", "group-a"))
+                client.tree["late-dir"] = [_video("late-child", "A.S02E01.mkv", "late-dir")]
+
+        harness.plan_hook = after_root_plan
+        # 任意其它读取均保持 live；成员约束与调用次数无关。
+        self.assertEqual(len(client.list_dir("root")), 3)
+        self.assertEqual(len(client.list_dir("root")), 3)
+        plans, stats = harness.run(source_member_ids=frozen)
+        self.assertEqual({plan.file_id for plan in plans}, {"root-video", "a-video"})
+        self.assertEqual(len(stats["group_results"]), 2)
+        self.assertEqual(stats["moved"], 2)
+        self.assertNotIn("group-b", client.calls)
+        self.assertNotIn("late-dir", client.calls)
+        self.assertEqual(len(client.list_dir("nested-a")), 2)
 
 
 if __name__ == "__main__":

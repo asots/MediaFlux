@@ -2577,7 +2577,8 @@ class Organizer:
                  media_probe_workers: int | None = None,
                  planning_executor: Executor | None = None,
                  execution_lock: object | None = None,
-                 task_runtime: OrganizeTaskRuntime | None = None) -> tuple[list, dict]:
+                 task_runtime: OrganizeTaskRuntime | None = None,
+                 source_member_ids: frozenset[str] | None = None) -> tuple[list, dict]:
         """兼容入口；内部阶段统一通过 :class:`OrganizeContext` 传参。"""
         from app.modules.organize_probe_notifications import (
             apply_notification_context, build_notification_context, normalize_notification_context,
@@ -2618,6 +2619,10 @@ class Organizer:
             planning_executor=planning_executor,
             execution_lock=execution_lock,
             task_runtime=task_runtime,
+            source_member_ids=(
+                None if source_member_ids is None
+                else frozenset(str(item) for item in source_member_ids)
+            ),
         )
         plans, stats = self._organize(context, rules)
         apply_notification_context(stats, frozen_notification)
@@ -2627,12 +2632,9 @@ class Organizer:
         """预览仍走整源路径：跨组统一冲突仲裁对只读预演更有价值。
 
         ``max_files`` 是整源级预览截断语义（负数立即停止、正数拒绝写入），
-        与逐组枚举不兼容；声明 ``supports_group_pipeline = False`` 的作用域
-        客户端只允许一次自顶向下扫描，同样必须继续沿用旧路径。
+        与逐组枚举不兼容；冻结成员由枚举和扫描共同约束，不关闭组级流水线。
         """
         if context.dry_run or not context.group_pipeline or context.max_files:
-            return False
-        if not bool(getattr(self.client, "supports_group_pipeline", True)):
             return False
         return get_bool("ORGANIZE_GROUP_PIPELINE", True)
 
@@ -3230,6 +3232,7 @@ class Organizer:
             trigger="automatic" if context.automatic else "manual",
             nsfw_enabled=rules.nsfw_enabled,
             cancelled=context.cancelled,
+            source_member_ids=context.source_member_ids,
         )
         if not enumeration.complete:
             # 部分列表不得冒充完整枚举：漏掉的媒体组会让后续清理误判来源已空。

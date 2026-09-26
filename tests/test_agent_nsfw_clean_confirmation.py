@@ -201,6 +201,8 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
 
             def organize(self, _parent, rules, **kwargs):
                 calls.append((kwargs["dry_run"], rules.clean_empty))
+                assert kwargs["source_member_ids"] == frozenset({"file-0"})
+                assert kwargs["group_pipeline"] is False
                 if not kwargs["dry_run"]:
                     if revoke:
                         outer.enabled = False
@@ -221,11 +223,6 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
                 confirmations,
                 "GuangYaClient",
                 return_value=SimpleNamespace(file_info=lambda _: remote),
-            ),
-            patch.object(
-                confirmations,
-                "ScopedGuangYaClient",
-                return_value=SimpleNamespace(begin_source_scan=lambda: None),
             ),
             patch.object(
                 confirmations,
