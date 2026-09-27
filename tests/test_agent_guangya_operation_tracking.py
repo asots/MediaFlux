@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from contextlib import contextmanager
 import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from app import database as db
 from app.agent.domain_catalog.cloud_runtime import guangya_organize_status
 from app.agent.effect_completion import (
     _CompletionTracker,
@@ -14,6 +17,14 @@ from app.agent.effect_completion import (
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
 from app.agent.models import RiskLevel, ToolContext, ToolReference, ToolResult, ToolSpec
+
+from app.modules.local_media_models import LOCAL_BUSY_TASK_STATUSES
+from app.modules.local_media_scan_runs import (
+    finish_local_media_scan_report,
+    record_local_media_scan,
+    resolve_local_media_scan,
+)
+from tests.support import isolated_test_database
 
 _OPERATION_REF = "GY-0000-0000-0000-0000-0000-0000-0000-0001"
 
@@ -862,3 +873,204 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('2 项执行审计未完整保存', result.error)
         success = _project_guangya_status({'status': 'completed', 'stats': {}}, overview={})
         self.assertEqual(success.error, '')
+
+
+class LocalMediaScanCompletionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        database = isolated_test_database("local-scan-completion.db")
+        database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.source_id = db.create_local_media_source(
+            name="扫描测试来源", qb_profile="", qb_path_prefix="",
+            local_root="/private/scan", owner="admin",
+        )
+        self.sequence = 0
+        self.context = ToolContext(owner="webk:v1:scan-test")
+
+    def _task(self, status="completed", action="move", *, warning=""):
+        self.sequence += 1
+        path = f"/private/scan/{self.sequence}.mkv"
+        task_id = db.create_local_media_task(
+            self.source_id, "", path, owner="admin", trigger="scan"
+        )
+        db.update_local_media_task(
+            task_id, status=status, warning=warning, error="private-error-token"
+        )
+        if action is not None:
+            db.add_local_media_task_item(
+                task_id, path, f"/private/library/{self.sequence}.mkv",
+                role="video", action=action,
+            )
+        return task_id
+
+    def _accepted(self, task_ids):
+        scan_ref = record_local_media_scan({
+            "task_ids": task_ids, "queued_count": len(task_ids),
+            "candidate_count": len(task_ids), "scanned_sources": 1,
+        })
+        result = _tracked_accepted("local_media_scan", scan_ref=scan_ref)
+        result.data.update(scan_ref=scan_ref, queued_tasks=len(task_ids))
+        return result
+
+    async def _wait(self, accepted, **kwargs):
+        return await wait_for_effect_completion(
+            accepted, tool="local_media.scan_sources", context=self.context, **kwargs
+        )
+
+    async def test_real_batch_over_twenty_uses_frozen_members_and_live_file_facts(self):
+        members = [self._task() for _ in range(24)]
+        members.append(self._task("planned", "skip"))
+        accepted = self._accepted(members)
+        scan_ref = accepted.data["scan_ref"]
+        # 已发送通知的旧快照不是本轮等待的文件事实。
+        finish_local_media_scan_report(scan_ref, {"task_outcomes": [
+            {"task_id": members[0], "status": "completed", "archived_video_count": 999}
+        ]})
+        unrelated = self._task("failed")
+        self._accepted([unrelated])  # 最近扫描属于另一批，绝不能拿来替代。
+        progress = AsyncMock()
+        statements = []
+        get_conn = db.get_conn
+
+        @contextmanager
+        def traced_conn():
+            with get_conn() as conn:
+                conn.set_trace_callback(statements.append)
+                yield conn
+
+        async def worker_finishes(_seconds):
+            db.update_local_media_task(members[-1], status="completed")
+            # 即使回执被后续改写，等待器也只追踪第一次解析冻结的成员。
+            with db.get_conn() as conn:
+                row = conn.execute("SELECT result FROM task_runs WHERE id=?", (int(scan_ref[2:]),)).fetchone()
+                payload = json.loads(row["result"])
+                payload["task_ids"].append(unrelated)
+                conn.execute("UPDATE task_runs SET result=? WHERE id=?", (json.dumps(payload), int(scan_ref[2:])))
+
+        with (
+            patch("app.database.get_conn", side_effect=traced_conn),
+            patch("app.modules.local_media_scan_runs.resolve_local_media_scan", wraps=resolve_local_media_scan) as resolve,
+            patch("app.agent.effect_completion.asyncio.sleep", new=AsyncMock(side_effect=worker_finishes)) as sleep,
+        ):
+            result = await self._wait(accepted, report_progress=progress)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "completed")
+        stats = result.data["stats"]
+        self.assertEqual((stats["total"], stats["completed"]), (25, 25))
+        self.assertEqual(stats["archived_video_count"], 24)
+        self.assertEqual(stats["skipped_video_count"], 1)
+        self.assertEqual(stats["unknown"], 0)
+        self.assertIn("归档 24 个视频", result.summary)
+        self.assertIn("冲突跳过 1 个视频", result.summary)
+        self.assertNotIn("private-", str(result.to_dict()))
+        self.assertNotIn("/private/", str(result.to_model_dict()))
+        self.assertNotIn("task_ids", str(result.to_model_dict()))
+        self.assertEqual([call.args[0]["status"] for call in progress.await_args_list], ["running", "completed"])
+        resolve.assert_called_once_with(scan_ref, owner="admin")
+        sleep.assert_awaited_once()
+        for table in ("local_media_tasks", "local_media_task_items"):
+            queries = [sql for sql in statements if sql.startswith(f"SELECT * FROM {table} WHERE owner=")]
+            self.assertEqual(len(queries), 2, "每轮应批量读一次，不按任务逐个查")
+
+    async def test_manual_and_failed_members_are_unsuccessful_terminal_after_busy_members_finish(self):
+        for status in ("requires_manual", "failed"):
+            with self.subTest(status=status):
+                member = self._task(status)
+                terminal = await self._wait(self._accepted([member]))
+                self.assertFalse(terminal.ok)
+                self.assertEqual(terminal.status, status)
+                skipped = await self._wait(self._accepted([member, self._task(action="skip")]))
+                self.assertEqual(skipped.status, status)
+                self.assertEqual(skipped.data["stats"]["archived_video_count"], 0)
+                busy = self._task("moving")
+                accepted = self._accepted([member, self._task(), busy])
+
+                async def finish(_seconds):
+                    db.update_local_media_task(busy, status="completed")
+
+                with patch("app.agent.effect_completion.asyncio.sleep", new=AsyncMock(side_effect=finish)) as sleep:
+                    result = await self._wait(accepted)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status, "partial")
+                self.assertEqual(result.data["stats"][status], 1)
+                self.assertEqual(result.data["stats"]["completed"], 2)
+                self.assertEqual(result.data["stats"]["archived_video_count"], 2)
+                self.assertIn("部分完成", result.summary)
+                self.assertFalse(result.data["background_job"]["timed_out"])
+                self.assertTrue(result.error)
+                sleep.assert_awaited_once()
+
+    async def test_every_busy_status_waits_and_timeout_never_claims_completion(self):
+        for status in sorted(LOCAL_BUSY_TASK_STATUSES):
+            with self.subTest(status=status):
+                accepted = self._accepted([self._task(status)])
+                accepted.model_data = {"accepted": True}
+                result = await self._wait(accepted, timeout_seconds=0)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status, "outcome_unknown")
+                self.assertEqual(result.data["background_job"]["last_status"], "running")
+                self.assertTrue(result.data["background_job"]["timed_out"])
+                self.assertEqual(result.data["stats"]["running"], 1)
+                self.assertEqual(result.data["stats"]["archived_video_count"], 0)
+                self.assertEqual(result.to_model_dict()["data"]["stats"], result.data["stats"])
+
+    async def test_missing_member_and_missing_file_evidence_cannot_be_completed(self):
+        for kind in ("missing_member", "no_items", "preview_only"):
+            with self.subTest(kind=kind):
+                task_id = self._task(
+                    action=None if kind == "no_items" else "move",
+                    warning="仅预览模式：未移动文件" if kind == "preview_only" else "",
+                )
+                members = [task_id, task_id + 100000] if kind == "missing_member" else [task_id]
+                result = await self._wait(self._accepted(members))
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status, "outcome_unknown")
+                self.assertEqual(result.data["stats"]["unknown"], 1)
+                self.assertEqual(result.data["stats"]["missing_tasks"], int(kind == "missing_member"))
+
+    async def test_all_conflicts_report_skips_not_archival(self):
+        result = await self._wait(self._accepted([self._task(action="skip") for _ in range(3)]))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.data["stats"]["archived_video_count"], 0)
+        self.assertEqual(result.data["stats"]["skipped_video_count"], 3)
+        self.assertIn("归档 0 个视频", result.summary)
+        self.assertIn("冲突跳过 3 个视频", result.summary)
+
+    async def test_unresolved_or_empty_receipts_never_fall_back_to_latest_scan(self):
+        self._accepted([self._task()])
+        empty_ref = self._accepted([]).data["scan_ref"]
+        foreign_ref = record_local_media_scan({"task_ids": []}, owner="other")
+        for scan_ref in ("", "LM-UNRECORDED", "invalid", "LM99999999", empty_ref, foreign_ref):
+            with self.subTest(scan_ref=scan_ref):
+                accepted = _tracked_accepted("local_media_scan", scan_ref=scan_ref)
+                with patch("app.modules.local_media_scan_runs.resolve_local_media_scan", wraps=resolve_local_media_scan) as resolve:
+                    result = await self._wait(accepted)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status, "outcome_unknown")
+                if not scan_ref:
+                    resolve.assert_not_called()
+                else:
+                    resolve.assert_called_once_with(scan_ref, owner="admin")
+
+    async def test_scan_uses_existing_kernel_completion_wait(self):
+        from app.agent.kernel.pipeline import ToolCallContext
+
+        accepted = self._accepted([self._task()])
+        tool = adapt_tool_spec(ToolSpec(
+            name="local_media.scan_sources", description="本地扫描", risk=RiskLevel.WRITE,
+            parameters={"type": "object", "properties": {}}, validator=lambda value: value,
+            requires_confirmation=True,
+            context_confirmation_preparer=lambda _args, _ctx: (ToolResult(True, "ready", "预检"), "snapshot"),
+            context_confirmed_handler=lambda _args, _snapshot, _ctx: accepted,
+        ))
+        state = InMemorySessionStateStore()
+        lease, _ = await state.begin_turn(owner="scan-owner", session_id="scan-session", request_id="scan-request")
+        context = ToolCallContext(
+            owner=lease.owner, session_id=lease.session_id, request_id=lease.request_id,
+            turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(),
+            report_progress=AsyncMock(), wait_for_completion=True,
+        )
+        result = await tool.verify({}, accepted, context)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.data["stats"]["archived_video_count"], 1)

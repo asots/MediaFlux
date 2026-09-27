@@ -11,7 +11,7 @@ from typing import Any
 from app import database as db
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolResult
-from app.agent.public_safety import sanitize_public_text
+from app.agent.public_safety import sanitize_resource_title
 from app.modules.local_media_scheduler import get_local_media_scheduler
 
 _OWNER = "admin"
@@ -45,7 +45,12 @@ def local_media_scan_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             )
         if value not in source_numbers:
             source_numbers.append(value)
-    query = sanitize_public_text(arguments.get("query"), limit=120)
+    raw_query = arguments.get("query", "")
+    if not isinstance(raw_query, str) or len(raw_query) > 120:
+        raise AgentToolError("query 必须是最多 120 字符的媒体名称，不是来源名称或路径")
+    query = sanitize_resource_title(raw_query, limit=120)
+    if raw_query.strip() and not query:
+        raise AgentToolError("媒体名称过滤条件无效，未执行扫描；请不要提供路径、链接或凭据")
     return {"source_numbers": source_numbers, "query": query}
 
 
@@ -199,6 +204,12 @@ def scan_local_media_sources_confirmed(
                 _now(),
             )
         ],
+        effect_metadata={
+            "completion": {
+                "kind": "local_media_scan",
+                "scan_ref": str(result.get("scan_ref") or ""),
+            }
+        } if queued else {},
         suggestions=(
             ["可继续查看本地媒体任务或待确认队列。"]
             if queued

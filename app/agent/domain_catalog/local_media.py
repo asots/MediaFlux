@@ -123,7 +123,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="local_media.scan_sources",
-            description="预检并确认后扫描全部或指定公开序号的已配置本地媒体来源，把发现的媒体加入整理队列；不接受任意路径。",
+            description="预检并确认后扫描全部或指定公开序号的已配置本地媒体来源，把发现的媒体加入整理队列。用 source_numbers 选择来源；query 只过滤媒体标题，不是来源名称，用户没有指定媒体标题时省略 query；不接受任意路径。",
             risk=RiskLevel.LOW_WRITE,
             parameters={
                 "type": "object",
@@ -133,7 +133,7 @@ def register_specs(
                         "items": {"type": "integer", "minimum": 1, "maximum": 10000},
                         "maxItems": 20,
                     },
-                    "query": {"type": "string", "maxLength": 120},
+                    "query": {"type": "string", "maxLength": 120, "description": "可选的媒体标题过滤词；不是来源名称或目录路径。扫描来源全部媒体时省略或传空字符串。"},
                 },
                 "additionalProperties": False,
             },
