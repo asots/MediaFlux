@@ -109,7 +109,7 @@ class KernelToolSpec:
     def model_definition(self) -> dict[str, Any]:
         description = self.description
         if self.effect is not ToolEffect.READ:
-            description += " 此操作只生成冻结预览，必须由用户确认后才会执行。"
+            description += " 调用本工具只准备确认卡，不执行写入，无需先征求生成卡片的许可；实际写入必须等用户确认。"
         return {
             "name": self.model_name,
             "description": description[:800],
