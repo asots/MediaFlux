@@ -314,7 +314,32 @@ class EffectLifecycleIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(invalidate.called, expected)
 
-    async def test_confirmed_effect_records_actual_owner_and_invalidates_runtime(
+    def test_only_actual_configuration_changes_invalidate_other_sessions(self):
+        lifecycle = MediaFluxEffectLifecycle()
+        with patch("app.agent.kernel.ports.mediaflux_effects.config.all_items", return_value={"MODE": "old"}):
+            fingerprint = lifecycle._configuration_fingerprint()
+        plan = EffectPlan(
+            plan_id="config-bound-job", owner="job-owner", session_id="session-1",
+            generation=1, tool_name="guangya.fs.change.execute",
+            effect=ToolEffect.DANGER, arguments={}, snapshot_fingerprint="snapshot",
+            preview={}, expires_at=0, metadata={"configuration_fingerprint": fingerprint},
+        )
+        for status, ok, data in (
+            ("completed", True, {}),
+            ("partial", False, {"background_job": {"status": "partial"}}),
+            ("outcome_unknown", False, {"background_job": {"status": "running"}}),
+        ):
+            for changed in (False, True):
+                with (
+                    self.subTest(status=status, changed=changed),
+                    patch("app.agent.kernel.ports.mediaflux_effects.config.all_items",
+                          return_value={"MODE": "new" if changed else "old"}),
+                    patch("app.agent.kernel.ports.mediaflux_effects.invalidate_agent_runtime_generation") as invalidate,
+                ):
+                    lifecycle.completed(plan=plan, value=ToolResult(ok, status, "结果", data=data), elapsed_ms=1)
+                    self.assertEqual(invalidate.called, changed)
+
+    async def test_confirmed_effect_records_actual_owner_without_invalidating_other_sessions(
         self,
     ) -> None:
         owner = "kernel-history-owner"
@@ -378,7 +403,7 @@ class EffectLifecycleIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 preview.effect_plan.plan_id,
                 context=context,
             )
-            self.assertEqual(current_agent_runtime_generation(), before + 1)
+            self.assertEqual(current_agent_runtime_generation(), before)
 
         rows = db.list_agent_action_history(
             owner_digest=action_history_owner_digest(owner),

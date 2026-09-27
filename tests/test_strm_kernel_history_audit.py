@@ -144,7 +144,7 @@ class STRMKernelHistoryAuditTests(unittest.IsolatedAsyncioTestCase):
             rebuilt, state = self.pipeline()
             await rebuilt.execute_confirmed(plan_id, context=context)
             trigger.assert_called_once_with("manual", selected_source_ids=["source-a"])
-            invalidate.assert_called_once()
+            invalidate.assert_not_called()
             self.assertFalse(
                 (
                     await state.load(owner=self.owner, session_id="history")

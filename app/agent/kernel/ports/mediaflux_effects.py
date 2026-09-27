@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from app import config
 from app.agent.action_history import (
     record_confirmation_error,
     record_confirmation_interrupted,
@@ -36,6 +39,12 @@ class MediaFluxEffectLifecycle:
         self, *, missing_media_runtime: MissingMediaWorkflowRuntime | None = None
     ) -> None:
         self.missing_media_runtime = missing_media_runtime
+
+    @staticmethod
+    def _configuration_fingerprint() -> str:
+        # 只保存摘要，不把配置值写进计划；文件操作不能打断其他会话的只读查询。
+        payload = json.dumps(config.all_items(), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _risk(plan: EffectPlan) -> RiskLevel:
@@ -72,6 +81,7 @@ class MediaFluxEffectLifecycle:
     ) -> PreparedEffect:
         runtime = self.missing_media_runtime
         metadata = dict(prepared.metadata)
+        metadata["configuration_fingerprint"] = self._configuration_fingerprint()
         inverse = compensation_candidate(tool.name, dict(arguments), dict(prepared.preview))
         if inverse:
             metadata["compensation"] = inverse
@@ -128,8 +138,11 @@ class MediaFluxEffectLifecycle:
             confirmation_id=plan.plan_id,
             owner_generation=plan.owner_generation,
         )
-        # 已受理后台作业即使只完成部分写入，也不能继续复用写入前的运行快照。
-        if value.ok or (isinstance(value.data, dict) and value.data.get("background_job")):
+        # 配置变化才使全局运行快照失效；普通写入由各领域的对象/版本快照防重放。
+        # 历史确认卡没有配置摘要时仍保守失效，不能跳过既有保护。
+        if (value.ok or (isinstance(value.data, dict) and value.data.get("background_job"))) and (
+            plan.metadata.get("configuration_fingerprint") != self._configuration_fingerprint()
+        ):
             invalidate_agent_runtime_generation()
 
     def failed(self, *, plan: EffectPlan, code: str, elapsed_ms: int) -> None:
