@@ -782,6 +782,7 @@ def build_fs_change_plan(
     cache: dict[str, dict[str, GuangYaFile]] = {}
     frozen: list[dict[str, Any]] = []
     seen_objects: set[str] = set()
+    unchanged = 0
     seen_creates: set[tuple[str, str]] = set()
     pending_targets: dict[str, dict[str, Any]] = {}
     planned_target_names: dict[str, set[str]] = {}
@@ -828,9 +829,6 @@ def build_fs_change_plan(
         handle = str(raw.get("object_ref") or "").strip().upper()
         if not valid_object_handle(handle) or handle not in entries:
             raise GuangYaFSChangeError("计划包含当前观察中不存在的对象引用")
-        if handle in seen_objects:
-            raise GuangYaFSChangeError("计划不能重复操作同一个对象")
-        seen_objects.add(handle)
         observed = entries[handle]
         parent_id = str(observed.get("parent_id") or "0")
         current = _list_map(client, parent_id, cache).get(
@@ -852,7 +850,8 @@ def build_fs_change_plan(
         if op in {"rename", "relocate"}:
             new_name = _validate_name(raw.get("new_name"))
             if op == "rename" and new_name == current.name:
-                raise GuangYaFSChangeError("改名操作没有产生变化")
+                unchanged += 1
+                continue
             if not current.is_dir:
                 old_suffix = Path(current.name).suffix.casefold()
                 new_suffix = Path(new_name).suffix.casefold()
@@ -867,11 +866,13 @@ def build_fs_change_plan(
             if pending_target is None:
                 target_id, target_snapshot = _resolve_directory(client, target_path)
                 if target_id == parent_id:
-                    raise GuangYaFSChangeError(
-                        "复制目标与当前目录相同"
-                        if op == "copy"
-                        else "移动目标与当前目录相同"
-                    )
+                    if op == "copy":
+                        raise GuangYaFSChangeError("复制目标与当前目录相同")
+                    if op == "move" or base.get("new_name") == current.name:
+                        unchanged += 1
+                        continue
+                    # 已在目标目录的 relocate 只需改名，不能再次提交原地移动。
+                    base["op"] = "rename"
             else:
                 target_id, target_snapshot = "", None
             source_path = str(base["source_path"])
@@ -899,6 +900,9 @@ def build_fs_change_plan(
             )
             if pending_target is not None:
                 base["target_create_path"] = target_path
+        if handle in seen_objects:
+            raise GuangYaFSChangeError("计划不能重复操作同一个对象")
+        seen_objects.add(handle)
         frozen.append(base)
 
     structural_moves = [
@@ -910,7 +914,7 @@ def build_fs_change_plan(
     # 保留签名计划已有的 rename_dependencies 字段，统一表示前置对象操作，
     # 不引入新旧两套依赖读取路径；旧计划仍按原有子文件改名依赖执行。
     by_id = {str(item["source"]["file_id"]): item for item in frozen if "source" in item}
-    if len(by_id) != object_count:
+    if len(by_id) != len(seen_objects):
         raise GuangYaFSChangeError("计划不能通过不同引用重复操作同一个对象")
     for item in frozen:
         source_path = str(item.get("source_path") or "")
@@ -1003,6 +1007,10 @@ def build_fs_change_plan(
         else:
             samples.append(f"新建目录：{item['name']}")
 
+    stats = {"total": len(frozen), "unchanged": unchanged, **counts}
+    if not frozen:
+        return {"status": "no_changes", "operations": [], "stats": stats,
+                "samples": [], "trigger_strm": False}
     current = time.time()
     plan = {
         "version": _PLAN_VERSION,
@@ -1016,7 +1024,7 @@ def build_fs_change_plan(
         "trigger_strm": bool(trigger_strm),
         "status": "previewed",
         "operations": frozen,
-        "stats": {"total": len(frozen), **counts},
+        "stats": stats,
         "samples": samples,
         "execution": {},
     }

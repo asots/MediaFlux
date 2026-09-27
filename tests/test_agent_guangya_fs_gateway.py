@@ -1879,3 +1879,97 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             change_actions.guangya_fs_change_preview_arguments({'operations': [
                 {'op': 'move', 'object_ref': 'OBJ' + 'A' * 24, 'new_name': 'wrong'}
             ]})
+
+    def test_noop_rename_does_not_block_move_of_same_file_in_either_order(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                client = FakeGatewayClient()
+                result = self._query(client)
+                entry = next(e for e in result.data['entries'] if e['object_name'] == 'Move.mp4')
+                observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+                operations = [{'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Move.mp4'},
+                              {'op': 'move', 'object_ref': entry['object_ref'], 'target_path': '/target'}]
+                if reverse:
+                    operations.reverse()
+                plan = guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, operations=operations, trigger_strm=False)
+                self.assertEqual(plan['stats']['total'], 1)
+                self.assertEqual(plan['stats']['unchanged'], 1)
+                self.assertEqual(plan['operations'][0]['op'], 'move')
+                guangya_fs_change.confirm_fs_change_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
+                outcome = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                self.assertFalse(outcome['partial'])
+                self.assertEqual(outcome['stats']['moved'], 1)
+                self.assertEqual(outcome['stats']['renamed'], 0)
+                self.assertEqual(client.file_info('move').parent_id, 'target')
+
+    def test_same_destination_relocate_only_renames_and_noop_move_is_omitted(self):
+        client = FakeGatewayClient()
+        result = self._query(client)
+        entries = {e['object_name']: e['object_ref'] for e in result.data['entries']}
+        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+        plan = guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, trigger_strm=False, operations=[
+            {'op': 'move', 'object_ref': entries['Move.mp4'], 'target_path': '/source'},
+            {'op': 'relocate', 'object_ref': entries['广告-ABC.mp4'], 'target_path': '/source', 'new_name': 'ABC.mp4'},
+        ])
+        self.assertEqual(plan['stats']['unchanged'], 1)
+        self.assertEqual(plan['stats']['rename'], 1)
+        self.assertEqual(plan['stats']['total'], 1)
+        guangya_fs_change.confirm_fs_change_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
+        with mock.patch.object(client, 'move', side_effect=AssertionError('原地变更不得调用移动')):
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertFalse(result['partial'])
+        self.assertEqual(client.file_info('rename').name, 'ABC.mp4')
+        self.assertEqual(client.file_info('rename').parent_id, 'source')
+
+    def test_all_noops_clear_old_preview_and_never_create_empty_confirmation(self):
+        from app.agent.session_context import SQLiteAgentSessionContextRepository
+        for persisted in (False, True):
+            with self.subTest(persisted=persisted):
+                change_actions.reset_guangya_fs_change_context_for_tests()
+                if persisted:
+                    change_actions.configure_guangya_fs_change_context(SQLiteAgentSessionContextRepository(secret_provider=lambda: 'test-secret'))
+                client = FakeGatewayClient()
+                result = self._query(client)
+                entry = next(e for e in result.data['entries'] if e['object_name'] == 'Move.mp4')
+                context = ToolContext(owner='owner', session_id='session')
+                args = {'observation_ref': result.data['observation_ref'], 'operations': [
+                    {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Different.mp4'}], 'trigger_strm': False}
+                with mock.patch.object(change_actions, 'GuangYaClient', return_value=client):
+                    previous = change_actions.preview_guangya_fs_change(change_actions.guangya_fs_change_preview_arguments(args), context)
+                    old_plan = change_actions._flow('owner').plan_id
+                    self.assertEqual(previous.status, 'ready')
+                    before = set(self.plan_dir.glob('*.json'))
+                    args['operations'] = [
+                        {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Move.mp4'},
+                        {'op': 'move', 'object_ref': entry['object_ref'], 'target_path': '/source'},
+                        {'op': 'relocate', 'object_ref': entry['object_ref'], 'target_path': '/source', 'new_name': 'Move.mp4'},
+                    ]
+                    noops = change_actions.preview_guangya_fs_change(change_actions.guangya_fs_change_preview_arguments(args), context)
+                    self.assertEqual(noops.status, 'no_changes')
+                    self.assertEqual(noops.data['total'], 0)
+                    self.assertEqual(noops.data['unchanged_count'], 3)
+                    self.assertIsNone(change_actions._flow('owner'))
+                    self.assertFalse(set(self.plan_dir.glob('*.json')) - before)
+                    with self.assertRaises(AgentToolError):
+                        change_actions.prepare_guangya_fs_change_confirmation({}, context)
+                    with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
+                        guangya_fs_change.load_fs_change_plan(old_plan, owner='owner')
+                self.assertEqual(client.file_info('move').parent_id, 'source')
+                self.assertEqual(client.file_info('move').name, 'Move.mp4')
+
+    def test_noop_does_not_hide_snapshot_drift_or_real_name_conflicts(self):
+        client = FakeGatewayClient()
+        result = self._query(client)
+        entry = next(e for e in result.data['entries'] if e['object_name'] == 'Move.mp4')
+        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+        client.rename('move', 'Changed.mp4')
+        with self.assertRaises(guangya_workspace.GuangYaWorkspaceStale):
+            guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, operations=[
+                {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Changed.mp4'}])
+        result = self._query(client)
+        refs = {e['object_name']: e['object_ref'] for e in result.data['entries']}
+        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+        with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, '占用'):
+            guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, operations=[
+                {'op': 'rename', 'object_ref': refs['Changed.mp4'], 'new_name': 'Changed.mp4'},
+                {'op': 'rename', 'object_ref': refs['广告-ABC.mp4'], 'new_name': 'Changed.mp4'}])

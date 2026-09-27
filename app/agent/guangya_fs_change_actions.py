@@ -103,6 +103,7 @@ def _safe_preview(value: object) -> dict[str, Any] | None:
             key: max(0, int(value.get(key) or 0))
             for key in (
                 "total",
+                "unchanged_count",
                 "rename_count",
                 "move_count",
                 "relocate_count",
@@ -536,6 +537,7 @@ def preview_guangya_fs_change(
     stats = plan.get("stats") if isinstance(plan.get("stats"), dict) else {}
     preview_safe = {
         "total": max(0, int(stats.get("total") or 0)),
+        "unchanged_count": max(0, int(stats.get("unchanged") or 0)),
         "rename_count": max(0, int(stats.get("rename") or 0)),
         "move_count": max(0, int(stats.get("move") or 0)),
         "relocate_count": max(0, int(stats.get("relocate") or 0)),
@@ -548,6 +550,16 @@ def preview_guangya_fs_change(
         "trigger_strm": bool(plan.get("trigger_strm")),
         "cloud_write": False,
     }
+    if not preview_safe["total"]:
+        if previous is not None:
+            if not _consume(previous):
+                raise AgentToolError("光鸭预览已被其他请求更新，请重新核对", code="confirmation_stale")
+            discard_fs_change_plan(previous.plan_id, preview_only=True)
+        return ToolResult(
+            True, "no_changes", "所选操作已符合目标名称或目录，无需重复变更；本次未写入云盘",
+            data=preview_safe,
+            suggestions=["没有生成新的确认计划；这仅表示所选文件操作无需变更，不代表元数据刮削或媒体库入库已完成。"],
+        )
     flow = _Flow(
         owner=context.owner,
         plan_id=str(plan["plan_id"]),
@@ -578,7 +590,11 @@ def preview_guangya_fs_change(
                 _now(),
             )
         ],
-        suggestions=["确认前请核对变更类型和名称示例；执行工具不能追加新操作。"],
+        suggestions=[
+            "确认前请核对变更类型和名称示例；执行工具不能追加新操作。",
+            *([f"已省略 {preview_safe['unchanged_count']} 项无需变更的操作；其他改名和移动仍在本计划中。"]
+              if preview_safe["unchanged_count"] else []),
+        ],
     )
 
 
