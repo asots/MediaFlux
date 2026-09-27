@@ -789,6 +789,7 @@ class OrganizeTaskManager:
             "started_at": str(row["started_at"] or ""),
             "finished_at": str(row["finished_at"] or ""),
             "error": str(row["error"] or ""),
+            "error_code": str(row["error_code"] or ""),
             "result": persisted_result if isinstance(persisted_result, dict) else {},
             "durable": True,
         }
@@ -1272,6 +1273,7 @@ class OrganizeTaskManager:
                             else f"{operation}需要人工核验"
                         ),
                         "error": memory_error, "current_source": "",
+                        "error_code": "" if cancelled else type(exc).__name__,
                         "group_progress": {},
                         "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })
@@ -1444,6 +1446,7 @@ class OrganizeTaskManager:
             "trigger_type": str(task.get("trigger_type") or ""),
             "finished_at": str(task.get("finished_at") or ""),
             "error": str(task.get("error") or ""),
+            "error_code": str(task.get("error_code") or ""),
             "stats": dict(task.get("stats") or {}),
             "notification_sent": bool(task.get("notification_sent")),
             "result": task.get("result") if isinstance(task.get("result"), dict) else {},

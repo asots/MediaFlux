@@ -135,6 +135,8 @@ def _project_guangya_status(
     # 只公开有明确统计依据的故障阶段，不转发 Provider 原始异常或私有路径。
     problems = []
     if task_status in {"partial", "failed", "manual_review"}:
+        if raw.get("error_code") == "GuangYaFSChangeStale":
+            problems.append("冻结计划、凭据或对象状态已变化，本次变更未执行；请重新读取目录并生成预览")
         for key, description in (
             ("precondition_failed", "项写前条件已变化，未执行"),
             ("verification_failed", "项写后状态未核验通过，不能据此认定未执行，请勿直接重复提交"),

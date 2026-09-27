@@ -280,6 +280,46 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                 for private in ("owner_digest", "internal_file_id", "private-item", job_id):
                     self.assertNotIn(private, json.dumps(receipt.data))
 
+    def test_preflight_stale_reason_survives_live_history_and_restart(self):
+        queued, _ = self._enqueue(self._confirmed_plan())
+        job_id = str(queued["job_id"])
+        claimed = claim_organize_operation_job(job_id)
+        public_ref = organize_operation_public_ref(job_id)
+        context = ToolContext(owner="queue-owner")
+        manager = OrganizeTaskManager()
+        manager._lock = threading.Lock()
+        manager._lock.acquire()
+        manager._task = {
+            "id": job_id, "status": "running", "durable": True,
+            "owner_digest": claimed["owner_digest"],
+        }
+        with (
+            mock.patch.object(manager, "_execute_durable_operation", side_effect=
+                              guangya_fs_change.GuangYaFSChangeStale("private token=secret /private/path")),
+            mock.patch.object(manager, "_wake_download_tracker"),
+        ):
+            manager._run_durable_operation(dict(claimed))
+        self.assertEqual(get_organize_operation_job(job_id)["error_code"], "GuangYaFSChangeStale")
+        accepted = ToolResult(True, "accepted", "已提交", data={"operation_ref": public_ref})
+        for source in ("live", "history", "restart"):
+            if source == "history":
+                manager._task = {}
+            current = OrganizeTaskManager() if source == "restart" else manager
+            with (
+                self.subTest(source=source),
+                mock.patch("app.modules.organize_tasks.get_organize_manager", return_value=current),
+                mock.patch.object(current, "status", return_value={}),
+            ):
+                receipt = asyncio.run(wait_for_effect_completion(
+                    accepted, tool="guangya.fs.change.execute", context=context,
+                ))
+                self.assertFalse(receipt.ok)
+                self.assertEqual(receipt.status, "failed")
+                self.assertIn("对象状态已变化", receipt.error)
+                self.assertIn("本次变更未执行", receipt.error)
+                for private in ("secret", "/private", "GuangYaFSChangeStale"):
+                    self.assertNotIn(private, str(receipt.to_dict()))
+
     def test_legacy_empty_directory_plan_needs_no_media_sync(self):
         plan = self._confirmed_plan()
         plan["trigger_strm"] = True
