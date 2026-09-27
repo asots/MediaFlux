@@ -230,3 +230,29 @@ class AgentKernelPublicViewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicToolArgumentErrorTests(unittest.TestCase):
+    def test_actual_validator_error_survives_kernel_and_public_projection(self):
+        from app.agent.guangya_fs_change_actions import guangya_fs_change_preview_arguments
+        from app.agent.kernel.ports.existing_actions import _safe_error
+        from app.agent.public_safety import sanitize_public_text
+        from app.agent.errors import AgentToolError
+        with self.assertRaises(AgentToolError) as caught:
+            guangya_fs_change_preview_arguments({'operations': [{'op': 'rename', 'object_ref': 'OBJ' + 'A' * 24}]})
+        error = _safe_error(caught.exception, fallback_code='invalid_tool_call')
+        text = sanitize_public_text(str(error))
+        self.assertIn('缺少 新名称', text)
+        self.assertIn('对象引用', text)
+        self.assertNotIn('内部状态', text)
+        self.assertNotIn('OBJ' + 'A' * 24, text)
+        self.assertEqual(text, sanitize_public_text(text))
+
+    def test_schema_labels_do_not_disable_secret_and_internal_state_redaction(self):
+        from app.agent.public_safety import sanitize_public_text
+        text = sanitize_public_text('new_name object_ref target_path parent_path observation_ref session_snapshot')
+        for label in ('新名称', '对象引用', '目标目录', '父目录', '目录观察引用'):
+            self.assertIn(label, text)
+        self.assertNotIn('session_snapshot', text)
+        self.assertEqual(sanitize_public_text('new_name access_token=AbCd1234testCredential9876'), '')
+        self.assertEqual(sanitize_public_text('new_name /data/private/test.env'), '')

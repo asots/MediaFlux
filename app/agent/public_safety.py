@@ -341,7 +341,10 @@ def _remove_internal_tool_guidance(text: str) -> str:
 
 def _replace_internal_field(match: re.Match[str]) -> str:
     value = match.group(0)
-    return value if value.casefold() in _PUBLIC_STATUS_KEYS else "内部状态"
+    # 公开Schema的字段含义不是私有状态；仅翻译名称，不放行真实引用值或任意内部字段。
+    labels = {"new_name": "新名称", "object_ref": "对象引用", "target_path": "目标目录",
+              "parent_path": "父目录", "observation_ref": "目录观察引用"}
+    return labels.get(value.casefold(), value if value.casefold() in _PUBLIC_STATUS_KEYS else "内部状态")
 
 
 def _replace_internal_identifiers_in_text(text: str) -> str:
@@ -371,13 +374,16 @@ def sanitize_untrusted_filename(value: object, *, limit: int = 255) -> str:
 
 
 def sanitize_public_text(value: object, *, limit: int = 600) -> str:
-    text = replace_internal_identifiers(value)
+    decoded = _decode_text(value)
+    # 必须在字段名转换前检查凭据；不能先把 access_token 改成“内部状态”再漏过其值。
+    if contains_sensitive_credential(decoded):
+        return ""
+    text = _replace_internal_identifiers_in_text(decoded)
     if not text:
         return ""
     path_scan_text = _TRANSFER_RATE_RE.sub("传输速度", text)
     if (
         _CONTROL_RE.search(text)
-        or contains_sensitive_credential(text)
         or _URI_RE.search(text)
         or _P2P_RE.search(text)
         or _WINDOWS_PATH_RE.search(path_scan_text)
