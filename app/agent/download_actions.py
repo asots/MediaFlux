@@ -25,6 +25,10 @@ logger = get_logger(__name__)
 
 _MAX_ATTENTION_TASKS = 20
 _MAX_TITLE_LENGTH = 180
+_DOWNLOAD_REQUEST_SCOPE_NOTE = (
+    "仅查询当前 MediaFlux 实例本地 SQLite 的 download_requests 记录（按所选范围及条数限制）；"
+    "不查询光鸭，也不代表光鸭实时全账户离线任务队列。"
+)
 _SENSITIVE_TITLE_PATTERN = re.compile(
     r"(?:magnet:\?|ed2k://|https?://|ftp://|(?:pass(?:word|key)?|secret|token|api[_-]?key|auth(?:orization|key)?|cookie|session|uid)\s*[=:]|authorization\s*:\s*bearer\b)",
     re.IGNORECASE,
@@ -193,12 +197,21 @@ def summarize_download_requests(arguments: dict[str, Any]) -> ToolResult:
     return ToolResult(
         ok=True,
         status="success" if items else "empty",
-        summary=f"{label}下载请求 {len(items)} 项",
-        data={"scope": scope, "count": len(items), "items": items},
+        summary=(
+            f"{label}本地下载请求 {len(items)} 项"
+            "（仅当前实例 SQLite 记录，不代表光鸭实时全账户队列）"
+        ),
+        data={
+            "scope": scope,
+            "count": len(items),
+            "items": items,
+            "scope_note": _DOWNLOAD_REQUEST_SCOPE_NOTE,
+        },
         evidence=[
             Evidence(
                 "download_requests",
-                "读取 MediaFlux 下载请求的 qB、光鸭、整理与 STRM 阶段摘要；未返回链接、路径、哈希或云端任务标识。",
+                f"来源为当前 MediaFlux 实例本地 SQLite 的 download_requests 表；{_DOWNLOAD_REQUEST_SCOPE_NOTE}"
+                "读取 qB、光鸭、整理与 STRM 阶段摘要；未返回链接、路径、哈希或云端任务标识。",
                 _now(),
             )
         ],

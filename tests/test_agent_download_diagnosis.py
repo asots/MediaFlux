@@ -3,12 +3,15 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
+from app import database as db
 from app.agent.download_actions import (
     diagnose_download_queue,
     download_diagnosis_arguments,
+    summarize_download_requests,
 )
 from app.agent.errors import AgentToolError
 from app.clients.qbittorrent import TorrentTask, TransferInfo
+from tests.support import IsolatedDatabaseTestCase
 
 
 def _task(
@@ -300,3 +303,38 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         serialized = str(result.to_dict())
         self.assertNotIn("private-qb.example", serialized)
         self.assertNotIn("private-password", serialized)
+
+
+class DownloadRequestSummaryScopeTests(IsolatedDatabaseTestCase):
+    def test_empty_and_populated_results_report_local_sqlite_scope(self):
+        empty = summarize_download_requests({"scope": "recent"})
+        self.assertTrue(empty.ok)
+        self.assertEqual(empty.status, "empty")
+        self.assertEqual(empty.data["count"], 0)
+        self.assertEqual(empty.data["items"], [])
+
+        request_id, created = db.create_download_request(
+            "request-summary-local-scope", "magnet", title="测试本地下载记录"
+        )
+        self.assertTrue(created)
+
+        populated = summarize_download_requests({"scope": "recent"})
+        self.assertTrue(populated.ok)
+        self.assertEqual(populated.status, "success")
+        self.assertEqual(populated.data["count"], 1)
+        self.assertEqual(populated.data["items"][0]["request_number"], request_id)
+        self.assertEqual(populated.data["items"][0]["title"], "测试本地下载记录")
+
+        for result in (empty, populated):
+            with self.subTest(status=result.status):
+                scope_note = result.data["scope_note"]
+                self.assertIn("当前 MediaFlux 实例本地 SQLite", scope_note)
+                self.assertIn("不查询光鸭", scope_note)
+                self.assertIn("不代表光鸭实时全账户离线任务队列", scope_note)
+                self.assertIn("光鸭实时全账户队列", result.summary)
+                self.assertEqual(result.to_model_dict()["data"]["scope_note"], scope_note)
+                self.assertIn("本地 SQLite", result.evidence[0].description)
+                self.assertIn(
+                    "不代表光鸭实时全账户离线任务队列",
+                    result.evidence[0].description,
+                )

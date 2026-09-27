@@ -43,7 +43,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="downloads.request_summaries",
-            description="只读列出 MediaFlux 统一下载请求在 qB、光鸭、整理与 STRM 各阶段的安全状态摘要，不返回链接、路径、哈希或云端任务标识。",
+            description="只读列出当前 MediaFlux 实例本地 SQLite 已记录的下载请求在 qB、光鸭、整理与 STRM 各阶段的安全状态摘要；不查询光鸭实时全账户离线任务队列，也不代表其完整状态；不返回链接、路径、哈希或云端任务标识。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -67,7 +67,7 @@ def register_specs(
             domains=("downloads", "jobs"),
             source_kind="system_state",
             freshness="live",
-            examples=("查看光鸭离线任务", "列出最近的下载请求", "哪些下载请求需要处理"),
+            examples=("列出最近的本地下载请求", "哪些本地下载请求需要处理"),
         )
     )
     registry.register(
