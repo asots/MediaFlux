@@ -86,7 +86,8 @@ class MediaFluxToolRateLimiter:
     ) -> None:
         del cost
         canonical = str(tool_name or "").removeprefix("confirm:")
-        scope_suffix = ""
+        # 预览不写入，不能耗尽用户点击确认时的执行额度；两阶段仍按同一身份跨 Worker 限流。
+        scope_suffix = "confirmed" if tool_name.startswith("confirm:") else ""
         if canonical == "provider.query":
             # 只按静态目录的 Provider 拆分；换会话、operation 或 profile 不会刷新预算。
             try:

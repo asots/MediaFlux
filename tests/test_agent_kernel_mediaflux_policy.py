@@ -136,7 +136,7 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
                 arguments={},
             )
         allowed.assert_called_once_with(
-            "owner", "rss.create_subscription", scope_suffix=""
+            "owner", "rss.create_subscription", scope_suffix="confirmed"
         )
         with (
             patch(
@@ -254,31 +254,25 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "operation_not_allowed")
         allowed.assert_not_called()
 
-    async def test_confirm_write_shares_the_canonical_tool_budget(self) -> None:
-        from app import database as db
-
-        db.init_db()
-        first_limiter = MediaFluxToolRateLimiter()
-        second_limiter = MediaFluxToolRateLimiter()
-        owner = f"live-p2-01-confirm:{uuid.uuid4().hex}"
-        for _ in range(4):
-            await first_limiter.acquire(
-                owner=owner,
-                tool_name="rss.create_subscription",
-                cost=1,
-                arguments={},
-            )
-
-        with self.assertRaises(ToolPipelineError) as raised:
-            await second_limiter.acquire(
-                owner=owner,
-                tool_name="confirm:rss.create_subscription",
-                cost=1,
-                arguments={},
-            )
-        self.assertEqual(raised.exception.code, "rate_limited")
-        self.assertIn("本地", str(raised.exception))
-        self.assertIn("未访问后端", str(raised.exception))
+    async def test_preview_cannot_spend_confirmation_budget_across_workers(self) -> None:
+        with isolated_test_database("confirmation-stage-budget.db"):
+            limiters = (MediaFluxToolRateLimiter(), MediaFluxToolRateLimiter())
+            owner = "webk:v1:" + uuid.uuid4().hex * 2
+            # Three complete preview/confirm pairs must work, including the
+            # first confirmation after the entire preview budget was spent.
+            for stage in ("", "confirm:"):
+                for index in range(3):
+                    await limiters[index % 2].acquire(
+                        owner=owner, tool_name=stage + "guangya.fs.change.execute",
+                        cost=1, arguments={},
+                    )
+                with self.assertRaises(ToolPipelineError) as raised:
+                    await limiters[1].acquire(
+                        owner=owner, tool_name=stage + "guangya.fs.change.execute",
+                        cost=1, arguments={},
+                    )
+                self.assertEqual(raised.exception.code, "rate_limited")
+                self.assertIn("未访问后端", str(raised.exception))
 
     async def test_guangya_directory_scrape_reads_have_independent_budgets(self) -> None:
         with isolated_test_database("guangya-scrape-rate-limit.db"):
@@ -353,13 +347,13 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await acquire(second_limiter, other_owner, tool_name)
 
-    async def test_guangya_directory_scrape_run_confirm_share_write_budget(self) -> None:
+    async def test_guangya_directory_scrape_run_confirm_has_own_write_budget(self) -> None:
         with isolated_test_database("guangya-scrape-run-rate-limit.db"):
             first_limiter = MediaFluxToolRateLimiter()
             second_limiter = MediaFluxToolRateLimiter()
             owner = "webk:v1:" + uuid.uuid4().hex * 2
 
-            for _ in range(2):
+            for _ in range(3):
                 await first_limiter.acquire(
                     owner=owner,
                     tool_name="guangya.directory_scrape.run",
@@ -367,7 +361,7 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
                     arguments={},
                 )
 
-            # Confirmation canonicalizes to run and consumes the third write call.
+            # Preview exhaustion must not reject an already offered confirmation.
             await second_limiter.acquire(
                 owner=owner,
                 tool_name="confirm:guangya.directory_scrape.run",
