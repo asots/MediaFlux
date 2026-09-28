@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import heapq
+import random
 import tempfile
 import threading
 import time
@@ -313,6 +315,93 @@ class GuangYaRequestConcurrencyTests(unittest.TestCase):
         self.assertGreaterEqual(metrics["request_p95_ms"], 0)
 
 
+class GuangYaCongestionReplayTests(unittest.TestCase):
+    """15个并发槽位的确定性回放；模拟预算不是服务端真实配额声明。"""
+
+    @staticmethod
+    def replay(limit, *, count=3345, rtt=.1, lifts_at=None):
+        clock = [0.0]
+        accepted, ready = deque(), deque((i, 0) for i in range(min(15, count)))
+        next_job = len(ready)
+        pending = []
+        completed = failed = attempts = sequence = 0
+        randomizer = random.Random(27)
+        gate = guangya_module._ReadCongestion()
+
+        def rounding_wait(delay, **_kwargs):
+            # 事件循环预先推进至准入时刻，仅允许浮点舍入误差。
+            if delay > 1e-7:
+                raise AssertionError("unexpected admission wait")
+            clock[0] += delay
+
+        with (
+            patch("app.clients.guangya.monotonic", side_effect=lambda: clock[0]),
+            patch("app.clients.guangya._wait_read_delay", side_effect=rounding_wait),
+        ):
+            while ready or pending:
+                clock[0] = min(
+                    pending[0][0] if pending else float("inf"),
+                    max(clock[0], gate.next_at) if ready else float("inf"),
+                )
+                while pending and pending[0][0] <= clock[0] + 1e-10:
+                    _, _, job, attempt, generation, success = heapq.heappop(pending)
+                    if success:
+                        gate.succeeded(generation)
+                        completed += 1
+                    else:
+                        delay = (.6, 1.2)[min(attempt, 1)]
+                        gate.rejected(generation, delay + randomizer.uniform(0, delay * .25))
+                        if attempt < 2:
+                            ready.appendleft((job, attempt + 1))
+                            continue
+                        failed += 1
+                    if next_job < count:
+                        ready.append((next_job, 0))
+                        next_job += 1
+                while ready and gate.next_at <= clock[0] + 1e-10:
+                    job, attempt = ready.popleft()
+                    generation = gate.acquire()
+                    attempts += 1
+                    sequence += 1
+                    while accepted and accepted[0] <= clock[0] - 1 + 1e-9:
+                        accepted.popleft()
+                    success = limit is None or (lifts_at is not None and clock[0] >= lifts_at) or len(accepted) < limit
+                    if success:
+                        accepted.append(clock[0])
+                    heapq.heappush(pending, (clock[0] + rtt, sequence, job, attempt, generation, success))
+        return clock[0], attempts, completed, failed
+
+    def test_sustained_limits_avoid_repeated_fast_restart_cycles(self):
+        # 旧实现对应耗时529.845/431.688/362.559/289.664/246.889/162.908s。
+        # 同RTT、同随机种子、同请求量；健康场景另行验证，不能只降低重试而牺牲吞吐。
+        for quota, seconds, max_rejections in ((8, 510, 96), (12, 350, 70), (16, 290, 100),
+                                             (24, 215, 150), (32, 190, 160), (64, 115, 160)):
+            with self.subTest(quota=quota):
+                elapsed, requests, completed, failed = self.replay(quota)
+                self.assertEqual((completed, failed), (3345, 0))
+                self.assertLess(elapsed, seconds)
+                self.assertLess(requests - completed, max_rejections)
+
+    def test_severe_congestion_keeps_strong_backoff_and_retry_budget(self):
+        # 与旧策略相同的严苛基线；温和探速不能在低配额+高RTT时放大耗尽。
+        for quota, ceiling, failures in ((1, 700, 2), (2, 400, 2), (4, 210, 0)):
+            with self.subTest(quota=quota):
+                elapsed, requests, completed, failed = self.replay(quota, count=512, rtt=.5)
+                self.assertLess(elapsed, ceiling)
+                self.assertEqual(failed, failures)
+                self.assertEqual(completed + failed, 512)
+                self.assertLess(requests, 600)
+
+    def test_healthy_and_transient_limits_do_not_impose_permanent_pacing(self):
+        elapsed, requests, completed, failed = self.replay(None)
+        self.assertAlmostEqual(elapsed, 22.3)
+        self.assertEqual((requests, completed, failed), (3345, 3345, 0))
+        elapsed, requests, completed, failed = self.replay(12, lifts_at=5)
+        self.assertLess(elapsed, 33)
+        self.assertLess(requests, 3360)
+        self.assertEqual((completed, failed), (3345, 0))
+
+
 class GuangYaAdaptiveReadTests(unittest.TestCase):
     """虚拟时间验证规模吞吐与拥塞恢复，不对生产服务做压力测试。"""
 
@@ -389,8 +478,11 @@ class GuangYaAdaptiveReadTests(unittest.TestCase):
 
     def test_repeated_congestion_is_bounded_and_affects_only_same_endpoint(self):
         gate = guangya_module._read_congestion("list_dir")
-        for _ in range(10):
+        for _ in range(32):
+            previous = gate.interval
             gate.rejected(gate.acquire(), 1)
+            self.assertGreaterEqual(gate.interval, previous)
+            self.assertLessEqual(gate.interval, 2)
         self.assertEqual(gate.interval, 2)
         self.delays.clear()
         for operation in ("get_download_url", "file_info", "task_status"):
@@ -398,6 +490,80 @@ class GuangYaAdaptiveReadTests(unittest.TestCase):
         self.assertEqual(self.delays, [])
         self.client._call_read("connection_probe", lambda: {"code": 0})
         self.assertGreater(sum(self.delays), 0)
+
+    def test_recent_rejection_after_recovery_reuses_probe_rate(self):
+        gate = guangya_module._read_congestion("list_dir")
+        gate.rejected(gate.acquire(), 1)
+        for _ in range(48):
+            gate.succeeded(gate.acquire())
+        self.assertEqual(gate.interval, 0)
+        self.assertEqual(gate.probe_rate, 32)
+        gate.rejected(gate.acquire(), 1)
+        self.assertAlmostEqual(gate.interval, 1 / (32 * .85))
+        self.assertLess(gate.interval, .125)
+
+    def test_repeated_limits_use_stable_window_and_additive_probe(self):
+        gate = guangya_module._read_congestion("list_dir")
+        gate.rejected(gate.acquire(), 1)
+        for _ in range(16):
+            gate.succeeded(gate.acquire())
+        gate.rejected(gate.acquire(), 1)
+        gate.rejected(gate.acquire(), 1)
+        self.assertTrue(gate.sustained)
+        previous = gate.interval
+        for _ in range(63):
+            gate.succeeded(gate.acquire())
+        self.assertEqual(gate.interval, previous)
+        gate.succeeded(gate.acquire())
+        self.assertAlmostEqual(1 / gate.interval, 1 / previous + 1)
+        # 限制解除后不能永久保留低速；最终重新无节拍读取。
+        for _ in range(640):
+            gate.succeeded(gate.acquire())
+        self.assertEqual(gate.interval, 0)
+
+    def test_old_probe_does_not_dictate_speed_after_long_idle(self):
+        gate = guangya_module._read_congestion("list_dir")
+        gate.rejected(gate.acquire(), 1)
+        for _ in range(48):
+            gate.succeeded(gate.acquire())
+        self.now += 60
+        gate.rejected(gate.acquire(), 1)
+        self.assertEqual(gate.interval, .125)
+        self.assertEqual(gate.ceiling_rate, 0)
+        self.assertFalse(gate.sustained)
+
+    def test_wait_metrics_are_separate_from_network_latency(self):
+        gate = guangya_module._read_congestion("list_dir")
+        gate.rejected(gate.acquire(), 1)
+        self.client._read_metrics_lock = threading.Lock()
+        self.client._read_metrics = None
+        collector = self.client.begin_read_metrics()
+        self.client._call_read("list_dir", lambda: {"code": 0})
+        metrics = self.client.end_read_metrics(collector)
+        self.assertEqual(metrics["read_wait_count"], 1)
+        self.assertEqual(metrics["read_wait_seconds"], 1)
+        self.assertEqual(metrics["read_wait_max_seconds"], 1)
+        self.assertEqual(metrics["request_p95_ms"], 0)
+        self.assertEqual(metrics["rate_limit_retries"], 0)
+        # 多个线程累计时间与单次最大值不是同一种统计。
+        collector.record_wait(2)
+        self.assertEqual(collector.snapshot()["read_wait_seconds"], 3)
+        self.assertEqual(collector.snapshot()["read_wait_max_seconds"], 2)
+
+    def test_cancelled_wait_is_measured_but_never_sends_request(self):
+        gate = guangya_module._read_congestion("list_dir")
+        gate.rejected(gate.acquire(), 5)
+        self.client._read_metrics_lock = threading.Lock()
+        self.client._read_metrics = None
+        collector = self.client.begin_read_metrics()
+        callback = Mock(return_value={"code": 0})
+        with self.assertRaises(guangya_module._ReadCancelled):
+            self.client._call_read("list_dir", callback, should_stop=lambda: self.now >= 100.1)
+        metrics = self.client.end_read_metrics(collector)
+        callback.assert_not_called()
+        self.assertEqual(metrics["read_wait_count"], 1)
+        self.assertEqual(metrics["read_wait_seconds"], .1)
+        self.assertEqual(metrics["directory_requests"], 0)
 
     def test_wait_rechecks_cooldown_when_another_request_is_rejected(self):
         gate = guangya_module._read_congestion("list_dir")

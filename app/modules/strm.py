@@ -1976,6 +1976,8 @@ def _sync_strm_impl(
         "scan_elapsed_seconds": 0.0,
         "directory_requests": 0, "scan_pages": 0, "read_retries": 0,
         "rate_limit_retries": 0, "read_failures": 0,
+        "read_wait_seconds": 0.0, "read_wait_max_seconds": 0.0,
+        "read_wait_count": 0,
         "request_p50_ms": 0.0, "request_p95_ms": 0.0,
         "request_p99_ms": 0.0,
         "scan_workers_configured": scan_worker_count,

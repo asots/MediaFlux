@@ -1139,6 +1139,8 @@ class STRMScheduler:
             "scanned_files": 0,
             "directory_requests": 0, "scan_pages": 0, "read_retries": 0,
             "rate_limit_retries": 0, "read_failures": 0,
+            "read_wait_seconds": 0.0, "read_wait_max_seconds": 0.0,
+            "read_wait_count": 0,
             "request_p50_ms": 0.0, "request_p95_ms": 0.0,
             "request_p99_ms": 0.0,
             "scan_workers_configured": 0, "scan_workers_peak": 0,
@@ -1182,7 +1184,7 @@ class STRMScheduler:
             if key in {
                 "request_p50_ms", "request_p95_ms", "request_p99_ms",
                 "scan_workers_configured", "scan_workers_peak", "scan_queue_peak",
-                "verify_workers_configured",
+                "verify_workers_configured", "read_wait_max_seconds",
             }:
                 aggregate[key] = max(float(aggregate[key]), float(value))
                 if key.startswith("scan_") or key.endswith("_configured"):
@@ -1829,6 +1831,19 @@ class STRMScheduler:
                             threshold=threshold,
                             active_ids_complete=not scoped_sources,
                         )
+                        # 两阶段实际发出的云端读取都纳入观测；文件扫描结果仍以全量阶段为准。
+                        for key in (
+                            "directory_requests", "scan_pages", "read_retries",
+                            "rate_limit_retries", "read_failures", "read_wait_count",
+                        ):
+                            aggregate[key] += int(incremental_stats.get(key, 0) or 0)
+                        aggregate["read_wait_seconds"] += float(
+                            incremental_stats.get("read_wait_seconds", 0) or 0
+                        )
+                        aggregate["read_wait_max_seconds"] = max(
+                            aggregate["read_wait_max_seconds"],
+                            float(incremental_stats.get("read_wait_max_seconds", 0) or 0),
+                        )
                         # 增量阶段已经真实落盘的变化仍计入最终通知与刷新判断；
                         # 全量阶段负责重新核验和补齐，不重复累加扫描总量。
                         for key in (
@@ -1886,6 +1901,7 @@ class STRMScheduler:
                 for key in (
                     "scan_elapsed_seconds", "generate_elapsed_seconds",
                     "metadata_elapsed_seconds", "cleanup_elapsed_seconds",
+                    "read_wait_seconds", "read_wait_max_seconds",
                     "failure_resolve_elapsed_seconds", "refresh_elapsed_seconds",
                 ):
                     aggregate[key] = round(float(aggregate.get(key, 0.0) or 0.0), 3)
@@ -1923,6 +1939,7 @@ class STRMScheduler:
             for key in (
                 "scan_elapsed_seconds", "generate_elapsed_seconds",
                 "metadata_elapsed_seconds", "cleanup_elapsed_seconds",
+                "read_wait_seconds", "read_wait_max_seconds",
                 "failure_resolve_elapsed_seconds", "refresh_elapsed_seconds",
             ):
                 aggregate[key] = round(float(aggregate.get(key, 0.0) or 0.0), 3)
@@ -2220,7 +2237,9 @@ class STRMScheduler:
             ("云端请求", (
                 f"{int(stats.get('directory_requests', 0) or 0)} 次 · "
                 f"{int(stats.get('scan_pages', 0) or 0)} 页 · "
-                f"{int(stats.get('read_retries', 0) or 0)} 次重试"
+                f"总重试 {int(stats.get('read_retries', 0) or 0)} 次"
+                f"（限流重试 "
+                f"{int(stats.get('rate_limit_retries', 0) or 0)} 次）"
             )),
             ("请求延迟", (
                 f"P50 {float(stats.get('request_p50_ms', 0) or 0):.0f}ms · "
@@ -2254,6 +2273,22 @@ class STRMScheduler:
             )),
             ("总耗时", f"{elapsed} 秒"),
         )
+        read_wait_seconds = max(
+            0.0, float(stats.get("read_wait_seconds", 0) or 0)
+        )
+        read_wait_max_seconds = max(
+            0.0, float(stats.get("read_wait_max_seconds", 0) or 0)
+        )
+        if (
+            int(stats.get("read_wait_count", 0) or 0) > 0
+            or read_wait_seconds > 0
+            or read_wait_max_seconds > 0
+        ):
+            fields += ((
+                "准入等待",
+                f"多线程累计等待 {read_wait_seconds:.3f}s · "
+                f"最长单次 {read_wait_max_seconds:.3f}s",
+            ),)
         errors = tuple(
             f"错误摘要：{str(item)[:300]}" for item in (stats.get("error_samples") or [])[:3]
         )

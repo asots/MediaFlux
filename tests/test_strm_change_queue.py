@@ -695,6 +695,36 @@ class ChangedPathProjectionTests(IsolatedDatabaseTestCase):
             "/root/光鸭云盘/A", "/root/光鸭云盘/B",
         ])
 
+    def test_source_stats_sum_read_wait_and_keep_longest_single_wait(self):
+        aggregate = STRMScheduler._empty_stats()
+
+        STRMScheduler._merge_source_stats(aggregate, {
+            "read_wait_seconds": 1.25,
+            "read_wait_max_seconds": 0.9,
+            "read_wait_count": 2,
+        }, "源 A")
+        STRMScheduler._merge_source_stats(aggregate, {
+            "read_wait_seconds": 2.75,
+            "read_wait_max_seconds": 1.4,
+            "read_wait_count": 3,
+        }, "源 B")
+
+        self.assertEqual(aggregate["read_wait_seconds"], 4.0)
+        self.assertEqual(aggregate["read_wait_max_seconds"], 1.4)
+        self.assertEqual(aggregate["read_wait_count"], 5)
+
+    def test_legacy_source_stats_without_read_wait_fields_default_to_zero(self):
+        aggregate = STRMScheduler._empty_stats()
+
+        STRMScheduler._merge_source_stats(aggregate, {
+            "directory_requests": 4,
+            "scan_pages": 2,
+        }, "历史来源")
+
+        self.assertEqual(aggregate["read_wait_seconds"], 0.0)
+        self.assertEqual(aggregate["read_wait_max_seconds"], 0.0)
+        self.assertEqual(aggregate["read_wait_count"], 0)
+
 
 if __name__ == "__main__":
     import unittest

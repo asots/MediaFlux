@@ -718,9 +718,17 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
             total=1, generated=1, created=1, failed=1,
             mode="incremental", fallback_required=True,
             fallback_reason="远端快照变化",
+            directory_requests=3, scan_pages=2, read_retries=2,
+            rate_limit_retries=1, read_failures=1,
+            read_wait_seconds=1.2, read_wait_max_seconds=0.9,
+            read_wait_count=2,
         )
         full_stats = self._empty_stats(
             total=1, generated=1, updated=1, scanned_files=7,
+            directory_requests=4, scan_pages=3, read_retries=1,
+            rate_limit_retries=1, read_failures=0,
+            read_wait_seconds=0.6, read_wait_max_seconds=0.4,
+            read_wait_count=1,
         )
         with patch.object(scheduler, "validate_config", return_value=""), patch.object(
             scheduler, "_source_dirs", return_value=[source]
@@ -749,6 +757,12 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["stats"]["created"], 1)
         self.assertEqual(result["stats"]["updated"], 1)
         self.assertEqual(result["stats"]["scanned_files"], 7)
+        self.assertEqual(result["stats"]["directory_requests"], 7)
+        self.assertEqual(result["stats"]["scan_pages"], 5)
+        self.assertEqual(result["stats"]["rate_limit_retries"], 2)
+        self.assertEqual(result["stats"]["read_wait_seconds"], 1.8)
+        self.assertEqual(result["stats"]["read_wait_max_seconds"], 0.9)
+        self.assertEqual(result["stats"]["read_wait_count"], 3)
         incremental.assert_called_once()
         full.assert_called_once()
         self.assertEqual(db.get_last_task_run("strm_sync")["status"], "success")

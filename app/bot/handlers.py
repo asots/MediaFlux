@@ -3191,6 +3191,13 @@ def _strm_summary_event(
             f"{_strm_count(stats, 'scanned_files'):,} 文件",
         ),
         (
+            "云端请求",
+            f"{_strm_count(stats, 'directory_requests'):,} 次请求 · "
+            f"{_strm_count(stats, 'scan_pages'):,} 页 · "
+            f"总重试 {_strm_count(stats, 'read_retries'):,} 次"
+            f"（限流重试 {_strm_count(stats, 'rate_limit_retries'):,} 次）",
+        ),
+        (
             "STRM",
             f"{_strm_count(stats, 'created'):,} 新建 · "
             f"{_strm_count(stats, 'updated'):,} 更新 · "
@@ -3205,6 +3212,18 @@ def _strm_summary_event(
         ("清理", _strm_cleanup_text(stats)),
         ("媒体库", refresh_text),
     ]
+    read_wait_seconds = _strm_seconds(stats, "read_wait_seconds")
+    read_wait_max_seconds = _strm_seconds(stats, "read_wait_max_seconds")
+    if (
+        _strm_count(stats, "read_wait_count")
+        or read_wait_seconds > 0
+        or read_wait_max_seconds > 0
+    ):
+        fields.append((
+            "准入等待",
+            f"多线程累计等待 {read_wait_seconds:.3f}s · "
+            f"最长单次 {read_wait_max_seconds:.3f}s",
+        ))
     if source_overview:
         fields.append(("来源概览", source_overview))
 

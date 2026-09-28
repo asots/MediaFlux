@@ -379,6 +379,9 @@ class TelegramStrmCleanupNotificationTests(unittest.TestCase):
             "cleaned": 1, "empty_dirs_cleaned": 2, "clean_skipped": False,
             "scan_elapsed_seconds": 1.25, "generate_elapsed_seconds": 0.5,
             "metadata_elapsed_seconds": 0.25, "cleanup_elapsed_seconds": 0.1,
+            "directory_requests": 9, "scan_pages": 5, "read_retries": 2,
+            "rate_limit_retries": 2, "read_wait_seconds": 3.6,
+            "read_wait_max_seconds": 1.8, "read_wait_count": 4,
             "changes": [],
         }
         aggregate = {
@@ -427,6 +430,14 @@ class TelegramStrmCleanupNotificationTests(unittest.TestCase):
         fields = dict(event.fields)
         self.assertEqual(fields["状态"], "✅ 同步完成（耗时 2.40s / 1 来源）")
         self.assertEqual(fields["扫描"], "12 目录 · 80 文件")
+        self.assertEqual(
+            fields["云端请求"],
+            "9 次请求 · 5 页 · 总重试 2 次（限流重试 2 次）",
+        )
+        self.assertEqual(
+            fields["准入等待"],
+            "多线程累计等待 3.600s · 最长单次 1.800s",
+        )
         self.assertEqual(fields["STRM"], "2 新建 · 1 更新 · 5 跳过 · 0 失败")
         self.assertEqual(fields["元数据"], "4 更新 · 3 后台排队")
         self.assertEqual(fields["清理"], "🗑 1 无效 STRM ｜ 📁 2 空目录 ｜ 🗃 1 失效元数据")
@@ -604,6 +615,9 @@ class StrmDetailedNotificationTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(stats["directories"], 1)
         self.assertIn("scan_elapsed_seconds", stats)
+        self.assertEqual(stats["read_wait_seconds"], 0.0)
+        self.assertEqual(stats["read_wait_max_seconds"], 0.0)
+        self.assertEqual(stats["read_wait_count"], 0)
         self.assertIn("metadata_elapsed_seconds", stats)
         self.assertTrue(stats["error_samples"])
         self.assertNotIn("secret", " ".join(stats["error_samples"]))
@@ -616,6 +630,9 @@ class StrmDetailedNotificationTests(IsolatedDatabaseTestCase):
                 "metadata_failed": 0, "metadata_cleaned": 1, "cleaned": 2,
                 "empty_dirs_cleaned": 1, "scan_elapsed_seconds": 1.2,
                 "metadata_elapsed_seconds": 0.8,
+                "directory_requests": 9, "scan_pages": 5, "read_retries": 2,
+                "rate_limit_retries": 2, "read_wait_seconds": 3.6,
+                "read_wait_max_seconds": 1.8, "read_wait_count": 4,
                 "error_samples": ["电影/坏目录：连接超时"],
             },
             refresh={"Emby": "queued", "Jellyfin": "failed"},
@@ -629,9 +646,33 @@ class StrmDetailedNotificationTests(IsolatedDatabaseTestCase):
         self.assertIn("STRM 同步部分完成", rendered)
         for text in ("同步来源", "扫描范围", "STRM 变化", "元数据", "清理", "媒体库刷新", "总耗时"):
             self.assertIn(text, rendered)
+        self.assertIn("9 次 · 5 页 · 总重试 2 次（限流重试 2 次）", rendered)
+        self.assertIn("多线程累计等待 3.600s · 最长单次 1.800s", rendered)
+        self.assertIn("0 失败", rendered)
         self.assertIn("电影/坏目录：连接超时", rendered)
         self.assertIn("Emby 已排队", rendered)
         self.assertIn("Jellyfin ❌", rendered)
+
+    def test_legacy_sync_summary_without_read_telemetry_defaults_to_zero(self):
+        from app.bot import handlers
+
+        event = handlers._strm_summary_event(
+            {"elapsed_seconds": 1.2},
+            {"failed": 0, "directories": 1, "scanned_files": 2},
+            source_count=1,
+        )
+        fields = dict(event.fields)
+
+        self.assertEqual(fields["云端请求"], "0 次请求 · 0 页 · 总重试 0 次（限流重试 0 次）")
+        self.assertNotIn("准入等待", fields)
+
+        scheduler_event = STRMScheduler._build_success_event(
+            stats={"failed": 0}, refresh={}, elapsed=1.2,
+            trigger_type="cron", sources=[], strm_root="/strm",
+        )
+        scheduler_fields = dict(scheduler_event.fields)
+        self.assertIn("限流重试 0 次", scheduler_fields["云端请求"])
+        self.assertNotIn("准入等待", scheduler_fields)
 
 
 class _PreviewScraper:

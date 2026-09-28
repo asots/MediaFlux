@@ -157,29 +157,43 @@ def _wait_read_delay(delay: float, *, deadline=None, should_stop=None) -> None:
 class _ReadCongestion:
     """仅在服务端限流后调节请求，不给正常读取施加固定 QPS。
 
-    临时退避从 125ms 起倍增；每 16 次成功减半，最终取消节拍。
-    这些是恢复策略参数，不是对旧站内接口限额的假设。
+    偶发限流仍快速恢复；近期反复受限则沿最近节拍平滑探速，避免恢复
+    无限速后再次从最低速开始。温和拥塞降速15%，严重拥塞仍倍增退避；
+    稳定窗口后每次增加1请求/秒。
+    这些是反馈恢复参数，不是假设服务端具有固定QPS上限。
     """
 
     interval: float = 0.0
     next_at: float = 0.0
     generation: int = 0
     successes: int = 0
+    ceiling_rate: float = 0.0
+    probe_rate: float = 0.0
+    rejected_at: float = float("-inf")
+    sustained: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def acquire(self, *, deadline=None, should_stop=None) -> int:
-        while True:
-            _wait_read_delay(0, deadline=deadline, should_stop=should_stop)
-            with self.lock:
-                now = monotonic()
-                delay = self.next_at - now
-                if delay <= 0:
-                    self.next_at = now + self.interval
-                    return self.generation
-                if deadline is not None and self.next_at >= deadline:
-                    raise httpx.TimeoutException("光鸭限流等待超过读取时限")
-            # 不提前预订未来槽位；醒来必须重查其它线程收到的新冷却。
-            _wait_read_delay(delay, deadline=deadline, should_stop=should_stop)
+    def acquire(self, *, deadline=None, should_stop=None, metrics=None) -> int:
+        wait_started = None
+        try:
+            while True:
+                _wait_read_delay(0, deadline=deadline, should_stop=should_stop)
+                with self.lock:
+                    now = monotonic()
+                    delay = self.next_at - now
+                    if delay <= 0:
+                        self.next_at = now + self.interval
+                        return self.generation
+                    if deadline is not None and self.next_at >= deadline:
+                        raise httpx.TimeoutException("光鸭限流等待超过读取时限")
+                # 不预订未来槽位；醒来重查其它线程的新冷却。指标累计实际等待，
+                # 多线程之和可超过墙钟耗时，不能当成本轮扫描可直接节省的时间。
+                if wait_started is None:
+                    wait_started = now
+                _wait_read_delay(delay, deadline=deadline, should_stop=should_stop)
+        finally:
+            if wait_started is not None and metrics is not None:
+                metrics.record_wait(monotonic() - wait_started)
 
     def rejected(self, generation: int, delay: float) -> None:
         with self.lock:
@@ -187,7 +201,23 @@ class _ReadCongestion:
                 return  # 同一波在途失败只降速一次，避免 15 个线程叠加退避。
             self.generation += 1
             self.successes = 0
-            self.interval = min(2.0, max(0.125, self.interval * 2))
+            previous = self.interval
+            now = monotonic()
+            if not previous and self.probe_rate and now - self.rejected_at < 30:
+                previous = 1.0 / self.probe_rate
+            self.sustained = now - self.rejected_at < 30 and bool(self.ceiling_rate)
+            self.rejected_at = now
+            if previous >= 0.125:
+                # 连冷启动节拍都无法承载时，保留强退避，不能温和探速耗尽重试。
+                self.interval = min(2.0, previous * 2)
+                self.ceiling_rate = 0.0
+                self.sustained = False
+            elif previous:
+                self.ceiling_rate = 1.0 / previous
+                self.interval = min(2.0, previous / 0.85)
+            else:
+                self.interval = 0.125
+                self.ceiling_rate = 0.0
             self.next_at = max(self.next_at, monotonic() + delay)
 
     def succeeded(self, generation: int) -> None:
@@ -195,9 +225,18 @@ class _ReadCongestion:
             if generation != self.generation or not self.interval:
                 return  # 限流前发出的成功响应不能提前解除冷却。
             self.successes += 1
-            if self.successes >= 16:
+            if self.successes >= (64 if self.sustained else 16):
                 self.successes = 0
-                self.interval = self.interval / 2 if self.interval > 0.03125 else 0
+                if self.ceiling_rate:
+                    rate = 1.0 / self.interval + 1.0
+                    if rate >= self.ceiling_rate * 1.25:
+                        self.interval = 0.0
+                        self.probe_rate = rate
+                    else:
+                        self.interval = 1.0 / rate
+                else:
+                    self.probe_rate = 1.0 / self.interval
+                    self.interval = self.interval / 2 if self.interval > 0.03125 else 0
                 self.next_at = min(self.next_at, monotonic() + self.interval)
 
 
@@ -224,6 +263,9 @@ class GuangYaReadMetrics:
     retries: int = 0
     rate_limit_retries: int = 0
     failures: int = 0
+    read_wait_seconds: float = 0.0
+    read_wait_max_seconds: float = 0.0
+    read_wait_count: int = 0
     _latencies_ms: list[float] = field(default_factory=list, repr=False)
     _latency_cursor: int = field(default=0, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -251,6 +293,14 @@ class GuangYaReadMetrics:
             self.retries += 1
             self.rate_limit_retries += int(rate_limited or status_code == 429)
 
+    def record_wait(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        with self._lock:
+            self.read_wait_seconds += seconds
+            self.read_wait_max_seconds = max(self.read_wait_max_seconds, seconds)
+            self.read_wait_count += 1
+
     @staticmethod
     def _percentile(ordered: list[float], percentile: float) -> float:
         if not ordered:
@@ -266,6 +316,9 @@ class GuangYaReadMetrics:
                 "scan_pages": self.pages,
                 "read_retries": self.retries,
                 "rate_limit_retries": self.rate_limit_retries,
+                "read_wait_seconds": round(self.read_wait_seconds, 3),
+                "read_wait_max_seconds": round(self.read_wait_max_seconds, 3),
+                "read_wait_count": self.read_wait_count,
                 "read_failures": self.failures,
                 "latency_samples": len(ordered),
                 "latency_sampled": int(self.requests > len(ordered)),
@@ -1536,10 +1589,12 @@ class GuangYaClient:
         congestion = _read_congestion(operation)
         attempt = 0
         while True:
-            generation = congestion.acquire(deadline=deadline, should_stop=should_stop)
+            metrics = self._active_read_metrics()
+            generation = congestion.acquire(
+                deadline=deadline, should_stop=should_stop, metrics=metrics,
+            )
             observed_access_token = str(getattr(getattr(self, "_raw", None), "token", "") or "")
             started = monotonic()
-            metrics = self._active_read_metrics()
             try:
                 result = callback()
                 _raise_read_rejection(result, operation=operation)
