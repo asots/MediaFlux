@@ -767,18 +767,10 @@ def build_fs_change_plan(
             f"{MAX_FS_CHANGE_OBJECT_OPERATIONS} 项对象变更和 "
             f"{MAX_FS_CHANGE_CREATE_OPERATIONS} 项目录创建"
         )
-    operations = [
-        *(
-            item
-            for item in operations
-            if str(item.get("op") or "").strip().casefold() == "create_directory"
-        ),
-        *(
-            item
-            for item in operations
-            if str(item.get("op") or "").strip().casefold() != "create_directory"
-        ),
-    ]
+    # 先创建浅层目录，再创建依赖它的子目录；对象操作保持原相对顺序。
+    operations = sorted(operations, key=lambda item: (
+        0, len(Path(_normalize_path(item.get("parent_path"))).parts),
+    ) if str(item.get("op") or "").strip().casefold() == "create_directory" else (1, 0))
     cache: dict[str, dict[str, GuangYaFile]] = {}
     frozen: list[dict[str, Any]] = []
     seen_objects: set[str] = set()
@@ -803,17 +795,18 @@ def build_fs_change_plan(
         if op == "create_directory":
             parent_path = _normalize_path(raw.get("parent_path"))
             name = _validate_name(raw.get("name"))
-            parent_id, parent_snapshot = _resolve_directory(client, parent_path)
-            key = (parent_id, name.casefold())
+            pending_parent = pending_targets.get(parent_path)
+            parent_id, parent_snapshot = (
+                ("", None) if pending_parent is not None
+                else _resolve_directory(client, parent_path)
+            )
+            key = (parent_id or parent_path, name.casefold())
             if key in seen_creates:
                 raise GuangYaFSChangeError("计划不能重复新建同名目录")
             seen_creates.add(key)
-            siblings = _list_map(client, parent_id, cache)
-            if _name_conflict(siblings, name):
+            if pending_parent is None and _name_conflict(_list_map(client, parent_id, cache), name):
                 raise GuangYaFSChangeError("新建目录名称已被占用")
             created_path = _full_path(parent_path, name)
-            if created_path in pending_targets:
-                raise GuangYaFSChangeError("计划不能重复新建同一路径")
             created = {
                 "op": op,
                 "parent_path": parent_path,
@@ -822,6 +815,9 @@ def build_fs_change_plan(
                 "name": name,
                 "created_path": created_path,
             }
+            if pending_parent is not None:
+                created["parent_create_path"] = parent_path
+            planned_target_names.setdefault(parent_path, set()).add(name.casefold())
             pending_targets[created_path] = created
             frozen.append(created)
             continue
@@ -1077,16 +1073,17 @@ def _verify_directory_snapshot(
     )
 
 
-def _target_id(
+def _directory_id(
     item: dict[str, Any],
-    created_targets: dict[str, str] | None,
+    created_targets: dict[str, dict[str, Any]] | None,
     *,
     allow_pending: bool = False,
+    role: str = "target",
 ) -> str:
-    create_path = str(item.get("target_create_path") or "")
+    create_path = str(item.get(f"{role}_create_path") or "")
     if not create_path:
-        return str(item.get("target_id") or "0")
-    created_id = str((created_targets or {}).get(create_path) or "")
+        return str(item.get(f"{role}_id") or "0")
+    created_id = str(((created_targets or {}).get(create_path) or {}).get("file_id") or "")
     if created_id:
         return created_id
     if allow_pending:
@@ -1098,14 +1095,24 @@ def _preflight_operation(
     client: GuangYaClient,
     item: dict[str, Any],
     *,
-    created_targets: dict[str, str] | None = None,
+    created_targets: dict[str, dict[str, Any]] | None = None,
     allow_pending_target: bool = False,
     completed_objects: set[str] | None = None,
 ) -> None:
     op = str(item.get("op") or "")
+    # 新建目录没有预先存在的快照：沿本次已核验创建链检查名称和位置，
+    # 防止外部搬走父目录后，后续操作仍按旧 ID 写入错误的归档路径。
+    dependency = str(item.get("parent_create_path" if op == "create_directory" else "target_create_path") or "")
+    while dependency and created_targets is not None:
+        directory = created_targets.get(dependency) or {}
+        if not _verify_directory_snapshot(client, str(directory.get("file_id") or ""), directory):
+            raise GuangYaFSChangeStale("计划中新建目录尚未就绪或位置已变化，请重新预览")
+        dependency = str(directory.get("parent_create_path") or "")
     if op == "create_directory":
-        parent_id = str(item.get("parent_id") or "0")
-        if not _verify_directory_snapshot(
+        parent_id = _directory_id(item, created_targets, role="parent", allow_pending=allow_pending_target)
+        if not parent_id:
+            return
+        if not item.get("parent_create_path") and not _verify_directory_snapshot(
             client, parent_id, item.get("parent_snapshot")
         ):
             raise GuangYaFSChangeStale("新建目录的父目录已变化，请重新预览")
@@ -1139,7 +1146,7 @@ def _preflight_operation(
         ):
             raise GuangYaFSChangeStale("改名目标已被占用，请重新预览")
     elif op in {"move", "relocate", "copy"}:
-        target_id = _target_id(
+        target_id = _directory_id(
             item,
             created_targets,
             allow_pending=allow_pending_target,
@@ -1163,11 +1170,11 @@ def _verify_after(
     item: dict[str, Any],
     created_id: str = "",
     *,
-    created_targets: dict[str, str] | None = None,
+    created_targets: dict[str, dict[str, Any]] | None = None,
 ) -> bool:
     op = str(item.get("op") or "")
     if op == "create_directory":
-        parent_id = str(item.get("parent_id") or "0")
+        parent_id = _directory_id(item, created_targets, role="parent")
         matches = [
             row
             for row in client.list_dir(parent_id)
@@ -1189,7 +1196,7 @@ def _verify_after(
             for row in client.list_dir(str(source.get("parent_id") or "0"))
         )
     if op in {"move", "relocate"}:
-        target_id = _target_id(item, created_targets)
+        target_id = _directory_id(item, created_targets)
         target_name = str(
             item.get("new_name") if op == "relocate" else source.get("name") or ""
         )
@@ -1201,7 +1208,7 @@ def _verify_after(
         # 复制必须保留冻结的源对象，不能把源消失、目标同名当作复制成功。
         if not _snapshot_matches(_find_current(client, source), source):
             return False
-        target_id = _target_id(item, created_targets)
+        target_id = _directory_id(item, created_targets)
         target_name = str(source.get("name") or "")
         for row in client.list_dir(target_id):
             if row.name != target_name or bool(row.is_dir) != bool(source.get("is_dir")):
@@ -1359,7 +1366,7 @@ def execute_fs_change_plan(
             started_at=started_at,
             stats=stats,
         )
-        created_targets: dict[str, str] = {}
+        created_targets: dict[str, dict[str, Any]] = {}
         completed_objects: set[str] = set()
         successful_operations: list[dict[str, Any]] = []
         for index, item in enumerate(operations, start=1):
@@ -1390,12 +1397,12 @@ def execute_fs_change_plan(
                         client.rename(str(source.get("file_id") or ""), str(item["new_name"]))
                     client.move(
                         [str(source.get("file_id") or "")],
-                        _target_id(item, created_targets),
+                        _directory_id(item, created_targets),
                     )
                 elif op == "copy":
                     client.copy(
                         [str(source.get("file_id") or "")],
-                        _target_id(item, created_targets),
+                        _directory_id(item, created_targets),
                     )
                 elif op == "trash":
                     delete_operation = None
@@ -1423,7 +1430,7 @@ def execute_fs_change_plan(
                     )
                 elif op == "create_directory":
                     created_id = client.create_dir(
-                        str(item["name"]), str(item.get("parent_id") or "0")
+                        str(item["name"]), _directory_id(item, created_targets, role="parent")
                     )
                 else:  # _operation_stat_key 已阻止未知操作
                     raise GuangYaFSChangeError("光鸭变更计划包含未知操作")
@@ -1434,10 +1441,6 @@ def execute_fs_change_plan(
                 if not verified:
                     stats["verification_failed"] += 1
                     raise GuangYaFSChangeError("写入后的云端状态校验失败")
-                if op == "create_directory":
-                    created_targets[str(item.get("created_path") or "")] = str(
-                        created_id
-                    )
                 stats[stat_key] += 1
                 status = "completed"
             except GuangYaFSChangeStale as exc:
@@ -1468,10 +1471,6 @@ def execute_fs_change_plan(
                     except Exception:  # noqa: BLE001 - 后置核验失败即保持未知
                         applied = False
                 if applied:
-                    if op == "create_directory":
-                        created_targets[str(item.get("created_path") or "")] = str(
-                            created_id
-                        )
                     stats[stat_key] += 1
                     status = "completed"
                     if op == "trash":
@@ -1508,6 +1507,12 @@ def execute_fs_change_plan(
                 # 日志介质失效后停止追加写入，避免扩大无法可靠追溯的副作用面。
                 break
             if status == "completed":
+                if op == "create_directory":
+                    created_targets[str(item["created_path"])] = {
+                        "file_id": str(created_id), "name": str(item["name"]),
+                        "parent_id": _directory_id(item, created_targets, role="parent"),
+                        "parent_create_path": str(item.get("parent_create_path") or ""),
+                    }
                 completed_objects.add(str(source.get("file_id") or created_id))
                 successful_operations.append(item)
         successful = (

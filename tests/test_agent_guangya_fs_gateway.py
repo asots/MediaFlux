@@ -860,6 +860,153 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
         self.assertEqual(plan["credential_generation"], 0)
 
+    def test_nested_directories_and_batch_relocate_share_one_frozen_plan(self):
+        client = FakeGatewayClient()
+        observed = self._query(client)
+        refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+        observation = guangya_workspace.load_directory_observation(
+            observed.data["observation_ref"], owner="owner"
+        )
+        operations = [
+            {"op": "batch_relocate", "items": [
+                {"object_ref": refs["广告-ABC.mp4"], "episode": 1},
+                {"object_ref": refs["Move.mp4"], "episode": 2},
+            ], "target_path": "/target/Series/Season 01", "title": "Series", "season": 1, "naming": "season_episode"},
+            {"op": "create_directory", "parent_path": "/target/Series", "name": "Season 01"},
+            {"op": "create_directory", "parent_path": "/target", "name": "Series"},
+        ]
+        normalized = change_actions.guangya_fs_change_preview_arguments({"operations": operations})
+        plan = guangya_fs_change.build_fs_change_plan(
+            client, owner="owner", observation=observation,
+            operations=normalized["operations"], trigger_strm=False,
+        )
+        self.assertEqual(client.directories["target"], [], "预览不能创建目录或移动文件")
+        self.assertEqual(plan["stats"]["create_directory"], 2)
+        self.assertEqual(plan["stats"]["relocate"], 2)
+        self.assertEqual([item["name"] for item in plan["operations"][:2]], ["Series", "Season 01"])
+        guangya_fs_change.confirm_fs_change_plan(
+            plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
+        )
+        payload = self._queued_payload(plan)
+        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["created"], 2)
+        self.assertEqual(result["stats"]["relocated"], 2)
+        series = client.directories["target"][0]
+        season = client.directories[series.file_id][0]
+        self.assertEqual(season.name, "Season 01")
+        self.assertEqual({item.name for item in client.directories[season.file_id]},
+                         {"Series - S01E01.mp4", "Series - S01E02.mp4"})
+        with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+
+    def test_failed_parent_creation_blocks_nested_create_and_move(self):
+        client = FakeGatewayClient()
+        observed = self._query(client)
+        reference = observed.data["entries"][0]["object_ref"]
+        observation = guangya_workspace.load_directory_observation(
+            observed.data["observation_ref"], owner="owner"
+        )
+        plan = guangya_fs_change.build_fs_change_plan(
+            client, owner="owner", observation=observation, trigger_strm=False,
+            operations=[
+                {"op": "create_directory", "parent_path": "/target", "name": "Series"},
+                {"op": "create_directory", "parent_path": "/target/Series", "name": "Season 01"},
+                {"op": "move", "object_ref": reference, "target_path": "/target/Series/Season 01"},
+            ],
+        )
+        guangya_fs_change.confirm_fs_change_plan(
+            plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
+        )
+        before = deepcopy(client.directories)
+        with mock.patch.object(client, "create_dir", side_effect=GuangYaWriteRejected("拒绝", code="denied")) as create:
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(result["stats"]["failed"], 3)
+        self.assertEqual(result["stats"]["precondition_failed"], 2)
+        self.assertEqual(client.directories, before)
+
+    def test_changed_created_ancestor_blocks_remaining_dependent_writes(self):
+        for change_after in (1, 2):
+            with self.subTest(change_after=change_after):
+                client = FakeGatewayClient()
+                observed = self._query(client)
+                reference = next(item["object_ref"] for item in observed.data["entries"] if item["object_name"] == "Move.mp4")
+                observation = guangya_workspace.load_directory_observation(
+                    observed.data["observation_ref"], owner="owner"
+                )
+                plan = guangya_fs_change.build_fs_change_plan(
+                    client, owner="owner", observation=observation, trigger_strm=False,
+                    operations=[
+                        {"op": "create_directory", "parent_path": "/target", "name": "Series"},
+                        {"op": "create_directory", "parent_path": "/target/Series", "name": "Season 01"},
+                        {"op": "move", "object_ref": reference, "target_path": "/target/Series/Season 01"},
+                    ],
+                )
+                guangya_fs_change.confirm_fs_change_plan(
+                    plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
+                )
+                preflight = guangya_fs_change._preflight_operation
+                changed = False
+
+                def change_ancestor(client, item, **kwargs):
+                    nonlocal changed
+                    created = kwargs.get("created_targets")
+                    if created is not None and len(created) == change_after and not changed:
+                        changed = True
+                        ancestor = client.directories["target"][0]
+                        client.rename(ancestor.file_id, "ChangedByOtherActor")
+                        client.move([ancestor.file_id], "source")
+                    return preflight(client, item, **kwargs)
+
+                with mock.patch.object(guangya_fs_change, "_preflight_operation", side_effect=change_ancestor):
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                self.assertTrue(changed)
+                self.assertEqual(result["stats"]["created"], change_after)
+                self.assertEqual(result["stats"]["moved"], 0)
+                self.assertEqual(result["stats"]["precondition_failed"], 3 - change_after)
+                self.assertEqual(client.file_info("move").parent_id, "source")
+
+    def test_nested_create_orders_root_parent_before_reversed_children(self):
+        client = FakeGatewayClient()
+        observed = self._query(client)
+        observation = guangya_workspace.load_directory_observation(
+            observed.data["observation_ref"], owner="owner"
+        )
+        plan = guangya_fs_change.build_fs_change_plan(
+            client, owner="owner", observation=observation, trigger_strm=False,
+            operations=[
+                {"op": "create_directory", "parent_path": "/Library/Series", "name": "Season 01"},
+                {"op": "create_directory", "parent_path": "/Library", "name": "Series"},
+                {"op": "create_directory", "parent_path": "/", "name": "Library"},
+            ],
+        )
+        self.assertEqual([item["name"] for item in plan["operations"]], ["Library", "Series", "Season 01"])
+        guangya_fs_change.confirm_fs_change_plan(
+            plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
+        )
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertEqual(result["stats"]["created"], 3)
+        self.assertEqual(result["stats"]["failed"], 0)
+
+    def test_created_subdirectory_conflicts_with_incoming_same_name(self):
+        client = FakeGatewayClient()
+        observed = self._query(client)
+        refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+        observation = guangya_workspace.load_directory_observation(
+            observed.data["observation_ref"], owner="owner"
+        )
+        with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "重复名称"):
+            guangya_fs_change.build_fs_change_plan(
+                client, owner="owner", observation=observation, trigger_strm=False,
+                operations=[
+                    {"op": "create_directory", "parent_path": "/target", "name": "Series"},
+                    {"op": "create_directory", "parent_path": "/target/Series", "name": "Move.mp4"},
+                    {"op": "move", "object_ref": refs["Move.mp4"], "target_path": "/target/Series"},
+                ],
+            )
+        self.assertEqual(client.directories["target"], [])
+
     def test_batch_relocate_can_target_directory_created_in_same_plan(self):
         client = FakeGatewayClient()
         observed = self._query(client)
