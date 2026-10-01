@@ -24,6 +24,7 @@ from app.modules.media_proxy import (
 )
 
 logger = get_logger(__name__)
+_MEDIA_PROXY_RESTART_WAIT_SECONDS = 30.0
 _ALLOWED_SERVER_TYPES = {"jellyfin", "emby"}
 
 
@@ -488,34 +489,70 @@ def restart_media_proxy_instance_confirmed(
         raise AgentToolError("实例已停用，请重新预检", code="confirmation_stale")
     internal_id = int(state["internal_id"])
     cleared = clear_signed_url_cache(internal_id)
-    accepted = bool(get_media_proxy_manager().request_restart(internal_id))
-    return ToolResult(
-        ok=accepted,
-        status="accepted" if accepted else "unavailable",
-        summary=(
-            f"媒体反代实例 {instance_number} 已进入重启队列"
-            if accepted
-            else f"媒体反代实例 {instance_number} 暂时无法热重启"
+    future = get_media_proxy_manager().request_restart(internal_id)
+    accepted = future is not None
+    restarted: bool | None = None
+    if future is not None:
+        try:
+            outcome = future.result(timeout=_MEDIA_PROXY_RESTART_WAIT_SECONDS)
+        except Exception:  # noqa: BLE001 - 不向 Agent 暴露后台异常正文
+            outcome = None
+        restarted = (
+            outcome.get("restarted")
+            if isinstance(outcome, dict)
+            and isinstance(outcome.get("restarted"), bool)
+            else None
+        )
+    responses = {
+        True: ("completed", "已重启", "", "稍后可检查实例状态和连接延迟。"),
+        False: (
+            "failed",
+            "重启失败",
+            "媒体反代实例未能重新启动，请检查当前实例状态。",
+            "请检查媒体反代实例状态后再决定后续操作。",
         ),
-        data={
-            "operation": "restart",
-            "instance_number": instance_number,
-            "accepted": accepted,
-            "cache_entries_cleared": int(cleared),
-        },
+        None: (
+            "outcome_unknown",
+            "重启结果尚未确认",
+            "后台重启未返回可信结果，请检查实例状态；请勿重复提交。",
+            "请检查媒体反代实例状态，确认结果前不要再次提交重启。",
+        ),
+    }
+    status, detail, error, suggestion = (
+        (
+            "unavailable",
+            "暂时无法热重启",
+            "媒体反代运行时当前未启动。",
+            "请重启 MediaFlux 后再检查该实例。",
+        )
+        if future is None
+        else responses[restarted]
+    )
+
+    data = {
+        "operation": "restart",
+        "instance_number": instance_number,
+        "accepted": accepted,
+        "cache_entries_cleared": int(cleared),
+    }
+    if isinstance(restarted, bool):
+        data["restarted"] = restarted
+    if status == "outcome_unknown":
+        data["outcome_unknown"] = True
+    return ToolResult(
+        ok=status == "completed",
+        status=status,
+        summary=f"媒体反代实例 {instance_number} {detail}",
+        data=data,
         evidence=[
             Evidence(
                 "media_proxy_runtime",
-                "已清理该实例短时直链缓存并请求重建运行时；未修改实例配置。",
+                "已清理该实例短时直链缓存并尝试请求重建运行时；未修改实例配置。",
                 _now(),
             )
         ],
-        suggestions=(
-            ["稍后可再次检查实例状态和连接延迟。"]
-            if accepted
-            else ["请重启 MediaFlux 后再检查该实例。"]
-        ),
-        error="" if accepted else "媒体反代运行时当前未启动。",
+        suggestions=[suggestion],
+        error=error,
     )
 
 

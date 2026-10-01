@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
 from app.agent.effect_completion import wait_for_effect_completion
-from app.agent.models import ToolContext
+from app.agent.errors import AgentToolError
 from app.agent.local_media_scan_actions import (
     local_media_scan_arguments,
     prepare_scan_local_media_sources,
@@ -22,6 +22,7 @@ from app.agent.media_proxy_actions import (
     prepare_restart_media_proxy_instance,
     restart_media_proxy_instance_confirmed,
 )
+from app.agent.models import ToolContext
 from app.modules.local_media_scheduler import LocalMediaScheduler
 from tests.support import IsolatedDatabaseTestCase
 
@@ -201,7 +202,9 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
             {"instance_number": 1}
         )
         manager = Mock()
-        manager.request_restart.return_value = True
+        future = concurrent.futures.Future()
+        future.set_result({"restarted": True, "reason": ""})
+        manager.request_restart.return_value = future
         with (
             patch(
                 "app.agent.media_proxy_actions.clear_signed_url_cache", return_value=3
@@ -216,8 +219,68 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
             )
         self.assertEqual(preview.status, "confirmation_required")
         self.assertTrue(result.ok)
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(result.data["restarted"])
         self.assertEqual(result.data["cache_entries_cleared"], 3)
         manager.request_restart.assert_called_once_with(instance_id)
+        self.assertNotIn("internal_id", str(result.to_dict()))
+        self.assertNotIn("effect_metadata", str(result.to_dict()))
+
+    def test_media_proxy_restart_reports_queue_failure_and_unknown_safely(self) -> None:
+        instance_id = db.add_media_proxy_instance(
+            name="Jellyfin 反代",
+            server_type="jellyfin",
+            upstream_url="http://jellyfin.invalid:8096",
+            api_key="secret",
+            listen_host="127.0.0.1",
+            listen_port=19096,
+            local_root="/media",
+            enabled=1,
+        )
+        _, fingerprint = prepare_restart_media_proxy_instance({"instance_number": 1})
+
+        failed_future = concurrent.futures.Future()
+        failed_future.set_result({"restarted": False, "reason": "private backend detail"})
+        pending_future = concurrent.futures.Future()
+        exceptional_future = concurrent.futures.Future()
+        exceptional_future.set_exception(RuntimeError("private backend exception"))
+        cases = (
+            ("queue_rejected", None, "unavailable"),
+            ("restart_failed", failed_future, "failed"),
+            ("timed_out", pending_future, "outcome_unknown"),
+            ("backend_exception", exceptional_future, "outcome_unknown"),
+        )
+
+        for name, future, expected_status in cases:
+            with self.subTest(name=name):
+                manager = Mock()
+                manager.request_restart.return_value = future
+                with (
+                    patch(
+                        "app.agent.media_proxy_actions.clear_signed_url_cache",
+                        return_value=1,
+                    ),
+                    patch(
+                        "app.agent.media_proxy_actions.get_media_proxy_manager",
+                        return_value=manager,
+                    ),
+                    patch(
+                        "app.agent.media_proxy_actions._MEDIA_PROXY_RESTART_WAIT_SECONDS",
+                        0.001,
+                    ),
+                ):
+                    result = restart_media_proxy_instance_confirmed(
+                        {"instance_number": 1}, fingerprint
+                    )
+
+                self.assertEqual(result.status, expected_status)
+                self.assertEqual(result.data["accepted"], future is not None)
+                manager.request_restart.assert_called_once_with(instance_id)
+                public = str(result.to_dict())
+                self.assertNotIn("private backend", public)
+                self.assertNotIn("internal_id", public)
+
+        self.assertFalse(pending_future.cancelled())
 
 
 class MediaProxyRuntimeRestartTests(unittest.IsolatedAsyncioTestCase):

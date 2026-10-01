@@ -626,6 +626,65 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "媒体反代热重载失败 type=%s", "RuntimeError"
         )
 
+    def test_request_restart_returns_the_scheduled_result_future(self):
+        from app.modules import media_proxy
+
+        manager = media_proxy.MediaProxyManager()
+        manager._loop = MagicMock()
+        manager._loop.is_closed.return_value = False
+        manager._loop.is_running.return_value = True
+        future = concurrent.futures.Future()
+
+        def schedule(coroutine, _loop):
+            coroutine.close()
+            return future
+
+        with patch.object(
+            media_proxy.asyncio, "run_coroutine_threadsafe", side_effect=schedule
+        ):
+            returned = manager.request_restart(9)
+
+        self.assertIs(returned, future)
+        future.set_result({"restarted": True, "reason": ""})
+
+    def test_request_restart_future_waits_for_real_event_loop_thread(self):
+        from app.modules import media_proxy
+
+        manager = media_proxy.MediaProxyManager()
+        loop = asyncio.new_event_loop()
+        loop_ready = threading.Event()
+        executed_threads = []
+
+        def run_loop():
+            asyncio.set_event_loop(loop)
+            loop.call_soon(loop_ready.set)
+            loop.run_forever()
+            loop.close()
+
+        worker = threading.Thread(target=run_loop, name="media-proxy-test-loop")
+        worker.start()
+        try:
+            self.assertTrue(loop_ready.wait(1))
+            manager._loop = loop
+
+            async def restart_instance(instance_id):
+                executed_threads.append(threading.current_thread())
+                await asyncio.sleep(0.01)
+                return {"restarted": instance_id == 9, "reason": ""}
+
+            with patch.object(manager, "restart_instance", new=restart_instance):
+                future = manager.request_restart(9)
+                self.assertEqual(future.result(timeout=1), {
+                    "restarted": True, "reason": "",
+                })
+
+            self.assertEqual(executed_threads, [worker])
+        finally:
+            if loop.is_running():
+                loop.call_soon_threadsafe(loop.stop)
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+
     def test_threadsafe_submission_failure_closes_unscheduled_coroutines(self):
         from app.modules import media_proxy
 
@@ -646,7 +705,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             side_effect=RuntimeError("Event loop is closed"),
         ):
             self.assertFalse(manager.request_reconcile())
-            self.assertFalse(manager.request_restart(9))
+            self.assertIsNone(manager.request_restart(9))
 
         reconcile.close.assert_called_once_with()
         restart.close.assert_called_once_with()

@@ -5979,19 +5979,21 @@ class MediaProxyManager:
         future.add_done_callback(self._report_reconcile_failure)
         return True
 
-    def request_restart(self, instance_id: int) -> bool:
-        """线程安全地请求重启一个已启用实例；仅表示是否成功排队。"""
+    def request_restart(
+        self, instance_id: int
+    ) -> ConcurrentFuture[dict[str, Any]] | None:
+        """线程安全地请求重启；返回真实重启结果的 Future，未能排队时返回 None。"""
         loop = self._loop
         if self._stopping or loop is None or loop.is_closed() or not loop.is_running():
-            return False
+            return None
         coroutine = self.restart_instance(int(instance_id))
         try:
             future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         except RuntimeError:
             coroutine.close()
-            return False
+            return None
         future.add_done_callback(self._report_reconcile_failure)
-        return True
+        return future
 
     async def restart_instance(self, instance_id: int) -> dict[str, Any]:
         """强制重建一个实例运行时，不改动实例配置。"""
