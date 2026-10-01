@@ -736,6 +736,40 @@ def _expand_batch_operations(
     return expanded
 
 
+def _validate_plan_names(operations: list[dict[str, Any]]) -> None:
+    """按实际目录身份统一检查计划内占用；跨目录搬移的临时改名不留占位。"""
+    occupied: dict[tuple[tuple[str, str], str], str] = {}
+    for item in operations:
+        op = str(item["op"])
+        if op == "trash":
+            continue
+        source = item.get("source") or {}
+        name = str(
+            item.get("name") if op == "create_directory"
+            else item.get("new_name", source.get("name", ""))
+        ).casefold()
+        if op == "rename":
+            directory = ("id", str(source.get("parent_id") or "0"))
+        else:
+            role = "parent" if op == "create_directory" else "target"
+            created_path = str(item.get(f"{role}_create_path") or "")
+            directory = (("created", created_path) if created_path
+                         else ("id", str(item.get(f"{role}_id") or "0")))
+        key = (directory, name)
+        previous = occupied.get(key)
+        # relocate 先在源目录改名、再搬走；不能撞上前序操作已留下的新名称。
+        transient = (("id", str(source.get("parent_id") or "0")), name)
+        if previous is not None or (
+            op == "relocate" and item.get("new_name") != source.get("name")
+            and transient in occupied
+        ):
+            raise GuangYaFSChangeError(
+                "计划不能重复新建同名目录" if previous == op == "create_directory"
+                else "计划在目标目录中生成了重复名称"
+            )
+        occupied[key] = op
+
+
 def build_fs_change_plan(
     client: GuangYaClient,
     *,
@@ -775,9 +809,7 @@ def build_fs_change_plan(
     frozen: list[dict[str, Any]] = []
     seen_objects: set[str] = set()
     unchanged = 0
-    seen_creates: set[tuple[str, str]] = set()
     pending_targets: dict[str, dict[str, Any]] = {}
-    planned_target_names: dict[str, set[str]] = {}
 
     for raw in operations:
         if not isinstance(raw, dict):
@@ -800,10 +832,6 @@ def build_fs_change_plan(
                 ("", None) if pending_parent is not None
                 else _resolve_directory(client, parent_path)
             )
-            key = (parent_id or parent_path, name.casefold())
-            if key in seen_creates:
-                raise GuangYaFSChangeError("计划不能重复新建同名目录")
-            seen_creates.add(key)
             if pending_parent is None and _name_conflict(_list_map(client, parent_id, cache), name):
                 raise GuangYaFSChangeError("新建目录名称已被占用")
             created_path = _full_path(parent_path, name)
@@ -817,7 +845,6 @@ def build_fs_change_plan(
             }
             if pending_parent is not None:
                 created["parent_create_path"] = parent_path
-            planned_target_names.setdefault(parent_path, set()).add(name.casefold())
             pending_targets[created_path] = created
             frozen.append(created)
             continue
@@ -881,10 +908,6 @@ def build_fs_change_plan(
                     else "不能把目录移动到自身或其子目录"
                 )
             target_name = str(base.get("new_name") or current.name)
-            planned_names = planned_target_names.setdefault(target_path, set())
-            if target_name.casefold() in planned_names:
-                raise GuangYaFSChangeError("计划在目标目录中生成了重复名称")
-            planned_names.add(target_name.casefold())
             if pending_target is None:
                 target_items = _list_map(client, target_id, cache)
                 if _name_conflict(target_items, target_name):
@@ -966,6 +989,7 @@ def build_fs_change_plan(
         if "source" in item:
             ordered_ids.add(str(item["source"]["file_id"]))
 
+    _validate_plan_names(frozen)
     counts = {
         key: 0
         for key in (
@@ -1134,7 +1158,7 @@ def _preflight_operation(
     if item.get("require_empty") and (completed_objects is not None or not dependencies):
         if client.list_dir(str(source["file_id"])):
             raise GuangYaFSChangeStale("目录仍包含内容，未执行空目录清理")
-    if op == "rename":
+    if op in {"rename", "relocate"}:
         siblings = {
             str(row.file_id): row
             for row in client.list_dir(str(source.get("parent_id") or "0"))
@@ -1145,7 +1169,7 @@ def _preflight_operation(
             exclude_id=str(source.get("file_id") or ""),
         ):
             raise GuangYaFSChangeStale("改名目标已被占用，请重新预览")
-    elif op in {"move", "relocate", "copy"}:
+    if op in {"move", "relocate", "copy"}:
         target_id = _directory_id(
             item,
             created_targets,
@@ -1348,6 +1372,7 @@ def execute_fs_change_plan(
         operations = list(plan.get("operations") or [])
         if not operations:
             raise GuangYaFSChangeError("光鸭变更计划没有可执行对象")
+        _validate_plan_names(operations)
         for item in operations:
             if cancel_check is not None:
                 cancel_check()

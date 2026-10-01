@@ -860,6 +860,122 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
         self.assertEqual(plan["credential_generation"], 0)
 
+    def test_plan_rejects_names_shared_by_multiple_operations(self):
+        for kind in ("rename", "rename_case", "create_directory", "move", "copy", "relocate", "target_alias", "transient_rename"):
+            for reverse in (False, True):
+                with self.subTest(kind=kind, reverse=reverse):
+                    client = FakeGatewayClient()
+                    client.directories["source"].append(GuangYaFile("other", "Other", True, parent_id="source", etag="other"))
+                    client.directories["other"] = [GuangYaFile("incoming", "Shared.mp4", False, parent_id="other", size=123, etag="incoming")]
+                    observed = self._query(client, operation="tree")
+                    refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+                    observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                    first = {"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "Shared.mp4"}
+                    if kind in {"rename", "rename_case"}:
+                        second = {"op": "rename", "object_ref": refs["Move.mp4"], "new_name": "SHARED.MP4" if kind == "rename_case" else "Shared.mp4"}
+                    elif kind == "create_directory":
+                        second = {"op": kind, "parent_path": "/SOURCE", "name": "Shared.mp4"}
+                    elif kind == "relocate":
+                        second = {"op": kind, "object_ref": refs["Move.mp4"], "target_path": "/SOURCE", "new_name": "Shared.mp4"}
+                    elif kind == "transient_rename":
+                        # 反向顺序会先移走临时名称，是合法计划，另有正向用例覆盖。
+                        if reverse:
+                            continue
+                        second = {"op": "relocate", "object_ref": refs["Move.mp4"], "target_path": "/target", "new_name": "Shared.mp4"}
+                    elif kind == "target_alias":
+                        first.update(op="relocate", target_path="/target")
+                        second = {"op": "relocate", "object_ref": refs["Move.mp4"], "target_path": "/TARGET//", "new_name": "Shared.mp4"}
+                    else:
+                        second = {"op": kind, "object_ref": refs["Shared.mp4"], "target_path": "/SOURCE"}
+                    operations = [second, first] if reverse else [first, second]
+                    before = deepcopy(client.directories)
+                    with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "重复名称"):
+                        guangya_fs_change.build_fs_change_plan(
+                            client, owner="owner", observation=observation,
+                            operations=operations, trigger_strm=False,
+                        )
+                    self.assertEqual(client.directories, before)
+                    self.assertEqual(list(self.plan_dir.glob("*.json")), [], "冲突计划不能落成可确认计划")
+
+    def test_same_planned_name_in_distinct_directories_remains_valid(self):
+        client = FakeGatewayClient()
+        observed = self._query(client)
+        refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        plan = guangya_fs_change.build_fs_change_plan(
+            client, owner="owner", observation=observation, trigger_strm=False,
+            operations=[
+                {"op": "relocate", "object_ref": refs["Move.mp4"], "new_name": "Shared.mp4", "target_path": "/target"},
+                {"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "Shared.mp4"},
+            ],
+        )
+        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertFalse(result["partial"])
+        self.assertEqual(client.file_info("rename").name, "Shared.mp4")
+        self.assertEqual(client.file_info("move").name, "Shared.mp4")
+        self.assertEqual(client.file_info("move").parent_id, "target")
+
+    def test_created_destinations_under_distinct_case_sensitive_parents_do_not_collide(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(GuangYaFile("other-target", "TARGET", True, parent_id="0", etag="other-target"))
+        client.directories["other-target"] = []
+        observed = self._query(client)
+        refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        plan = guangya_fs_change.build_fs_change_plan(
+            client, owner="owner", observation=observation, trigger_strm=False,
+            operations=[
+                {"op": "create_directory", "parent_path": "/target", "name": "New"},
+                {"op": "create_directory", "parent_path": "/TARGET", "name": "New"},
+                {"op": "relocate", "object_ref": refs["广告-ABC.mp4"], "target_path": "/target/New", "new_name": "Shared.mp4"},
+                {"op": "relocate", "object_ref": refs["Move.mp4"], "target_path": "/TARGET/New", "new_name": "Shared.mp4"},
+            ],
+        )
+        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["relocated"], 2)
+        self.assertNotEqual(client.file_info("rename").parent_id, client.file_info("move").parent_id)
+
+    def test_relocate_checks_new_source_name_conflict_before_any_write(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(client, {
+            "op": "relocate", "source_name": "Move.mp4",
+            "new_name": "Shared.mp4", "target_path": "/target",
+        })
+        client.directories["source"].append(GuangYaFile("external", "Shared.mp4", False, parent_id="source", etag="external"))
+        before = deepcopy(client.directories)
+        with mock.patch.object(client, "rename", wraps=client.rename) as rename:
+            with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
+                guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            rename.assert_not_called()
+        self.assertEqual(client.directories, before)
+
+    def test_old_signed_conflicting_rename_plan_stops_before_any_write(self):
+        client = FakeGatewayClient()
+        observed = self._query(client)
+        refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        plan = guangya_fs_change.build_fs_change_plan(
+            client, owner="owner", observation=observation, trigger_strm=False,
+            operations=[
+                {"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "Shared.mp4"},
+                {"op": "rename", "object_ref": refs["Move.mp4"], "new_name": "Distinct.mp4"},
+            ],
+        )
+        # 构造旧编译器允许保存的有效签名v1计划，不绕过实际执行器的任何校验。
+        plan["operations"][1]["new_name"] = "SHARED.MP4"
+        plan["fingerprint"] = guangya_fs_change._fingerprint(plan)
+        guangya_fs_change._atomic_write(plan)
+        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        before = deepcopy(client.directories)
+        with mock.patch.object(client, "rename", wraps=client.rename) as rename:
+            with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "重复名称"):
+                guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            rename.assert_not_called()
+        self.assertEqual(client.directories, before)
+
     def test_nested_directories_and_batch_relocate_share_one_frozen_plan(self):
         client = FakeGatewayClient()
         observed = self._query(client)
