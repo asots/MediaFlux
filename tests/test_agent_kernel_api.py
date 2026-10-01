@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import types
 import unittest
@@ -110,10 +111,19 @@ class FakeEffectStore:
     def __init__(self):
         self.active = True
         self.calls = []
+        self.plan = None
 
-    def is_active(self, **scope):
+    def get_active_plan(self, **scope):
         self.calls.append(dict(scope))
-        return self.active
+        return self.plan if self.active else None
+
+
+class FakeApprovalPlan:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def public_approval_dict(self):
+        return dict(self.payload)
 
 
 class FakeLifecycle:
@@ -257,26 +267,18 @@ class AgentKernelApiTests(unittest.TestCase):
             ],
             pending_effect_plan_id="plan-restore-0001",
         )
-        self.runtime.store.events = [
-            {
-                "type": "effect.approval_required",
-                "payload": {
-                    "tool": "download.pause",
-                    "plan": {
-                        "plan_id": "plan-restore-0001",
-                        "tool_name": "download.pause",
-                        "effect": "WRITE",
-                        "preview": {"summary": "暂停任务", "data": {"task": "示例"}},
-                        "confirmation": {
-                            "action": "暂停下载任务",
-                            "impact": "任务将停止传输。",
-                        },
-                        "expires_at": "2026-09-03T12:05:00+00:00",
-                    },
-                    "result": {"summary": "预检通过"},
-                },
-            }
-        ]
+        self.lifecycle.effect_store.plan = FakeApprovalPlan({
+            "plan_id": "plan-restore-0001",
+            "tool_name": "download.pause",
+            "effect": "WRITE",
+            "preview": {"summary": "暂停任务", "data": {"task": "示例"}},
+            "result": {"summary": "预检通过"},
+            "confirmation": {
+                "action": "暂停下载任务",
+                "impact": "任务将停止传输。",
+            },
+            "expires_at": "2026-09-03T12:05:00+00:00",
+        })
 
         response = self.client.get("/api/agent/sessions/session_1234567890")
         self.assertEqual(response.status_code, 200, response.text)
@@ -287,6 +289,7 @@ class AgentKernelApiTests(unittest.TestCase):
         self.assertEqual(payload["pending_approval"]["plan_id"], "plan-restore-0001")
         self.assertEqual(payload["pending_approval"]["tool_name"], "download.pause")
         self.assertEqual(payload["pending_approval"]["preview"]["summary"], "暂停任务")
+        self.assertEqual(payload["pending_approval"]["result"], {"summary": "预检通过"})
         self.assertEqual(
             payload["pending_approval"]["confirmation"]["action"], "暂停下载任务"
         )
@@ -300,14 +303,327 @@ class AgentKernelApiTests(unittest.TestCase):
             }],
         )
 
+    def test_pipeline_snapshots_the_exact_projected_public_result(self):
+        from app.agent.confirmation import ConfirmationStore
+        from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+        from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+        from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+        from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+
+        state = InMemorySessionStateStore()
+        effect_store = ConfirmationEffectPlanStore(ConfirmationStore())
+        preview = {"summary": "公开预检摘要"}
+        tool = KernelToolSpec(
+            name="library.archive",
+            domain="library",
+            description="归档资源",
+            input_schema={"type": "object", "properties": {}},
+            effect=ToolEffect.WRITE,
+            prepare=lambda _arguments, _context: PreparedEffect(
+                preview=preview,
+                snapshot_fingerprint="pipeline-result-snapshot",
+                metadata={
+                    "risk": "write",
+                    "confirmation": {"action": "归档资源", "impact": "移动 1 项"},
+                },
+            ),
+            execute_confirmed=lambda *_args: {"summary": "不会在本测试执行"},
+        )
+        pipeline = ToolPipeline(
+            catalog=ToolCatalog([tool]),
+            state_store=state,
+            effect_store=effect_store,
+        )
+
+        async def execute_preview():
+            lease, _snapshot = await state.begin_turn(
+                owner="owner-pipeline", session_id="session-pipeline", request_id="preview"
+            )
+            return await pipeline.execute(
+                tool.name,
+                {},
+                context=ToolCallContext(
+                    owner="owner-pipeline",
+                    session_id="session-pipeline",
+                    request_id=lease.request_id,
+                    turn_id=lease.turn_id,
+                    lease=lease,
+                    cancellation=CancellationToken(),
+                    report_progress=lambda _payload: asyncio.sleep(0),
+                ),
+            )
+
+        result = asyncio.run(execute_preview())
+        restored = effect_store.get_active_plan(
+            owner="owner-pipeline",
+            session_id="session-pipeline",
+            generation=result.effect_plan.generation,
+            plan_id=result.effect_plan.plan_id,
+        )
+        self.assertEqual(result.outcome.public_content["summary"], "公开预检摘要")
+        self.assertNotEqual(result.outcome.public_content, preview)
+        self.assertEqual(restored.public_result, result.outcome.public_content)
+        self.assertEqual(restored.preview, preview)
+
+    def test_session_restore_uses_persisted_plan_after_approval_event_is_evicted(self):
+        from app.agent.confirmation import SQLiteConfirmationStore
+        from app.agent.kernel.capabilities import ToolEffect
+        from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+        from app.agent.kernel.events import AgentEvent, AgentEventType
+        from app.agent.kernel.persistence import SQLiteKernelStore
+        from app.agent.kernel.state import StateUpdate
+        from tests.support import isolated_test_database
+
+        owner = "webk:v1:" + "a" * 64
+        session_id = "session_1234567890"
+        preview = {"summary": "冻结预览", "data": {"target": "归档目录"}}
+        public_result = {
+            "ok": True,
+            "status": "preview",
+            "summary": "公开预检回执",
+            "data": {"target": "归档目录", "checked_items": 3},
+            "refs": [],
+        }
+        confirmation = {"action": "归档文件", "impact": "移动 3 个文件。"}
+
+        with isolated_test_database("agent-api-active-plan.db"):
+            with patch("app.modules.web_secret.get_web_secret", return_value="test-confirm-secret"):
+                state_store = SQLiteKernelStore(
+                    secret_provider=lambda: "test-kernel-secret"
+                )
+                effect_store = ConfirmationEffectPlanStore(SQLiteConfirmationStore())
+                plan = effect_store.freeze(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=4,
+                    tool_name="cloud.archive",
+                    effect=ToolEffect.WRITE,
+                    arguments={"target": "archive"},
+                    prepared=PreparedEffect(
+                        preview=preview,
+                        snapshot_fingerprint="snapshot-4",
+                        metadata={"risk": "write", "confirmation": confirmation},
+                    ),
+                    public_result=public_result,
+                )
+
+                async def seed_persisted_state_and_events():
+                    lease = None
+                    for index in range(4):
+                        lease, _ = await state_store.begin_turn(
+                            owner=owner,
+                            session_id=session_id,
+                            request_id=f"generation-{index + 1}",
+                        )
+                    await state_store.commit(
+                        lease,
+                        conversation=[
+                            {"role": "user", "content": "归档文件"},
+                            {"role": "assistant", "content": "确认前检查完成"},
+                        ],
+                        updates=(StateUpdate("pending_effect_plan_id", plan.plan_id),),
+                    )
+                    await state_store.append(
+                        AgentEvent(
+                            type=AgentEventType.EFFECT_APPROVAL_REQUIRED,
+                            session_id=session_id,
+                            turn_id="approval-turn",
+                            request_id="approval-request",
+                            sequence=1,
+                            payload={
+                                "tool": plan.tool_name,
+                                "plan": plan.public_dict(),
+                                "result": public_result,
+                            },
+                        ),
+                        owner=owner,
+                    )
+                    for attempt in range(100):
+                        for sequence, event_type in enumerate(
+                            (AgentEventType.TURN_STARTED, AgentEventType.TURN_FAILED),
+                            start=1,
+                        ):
+                            await state_store.append(
+                                AgentEvent(
+                                    type=event_type,
+                                    session_id=session_id,
+                                    turn_id=f"invalid-confirm-{attempt}",
+                                    request_id=f"invalid-request-{attempt}",
+                                    sequence=sequence,
+                                    payload={"code": "confirmation_invalid"},
+                                ),
+                                owner=owner,
+                            )
+
+                asyncio.run(seed_persisted_state_and_events())
+
+                # Rebuild both stores over the same SQLite database, as after a worker restart.
+                self.runtime.store = SQLiteKernelStore(
+                    secret_provider=lambda: "test-kernel-secret"
+                )
+                self.lifecycle.effect_store = ConfirmationEffectPlanStore(
+                    SQLiteConfirmationStore()
+                )
+                response = self.client.get(f"/api/agent/sessions/{session_id}")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        approval = response.json()["pending_approval"]
+        self.assertIsNotNone(approval)
+        self.assertEqual(approval["plan_id"], plan.plan_id)
+        self.assertEqual(approval["tool_name"], "cloud.archive")
+        self.assertEqual(approval["preview"], preview)
+        self.assertEqual(approval["result"], public_result)
+        self.assertEqual(approval["confirmation"], confirmation)
+
+    def test_sqlite_plan_restore_enforces_scope_expiry_consumption_and_restart(self):
+        from app.agent.confirmation import SQLiteConfirmationStore
+        from app.agent.kernel.capabilities import ToolEffect
+        from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+        from tests.support import isolated_test_database
+
+        owner = "owner-restore"
+        session_id = "session_1234567890"
+        now = [1_000.0]
+        public_result = {"ok": True, "status": "preview", "summary": "原始公开回执"}
+        preview = {"summary": "独立冻结预览"}
+        confirmation = {"action": "执行操作", "impact": "修改 1 项"}
+
+        with isolated_test_database("agent-plan-scope.db"):
+            with patch("app.modules.web_secret.get_web_secret", return_value="test-confirm-secret"):
+                legacy_ticket_store = SQLiteConfirmationStore(
+                    ttl_seconds=30, clock=lambda: now[0]
+                )
+                legacy_owner = "owner-v1-restore"
+                legacy_session = "legacy_session_123456"
+                legacy_ticket = legacy_ticket_store.issue(
+                    owner=ConfirmationEffectPlanStore._scoped_owner(
+                        legacy_owner, legacy_session
+                    ),
+                    tool_name="library.archive",
+                    arguments={"target": "archive"},
+                    context_fingerprint="legacy-snapshot",
+                    confirmation_contract={
+                        "kernel_effect_version": 1,
+                        "session_id": legacy_session,
+                        "generation": 3,
+                        "effect": ToolEffect.WRITE.value,
+                        "preview": preview,
+                        "metadata": {"risk": "write"},
+                        "audit_contract": {},
+                    },
+                )
+                legacy = ConfirmationEffectPlanStore(
+                    SQLiteConfirmationStore(ttl_seconds=30, clock=lambda: now[0])
+                ).get_active_plan(
+                    owner=legacy_owner,
+                    session_id=legacy_session,
+                    generation=3,
+                    plan_id=legacy_ticket.confirmation_id,
+                )
+                self.assertIsNotNone(legacy)
+                self.assertEqual(legacy.public_result, {})
+                self.assertEqual(legacy.public_approval_dict()["confirmation"], {})
+                self.assertEqual(
+                    set(legacy.public_approval_dict()),
+                    {
+                        "plan_id", "tool_name", "effect", "preview", "result",
+                        "confirmation", "expires_at",
+                    },
+                )
+
+                first_store = ConfirmationEffectPlanStore(
+                    SQLiteConfirmationStore(ttl_seconds=30, clock=lambda: now[0])
+                )
+                plan = first_store.freeze(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=8,
+                    tool_name="library.archive",
+                    effect=ToolEffect.WRITE,
+                    arguments={"target": "archive"},
+                    prepared=PreparedEffect(
+                        preview=preview,
+                        snapshot_fingerprint="scope-snapshot",
+                        metadata={"risk": "write", "confirmation": confirmation},
+                    ),
+                    public_result=public_result,
+                )
+
+                # 新建 store 复用同一 SQLite 文件，模拟另一进程重新读取计划快照。
+                store = ConfirmationEffectPlanStore(
+                    SQLiteConfirmationStore(ttl_seconds=30, clock=lambda: now[0])
+                )
+                restored = store.get_active_plan(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=8,
+                    plan_id=plan.plan_id,
+                )
+                self.assertIsNotNone(restored)
+                self.assertEqual(restored.public_result, public_result)
+                self.assertEqual(restored.preview, preview)
+                self.assertEqual(restored.public_approval_dict()["confirmation"], confirmation)
+                self.assertIsNone(store.get_active_plan(
+                    owner="other-owner",
+                    session_id=session_id,
+                    generation=8,
+                    plan_id=plan.plan_id,
+                ))
+                self.assertIsNone(store.get_active_plan(
+                    owner=owner,
+                    session_id="other-session-123456",
+                    generation=8,
+                    plan_id=plan.plan_id,
+                ))
+                self.assertIsNone(store.get_active_plan(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=7,
+                    plan_id=plan.plan_id,
+                ))
+
+                store.claim(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=8,
+                    plan_id=plan.plan_id,
+                )
+                store = ConfirmationEffectPlanStore(
+                    SQLiteConfirmationStore(ttl_seconds=30, clock=lambda: now[0])
+                )
+                self.assertIsNone(store.get_active_plan(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=8,
+                    plan_id=plan.plan_id,
+                ))
+
+                expiring = store.freeze(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=9,
+                    tool_name="library.archive",
+                    effect=ToolEffect.WRITE,
+                    arguments={"target": "archive"},
+                    prepared=PreparedEffect(
+                        preview=preview,
+                        snapshot_fingerprint="expiring-snapshot",
+                        metadata={"risk": "write", "confirmation": confirmation},
+                    ),
+                    public_result=public_result,
+                )
+                now[0] = expiring.expires_at + 1
+                self.assertIsNone(store.get_active_plan(
+                    owner=owner,
+                    session_id=session_id,
+                    generation=9,
+                    plan_id=expiring.plan_id,
+                ))
+
     def test_session_restore_does_not_revive_consumed_or_expired_plan(self):
         self.runtime.store.state = types.SimpleNamespace(
             generation=4, conversation=[], pending_effect_plan_id="plan-stale-0001"
         )
-        self.runtime.store.events = [{
-            "type": "effect.approval_required",
-            "payload": {"plan": {"plan_id": "plan-stale-0001"}},
-        }]
         self.lifecycle.effect_store.active = False
 
         response = self.client.get("/api/agent/sessions/session_1234567890")

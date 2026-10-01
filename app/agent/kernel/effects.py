@@ -41,6 +41,7 @@ class EffectPlan:
     owner_generation: int = 0
     confirmation_contract: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    public_result: Mapping[str, Any] = field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
         expires_at = (
@@ -62,6 +63,13 @@ class EffectPlan:
             result["confirmation"] = deepcopy(dict(confirmation))
         return result
 
+    def public_approval_dict(self) -> dict[str, Any]:
+        """返回恢复待确认卡片时与事件公开载荷一致的字段。"""
+        result = self.public_dict()
+        result.setdefault("confirmation", {})
+        result["result"] = deepcopy(dict(self.public_result))
+        return result
+
 
 class EffectPlanStore(Protocol):
     def freeze(
@@ -74,6 +82,7 @@ class EffectPlanStore(Protocol):
         effect: ToolEffect,
         arguments: Mapping[str, Any],
         prepared: PreparedEffect,
+        public_result: Mapping[str, Any] | None = None,
     ) -> EffectPlan: ...
 
     def claim(
@@ -94,15 +103,14 @@ class EffectPlanStore(Protocol):
         plan_id: str,
     ) -> EffectPlan | None: ...
 
-    def is_active(
+    def get_active_plan(
         self,
         *,
         owner: str,
         session_id: str,
         generation: int,
         plan_id: str,
-    ) -> bool: ...
-
+    ) -> EffectPlan | None: ...
 
 class ConfirmationEffectPlanStore:
     """在既有一次性 ConfirmationStore 之上提供 Kernel EffectPlan。"""
@@ -136,17 +144,20 @@ class ConfirmationEffectPlanStore:
         effect: ToolEffect,
         arguments: Mapping[str, Any],
         prepared: PreparedEffect,
+        public_result: Mapping[str, Any] | None = None,
     ) -> EffectPlan:
         if effect is ToolEffect.READ:
             raise EffectPlanError("READ tools cannot create effect plans")
         scoped_owner = self._scoped_owner(owner, session_id)
         effective_arguments = dict(prepared.arguments or arguments)
+        normalized_public_result = dict(public_result or {})
         contract = {
             "kernel_effect_version": self.CONTRACT_VERSION,
             "session_id": session_id,
             "generation": int(generation),
             "effect": effect.value,
             "preview": deepcopy(dict(prepared.preview)),
+            "public_result": deepcopy(normalized_public_result),
             "metadata": deepcopy(dict(prepared.metadata)),
             "audit_risk": str(prepared.metadata.get("risk") or effect.value),
             "audit_contract": deepcopy(
@@ -175,6 +186,7 @@ class ConfirmationEffectPlanStore:
             owner_generation=ticket.owner_generation,
             confirmation_contract=deepcopy(ticket.confirmation_contract),
             metadata=deepcopy(dict(prepared.metadata)),
+            public_result=deepcopy(normalized_public_result),
         )
 
     @staticmethod
@@ -192,6 +204,7 @@ class ConfirmationEffectPlanStore:
             stored_generation = int(contract.get("generation"))
             effect = ToolEffect(str(contract.get("effect") or ""))
             preview = contract.get("preview")
+            public_result = contract.get("public_result", {})
             metadata = contract.get("metadata")
         except (TypeError, ValueError) as exc:
             raise EffectPlanError("effect plan payload is invalid") from exc
@@ -202,7 +215,11 @@ class ConfirmationEffectPlanStore:
             raise EffectPlanError("effect plan scope is invalid")
         if stored_generation != int(generation):
             raise EffectPlanError("effect plan is stale")
-        if not isinstance(preview, dict) or not isinstance(metadata, dict):
+        if (
+            not isinstance(preview, dict)
+            or not isinstance(public_result, dict)
+            or not isinstance(metadata, dict)
+        ):
             raise EffectPlanError("effect plan payload is invalid")
         return EffectPlan(
             plan_id=ticket.confirmation_id,
@@ -218,6 +235,7 @@ class ConfirmationEffectPlanStore:
             owner_generation=ticket.owner_generation,
             confirmation_contract=deepcopy(contract),
             metadata=deepcopy(metadata),
+            public_result=deepcopy(public_result),
         )
 
     def claim(
@@ -260,19 +278,19 @@ class ConfirmationEffectPlanStore:
             generation=generation,
         )
 
-    def is_active(
+    def get_active_plan(
         self,
         *,
         owner: str,
         session_id: str,
         generation: int,
         plan_id: str,
-    ) -> bool:
-        """只读核对冻结计划仍有效；恢复 UI 时不得仅相信会话指针。"""
+    ) -> EffectPlan | None:
+        """从唯一有效的确认快照恢复卡片；不依赖可淘汰的事件日志。"""
         try:
             scoped_owner = self._scoped_owner(owner, session_id)
         except EffectPlanError:
-            return False
+            return None
         ticket = next(
             (
                 item
@@ -282,17 +300,16 @@ class ConfirmationEffectPlanStore:
             None,
         )
         if ticket is None:
-            return False
+            return None
         try:
-            self._restore_plan(
+            return self._restore_plan(
                 ticket,
                 owner=owner,
                 session_id=session_id,
                 generation=generation,
             )
         except EffectPlanError:
-            return False
-        return True
+            return None
 
     def cancel(
         self,

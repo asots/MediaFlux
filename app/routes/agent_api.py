@@ -348,48 +348,16 @@ async def get_session(request: Request, session_id: str):
         messages = public_conversation_messages(state.conversation, candidate_view=candidate_view)
         pending_approval = None
         pending_plan_id = state.pending_effect_plan_id
-        if pending_plan_id and await asyncio.to_thread(
-            runtime.lifecycle.effect_store.is_active,
-            owner=owner,
-            session_id=normalized,
-            generation=state.generation,
-            plan_id=pending_plan_id,
-        ):
-            events = await runtime.store.list_events(
+        if pending_plan_id:
+            plan = await asyncio.to_thread(
+                runtime.lifecycle.effect_store.get_active_plan,
                 owner=owner,
                 session_id=normalized,
-                limit=200,
+                generation=state.generation,
+                plan_id=pending_plan_id,
             )
-            for event in reversed(events):
-                if (
-                    not isinstance(event, dict)
-                    or event.get("type") != "effect.approval_required"
-                ):
-                    continue
-                payload = event.get("payload")
-                plan = payload.get("plan") if isinstance(payload, dict) else None
-                if (
-                    isinstance(plan, dict)
-                    and str(plan.get("plan_id") or "") == pending_plan_id
-                ):
-                    pending_approval = {
-                        "plan_id": str(plan.get("plan_id") or ""),
-                        "tool_name": str(
-                            plan.get("tool_name") or payload.get("tool") or ""
-                        ),
-                        "effect": str(plan.get("effect") or "WRITE"),
-                        "preview": plan.get("preview")
-                        if isinstance(plan.get("preview"), dict)
-                        else {},
-                        "result": payload.get("result")
-                        if isinstance(payload.get("result"), dict)
-                        else {},
-                        "confirmation": plan.get("confirmation")
-                        if isinstance(plan.get("confirmation"), dict)
-                        else {},
-                        "expires_at": str(plan.get("expires_at") or ""),
-                    }
-                    break
+            if plan is not None:
+                pending_approval = plan.public_approval_dict()
         return api_response(
             {
                 "session_id": normalized,

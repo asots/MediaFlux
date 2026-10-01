@@ -508,6 +508,9 @@ class ToolPipeline:
                     self._effect_prepare_failed(prepared=prepared_value, context=context)
                     raise StalePublicationError("turn lost publication authority")
                 try:
+                    preview_outcome = await self._materialize_refs(
+                        self.projector.project(prepared_value.preview), context=context
+                    )
                     plan = await asyncio.to_thread(
                         self.effect_store.freeze,
                         owner=context.owner,
@@ -517,14 +520,12 @@ class ToolPipeline:
                         effect=tool.effect,
                         arguments=normalized,
                         prepared=prepared_value,
+                        public_result=preview_outcome.public_content,
                     )
                 except BaseException:
                     self._effect_prepare_failed(prepared=prepared_value, context=context)
                     raise
                 try:
-                    preview_outcome = await self._materialize_refs(
-                        self.projector.project(prepared_value.preview), context=context
-                    )
                     updates = tuple(preview_outcome.state_updates) + (
                         StateUpdate("pending_effect_plan_id", plan.plan_id),
                     )

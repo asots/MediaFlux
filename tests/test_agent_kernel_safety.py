@@ -198,10 +198,10 @@ class EffectPlanStoreSafetyTests(unittest.TestCase):
                 generation=1,
                 plan_id=old.plan_id,
             )
-        self.assertTrue(store.is_active(
+        self.assertIsNotNone(store.get_active_plan(
             owner="owner", session_id="session", generation=2, plan_id=new.plan_id,
         ))
-        self.assertFalse(store.is_active(
+        self.assertIsNone(store.get_active_plan(
             owner="owner", session_id="session", generation=1, plan_id=new.plan_id,
         ))
         claimed = store.claim(
@@ -211,7 +211,7 @@ class EffectPlanStoreSafetyTests(unittest.TestCase):
             plan_id=new.plan_id,
         )
         self.assertEqual(claimed.arguments, {"value": 2})
-        self.assertFalse(store.is_active(
+        self.assertIsNone(store.get_active_plan(
             owner="owner", session_id="session", generation=2, plan_id=new.plan_id,
         ))
 
