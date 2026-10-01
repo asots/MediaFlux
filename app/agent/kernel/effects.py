@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from app.agent.confirmation import ConfirmationStore
+from app.agent.confirmation import ConfirmationStore, ConfirmationTicket
 
 from .capabilities import ToolEffect
 
@@ -238,6 +238,13 @@ class ConfirmationEffectPlanStore:
             public_result=deepcopy(public_result),
         )
 
+    def _active_ticket(self, scoped_owner: str, plan_id: str) -> ConfirmationTicket | None:
+        return next(
+            (ticket for ticket in self.store.list_active_tickets(owner=scoped_owner)
+             if secrets.compare_digest(ticket.confirmation_id, plan_id)),
+            None,
+        )
+
     def claim(
         self,
         *,
@@ -249,14 +256,7 @@ class ConfirmationEffectPlanStore:
         scoped_owner = self._scoped_owner(owner, session_id)
         # 先只读校验 generation/contract，再做一次性原子领取。旧回合不能
         # 通过“先领取后失败”撤销同会话更新的有效计划。
-        preview_ticket = next(
-            (
-                ticket
-                for ticket in self.store.list_active_tickets(owner=scoped_owner)
-                if secrets.compare_digest(ticket.confirmation_id, plan_id)
-            ),
-            None,
-        )
+        preview_ticket = self._active_ticket(scoped_owner, plan_id)
         if preview_ticket is None:
             raise EffectPlanError("effect plan is unavailable")
         self._restore_plan(
@@ -291,14 +291,7 @@ class ConfirmationEffectPlanStore:
             scoped_owner = self._scoped_owner(owner, session_id)
         except EffectPlanError:
             return None
-        ticket = next(
-            (
-                item
-                for item in self.store.list_active_tickets(owner=scoped_owner)
-                if secrets.compare_digest(item.confirmation_id, str(plan_id or ""))
-            ),
-            None,
-        )
+        ticket = self._active_ticket(scoped_owner, str(plan_id or ""))
         if ticket is None:
             return None
         try:
@@ -320,14 +313,7 @@ class ConfirmationEffectPlanStore:
         plan_id: str,
     ) -> EffectPlan | None:
         scoped_owner = self._scoped_owner(owner, session_id)
-        ticket = next(
-            (
-                item
-                for item in self.store.list_active_tickets(owner=scoped_owner)
-                if secrets.compare_digest(item.confirmation_id, plan_id)
-            ),
-            None,
-        )
+        ticket = self._active_ticket(scoped_owner, plan_id)
         if ticket is None:
             return None
         try:
