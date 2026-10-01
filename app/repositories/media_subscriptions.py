@@ -972,6 +972,76 @@ def update_media_subscription_candidate(candidate_id: int, **fields: Any) -> boo
         return bool(cur.rowcount)
 
 
+def _transfer_failed_media_download_admissions_conn(
+    conn: sqlite3.Connection,
+    *,
+    source_request_ids: Iterable[int],
+    successor_request_id: int,
+    timestamp: str,
+) -> int:
+    """在下载请求创建事务中把失败订阅准入及候选一起交给 successor。"""
+    from app.repositories.download_requests import DownloadRequestRetryFenceError
+
+    if not conn.in_transaction:
+        raise DownloadRequestRetryFenceError("媒体下载准入接管事务已失效")
+    source_ids = tuple(dict.fromkeys(int(value) for value in source_request_ids))
+    if not source_ids:
+        return 0
+    placeholders = ",".join("?" for _ in source_ids)
+    rows = conn.execute(
+        "SELECT a.id,a.media_key,a.subscription_id,a.subscription_revision,a.candidate_id,a.request_id,"
+        "s.enabled,s.deleted_at,s.revision "
+        "FROM media_download_admissions a "
+        "JOIN media_subscriptions s ON s.id=a.subscription_id "
+        f"WHERE a.request_id IN ({placeholders}) AND a.status='failed' ORDER BY a.id",
+        source_ids,
+    ).fetchall()
+    for row in rows:
+        if (
+            not bool(row["enabled"])
+            or row["deleted_at"] is not None
+            or int(row["revision"] or 0) != int(row["subscription_revision"] or 0)
+        ):
+            raise DownloadRequestRetryFenceError(
+                "订阅已暂停、删除或配置已变更，未重新提交"
+            )
+        candidate_id = row["candidate_id"]
+        if candidate_id is not None:
+            candidate = conn.execute(
+                "UPDATE media_subscription_candidates SET request_id=?,updated_at=? "
+                "WHERE id=? AND subscription_id=? AND media_key=? "
+                "AND (request_id IS NULL OR request_id=?)",
+                (
+                    int(successor_request_id), timestamp, int(candidate_id),
+                    int(row["subscription_id"]), str(row["media_key"]),
+                    int(row["request_id"]),
+                ),
+            )
+            if candidate.rowcount != 1:
+                raise DownloadRequestRetryFenceError(
+                    "媒体候选关联已变化，未重新提交"
+                )
+        try:
+            transferred = conn.execute(
+                "UPDATE media_download_admissions SET request_id=?,status='dispatching',"
+                "error='',completed_at=NULL,updated_at=? "
+                "WHERE id=? AND request_id=? AND status='failed'",
+                (
+                    int(successor_request_id), timestamp, int(row["id"]),
+                    int(row["request_id"]),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise DownloadRequestRetryFenceError(
+                "同一媒体已有活动下载准入，未重复提交"
+            ) from exc
+        if transferred.rowcount != 1:
+            raise DownloadRequestRetryFenceError(
+                "媒体下载准入已变化，未重新提交"
+            )
+    return len(rows)
+
+
 def list_active_media_download_admissions(subscription_id: int | None = None) -> list[sqlite3.Row]:
     params: list[Any] = []
     clause = ""

@@ -342,6 +342,9 @@ def create_request(
     user_id: str = "",
     supersede_request_id: int | None = None,
     admission_id: int | None = None,
+    initial_targets: str = "",
+    retry_source_request_id: int | None = None,
+    retry_source_status: str = "",
 ) -> dict[str, Any]:
     keys = request_keys(item)
     req_id, created = db.create_download_request(
@@ -352,6 +355,9 @@ def create_request(
         alternate_request_keys=keys[1:],
         source_alias_key=request_source_alias_key(item),
         admission_id=admission_id,
+        initial_targets=initial_targets,
+        retry_source_request_id=retry_source_request_id,
+        retry_source_status=retry_source_status,
     )
     row = db.get_download_request(req_id)
     return {"id": req_id, "created": created, "status": row["status"] if row else ""}
@@ -863,18 +869,33 @@ def resubmit_download_request(
                 "error": "原种子读取失败或内容身份已变化，未重新提交，请核对下载来源",
             }
     source_status = str(source_row["status"] or "").strip().lower()
-    created = create_request(
-        item,
-        str(source_row["chat_id"] or ""),
-        f"resubmit:{int(source_request_id)}",
-        origin=str(origin or "web"),
-        user_id=str(source_row["user_id"] or ""),
-        # manual_review 不属于普通终态，必须显式指定被接管请求；completed、
-        # failed、cancelled 走仓储层既有的终态归档与新建逻辑。
-        supersede_request_id=(
-            int(source_request_id) if source_status == "manual_review" else None
-        ),
-    )
+    from app.repositories.download_requests import DownloadRequestRetryFenceError
+
+    try:
+        created = create_request(
+            item,
+            str(source_row["chat_id"] or ""),
+            f"resubmit:{int(source_request_id)}",
+            origin=str(origin or "web"),
+            user_id=str(source_row["user_id"] or ""),
+            # manual_review 不属于普通终态，必须显式指定被接管请求；completed、
+            # failed、cancelled 走仓储层既有的终态归档与新建逻辑。
+            supersede_request_id=(
+                int(source_request_id) if source_status == "manual_review" else None
+            ),
+            # successor 认领和媒体准入/候选接管复用同一事务。
+            initial_targets=targets,
+            retry_source_request_id=int(source_request_id),
+            retry_source_status=source_status,
+        )
+    except DownloadRequestRetryFenceError as exc:
+        return {
+            "ok": False,
+            "retry_blocked": True,
+            "source_request_id": int(source_request_id),
+            "source_attention_preserved": True,
+            "error": str(exc),
+        }
     successor_id = int(created.get("id") or 0)
     if not successor_id:
         return {"ok": False, "error": "重新创建下载请求失败"}
@@ -889,7 +910,19 @@ def resubmit_download_request(
     dispatch_kwargs: dict[str, str] = {}
     if qb_task_id_hint and targets in {"qb", "both"}:
         dispatch_kwargs["qb_task_id_hint"] = qb_task_id_hint
-    result = dispatch_request(successor_id, targets, **dispatch_kwargs)
+    successor = db.get_download_request(successor_id)
+    if successor is None:
+        return {
+            "ok": False,
+            "source_request_id": int(source_request_id),
+            "request_id": successor_id,
+            "source_attention_preserved": True,
+            "error": "新下载请求已认领但无法读取，未调用下载后端",
+        }
+    claimed_targets = ("qb", "guangya") if targets == "both" else (targets,)
+    result = _dispatch_claimed_targets(
+        successor, claimed_targets, **dispatch_kwargs,
+    )
     if result.get("ok"):
         db.mark_download_request_resubmitted(
             int(source_request_id),

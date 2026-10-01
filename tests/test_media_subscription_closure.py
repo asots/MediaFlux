@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from app import database as db
 from app.clients.guangya import GuangYaClient
+from app.modules import download_dispatcher
 from app.modules.download_dispatcher import DownloadInput, request_key
 from app.modules.download_tracker import DownloadTracker
 from app.indexers.downloads import _persist_and_dispatch
@@ -53,6 +54,127 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             subscription_revision=1,
         ))
         return int(admission_id)
+
+    def _seed_failed_subscription_request(self, suffix: int = 86034):
+        tmdb_id = str(suffix)
+        media_key = f"tmdb:{tmdb_id}:tv:S01E001"
+        subscription_id = db.add_media_subscription(
+            provider="tmdb", external_id=tmdb_id, tmdb_id=tmdb_id, media_type="tv",
+            title="重试准入闭环", monitor_mode="missing", action="confirm",
+            download_target="qb", check_interval_minutes=4320,
+        )
+        candidate_id = db.replace_media_subscription_candidates(
+            subscription_id, media_key, season=1, episode=1,
+            candidates=[{
+                "result_id": f"retry-{suffix}", "title": "同集旧资源",
+                "download_state": "ready", "relevance_score": 99,
+            }],
+            expires_at="2099-01-01 00:00:00",
+        )[0]
+        admission_id = db.claim_media_download_admission(
+            media_key=media_key, tmdb_id=tmdb_id, media_type="tv",
+            subscription_id=subscription_id, candidate_id=candidate_id,
+            season=1, episode=1, subscription_revision=1,
+        )
+        self.assertTrue(admission_id)
+        self.assertTrue(db.begin_media_download_dispatch(
+            int(admission_id), subscription_id=subscription_id,
+            subscription_revision=1,
+        ))
+        item = DownloadInput(
+            kind="magnet", title="同集旧资源",
+            source_value=f"magnet:?xt=urn:btih:{suffix:040x}",
+        )
+        created = download_dispatcher.create_request(
+            item, "", "subscription", origin="indexer:test", admission_id=admission_id,
+        )
+        request_id = int(created["id"])
+        db.update_media_subscription_candidate(
+            candidate_id, status="submitted", request_id=request_id,
+        )
+        db.update_download_request(
+            request_id, targets="qb", status="failed", qb_status="failed",
+            error="模拟的确定失败",
+        )
+        db.sync_media_download_admission_for_request(request_id)
+        return subscription_id, candidate_id, admission_id, request_id, media_key
+
+    def test_new_subscription_admission_binds_when_same_hash_failed_owner_is_archived(self):
+        subscription, _old_candidate, old_admission, old_request, media_key = (
+            self._seed_failed_subscription_request(86080)
+        )
+        candidate = db.replace_media_subscription_candidates(
+            subscription, media_key, season=1, episode=1,
+            candidates=[{
+                "result_id": "retry-new-candidate", "title": "同 hash 新候选",
+                "download_state": "ready",
+            }],
+            expires_at="2099-01-01 00:00:00",
+        )[0]
+        new_admission = db.claim_media_download_admission(
+            media_key=media_key, tmdb_id="86080", media_type="tv",
+            subscription_id=subscription, candidate_id=candidate,
+            season=1, episode=1, subscription_revision=1,
+        )
+        self.assertTrue(new_admission)
+        self.assertTrue(db.begin_media_download_dispatch(
+            int(new_admission), subscription_id=subscription, subscription_revision=1,
+        ))
+        source = db.get_download_request(old_request)
+        item = DownloadInput(
+            kind="magnet", title=str(source["title"]),
+            source_value=str(source["source_value"]),
+        )
+
+        created = download_dispatcher.create_request(
+            item, "", "subscription:new-candidate", origin="indexer:test",
+            admission_id=int(new_admission),
+        )
+
+        self.assertTrue(created["created"])
+        successor_id = int(created["id"])
+        self.assertNotEqual(successor_id, old_request)
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id,request_id,status FROM media_download_admissions ORDER BY id"
+            ).fetchall()
+        self.assertEqual(
+            [(int(row["id"]), int(row["request_id"]), row["status"]) for row in rows],
+            [
+                (old_admission, old_request, "failed"),
+                (int(new_admission), successor_id, "dispatching"),
+            ],
+        )
+
+    def test_manual_same_hash_readd_is_not_fenced_by_paused_subscription(self):
+        _subscription, _candidate, admission_id, source_id, _media_key = (
+            self._seed_failed_subscription_request(86081)
+        )
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE media_subscriptions SET enabled=0,status='paused',revision=revision+1 "
+                "WHERE id=(SELECT subscription_id FROM media_download_admissions WHERE id=?)",
+                (admission_id,),
+            )
+        source = db.get_download_request(source_id)
+        item = DownloadInput(
+            kind="magnet", title=str(source["title"]),
+            source_value=str(source["source_value"]),
+        )
+
+        created = download_dispatcher.create_request(
+            item, "", "manual-readd", origin="web",
+        )
+
+        self.assertTrue(created["created"])
+        self.assertNotEqual(int(created["id"]), source_id)
+        with db.get_conn() as conn:
+            admission = conn.execute(
+                "SELECT request_id,status FROM media_download_admissions WHERE id=?",
+                (admission_id,),
+            ).fetchone()
+        self.assertEqual((int(admission["request_id"]), admission["status"]),
+                         (source_id, "failed"))
 
     def test_request_creation_binds_dispatching_admission_in_same_transaction(self):
         subscription_id, candidate_id = self._seed()
@@ -530,6 +652,362 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             ).fetchone()
         self.assertEqual(int(admission["request_id"]), request_id)
         self.assertEqual(admission["status"], "processing")
+
+    def test_failed_subscription_retry_transfers_admission_before_successor_submit(self):
+        subscription_id, candidate_id, admission_id, original_request_id, media_key = (
+            self._seed_failed_subscription_request()
+        )
+
+        observed_before_submit = []
+
+        def submit_without_network(row, **_kwargs):
+            with db.get_conn() as conn:
+                admission = conn.execute(
+                    "SELECT status,request_id FROM media_download_admissions WHERE id=?",
+                    (admission_id,),
+                ).fetchone()
+                candidate = conn.execute(
+                    "SELECT request_id FROM media_subscription_candidates WHERE id=?",
+                    (candidate_id,),
+                ).fetchone()
+            observed_before_submit.append((
+                int(row["id"]), admission["status"], admission["request_id"],
+                candidate["request_id"],
+            ))
+            return {"ok": True, "task_id": "b" * 40}
+
+        with (
+            patch.object(
+                download_dispatcher, "get",
+                side_effect=lambda key, default="": "http://qb.invalid" if key == "QB_URL" else default,
+            ),
+            patch.object(
+                download_dispatcher, "analyze_offline_url",
+                return_value=type("Decision", (), {"allowed": False, "reason": "disabled"})(),
+            ),
+            patch.object(download_dispatcher, "_submit_qb", side_effect=submit_without_network),
+        ):
+            result = download_dispatcher.resubmit_download_request(original_request_id, "qb")
+
+        successor_id = int(result["request_id"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(observed_before_submit, [(
+            successor_id, "dispatching", successor_id, successor_id,
+        )])
+        self.assertEqual(db.get_download_request(successor_id)["status"], "submitted")
+
+        second_candidate_id = db.replace_media_subscription_candidates(
+            subscription_id, media_key, season=1, episode=1,
+            candidates=[{
+                "result_id": "retry-different-hash", "title": "同集新资源",
+                "download_state": "ready", "relevance_score": 99,
+            }],
+            expires_at="2099-01-01 00:00:00",
+        )[0]
+        second_admission_id = db.claim_media_download_admission(
+            media_key=media_key, tmdb_id="86034", media_type="tv",
+            subscription_id=subscription_id, candidate_id=second_candidate_id,
+            season=1, episode=1, subscription_revision=1,
+        )
+        self.assertIsNone(second_admission_id)
+
+    def test_failed_retry_failure_and_unknown_results_keep_subscription_projection(self):
+        capabilities = {
+            name: {"enabled": True, "reason": ""}
+            for name in ("qb", "guangya", "both")
+        }
+        cases = (
+            ({"ok": True, "task_id": "task-ok"}, True, "submitted", "submitted"),
+            ({"ok": False, "error": "明确拒绝"}, False, "failed", "failed"),
+            ({"ok": False, "failure_code": "qb_outcome_unknown", "error": "超时"},
+             False, "submitted", "submitted"),
+        )
+        for offset, (backend_result, expected_ok, request_status, admission_status) in enumerate(cases):
+            with self.subTest(request_status=request_status, admission_status=admission_status):
+                _subscription, candidate_id, admission_id, source_id, _media_key = (
+                    self._seed_failed_subscription_request(86040 + offset)
+                )
+                with (
+                    patch.object(
+                        download_dispatcher, "download_resubmit_capabilities",
+                        return_value=capabilities,
+                    ),
+                    patch.object(
+                        download_dispatcher, "_submit_qb", return_value=backend_result,
+                    ) as submit,
+                ):
+                    result = download_dispatcher.resubmit_download_request(source_id, "qb")
+                submit.assert_called_once()
+                self.assertEqual(bool(result["ok"]), expected_ok)
+                self.assertEqual(
+                    bool(result.get("outcome_unknown")),
+                    backend_result.get("failure_code") == "qb_outcome_unknown",
+                )
+                successor_id = int(result["request_id"])
+                self.assertEqual(db.get_download_request(successor_id)["status"], request_status)
+                candidate = db.get_media_subscription_candidate(candidate_id)
+                self.assertEqual(int(candidate["request_id"]), successor_id)
+                with db.get_conn() as conn:
+                    admission = conn.execute(
+                        "SELECT request_id,status FROM media_download_admissions WHERE id=?",
+                        (admission_id,),
+                    ).fetchone()
+                self.assertEqual(int(admission["request_id"]), successor_id)
+                self.assertEqual(admission["status"], admission_status)
+                replacement_candidate = db.replace_media_subscription_candidates(
+                    _subscription, _media_key, season=1, episode=1,
+                    candidates=[{
+                        "result_id": f"retry-alternate-{offset}",
+                        "title": "同集不同 hash 候选", "download_state": "ready",
+                    }],
+                    expires_at="2099-01-01 00:00:00",
+                )[0]
+                next_admission = db.claim_media_download_admission(
+                    media_key=_media_key, tmdb_id=str(86040 + offset), media_type="tv",
+                    subscription_id=_subscription, candidate_id=replacement_candidate,
+                    season=1, episode=1, subscription_revision=1,
+                )
+                if admission_status in {"submitted", "processing"}:
+                    self.assertIsNone(next_admission)
+                else:
+                    self.assertIsInstance(next_admission, int)
+
+    def test_manual_review_source_transfers_its_failed_admission(self):
+        _subscription, candidate_id, admission_id, source_id, _media_key = (
+            self._seed_failed_subscription_request(86049)
+        )
+        db.update_download_request(
+            source_id, status="manual_review", qb_status="manual_review",
+            error="历史结果待人工核验",
+        )
+        db.update_media_download_admission(
+            admission_id, status="failed", error="待重试准入",
+        )
+        capabilities = {
+            name: {"enabled": True, "reason": ""}
+            for name in ("qb", "guangya", "both")
+        }
+        observed = []
+
+        def submit(row, **_kwargs):
+            with db.get_conn() as conn:
+                admission = conn.execute(
+                    "SELECT status,request_id FROM media_download_admissions WHERE id=?",
+                    (admission_id,),
+                ).fetchone()
+                candidate = conn.execute(
+                    "SELECT request_id FROM media_subscription_candidates WHERE id=?",
+                    (candidate_id,),
+                ).fetchone()
+            observed.append((int(row["id"]), admission["status"], admission["request_id"], candidate["request_id"]))
+            return {"ok": True, "task_id": "task-manual-review"}
+
+        with (
+            patch.object(
+                download_dispatcher, "download_resubmit_capabilities",
+                return_value=capabilities,
+            ),
+            patch.object(download_dispatcher, "_submit_qb", side_effect=submit),
+        ):
+            result = download_dispatcher.resubmit_download_request(source_id, "qb")
+        self.assertTrue(result["ok"], result)
+        successor_id = int(result["request_id"])
+        self.assertEqual(observed, [(successor_id, "dispatching", successor_id, successor_id)])
+        self.assertEqual(db.get_download_request(source_id)["status"], "resubmitted")
+
+    def test_original_source_retry_moves_admission_from_each_archived_failed_successor(self):
+        _subscription_id, candidate_id, admission_id, source_id, _media_key = (
+            self._seed_failed_subscription_request(86048)
+        )
+        capabilities = {
+            name: {"enabled": True, "reason": ""}
+            for name in ("qb", "guangya", "both")
+        }
+        observed = []
+
+        def record(target, row):
+            with db.get_conn() as conn:
+                admission = conn.execute(
+                    "SELECT status,request_id FROM media_download_admissions WHERE id=?",
+                    (admission_id,),
+                ).fetchone()
+                candidate = conn.execute(
+                    "SELECT request_id FROM media_subscription_candidates WHERE id=?",
+                    (candidate_id,),
+                ).fetchone()
+            observed.append((target, int(row["id"]), admission["status"],
+                             admission["request_id"], candidate["request_id"]))
+
+        qb_results = iter((
+            {"ok": False, "error": "qB 明确失败"},
+            {"ok": True, "task_id": "qB-final"},
+        ))
+
+        def submit_qb(row, **_kwargs):
+            record("qb", row)
+            return next(qb_results)
+
+        def submit_guangya(row, **_kwargs):
+            record("guangya", row)
+            return {"ok": False, "error": "光鸭明确失败"}
+
+        with (
+            patch.object(
+                download_dispatcher, "download_resubmit_capabilities",
+                return_value=capabilities,
+            ),
+            patch.object(download_dispatcher, "_submit_qb", side_effect=submit_qb),
+            patch.object(download_dispatcher, "_submit_guangya", side_effect=submit_guangya),
+        ):
+            first = download_dispatcher.resubmit_download_request(source_id, "qb")
+            first_successor = int(first["request_id"])
+            self.assertFalse(first["ok"])
+            self.assertEqual(db.get_download_request(source_id)["status"], "failed")
+            self.assertEqual(db.get_download_request(first_successor)["status"], "failed")
+            with db.get_conn() as conn:
+                admission = conn.execute(
+                    "SELECT request_id,status FROM media_download_admissions WHERE id=?",
+                    (admission_id,),
+                ).fetchone()
+            self.assertEqual((int(admission["request_id"]), admission["status"]),
+                             (first_successor, "failed"))
+
+            second = download_dispatcher.resubmit_download_request(source_id, "guangya")
+            second_successor = int(second["request_id"])
+            self.assertFalse(second["ok"])
+            self.assertEqual(db.get_download_request(source_id)["status"], "failed")
+            self.assertEqual(db.get_download_request(second_successor)["status"], "failed")
+            with db.get_conn() as conn:
+                admission = conn.execute(
+                    "SELECT request_id,status FROM media_download_admissions WHERE id=?",
+                    (admission_id,),
+                ).fetchone()
+            self.assertEqual((int(admission["request_id"]), admission["status"]),
+                             (second_successor, "failed"))
+
+            third = download_dispatcher.resubmit_download_request(source_id, "qb")
+
+        third_successor = int(third["request_id"])
+        self.assertTrue(third["ok"])
+        self.assertNotIn(third_successor, {source_id, first_successor, second_successor})
+        self.assertEqual(db.get_download_request(source_id)["status"], "resubmitted")
+        self.assertEqual(
+            [entry[0] for entry in observed], ["qb", "guangya", "qb"],
+        )
+        self.assertEqual(
+            observed,
+            [
+                ("qb", first_successor, "dispatching", first_successor, first_successor),
+                ("guangya", second_successor, "dispatching", second_successor, second_successor),
+                ("qb", third_successor, "dispatching", third_successor, third_successor),
+            ],
+        )
+        with db.get_conn() as conn:
+            admission = conn.execute(
+                "SELECT request_id,status FROM media_download_admissions WHERE id=?",
+                (admission_id,),
+            ).fetchone()
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM download_requests"
+            ).fetchone()[0], 4)
+        self.assertEqual((int(admission["request_id"]), admission["status"]),
+                         (third_successor, "submitted"))
+        self.assertEqual(
+            int(db.get_media_subscription_candidate(candidate_id)["request_id"]),
+            third_successor,
+        )
+
+    def test_subscription_revision_and_pause_fence_failed_retry_before_submit(self):
+        capabilities = {name: {"enabled": True, "reason": ""}
+                        for name in ("qb", "guangya", "both")}
+        updates = (
+            "UPDATE media_subscriptions SET revision=revision+1 WHERE id=?",
+            "UPDATE media_subscriptions SET enabled=0,status='paused',revision=revision+1 WHERE id=?",
+        )
+        for offset, update in enumerate(updates):
+            with self.subTest(update=update):
+                subscription, candidate, admission_id, source_id, _key = (
+                    self._seed_failed_subscription_request(86050 + offset)
+                )
+                with db.get_conn() as conn:
+                    before = conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0]
+                    conn.execute(update, (subscription,))
+                with patch.object(
+                    download_dispatcher, "download_resubmit_capabilities",
+                    return_value=capabilities,
+                ), patch.object(download_dispatcher, "_submit_qb") as submit:
+                    result = download_dispatcher.resubmit_download_request(source_id, "qb")
+                self.assertTrue(result["retry_blocked"])
+                self.assertTrue(result["source_attention_preserved"])
+                submit.assert_not_called()
+                self.assertEqual(db.get_download_request(source_id)["status"], "failed")
+                with db.get_conn() as conn:
+                    self.assertEqual(conn.execute(
+                        "SELECT COUNT(*) FROM download_requests"
+                    ).fetchone()[0], before)
+                    row = conn.execute(
+                        "SELECT request_id,status FROM media_download_admissions WHERE id=?",
+                        (admission_id,),
+                    ).fetchone()
+                self.assertEqual((int(row["request_id"]), row["status"]),
+                                 (source_id, "failed"))
+                self.assertEqual(int(db.get_media_subscription_candidate(candidate)["request_id"]),
+                                 source_id)
+
+    def test_stale_cancelled_source_retry_is_fenced_in_creation_transaction(self):
+        _subscription, _candidate, _admission, source_id, _key = (
+            self._seed_failed_subscription_request(86060)
+        )
+        capabilities = {name: {"enabled": True, "reason": ""}
+                        for name in ("qb", "guangya", "both")}
+        create = download_dispatcher.create_request
+
+        def cancel_before_create(*args, **kwargs):
+            db.update_download_request(source_id, status="cancelled", qb_status="cancelled")
+            return create(*args, **kwargs)
+
+        with (
+            patch.object(download_dispatcher, "download_resubmit_capabilities", return_value=capabilities),
+            patch.object(download_dispatcher, "create_request", side_effect=cancel_before_create),
+            patch.object(download_dispatcher, "_submit_qb") as submit,
+        ):
+            result = download_dispatcher.resubmit_download_request(source_id, "qb")
+        self.assertTrue(result["retry_blocked"])
+        submit.assert_not_called()
+        self.assertEqual(db.get_download_request(source_id)["status"], "cancelled")
+        with db.get_conn() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0], 1)
+
+    def test_repeated_retry_during_first_submit_uses_same_active_successor(self):
+        _subscription, candidate, admission_id, source_id, _key = (
+            self._seed_failed_subscription_request(86070)
+        )
+        capabilities = {name: {"enabled": True, "reason": ""}
+                        for name in ("qb", "guangya", "both")}
+        nested = []
+
+        def submit(_row, **_kwargs):
+            nested.append(download_dispatcher.resubmit_download_request(source_id, "qb"))
+            return {"ok": True, "task_id": "task-once"}
+
+        with (
+            patch.object(download_dispatcher, "download_resubmit_capabilities", return_value=capabilities),
+            patch.object(download_dispatcher, "_submit_qb", side_effect=submit) as backend,
+        ):
+            first = download_dispatcher.resubmit_download_request(source_id, "qb")
+        self.assertTrue(first["ok"])
+        backend.assert_called_once()
+        self.assertTrue(nested[0]["duplicate"])
+        successor = int(first["request_id"])
+        with db.get_conn() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0], 2)
+            admission = conn.execute(
+                "SELECT request_id,status FROM media_download_admissions WHERE id=?",
+                (admission_id,),
+            ).fetchone()
+        self.assertEqual((int(admission["request_id"]), admission["status"]),
+                         (successor, "submitted"))
+        self.assertEqual(int(db.get_media_subscription_candidate(candidate)["request_id"]), successor)
 
     def test_candidate_count_matches_visible_rows_after_retrying_same_episode(self):
         subscription_id, first_candidate_id = self._seed()

@@ -11,6 +11,10 @@ class DownloadAdmissionBindingError(RuntimeError):
     """媒体订阅下载准入无法在外部提交前绑定到持久化请求。"""
 
 
+class DownloadRequestRetryFenceError(RuntimeError):
+    """重试源或媒体准入已变化，禁止创建 successor 并提交后端。"""
+
+
 def add_download_log(source: str, title: str = "", path: str = "",
                      rss_item_id: int | None = None, status: str = "submitted",
                      request_id: int | None = None, backend_task_id: str = "",
@@ -296,7 +300,9 @@ def create_download_request(request_key: str, kind: str, title: str = "",
                             source_alias_key: str = "",
                             admission_id: int | None = None,
                             content_type: str = "",
-                            initial_targets: str = "") -> tuple[int, bool]:
+                            initial_targets: str = "",
+                            retry_source_request_id: int | None = None,
+                            retry_source_status: str = "") -> tuple[int, bool]:
     """原子创建下载请求，并把等价历史 key 纳入同一防重边界。
 
     运行中的同源请求继续幂等返回；用户再次显式提交已经完成、失败或取消的普通下载时，
@@ -311,11 +317,25 @@ def create_download_request(request_key: str, kind: str, title: str = "",
     primary_key = keys[0]
     timestamp = db.now()
     with db.get_conn() as conn:
-        def finish(request_id: int, created: bool) -> tuple[int, bool]:
+        def finish(
+            request_id: int, created: bool,
+            admission_source_ids: tuple[int, ...] = (),
+        ) -> tuple[int, bool]:
             if created and initial_targets and not _claim_download_request_conn(
                 conn, int(request_id), initial_targets, timestamp
             ):
                 raise RuntimeError("新下载请求未能认领")
+            if created and admission_source_ids:
+                from app.repositories.media_subscriptions import (
+                    _transfer_failed_media_download_admissions_conn,
+                )
+
+                _transfer_failed_media_download_admissions_conn(
+                    conn,
+                    source_request_ids=admission_source_ids,
+                    successor_request_id=int(request_id),
+                    timestamp=timestamp,
+                )
             _bind_media_download_admission_conn(
                 conn, admission_id, int(request_id), timestamp
             )
@@ -323,6 +343,15 @@ def create_download_request(request_key: str, kind: str, title: str = "",
 
         # 串行化“检查所有等价 key → 归档历史 → 新建 canonical 请求”。
         conn.execute("BEGIN IMMEDIATE")
+        if retry_source_request_id is not None:
+            source = conn.execute(
+                "SELECT status FROM download_requests WHERE id=?",
+                (int(retry_source_request_id),),
+            ).fetchone()
+            if source is None or str(source["status"] or "") != str(retry_source_status):
+                raise DownloadRequestRetryFenceError(
+                    "原下载请求状态已变化，未重新提交"
+                )
         keys = _compatible_request_keys(conn, keys, source_alias_key)
         rows = _request_rows_for_keys(
             conn,
@@ -418,7 +447,14 @@ def create_download_request(request_key: str, kind: str, title: str = "",
         )
         request_id = int(created.lastrowid)
         _register_request_keys(conn, request_id, keys, timestamp)
-        return finish(request_id, True)
+        admission_source_ids = ()
+        if retry_source_request_id is not None:
+            admission_source_ids = tuple(dict.fromkeys((
+                int(retry_source_request_id),
+                *(int(row["id"]) for row in rows_to_archive
+                  if str(row["status"] or "") in {"failed", "manual_review"}),
+            )))
+        return finish(request_id, True, admission_source_ids)
 
 
 def bind_pending_download_request_owner(

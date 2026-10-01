@@ -106,7 +106,7 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
         }
         with (
             patch.object(download_dispatcher, "download_resubmit_capabilities", return_value=capabilities),
-            patch.object(download_dispatcher, "dispatch_request", return_value=dispatch_result),
+            patch.object(download_dispatcher, "_dispatch_claimed_targets", return_value=dispatch_result),
         ):
             result = download_dispatcher.resubmit_download_request(request_id, "guangya")
 
@@ -181,19 +181,21 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
         }
         with (
             patch.object(download_dispatcher, "download_resubmit_capabilities", return_value=capabilities),
-            patch.object(download_dispatcher, "dispatch_request", return_value=dispatch_result) as dispatch,
+            patch.object(download_dispatcher, "_dispatch_claimed_targets", return_value=dispatch_result) as dispatch,
         ):
             result = download_dispatcher.resubmit_download_request(request_id, "guangya")
 
         self.assertTrue(result["ok"])
         successor_id = int(result["request_id"])
         self.assertNotEqual(successor_id, request_id)
-        dispatch.assert_called_once_with(successor_id, "guangya")
+        dispatch.assert_called_once()
+        self.assertEqual(int(dispatch.call_args.args[0]["id"]), successor_id)
+        self.assertEqual(dispatch.call_args.args[1], ("guangya",))
         original = db.get_download_request(request_id)
         successor = db.get_download_request(successor_id)
         self.assertEqual(original["status"], "resubmitted")
         self.assertIn(":history:", original["request_key"])
-        self.assertEqual(successor["status"], "pending")
+        self.assertEqual(successor["status"], "submitting")
         self.assertEqual(successor["chat_id"], "-100123")
         self.assertEqual(successor["user_id"], "9988")
         active_ids = {int(row["id"]) for row in db.list_active_download_requests()}
@@ -256,7 +258,7 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
         }
         with (
             patch.object(download_dispatcher, "download_resubmit_capabilities", return_value=capabilities),
-            patch.object(download_dispatcher, "dispatch_request", return_value=dispatch_result),
+            patch.object(download_dispatcher, "_dispatch_claimed_targets", return_value=dispatch_result),
         ):
             result = download_dispatcher.resubmit_download_request(request_id, "qb")
 
@@ -425,7 +427,7 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
             ) as export_torrent,
             patch.object(
                 download_dispatcher,
-                "dispatch_request",
+                "_dispatch_claimed_targets",
                 return_value=dispatch_result,
             ),
         ):
@@ -468,7 +470,7 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
             patch.object(download_dispatcher, "get", return_value="http://qb.local"),
             patch.object(
                 download_dispatcher,
-                "dispatch_request",
+                "_dispatch_claimed_targets",
                 return_value=dispatch_result,
             ),
         ):
@@ -508,7 +510,9 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
             "both": {"enabled": False, "reason": "unsupported"},
         }
 
-        def fail_dispatch(successor_id: int, targets: str):
+        def fail_dispatch(row, claimed_targets: tuple[str, ...]):
+            successor_id = int(row["id"])
+            targets = "both" if len(claimed_targets) == 2 else claimed_targets[0]
             db.update_download_request(
                 successor_id,
                 targets=targets,
@@ -528,7 +532,7 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
 
         with (
             patch.object(download_dispatcher, "download_resubmit_capabilities", return_value=capabilities),
-            patch.object(download_dispatcher, "dispatch_request", side_effect=fail_dispatch),
+            patch.object(download_dispatcher, "_dispatch_claimed_targets", side_effect=fail_dispatch),
         ):
             result = download_dispatcher.resubmit_download_request(request_id, "qb")
 
@@ -667,7 +671,7 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
         with (
             patch.object(download_dispatcher, "get", return_value="http://qb.local"),
             patch.object(download_dispatcher, "analyze_offline_url") as analyze,
-            patch.object(download_dispatcher, "dispatch_request", return_value=dispatch_result),
+            patch.object(download_dispatcher, "_dispatch_claimed_targets", return_value=dispatch_result),
         ):
             analyze.return_value.allowed = True
             analyze.return_value.reason = ""
