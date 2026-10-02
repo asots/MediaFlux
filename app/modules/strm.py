@@ -53,7 +53,7 @@ def _guangya_client_scope(
 ) -> Iterator[GuangYaClient]:
     """仅释放当前调用内部创建的光鸭客户端。"""
     owned_client = client is None
-    runtime_client = client or GuangYaClient()
+    runtime_client = client or GuangYaClient(background_reads=True)
     try:
         yield runtime_client
     finally:

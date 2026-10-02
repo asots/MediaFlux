@@ -9,6 +9,7 @@ import unittest
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from email.utils import formatdate
 from unittest.mock import Mock, PropertyMock, patch
 
 import app.clients.guangya as guangya_module
@@ -421,6 +422,78 @@ class GuangYaAdaptiveReadTests(unittest.TestCase):
         self.delays.append(seconds)
         self.now += seconds
 
+    @staticmethod
+    def _http_error(status, retry_after):
+        response = guangya_module.httpx.Response(
+            status, headers={"Retry-After": retry_after.encode("utf-8")},
+            request=guangya_module.httpx.Request("POST", "https://provider.invalid/list"),
+        )
+        return guangya_module.httpx.HTTPStatusError("limited", request=response.request, response=response)
+
+    def test_retry_after_seconds_and_http_date_honor_provider_cooldown(self):
+        for status in (429, 503):
+            for value in ("15", formatdate(1_800_000_015, usegmt=True)):
+                with self.subTest(status=status, value=value), patch.dict(
+                    guangya_module._READ_CONGESTION, {}, clear=True,
+                ), patch("app.clients.guangya.time", return_value=1_800_000_000):
+                    self.now = 100.0
+                    starts = []
+                    def callback():
+                        starts.append(self.now)
+                        if self.now < 115:
+                            raise self._http_error(status, value)
+                        return {"code": 0}
+                    self.assertEqual(self.client._call_read("list_dir", callback), {"code": 0})
+                    self.assertEqual(starts, [100.0, 115.0])
+
+    def test_retry_after_invalid_past_and_unrelated_responses_do_not_wait(self):
+        for value in ("", "nonsense", "-1", "0", "1.5", "NaN", "inf", "９", "9" * 400,
+                      "Thu, 01 Jan 1970 00:00:00 GMT", "Wed, 21 Oct 2015 07:28:00"):
+            with self.subTest(value=value):
+                self.assertEqual(self.client._retry_after_delay(self._http_error(429, value)), 0)
+        self.assertEqual(self.client._retry_after_delay(self._http_error(403, "15")), 0)
+
+    def test_wrapped_retry_after_and_exception_cycle(self):
+        wrapper = RuntimeError("sdk wrapper")
+        error = self._http_error(429, "15")
+        wrapper.__cause__ = error
+        error.__context__ = wrapper
+        self.assertEqual(self.client._retry_after_delay(wrapper), 15)
+
+    def test_success_probe_cannot_shorten_server_cooldown(self):
+        gate = guangya_module._read_congestion("list_dir")
+        gate.interval = .125
+        gate.defer(15)
+        for _ in range(16):
+            gate.succeeded(gate.generation)
+        self.assertEqual(gate.interval, .0625)
+        gate.acquire()
+        self.assertEqual(self.now, 115)
+
+    def test_late_rejections_keep_longest_cooldown_without_multiple_rate_penalties(self):
+        gate = guangya_module._read_congestion("list_dir")
+        generation = gate.acquire()
+        for seconds in (10, 30, 5):
+            gate.defer(seconds)
+            gate.rejected(generation, .6)
+        self.assertEqual(gate.generation, 1)
+        self.assertEqual(gate.interval, .125)
+        gate.acquire()
+        self.assertEqual(self.now, 130)
+
+    def test_retry_after_deadline_and_cancel_never_send_early_retry(self):
+        for options, exception in (({"deadline": 101}, guangya_module.httpx.TimeoutException),
+                                   ({"should_stop": lambda: self.now >= 100.1}, guangya_module._ReadCancelled)):
+            with self.subTest(options=options), patch.dict(guangya_module._READ_CONGESTION, {}, clear=True):
+                self.now = 100.0
+                callback = Mock(side_effect=self._http_error(429, "15"))
+                with self.assertRaises(exception):
+                    self.client._call_read("list_dir", callback, **options)
+                callback.assert_called_once()
+                gate = guangya_module._read_congestion("list_dir")
+                self.assertEqual(gate.waiting, [0, 0])
+                self.assertEqual(gate.cooldown_until, 115)
+
     def test_large_healthy_library_adds_no_rate_limit_wait(self):
         for size in (3244, 32440):
             with self.subTest(requests=size):
@@ -642,6 +715,63 @@ class GuangYaAdaptiveReadTests(unittest.TestCase):
         self.assertEqual(observed["rate_limit_retries"], 1)
         self.assertEqual(observed["scan_pages"], 2)
         self.assertEqual(observed["directory_requests"], 3)
+
+
+class GuangYaReadPriorityTests(unittest.TestCase):
+    def test_foreground_preference_is_bounded_and_preserves_endpoint_spacing(self):
+        gate = guangya_module._ReadCongestion(interval=.005)
+        barrier = threading.Barrier(17)
+        local = threading.local()
+        original_wait = guangya_module._wait_read_delay
+        order = []
+        def wait(*args, **kwargs):
+            if not getattr(local, "registered", False):
+                local.registered = True
+                barrier.wait(timeout=5)
+            original_wait(*args, **kwargs)
+        def read(background):
+            gate.acquire(background=background)
+            order.append((background, time.monotonic()))
+        with patch.object(guangya_module, "_wait_read_delay", side_effect=wait), ThreadPoolExecutor(max_workers=16) as pool:
+            futures = [pool.submit(read, background) for background in [True] * 4 + [False] * 12]
+            barrier.wait(timeout=5)
+            for future in futures:
+                future.result(timeout=5)
+        self.assertEqual([lane for lane, _ in order], [False, False, False, True] * 4)
+        self.assertGreaterEqual(min(b[1] - a[1] for a, b in zip(order, order[1:])), .004)
+        self.assertEqual(gate.waiting, [0, 0])
+
+    def test_cancelled_preferred_waiter_releases_background(self):
+        gate = guangya_module._ReadCongestion(interval=.005)
+        entered = threading.Event()
+        cancelled = threading.Event()
+        def should_stop():
+            entered.set()
+            return cancelled.is_set()
+        # 先令前台也等待一个真实冷却，再取消；其名额不可永久挡住后台。
+        gate.defer(.1)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            foreground = pool.submit(gate.acquire, should_stop=should_stop)
+            self.assertTrue(entered.wait(timeout=2))
+            background = pool.submit(gate.acquire, background=True)
+            cancelled.set()
+            with self.assertRaises(guangya_module._ReadCancelled):
+                foreground.result(timeout=2)
+            self.assertEqual(background.result(timeout=2), 0)
+        self.assertEqual(gate.waiting, [0, 0])
+
+    def test_strm_owned_clients_use_background_lane_without_changing_supplied_client(self):
+        from app.modules.strm import _guangya_client_scope
+        with patch("app.modules.strm.GuangYaClient") as factory:
+            with _guangya_client_scope(None) as client:
+                self.assertIs(client, factory.return_value)
+            factory.assert_called_once_with(background_reads=True)
+            client.close.assert_called_once_with()
+            supplied = object.__new__(GuangYaClient)
+            with _guangya_client_scope(supplied) as current:
+                self.assertIs(current, supplied)
+                self.assertFalse(current._background_reads)
+            factory.assert_called_once()
 
 
 class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):

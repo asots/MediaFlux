@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from secrets import token_hex
 from time import monotonic, sleep, time
@@ -132,6 +133,16 @@ _READ_RATE_LIMIT_MESSAGE_MARKERS = (
 )
 
 
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """SDK 包装异常共用一次遍历规则，显式 cause 优先并阻止循环引用。"""
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
 class _ReadCancelled(RuntimeError):
     """调用方停止扫描；不视为云端失败，也不触发网络重试。"""
 
@@ -165,35 +176,59 @@ class _ReadCongestion:
 
     interval: float = 0.0
     next_at: float = 0.0
+    cooldown_until: float = 0.0
+    waiting: list[int] = field(default_factory=lambda: [0, 0], repr=False)
+    foreground_streak: int = 0
     generation: int = 0
     successes: int = 0
     ceiling_rate: float = 0.0
     probe_rate: float = 0.0
     rejected_at: float = float("-inf")
     sustained: bool = False
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    lock: threading.Condition = field(default_factory=threading.Condition, repr=False)
 
-    def acquire(self, *, deadline=None, should_stop=None, metrics=None) -> int:
+    def acquire(self, *, background=False, deadline=None, should_stop=None, metrics=None) -> int:
         wait_started = None
+        lane = int(background)
+        with self.lock:
+            self.waiting[lane] += 1
         try:
             while True:
                 _wait_read_delay(0, deadline=deadline, should_stop=should_stop)
                 with self.lock:
                     now = monotonic()
-                    delay = self.next_at - now
-                    if delay <= 0:
-                        self.next_at = now + self.interval
-                        return self.generation
-                    if deadline is not None and self.next_at >= deadline:
+                    ready_at = max(self.next_at, self.cooldown_until)
+                    if deadline is not None and ready_at >= deadline:
                         raise httpx.TimeoutException("光鸭限流等待超过读取时限")
-                # 不预订未来槽位；醒来重查其它线程的新冷却。指标累计实际等待，
-                # 多线程之和可超过墙钟耗时，不能当成本轮扫描可直接节省的时间。
-                if wait_started is None:
-                    wait_started = now
+                    delay = ready_at - now
+                    if wait_started is None and delay > 0:
+                        wait_started = now
+                    if delay <= 0:
+                        # 拥塞时优先前台，但每连续 3 次前台必须让一个后台通过。
+                        # 无拥塞时不串行化请求，也不另加固定 QPS 限额。
+                        preferred = int(self.foreground_streak >= 3)
+                        if self.interval and lane != preferred and self.waiting[preferred]:
+                            if wait_started is None:
+                                wait_started = now
+                            self.lock.wait(timeout=min(0.1, deadline - now) if deadline else 0.1)
+                            continue
+                        self.next_at = now + self.interval
+                        self.foreground_streak = 0 if background else min(3, self.foreground_streak + 1)
+                        return self.generation
+                # 不预订未来槽位；醒来重查其它线程的新冷却。多线程等待之和
+                # 可超过墙钟耗时，不能当成本轮扫描可直接节省的时间。
                 _wait_read_delay(delay, deadline=deadline, should_stop=should_stop)
         finally:
+            with self.lock:
+                self.waiting[lane] -= 1
+                self.lock.notify_all()
             if wait_started is not None and metrics is not None:
                 metrics.record_wait(monotonic() - wait_started)
+
+    def defer(self, delay: float) -> None:
+        # 服务端明确的冷却独立于探速节拍；迟到的成功不能将它提前解除。
+        with self.lock:
+            self.cooldown_until = max(self.cooldown_until, monotonic() + delay)
 
     def rejected(self, generation: int, delay: float) -> None:
         with self.lock:
@@ -1037,8 +1072,10 @@ class GuangYaClient:
     """光鸭云盘客户端。"""
 
     display_name = "光鸭云盘"
+    _background_reads = False
 
-    def __init__(self, token_file: Path = TOKEN_FILE):
+    def __init__(self, token_file: Path = TOKEN_FILE, *, background_reads: bool = False):
+        self._background_reads = background_reads
         self.token_file = _canonical_token_path(Path(token_file))
         self._token_lock = _shared_token_lock(self.token_file)
         self._token_process_lock = _shared_token_process_lock(self.token_file)
@@ -1524,15 +1561,11 @@ class GuangYaClient:
 
     @classmethod
     def _rate_limit_kind(cls, exc: BaseException) -> str:
-        current: BaseException | None = exc
-        visited: set[int] = set()
         http_limited = False
-        while current is not None and id(current) not in visited:
-            visited.add(id(current))
+        for current in _exception_chain(exc):
             if isinstance(current, GuangYaReadRejected) and current.rate_limited:
                 return "business"
             http_limited |= cls._exception_status_code(current) == 429
-            current = current.__cause__ or current.__context__
         return "http" if http_limited else ""
 
     @staticmethod
@@ -1542,12 +1575,28 @@ class GuangYaClient:
         base = (0.6, 1.2)[min(max(0, attempt), 1)]
         return base + random.uniform(0.0, base * 0.25)
 
+    @staticmethod
+    def _retry_after_delay(exc: BaseException) -> float:
+        delay = 0.0
+        for current in _exception_chain(exc):
+            response = getattr(current, "response", None)
+            if getattr(response, "status_code", None) in {429, 503}:
+                value = str(getattr(response, "headers", {}).get("Retry-After", "")).strip()
+                try:
+                    if value.isascii() and value.isdigit():
+                        seconds = float(value)
+                    else:
+                        date = parsedate_to_datetime(value)
+                        seconds = date.timestamp() - time() if date.tzinfo else 0.0
+                    if math.isfinite(seconds):
+                        delay = max(delay, seconds)
+                except (ValueError, TypeError, OverflowError):
+                    pass  # 缺失/非法响应头继续使用原有有界退避。
+        return delay
+
     @classmethod
     def _read_retryable(cls, exc: Exception) -> bool:
-        current: BaseException | None = exc
-        visited: set[int] = set()
-        while current is not None and id(current) not in visited:
-            visited.add(id(current))
+        for current in _exception_chain(exc):
             if isinstance(current, GuangYaReadRejected) and current.retryable:
                 return True
             status_code = cls._exception_status_code(current)
@@ -1558,19 +1607,14 @@ class GuangYaClient:
             name = type(current).__name__.lower()
             if any(token in name for token in ("timeout", "connect", "network", "transport")):
                 return True
-            current = current.__cause__ or current.__context__
         return False
 
     @staticmethod
     def _is_timeout_error(exc: BaseException) -> bool:
-        current: BaseException | None = exc
-        visited: set[int] = set()
-        while current is not None and id(current) not in visited:
-            visited.add(id(current))
-            if isinstance(current, (TimeoutError, httpx.TimeoutException)):
-                return True
-            current = current.__cause__ or current.__context__
-        return False
+        return any(
+            isinstance(current, (TimeoutError, httpx.TimeoutException))
+            for current in _exception_chain(exc)
+        )
 
     def _call_read(
         self,
@@ -1591,6 +1635,7 @@ class GuangYaClient:
         while True:
             metrics = self._active_read_metrics()
             generation = congestion.acquire(
+                background=self._background_reads,
                 deadline=deadline, should_stop=should_stop, metrics=metrics,
             )
             observed_access_token = str(getattr(getattr(self, "_raw", None), "token", "") or "")
@@ -1604,6 +1649,9 @@ class GuangYaClient:
                 rate_limit_kind = self._rate_limit_kind(exc)
                 rate_limited = bool(rate_limit_kind)
                 delay = self._read_retry_delay(attempt, rate_limited=rate_limited)
+                retry_after = self._retry_after_delay(exc)
+                if retry_after:
+                    congestion.defer(retry_after)
                 if rate_limited:
                     congestion.rejected(generation, delay)
                 retry_limit = 2 if rate_limit_kind == "business" else 1
