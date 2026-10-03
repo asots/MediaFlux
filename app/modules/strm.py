@@ -1922,6 +1922,57 @@ def sync_strm_incremental(
         )
 
 
+def _directory_fingerprint(files: list[GuangYaFile]) -> str:
+    payload = [vars(file) for file in sorted(files, key=lambda file: file.file_id)]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _source_snapshot_directories(
+    snapshot: dict[str, GuangYaFile],
+    source_id: str,
+    observed: dict[str, str],
+) -> dict[str, list[GuangYaFile]]:
+    """将同一账号快照投影到来源；不能把无法归属的历史对象当成已删除。"""
+    if source_id != "0" and (
+        source_id not in snapshot or not snapshot[source_id].is_dir
+    ):
+        raise RuntimeError("光鸭全量快照缺少来源目录")
+    children: dict[str, list[GuangYaFile]] = {}
+    for file in snapshot.values():
+        children.setdefault(file.parent_id, []).append(file)
+    directories: dict[str, list[GuangYaFile]] = {}
+    pending = [source_id]
+    while pending:
+        parent = pending.pop()
+        if parent in directories:
+            raise RuntimeError("光鸭来源目录存在循环或重复归属")
+        files = children.get(parent, [])
+        directories[parent] = files
+        pending.extend(file.file_id for file in files if file.is_dir)
+    for parent, fingerprint in observed.items():
+        if parent not in directories or fingerprint != _directory_fingerprint(directories[parent]):
+            raise RuntimeError("光鸭来源在目录读取与全量快照之间发生变化")
+
+    # 来源内历史项追溯到来源根即可；来源外对象须账号根可达才能退役。
+    # 断链/非目录父节点/循环不能作为删除证据，无关孤儿不拖垮全部同步。
+    resolved = {"0", source_id}
+    for namespace in (f"guangya:{source_id}", f"guangya-meta:{source_id}"):
+        for row in db.list_strm_index(namespace):
+            file_id = str(row["file_id"])
+            if file_id not in snapshot:
+                continue
+            chain: set[str] = set()
+            current = snapshot[file_id].parent_id
+            while current not in resolved:
+                node = snapshot.get(current)
+                if current in chain or node is None or not node.is_dir:
+                    raise RuntimeError("光鸭全量快照中的历史对象归属不完整，已阻止清理")
+                chain.add(current)
+                current = node.parent_id
+            resolved.update(chain)
+    return directories
+
+
 def _sync_strm_impl(
     source_dir_id: str,
     base_url: str,
@@ -1982,6 +2033,7 @@ def _sync_strm_impl(
         "request_p99_ms": 0.0,
         "scan_workers_configured": scan_worker_count,
         "scan_workers_peak": 0, "scan_queue_peak": 0,
+        "scan_bulk_used": False,
         "verify_workers_configured": verify_worker_count,
         "verified_candidates": 0, "verify_prefiltered": 0,
         "scan_incomplete": False, "scan_limit_reason": "",
@@ -2054,6 +2106,19 @@ def _sync_strm_impl(
         nonlocal scan_errors
         pending_dirs = deque([(initial_dir_id, initial_parts)])
         visited_dir_ids: set[str] = set()
+        observed_dirs: dict[str, str] = {}
+        snapshot_dirs: dict[str, list[GuangYaFile]] | None = None
+        snapshot_attempted = False
+
+        def read_snapshot(request_budget: int):
+            snapshot = client.read_directory_snapshot(
+                request_budget=request_budget, max_items=max_entries,
+                should_stop=page_scan_stop_requested,
+            )
+            return (
+                _source_snapshot_directories(snapshot, str(initial_dir_id), observed_dirs)
+                if snapshot is not None else None
+            )
 
         def list_directory(dir_id: str) -> list[GuangYaFile]:
             nonlocal active_scan_workers, scan_entry_budget_used
@@ -2065,11 +2130,12 @@ def _sync_strm_impl(
                     int(stats["scan_workers_peak"]), active_scan_workers
                 )
             try:
-                files = iter(client.iter_dir(
-                    dir_id,
-                    should_stop=page_scan_stop_requested,
-                    max_items=max_entries,
-                ))
+                files = iter(
+                    snapshot_dirs[dir_id] if snapshot_dirs is not None
+                    else client.iter_dir(
+                        dir_id, should_stop=page_scan_stop_requested, max_items=max_entries,
+                    )
+                )
                 collected: list[GuangYaFile] = []
                 while True:
                     # 在读取下一个远端条目前原子预留全局配额；空迭代器会
@@ -2117,7 +2183,7 @@ def _sync_strm_impl(
             max_workers=scan_worker_count,
             thread_name_prefix="strm-dir-scan",
         ) as executor:
-            inflight: dict[object, tuple[str, tuple[str, ...]]] = {}
+            inflight: dict[object, tuple[str | None, tuple[str, ...]]] = {}
             while (pending_dirs or inflight) and not scan_abort.is_set():
                 if stop_requested("scan"):
                     abort_scan()
@@ -2126,7 +2192,16 @@ def _sync_strm_impl(
                     abort_scan("deadline", "云端目录扫描超过总时限")
                     break
 
-                while pending_dirs and len(inflight) < scan_worker_count:
+                # 小来源不探测全账号；大 frontier 的目录请求成本足以覆盖
+                # 双轮快照时，改用同一张来源图供下方唯一的候选管道消费。
+                want_snapshot = (
+                    any(parent is None for parent, _parts in inflight.values())
+                    or not snapshot_attempted and len(pending_dirs) >= 64
+                )
+                if want_snapshot and not inflight:
+                    snapshot_attempted = True
+                    inflight[executor.submit(read_snapshot, len(pending_dirs))] = (None, ())
+                while not want_snapshot and pending_dirs and len(inflight) < scan_worker_count:
                     dir_id, rel_parts = pending_dirs.popleft()
                     identity = str(dir_id)
                     if identity in visited_dir_ids:
@@ -2159,14 +2234,20 @@ def _sync_strm_impl(
                         abort_scan()
                         raise
                     except Exception as exc:
-                        logger.error("列目录失败 %s: %s", dir_id, exc)
+                        if stop_requested("scan"):
+                            abort_scan()
+                            break
+                        if scan_deadline_hit.is_set() or time.monotonic() > scan_deadline:
+                            abort_scan("deadline", "云端目录扫描超过总时限")
+                            break
+                        logger.error("列目录失败 %s: %s", dir_id or source_dir_id, exc)
                         stats["failed"] += 1
                         scan_errors += 1
                         if not stats["scan_limit_reason"]:
                             stats["scan_limit_reason"] = "directory_error"
                         stats["scan_incomplete"] = True
                         stats["clean_skipped"] = True
-                        _append_error_sample(stats, "扫描目录", dir_id, exc)
+                        _append_error_sample(stats, "扫描目录", dir_id or source_dir_id, exc)
                         abort_scan()
                         break
 
@@ -2178,6 +2259,13 @@ def _sync_strm_impl(
                         abort_scan("deadline", "云端目录扫描超过总时限")
                         break
 
+                    if dir_id is None:
+                        snapshot_dirs = files
+                        stats["scan_bulk_used"] = snapshot_dirs is not None
+                        observed_dirs.clear()
+                        continue
+                    if not snapshot_attempted:
+                        observed_dirs[dir_id] = _directory_fingerprint(files)
                     stats["directories"] += 1
 
                     child_dirs: list[tuple[str, tuple[str, ...]]] = []

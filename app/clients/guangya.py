@@ -1928,6 +1928,109 @@ class GuangYaClient:
             return self.token_status(valid=False)
 
     # ===== 目录浏览 =====
+    def _iter_directory_pages(
+        self,
+        parent_id: str | None,
+        page_size: int,
+        should_stop: Callable[[], bool] | None = None,
+        *,
+        strict: bool = False,
+        expected_total: int | None = None,
+        max_pages: int | None = None,
+    ) -> Iterator[tuple[Iterator[GuangYaFile], int | None]]:
+        """共用目录分页读取；strict 仅用于要求完整性的全账号快照。"""
+        seen_ids: set[str] = set()
+        yielded = 0
+        directory_total = expected_total
+        page = 0
+
+        def convert_page(items: list[dict]) -> Iterator[GuangYaFile]:
+            nonlocal yielded
+            for raw_item in items:
+                item = _to_file(raw_item, "0" if strict else (parent_id or "0"))
+                if strict and not item.file_id:
+                    raise RuntimeError("光鸭全账号目录快照条目缺少file_id")
+                if item.file_id and item.file_id in seen_ids:
+                    if strict:
+                        raise RuntimeError("光鸭全账号目录快照包含重复file_id")
+                    continue
+                if item.file_id:
+                    seen_ids.add(item.file_id)
+                yielded += 1
+                yield item
+
+        while True:
+            if should_stop and should_stop():
+                if strict:
+                    raise RuntimeError("光鸭全账号目录快照已取消")
+                return
+            if max_pages is not None and page >= max_pages:
+                raise RuntimeError("光鸭全账号目录快照超过请求预算")
+            try:
+                response = self._call_read(
+                    "list_dir",
+                    lambda page=page: self.raw.fs_files(
+                        parent_id=parent_id,
+                        page=page,
+                        page_size=page_size,
+                    ),
+                    should_stop=should_stop,
+                )
+            except _ReadCancelled as exc:
+                if strict:
+                    raise RuntimeError("光鸭全账号目录快照已取消") from exc
+                return
+
+            metrics = self._active_read_metrics()
+            if metrics is not None:
+                metrics.record_page()
+            payload = response.get("data", response) if isinstance(response, dict) else {}
+            page_total = payload.get("total") if isinstance(payload, dict) else None
+            valid_total = (
+                isinstance(page_total, int)
+                and not isinstance(page_total, bool)
+                and page_total >= 0
+            )
+            if strict and not valid_total:
+                raise RuntimeError("光鸭全账号目录快照缺少有效total")
+            if valid_total:
+                if directory_total is None:
+                    directory_total = page_total
+                elif page_total != directory_total:
+                    raise RuntimeError("光鸭目录分页总数发生变化，读取不完整")
+
+            items = self._extract_list(response)
+            before = yielded
+            files = convert_page(items)
+            if strict:
+                # 快照整页核验后才消费；普通读取保留逐项转换与提前结束语义。
+                files = list(files)
+            else:
+                yield files, directory_total
+
+            has_more = _read_page_has_more(
+                response, count=len(items), seen=yielded, page_size=page_size,
+            )
+            if strict:
+                assert directory_total is not None
+                expected_pages = max(1, math.ceil(directory_total / page_size))
+                expected_count = max(0, min(page_size, directory_total - page * page_size))
+                if page >= expected_pages or len(items) != expected_count:
+                    raise RuntimeError("光鸭全账号目录分页缺失或服务端缩页，读取不完整")
+                if has_more != (page + 1 < expected_pages):
+                    raise RuntimeError("光鸭全账号目录分页标记与total不一致")
+            else:
+                if yielded == before and (items or has_more):
+                    raise RuntimeError("光鸭目录分页未推进，已停止读取以避免返回不完整目录")
+                if not has_more and directory_total is not None and yielded != directory_total:
+                    raise RuntimeError("光鸭目录分页条目数与总数不一致，读取不完整")
+
+            if strict:
+                yield iter(files), directory_total
+            if not has_more:
+                return
+            page += 1
+
     def iter_dir(
         self,
         parent_id: str = "0",
@@ -1937,64 +2040,74 @@ class GuangYaClient:
     ) -> Iterator[GuangYaFile]:
         """逐页迭代目录，并由调用方预算限制条目数而非固定页数。"""
         normalized_parent = parent_id if parent_id != "0" else None
-        seen_ids: set[str] = set()
-        yielded = 0
-        directory_total: int | None = None
-        page = 0
-        # 总条目预算独立于页长；小预算只多请求一个条目用于判定是否截断。
         item_limit = (
             _DEFAULT_DIRECTORY_ITEM_LIMIT
             if max_items is None else max(1, int(max_items))
         )
         page_size = min(1000, item_limit + 1)
-        while True:
-            if should_stop and should_stop():
-                return
-            try:
-                res = self._call_read(
-                    "list_dir",
-                    lambda: self.raw.fs_files(
-                        parent_id=normalized_parent,
-                        page=page,
-                        page_size=page_size,
-                    ),
-                    should_stop=should_stop,
-                )
-            except _ReadCancelled:
-                return
-            metrics = self._active_read_metrics()
-            if metrics is not None:
-                metrics.record_page()
-            payload = res.get("data", res) if isinstance(res, dict) else {}
-            page_total = payload.get("total") if isinstance(payload, dict) else None
-            if isinstance(page_total, int) and not isinstance(page_total, bool) and page_total >= 0:
-                if directory_total is None:
-                    directory_total = page_total
-                elif page_total != directory_total:
-                    raise RuntimeError("光鸭目录分页总数发生变化，读取不完整")
-            items = self._extract_list(res)
-            new_count = 0
-            for raw_item in items:
-                item = _to_file(raw_item, parent_id)
-                if item.file_id and item.file_id in seen_ids:
-                    continue
+        yielded = 0
+        for files, _total in self._iter_directory_pages(
+            normalized_parent, page_size, should_stop,
+        ):
+            for item in files:
                 if item_limit is not None and yielded >= item_limit:
                     raise DirectoryEntryLimitError(
                         f"光鸭目录项目超过调用方安全上限 {item_limit}，已停止读取"
                     )
-                if item.file_id:
-                    seen_ids.add(item.file_id)
                 yield item
                 yielded += 1
-                new_count += 1
-            has_more = _read_page_has_more(res, count=len(items), seen=yielded, page_size=page_size)
-            if new_count == 0 and (items or has_more):
-                raise RuntimeError("光鸭目录分页未推进，已停止读取以避免返回不完整目录")
-            if not has_more:
-                if directory_total is not None and yielded != directory_total:
-                    raise RuntimeError("光鸭目录分页条目数与总数不一致，读取不完整")
-                return
-            page += 1
+
+    def read_directory_snapshot(
+        self,
+        *,
+        request_budget: int,
+        max_items: int,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> dict[str, GuangYaFile] | None:
+        """双轮读取并核对全账号目录；None 仅表示预估读取成本超出预算。"""
+        def check_cancelled() -> None:
+            if should_stop and should_stop():
+                raise RuntimeError("光鸭全账号目录快照已取消")
+
+        first_pages = self._iter_directory_pages(
+            "*", 1000, should_stop, strict=True,
+        )
+        first_page, total = next(first_pages)
+        assert total is not None
+        check_cancelled()
+
+        # 空目录每轮仍需一次请求以证明为空；非空按协议中的ceil(total/1000)计页。
+        pages_per_round = max(1, math.ceil(total / 1000))
+        # 根列表独立核对缺省parentId的真实根条目，至少预留一页。
+        if total > max_items or 2 * pages_per_round + 1 > request_budget:
+            first_pages.close()
+            return None
+
+        first: dict[str, GuangYaFile] = {
+            item.file_id: item for item in first_page
+        }
+        for page_files, _page_total in first_pages:
+            first.update((item.file_id, item) for item in page_files)
+
+        check_cancelled()
+        second: dict[str, GuangYaFile] = {}
+        for page_files, _page_total in self._iter_directory_pages(
+            "*", 1000, should_stop, strict=True, expected_total=total,
+        ):
+            second.update((item.file_id, item) for item in page_files)
+        check_cancelled()
+        if first != second:
+            raise RuntimeError("光鸭全账号目录两轮快照不一致")
+        roots: dict[str, GuangYaFile] = {}
+        for files, _total in self._iter_directory_pages(
+            None, 1000, should_stop, strict=True,
+            max_pages=request_budget - 2 * pages_per_round,
+        ):
+            roots.update((file.file_id, file) for file in files)
+        check_cancelled()
+        if roots != {fid: file for fid, file in first.items() if file.parent_id == "0"}:
+            raise RuntimeError("光鸭全账号快照与根目录列表不一致，无法确认缺省parentId的归属")
+        return first
 
     def list_dir(self, parent_id: str = "0") -> list[GuangYaFile]:
         """完整读取目录全部分页，适合需要完整快照的调用方。"""

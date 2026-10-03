@@ -831,6 +831,12 @@ class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
                 if parent_id == "dir-1" and not limited:
                     limited = True
                     return {"code": 127, "msg": "操作过于频繁"}
+            if parent_id == "*":
+                # 账号远大于本次来源，首个成本探测后继续目录枚举。
+                return {"data": {"total": 1_000_000, "list": [
+                    {"fileId": f"outside-{i}", "fileName": f"Other-{i}",
+                     "resType": 2, "parentId": "0"} for i in range(page_size)
+                ]}}
             if parent_id == "root":
                 rows = [
                     {"fileId": f"dir-{i}", "fileName": f"Show-{i}", "resType": 2}
@@ -857,7 +863,7 @@ class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
                               clean_invalid=False, clean_empty_dirs=False, scan_workers=15)
             self.assertFalse(stats["scan_incomplete"])
             self.assertEqual(stats["directories"], 301)
-            self.assertEqual(stats["directory_requests"], 302)  # 根目录一页 + 重试一页
+            self.assertEqual(stats["directory_requests"], 303)  # 根目录、重试、一次成本探测
             self.assertEqual(stats["generated"], 1200)
             self.assertEqual(stats["failed"], 0)
             self.assertEqual(stats["rate_limit_retries"], 1)
@@ -869,7 +875,7 @@ class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
             self.assertEqual(again["generated"], 0)
             self.assertEqual(again["skipped"], 1200)
             self.assertEqual(again["read_retries"], 0)
-            self.assertEqual(len(calls), 301)
+            self.assertEqual(len(calls), 302)
             self.assertEqual(before, {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")})
 
     def test_exhausted_rate_limit_never_cleans_existing_strm(self):
@@ -936,3 +942,195 @@ class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _SnapshotTreeClient(GuangYaClient):
+    """仅替换SDK传输：生产客户端分页、快照和STRM管道均真实执行。"""
+    def __init__(self, directories=64):
+        self._read_metrics_lock = threading.Lock()
+        self._read_metrics = None
+        self.calls = []
+        self.hook = None
+        self.rows = [self.row("root", "Root", "0", True)]
+        for i in range(directories):
+            self.rows.extend([
+                self.row(f"d{i}", f"Show-{i}", "root", True),
+                self.row(f"f{i}", "S01E01.mkv", f"d{i}"),
+            ])
+        self._raw = Mock()
+        self._raw.fs_files.side_effect = self.files
+
+    @staticmethod
+    def row(fid, name, parent, directory=False):
+        return {"fileId": fid, "fileName": name, "parentId": parent,
+                "resType": 2 if directory else 1, "fileSize": 123, "gcid": "etag"}
+
+    @property
+    def raw(self):
+        return self._raw
+
+    def files(self, *, parent_id, page, page_size):
+        self.calls.append((parent_id, page))
+        if self.hook:
+            self.hook(parent_id, page)
+        rows = [r.copy() for r in self.rows if parent_id == "*" or r["parentId"] == (parent_id or "0")]
+        return {"data": {"total": len(rows), "list": rows[page * page_size:(page + 1) * page_size]}}
+
+
+class GuangYaSnapshotScanTests(unittest.TestCase):
+    def run_sync(self, root, client, **kwargs):
+        return sync_strm("root", "http://media.invalid", root, client=client, **kwargs)
+
+    def test_bulk_scan_repeat_and_verified_removal_use_the_same_index_pipeline(self):
+        from app import database as db
+        client = _SnapshotTreeClient()
+        # 账号中的无关孤儿、来源外视频都不能变成来源内候选。
+        client.rows.extend([
+            client.row("orphan", "Orphan.mkv", "missing"),
+            client.row("outside", "Outside.mkv", "0"),
+        ])
+        with tempfile.TemporaryDirectory() as root, isolated_test_database():
+            first = self.run_sync(root, client)
+            self.assertTrue(first["scan_bulk_used"])
+            self.assertFalse(first["scan_incomplete"])
+            self.assertEqual(first["generated"], 64)
+            self.assertEqual(first["directories"], 65)
+            self.assertEqual(first["scan_entries"], 128)
+            self.assertEqual(client.calls, [("root", 0), ("*", 0), ("*", 0), (None, 0)])
+            before = {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")}
+            client.calls.clear()
+            again = self.run_sync(root, client)
+            self.assertEqual(again["skipped"], 64)
+            self.assertEqual(again["generated"], 0)
+            self.assertEqual(again["cleaned"], 0)
+            self.assertEqual(before, {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")})
+            # 从新的完整快照真实缺失，仍经原所有权/索引事务清理。
+            client.rows = [r for r in client.rows if r["fileId"] != "f0"]
+            last = self.run_sync(root, client)
+            self.assertEqual(last["cleaned"], 1)
+            self.assertEqual(len(db.list_strm_index("guangya:root")), 63)
+            self.assertEqual(len(list(Path(root).rglob("*.strm"))), 63)
+
+    def test_multi_page_snapshot_preserves_metadata_and_conflict_winners(self):
+        from app import database as db
+        client = _SnapshotTreeClient(300)
+        for i in range(300):
+            for episode in range(2, 5):
+                client.rows.append(client.row(f"f{i}-e{episode}", f"S01E{episode:02d}.mkv", f"d{i}"))
+            client.rows.append(client.row(f"nfo{i}", "tvshow.nfo", f"d{i}"))
+        # 两个独立ID目录映射到同名路径，继续采用原稳定赢家规则。
+        next(r for r in client.rows if r["fileId"] == "d1")["fileName"] = "Show-0"
+        next(r for r in client.rows if r["fileId"] == "f1")["fileSize"] = 999
+        with tempfile.TemporaryDirectory() as root, isolated_test_database():
+            result = self.run_sync(root, client, metadata_exts={"nfo"})
+            self.assertTrue(result["scan_bulk_used"])
+            self.assertFalse(result["scan_incomplete"])
+            self.assertEqual(result["directories"], 301)
+            self.assertEqual(result["generated"], 1196)
+            self.assertEqual(result["duplicates_skipped"], 4)
+            self.assertEqual(result["metadata_queued"], 299)
+            self.assertEqual(len(client.calls), 6)
+            output = Path(root) / "光鸭云盘" / "Show-0" / "S01E01.strm"
+            self.assertIn("/f1/", output.read_text())
+            with db.get_conn() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strm_metadata_queue").fetchone()[0], 299)
+            self.assertEqual(len(db.list_strm_index("guangya:root")), 1196)
+
+    def test_snapshot_deadline_is_not_a_directory_error(self):
+        client = _SnapshotTreeClient()
+        def slow(parent, page):
+            if parent == "*":
+                time.sleep(0.15)
+        client.hook = slow
+        with tempfile.TemporaryDirectory() as root, isolated_test_database(), patch(
+            "app.modules.strm._scan_limits", return_value=(1000, 1000, 1000, 0.1),
+        ):
+            result = self.run_sync(root, client)
+            self.assertTrue(result["scan_incomplete"])
+            self.assertEqual(result["scan_limit_reason"], "deadline")
+            self.assertEqual(result["failed"], 0)
+            self.assertEqual(result["generated"], 0)
+
+    def test_explicit_source_remains_repeatable_when_its_outer_parent_is_missing(self):
+        client = _SnapshotTreeClient()
+        client.rows[0]["parentId"] = "missing-outside-source"
+        with tempfile.TemporaryDirectory() as root, isolated_test_database():
+            first = self.run_sync(root, client)
+            self.assertFalse(first["scan_incomplete"])
+            self.assertEqual(first["generated"], 64)
+            again = self.run_sync(root, client)
+            self.assertFalse(again["scan_incomplete"])
+            self.assertEqual(again["skipped"], 64)
+            self.assertEqual(again["cleaned"], 0)
+            self.assertEqual(again["failed"], 0)
+
+    def test_small_source_never_reads_account(self):
+        with tempfile.TemporaryDirectory() as root, isolated_test_database():
+            client = _SnapshotTreeClient(3)
+            result = self.run_sync(root, client)
+            self.assertFalse(result["scan_bulk_used"])
+            self.assertEqual(result["generated"], 3)
+            self.assertNotIn("*", [parent for parent, page in client.calls])
+
+    def test_same_total_changes_and_directory_transition_changes_never_write(self):
+        for during in (1, 2):
+            with self.subTest(during=during), tempfile.TemporaryDirectory() as root, isolated_test_database():
+                client = _SnapshotTreeClient()
+                self.run_sync(root, client)
+                before = {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")}
+                rounds = 0
+                def mutate(parent, page):
+                    nonlocal rounds
+                    if parent == "*" and page == 0:
+                        rounds += 1
+                        if rounds == during:
+                            # 第一轮改已读目录 / 第二轮改普通文件，total均不变。
+                            target = "d0" if during == 1 else "f0"
+                            next(r for r in client.rows if r["fileId"] == target)["fileName"] = "Changed.mkv"
+                client.hook = mutate
+                result = self.run_sync(root, client)
+                self.assertTrue(result["scan_incomplete"])
+                self.assertTrue(result["clean_skipped"])
+                self.assertEqual(result["generated"], 0)
+                self.assertEqual(result["cleaned"], 0)
+                self.assertEqual(before, {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")})
+
+    def test_indexed_orphan_prevents_retirement_but_known_outside_move_is_cleaned(self):
+        for destination in ("missing", "0"):
+            with self.subTest(destination=destination), tempfile.TemporaryDirectory() as root, isolated_test_database():
+                client = _SnapshotTreeClient()
+                self.run_sync(root, client)
+                next(r for r in client.rows if r["fileId"] == "f0")["parentId"] = destination
+                result = self.run_sync(root, client)
+                self.assertEqual(result["scan_incomplete"], destination == "missing")
+                self.assertEqual(result["cleaned"], 0 if destination == "missing" else 1)
+                self.assertEqual(len(list(Path(root).rglob("*.strm"))), 64 if destination == "missing" else 63)
+
+    def test_bulk_obeys_scoped_entry_directory_and_candidate_budgets(self):
+        cases = ((64, 1000, 1000, "directories"), (1000, 100, 1000, "entries"), (1000, 1000, 5, "candidates"))
+        for dirs, entries, candidates, reason in cases:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as root, isolated_test_database(), patch(
+                "app.modules.strm._scan_limits", return_value=(dirs, entries, candidates, 100),
+            ):
+                result = self.run_sync(root, _SnapshotTreeClient())
+                self.assertTrue(result["scan_incomplete"])
+                self.assertEqual(result["scan_limit_reason"], reason)
+                self.assertEqual(result["generated"], 0)
+                self.assertFalse(list(Path(root).rglob("*.strm")))
+
+    def test_stop_while_bulk_is_read_preserves_existing_files(self):
+        with tempfile.TemporaryDirectory() as root, isolated_test_database():
+            client = _SnapshotTreeClient()
+            self.run_sync(root, client)
+            before = {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")}
+            stopped = False
+            def stop(parent, page):
+                nonlocal stopped
+                if parent == "*":
+                    stopped = True
+            client.hook = stop
+            result = self.run_sync(root, client, should_stop=lambda: stopped)
+            self.assertTrue(result["stopped"])
+            self.assertTrue(result["clean_skipped"])
+            self.assertEqual(result["generated"], 0)
+            self.assertEqual(before, {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")})

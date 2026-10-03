@@ -1071,5 +1071,167 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
             _cleanup_source_indexes(source_id)
 
 
+class StrmSnapshotOwnershipTests(IsolatedDatabaseTestCase):
+    """直接覆盖账号快照投影与历史索引归属校验，不启动完整同步。"""
+
+    def setUp(self):
+        super().setUp()
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM strm_index")
+
+    @staticmethod
+    def _record_history(source_key: str, file_id: str) -> None:
+        db.upsert_strm_index(
+            source_key, file_id, "etag", 1, f"{file_id}.nfo", f"/{file_id}.strm",
+        )
+
+    def test_virtual_zero_root_nested_closure_and_same_name_directories(self):
+        snapshot = {
+            "account": GuangYaFile("account", "账号目录", True, parent_id="0"),
+            "source": GuangYaFile("source", "来源", True, parent_id="account"),
+            "sibling": GuangYaFile("sibling", "其他来源", True, parent_id="account"),
+            "season-a": GuangYaFile("season-a", "Season", True, parent_id="source"),
+            "season-b": GuangYaFile("season-b", "Season", True, parent_id="source"),
+            "episode-a": GuangYaFile("episode-a", "A.mkv", False, parent_id="season-a"),
+            "episode-b": GuangYaFile("episode-b", "B.mkv", False, parent_id="season-b"),
+            "sibling-video": GuangYaFile(
+                "sibling-video", "Else.mkv", False, parent_id="sibling",
+            ),
+        }
+
+        # "0" 是虚拟根，不要求 snapshot 中存在 file_id="0" 的目录对象。
+        account_root = strm_module._source_snapshot_directories(snapshot, "0", {})
+        self.assertEqual(
+            [item.file_id for item in account_root["0"]], ["account"],
+        )
+
+        observed = {
+            "source": strm_module._directory_fingerprint(
+                [snapshot["season-a"], snapshot["season-b"]],
+            ),
+            "season-a": strm_module._directory_fingerprint([snapshot["episode-a"]]),
+            "season-b": strm_module._directory_fingerprint([snapshot["episode-b"]]),
+        }
+        source_dirs = strm_module._source_snapshot_directories(
+            snapshot, "source", observed,
+        )
+
+        self.assertEqual(set(source_dirs), {"source", "season-a", "season-b"})
+        self.assertEqual(
+            {item.file_id for item in source_dirs["source"]}, {"season-a", "season-b"},
+        )
+        self.assertEqual(
+            [item.file_id for item in source_dirs["season-a"]], ["episode-a"],
+        )
+        self.assertEqual(
+            [item.file_id for item in source_dirs["season-b"]], ["episode-b"],
+        )
+        self.assertNotIn("sibling-video", {
+            item.file_id for files in source_dirs.values() for item in files
+        })
+
+    def test_missing_source_root_and_reachable_source_cycle_are_rejected(self):
+        with self.subTest("missing root"), self.assertRaises(RuntimeError):
+            strm_module._source_snapshot_directories({}, "missing-source", {})
+
+        with self.subTest("source is not a directory"):
+            snapshot = {
+                "source": GuangYaFile("source", "not-a-directory", False),
+            }
+            with self.assertRaises(RuntimeError):
+                strm_module._source_snapshot_directories(snapshot, "source", {})
+
+        with self.subTest("reachable cycle"):
+            snapshot = {
+                # source -> branch -> tail -> source；所有节点从来源可达。
+                "source": GuangYaFile("source", "来源", True, parent_id="tail"),
+                "branch": GuangYaFile("branch", "分支", True, parent_id="source"),
+                "tail": GuangYaFile("tail", "尾部", True, parent_id="branch"),
+            }
+            with self.assertRaises(RuntimeError):
+                strm_module._source_snapshot_directories(snapshot, "source", {})
+
+    def test_changed_observed_directory_fingerprint_is_rejected(self):
+        source = GuangYaFile("source", "来源", True)
+        child = GuangYaFile("video", "Movie.mkv", False, parent_id="source")
+        second_child = GuangYaFile("video-2", "Other.mkv", False, parent_id="source")
+        snapshot = {
+            source.file_id: source,
+            child.file_id: child,
+            second_child.file_id: second_child,
+        }
+
+        self.assertEqual(
+            strm_module._directory_fingerprint([child, second_child]),
+            strm_module._directory_fingerprint([second_child, child]),
+        )
+        with self.assertRaises(RuntimeError):
+            strm_module._source_snapshot_directories(
+                snapshot, "source", {"source": strm_module._directory_fingerprint([])},
+            )
+
+    def test_metadata_namespace_historical_orphan_blocks_cleanup(self):
+        source_id = "metadata-orphan-source"
+        snapshot = {
+            source_id: GuangYaFile(source_id, "来源", True),
+            "legacy-meta": GuangYaFile(
+                "legacy-meta", "Movie.nfo", False, parent_id="missing-parent",
+            ),
+        }
+        source_key = f"guangya-meta:{source_id}"
+        self._record_history(source_key, "legacy-meta")
+
+        # 真实 SQLite 索引行用于确保 metadata 命名空间也参与归属核验。
+        self.assertEqual(
+            [row["file_id"] for row in db.list_strm_index(source_key)], ["legacy-meta"],
+        )
+        with self.assertRaises(RuntimeError):
+            strm_module._source_snapshot_directories(snapshot, source_id, {})
+
+    def test_reachable_outside_history_is_allowed_but_unprovable_ownership_is_not(self):
+        source_id = "current-source"
+        source = GuangYaFile(source_id, "当前来源", True)
+        inside = GuangYaFile("inside-video", "Current.mkv", False, parent_id=source_id)
+        outside_dir = GuangYaFile("other-root", "其他目录", True, parent_id="0")
+        outside_nested = GuangYaFile("outside-nested", "子目录", True, parent_id="other-root")
+        retired = GuangYaFile("retired-video", "Retired.mkv", False, parent_id="outside-nested")
+        reachable_snapshot = {
+            item.file_id: item
+            for item in (source, inside, outside_dir, outside_nested, retired)
+        }
+        source_key = f"guangya:{source_id}"
+        self._record_history(source_key, retired.file_id)
+
+        # 来源外但可沿目录链回到虚拟根的旧条目可安全退休，不进入当前来源图。
+        directories = strm_module._source_snapshot_directories(
+            reachable_snapshot, source_id, {},
+        )
+        self.assertEqual(set(directories), {source_id})
+        self.assertEqual([item.file_id for item in directories[source_id]], [inside.file_id])
+
+        invalid_cases = {
+            "missing owner": {
+                "legacy": GuangYaFile("legacy", "Old.mkv", False, parent_id="missing"),
+            },
+            "non-directory parent": {
+                "owner-file": GuangYaFile("owner-file", "Not a folder", False),
+                "legacy": GuangYaFile("legacy", "Old.mkv", False, parent_id="owner-file"),
+            },
+            "ancestry cycle": {
+                "cycle-a": GuangYaFile("cycle-a", "A", True, parent_id="cycle-b"),
+                "cycle-b": GuangYaFile("cycle-b", "B", True, parent_id="cycle-a"),
+                "legacy": GuangYaFile("legacy", "Old.mkv", False, parent_id="cycle-a"),
+            },
+        }
+        for label, malformed in invalid_cases.items():
+            with self.subTest(label=label):
+                with db.get_conn() as conn:
+                    conn.execute("DELETE FROM strm_index")
+                self._record_history(source_key, "legacy")
+                snapshot = {source_id: source, **malformed}
+                with self.assertRaises(RuntimeError):
+                    strm_module._source_snapshot_directories(snapshot, source_id, {})
+
+
 if __name__ == "__main__":
     unittest.main()

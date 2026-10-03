@@ -85,6 +85,17 @@ class GuangYaReadContractTests(unittest.TestCase):
                 self.assertEqual(list(client.iter_dir(max_items=limit)), [])
                 self.assertEqual(client.raw.fs_files.call_args.kwargs["page_size"], size)
 
+    def test_root_directory_keeps_zero_parent_for_entries_without_parent_field(self):
+        client = ReadClient({"msg": "success", "data": {
+            "total": 1, "list": [{"fileId": "root-file", "fileName": "root.mkv"}],
+        }})
+
+        entries = client.list_dir()
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].parent_id, "0")
+        self.assertIsNone(client.raw.fs_files.call_args.kwargs["parent_id"])
+
     def test_large_directory_reads_complete_result_in_two_pages(self):
         rows = [{"fileId": str(i), "fileName": f"{i}.mkv"} for i in range(1201)]
         client = ReadClient(None)
@@ -137,6 +148,146 @@ class GuangYaReadContractTests(unittest.TestCase):
                     client.list_dir()
                 self.assertNotIn("private", str(caught.exception))
                 self.assertEqual(client.raw.fs_files.call_count, 2)
+
+    def test_directory_iterator_can_stop_before_unrelated_malformed_item(self):
+        client = ReadClient({"data": {"total": 2, "list": [
+            {"fileId": "wanted", "fileName": "Wanted.mkv", "size": 1},
+            {"fileId": "other", "fileName": "Other.mkv", "size": "invalid"},
+        ]}})
+        items = client.iter_dir("source")
+        self.assertEqual(next(items).file_id, "wanted")
+        # 精准定位找到目标可立即结束；完整枚举仍必须暴露坏条目。
+        with self.assertRaises(ValueError):
+            next(items)
+        self.assertEqual(client.raw.fs_files.call_count, 1)
+
+    def test_directory_snapshot_budget_refusal_uses_one_authoritative_page(self):
+        rows = [
+            {"fileId": str(index), "fileName": f"{index}.mkv", "parentId": "0"}
+            for index in range(1000)
+        ]
+        client = ReadClient(None)
+        client.raw.fs_files.return_value = {"msg": "success", "data": {
+            "total": 1001, "list": rows, "hasMore": True,
+        }}
+
+        self.assertIsNone(client.read_directory_snapshot(request_budget=3, max_items=2000))
+        client.raw.fs_files.assert_called_once_with(parent_id="*", page=0, page_size=1000)
+
+    def test_directory_snapshot_requires_two_equal_rounds_and_independent_roots(self):
+        rows = [
+            {"fileId": "a", "fileName": "A", "parentId": 0, "size": 10, "etag": "v1"},
+            {"fileId": "b", "fileName": "B", "size": 20},
+        ]
+        client = ReadClient({"data": {"total": 2, "list": rows}})
+        snapshot = client.read_directory_snapshot(request_budget=3, max_items=2)
+        self.assertEqual(set(snapshot), {"a", "b"})
+        self.assertTrue(all(file.parent_id == "0" for file in snapshot.values()))
+        self.assertEqual([c.kwargs["parent_id"] for c in client.raw.fs_files.call_args_list], ["*", "*", None])
+
+    def test_snapshot_root_pages_cannot_exceed_remaining_request_budget(self):
+        rows = [{"fileId": str(i), "fileName": str(i), "parentId": "0"} for i in range(1001)]
+        client = ReadClient(None)
+        def files(*, parent_id, page, page_size):
+            return {"data": {"total": len(rows), "list": rows[page * page_size:(page + 1) * page_size]}}
+        client.raw.fs_files.side_effect = files
+        with self.assertRaisesRegex(RuntimeError, "超过请求预算"):
+            client.read_directory_snapshot(request_budget=5, max_items=2000)
+        self.assertEqual(client.raw.fs_files.call_count, 5)
+        client.raw.fs_files.reset_mock()
+        self.assertEqual(len(client.read_directory_snapshot(request_budget=6, max_items=2000)), 1001)
+        self.assertEqual(client.raw.fs_files.call_count, 6)
+
+    def test_directory_snapshot_missing_parent_must_be_proven_by_root_listing(self):
+        client = ReadClient(None)
+        first = {"data": {"total": 1, "list": [{"fileId": "a", "fileName": "A"}]}}
+        client.raw.fs_files.side_effect = [first, first, {"data": {"total": 0, "list": []}}]
+        with self.assertRaisesRegex(RuntimeError, "根目录列表不一致"):
+            client.read_directory_snapshot(request_budget=3, max_items=2)
+        self.assertEqual(client.raw.fs_files.call_count, 3)
+
+    def test_directory_snapshot_rejects_same_total_replacement_and_field_change(self):
+        original = [
+            {"fileId": "a", "fileName": "A", "parentId": "0", "size": 10},
+            {"fileId": "b", "fileName": "B", "parentId": "0", "size": 20},
+        ]
+        replacements = (
+            [
+                {"fileId": "a", "fileName": "A", "parentId": "0", "size": 11},
+                {"fileId": "b", "fileName": "B", "parentId": "0", "size": 20},
+            ],
+            [
+                {"fileId": "a", "fileName": "A", "parentId": "0", "size": 10},
+                {"fileId": "c", "fileName": "C", "parentId": "0", "size": 20},
+            ],
+        )
+        for replacement in replacements:
+            client = ReadClient(None)
+            client.raw.fs_files.side_effect = [
+                {"msg": "success", "data": {"total": 2, "list": deepcopy(original)}},
+                {"msg": "success", "data": {"total": 2, "list": deepcopy(replacement)}},
+            ]
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(RuntimeError, "两轮快照不一致"):
+                client.read_directory_snapshot(request_budget=3, max_items=2)
+            self.assertEqual(client.raw.fs_files.call_count, 2)
+
+    def test_directory_snapshot_cancellation_is_an_error_not_a_partial_snapshot(self):
+        before_request = ReadClient(None)
+        with self.assertRaisesRegex(RuntimeError, "已取消"):
+            before_request.read_directory_snapshot(request_budget=2, max_items=10, should_stop=lambda: True)
+        before_request.raw.fs_files.assert_not_called()
+
+        after_first_request = ReadClient(None)
+        after_first_request.raw.fs_files.return_value = {"msg": "success", "data": {
+            "total": 1, "list": [{"fileId": "a", "fileName": "A", "parentId": "0"}],
+        }}
+        with self.assertRaisesRegex(RuntimeError, "已取消"):
+            after_first_request.read_directory_snapshot(
+                request_budget=2,
+                max_items=10,
+                should_stop=lambda: after_first_request.raw.fs_files.call_count > 0,
+            )
+        after_first_request.raw.fs_files.assert_called_once()
+
+    def test_directory_snapshot_rejects_invalid_identity_parent_and_total_contracts(self):
+        cases = (
+            ("duplicate id", {"total": 2, "list": [
+                {"fileId": "a", "parentId": "0"}, {"fileId": "a", "parentId": "0"},
+            ]}, "重复file_id"),
+            ("missing id", {"total": 1, "list": [{"fileName": "A", "parentId": "0"}]}, "缺少file_id"),
+            ("missing total", {"list": []}, "缺少有效total"),
+        )
+        for label, data, message in cases:
+            client = ReadClient(None)
+            client.raw.fs_files.return_value = {"msg": "success", "data": data}
+            with self.subTest(label=label), self.assertRaisesRegex(RuntimeError, message):
+                client.read_directory_snapshot(request_budget=10, max_items=10)
+            client.raw.fs_files.assert_called_once()
+
+    def test_directory_snapshot_rejects_changed_total_and_server_page_shrink(self):
+        rows = [
+            {"fileId": str(index), "fileName": str(index), "parentId": "0"}
+            for index in range(1000)
+        ]
+        changed_total = ReadClient(None)
+        changed_total.raw.fs_files.side_effect = [
+            {"msg": "success", "data": {"total": 1001, "list": rows, "hasMore": True}},
+            {"msg": "success", "data": {"total": 1002, "list": [{
+                "fileId": "1000", "fileName": "1000", "parentId": "0",
+            }], "hasMore": True}},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "分页总数发生变化"):
+            changed_total.read_directory_snapshot(request_budget=5, max_items=2000)
+        self.assertEqual(changed_total.raw.fs_files.call_count, 2)
+
+        shrunk = ReadClient(None)
+        shrunk.raw.fs_files.return_value = {"msg": "success", "data": {
+            "total": 1001, "list": rows[:500], "hasMore": True,
+        }}
+        with self.assertRaisesRegex(RuntimeError, "服务端缩页"):
+            shrunk.read_directory_snapshot(request_budget=5, max_items=2000)
+        # 缩页按协议错误处理，不降级成成本拒绝或继续超预算翻页。
+        shrunk.raw.fs_files.assert_called_once()
 
     def test_directory_terminal_page_without_total_checks_locked_count(self):
         enough = ReadClient(None)
