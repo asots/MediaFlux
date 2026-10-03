@@ -78,6 +78,34 @@ class GuangYaReadContractTests(unittest.TestCase):
                 self.assertEqual(len(getattr(client, method)()), 2)
                 self.assertEqual(getattr(client.raw, sdk).call_count, 2)
 
+    def test_directory_page_size_tracks_the_read_budget(self):
+        for limit, size in ((None, 1000), (0, 2), (1, 2), (17, 18), (999, 1000), (100000, 1000)):
+            with self.subTest(limit=limit):
+                client = ReadClient({"data": {"total": 0, "list": []}})
+                self.assertEqual(list(client.iter_dir(max_items=limit)), [])
+                self.assertEqual(client.raw.fs_files.call_args.kwargs["page_size"], size)
+
+    def test_large_directory_reads_complete_result_in_two_pages(self):
+        rows = [{"fileId": str(i), "fileName": f"{i}.mkv"} for i in range(1201)]
+        client = ReadClient(None)
+        def files(*, parent_id, page, page_size):
+            return {"data": {"total": len(rows), "list": rows[page * page_size:(page + 1) * page_size]}}
+        client.raw.fs_files.side_effect = files
+        self.assertEqual([f.file_id for f in client.list_dir()], [str(i) for i in range(1201)])
+        self.assertEqual(client.raw.fs_files.call_count, 2)
+        self.assertEqual([c.kwargs["page"] for c in client.raw.fs_files.call_args_list], [0, 1])
+
+    def test_small_budget_requests_only_one_extra_item_for_overflow_detection(self):
+        rows = [{"fileId": str(i), "fileName": f"{i}.mkv"} for i in range(50)]
+        client = ReadClient(None)
+        def files(*, parent_id, page, page_size):
+            return {"data": {"total": len(rows), "list": rows[page * page_size:(page + 1) * page_size]}}
+        client.raw.fs_files.side_effect = files
+        with self.assertRaises(DirectoryEntryLimitError):
+            list(client.iter_dir(max_items=2))
+        self.assertEqual(client.raw.fs_files.call_count, 1)
+        self.assertEqual(client.raw.fs_files.call_args.kwargs["page_size"], 3)
+
     def test_directory_pagination_accepts_stable_total_across_pages(self):
         client = ReadClient(None)
         client.raw.fs_files.side_effect = [

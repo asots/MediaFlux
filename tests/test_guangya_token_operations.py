@@ -86,26 +86,13 @@ class _PagedDirectoryRawClient(_RotatingRawClient):
     def fs_files(self, **kwargs):
         self.fs_calls.append(dict(kwargs))
         page = int(kwargs.get("page", 0))
-        if page == 0:
-            items = [
-                {
-                    "fileId": f"dir-{index}",
-                    "fileName": f"Media {index}",
-                    "resType": 2,
-                }
-                for index in range(200)
-            ]
-        elif page == 1:
-            items = [
-                {
-                    "fileId": "canonical",
-                    "fileName": "Existing Show (2021) {tmdb-113256}",
-                    "resType": 2,
-                }
-            ]
-        else:
-            items = []
-        return {"data": {"list": items}}
+        page_size = int(kwargs["page_size"])
+        # 模拟遵守请求页长、但省略 total 的分页协议；不能写死旧的 200 条。
+        items = [
+            {"fileId": f"dir-{index}", "fileName": f"Media {index}", "resType": 2}
+            for index in range(1000)
+        ] + [{"fileId": "canonical", "fileName": "Existing Show (2021) {tmdb-113256}", "resType": 2}]
+        return {"data": {"list": items[page * page_size:(page + 1) * page_size]}}
 
     def fs_create_dir(self, **kwargs):
         self.create_calls.append(dict(kwargs))
@@ -313,11 +300,11 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 files = client.list_dir("anime-root")
                 raw = client.raw
 
-        self.assertEqual(len(files), 201)
+        self.assertEqual(len(files), 1001)
         self.assertEqual(files[-1].file_id, "canonical")
         self.assertEqual(
             [(call["page"], call["page_size"]) for call in raw.fs_calls],
-            [(0, 200), (1, 200)],
+            [(0, 1000), (1, 1000)],
         )
         self.assertTrue(all(call["parent_id"] == "anime-root" for call in raw.fs_calls))
 
@@ -337,10 +324,10 @@ class GuangYaTokenClientTests(unittest.TestCase):
         self.assertEqual(first.file_id, "dir-0")
         self.assertEqual(
             [(call["page"], call["page_size"]) for call in raw.fs_calls],
-            [(0, 200)],
+            [(0, 1000)],
         )
 
-    def test_iter_dir_enforces_caller_item_budget_across_pages(self):
+    def test_iter_dir_enforces_caller_item_budget_before_extra_page(self):
         with tempfile.TemporaryDirectory() as directory:
             token_file = self._token_file(directory)
             with patch(
@@ -354,7 +341,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
 
         self.assertEqual(
             [(call["page"], call["page_size"]) for call in raw.fs_calls],
-            [(0, 200), (1, 200)],
+            [(0, 201)],
         )
 
     def test_list_dir_retains_default_total_item_fuse(self):

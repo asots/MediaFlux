@@ -1936,18 +1936,17 @@ class GuangYaClient:
         max_items: int | None = None,
     ) -> Iterator[GuangYaFile]:
         """逐页迭代目录，并由调用方预算限制条目数而非固定页数。"""
-        page_size = 200
         normalized_parent = parent_id if parent_id != "0" else None
         seen_ids: set[str] = set()
         yielded = 0
         directory_total: int | None = None
         page = 0
-        # 保留历史 500 页（约 10 万项）熔断作为所有普通目录读取的默认边界；
-        # STRM 等已审计调用方可通过 max_items 传入更严格的本轮预算。
+        # 总条目预算独立于页长；小预算只多请求一个条目用于判定是否截断。
         item_limit = (
             _DEFAULT_DIRECTORY_ITEM_LIMIT
             if max_items is None else max(1, int(max_items))
         )
+        page_size = min(1000, item_limit + 1)
         while True:
             if should_stop and should_stop():
                 return

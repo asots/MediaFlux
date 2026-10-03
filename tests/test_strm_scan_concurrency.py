@@ -857,7 +857,7 @@ class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
                               clean_invalid=False, clean_empty_dirs=False, scan_workers=15)
             self.assertFalse(stats["scan_incomplete"])
             self.assertEqual(stats["directories"], 301)
-            self.assertEqual(stats["directory_requests"], 303)  # 根目录两页 + 重试一页
+            self.assertEqual(stats["directory_requests"], 302)  # 根目录一页 + 重试一页
             self.assertEqual(stats["generated"], 1200)
             self.assertEqual(stats["failed"], 0)
             self.assertEqual(stats["rate_limit_retries"], 1)
@@ -869,7 +869,7 @@ class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
             self.assertEqual(again["generated"], 0)
             self.assertEqual(again["skipped"], 1200)
             self.assertEqual(again["read_retries"], 0)
-            self.assertEqual(len(calls), 302)
+            self.assertEqual(len(calls), 301)
             self.assertEqual(before, {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")})
 
     def test_exhausted_rate_limit_never_cleans_existing_strm(self):
