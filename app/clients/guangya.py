@@ -1940,6 +1940,7 @@ class GuangYaClient:
         normalized_parent = parent_id if parent_id != "0" else None
         seen_ids: set[str] = set()
         yielded = 0
+        directory_total: int | None = None
         page = 0
         # 保留历史 500 页（约 10 万项）熔断作为所有普通目录读取的默认边界；
         # STRM 等已审计调用方可通过 max_items 传入更严格的本轮预算。
@@ -1965,6 +1966,13 @@ class GuangYaClient:
             metrics = self._active_read_metrics()
             if metrics is not None:
                 metrics.record_page()
+            payload = res.get("data", res) if isinstance(res, dict) else {}
+            page_total = payload.get("total") if isinstance(payload, dict) else None
+            if isinstance(page_total, int) and not isinstance(page_total, bool) and page_total >= 0:
+                if directory_total is None:
+                    directory_total = page_total
+                elif page_total != directory_total:
+                    raise RuntimeError("光鸭目录分页总数发生变化，读取不完整")
             items = self._extract_list(res)
             new_count = 0
             for raw_item in items:
@@ -1984,6 +1992,8 @@ class GuangYaClient:
             if new_count == 0 and (items or has_more):
                 raise RuntimeError("光鸭目录分页未推进，已停止读取以避免返回不完整目录")
             if not has_more:
+                if directory_total is not None and yielded != directory_total:
+                    raise RuntimeError("光鸭目录分页条目数与总数不一致，读取不完整")
                 return
             page += 1
 

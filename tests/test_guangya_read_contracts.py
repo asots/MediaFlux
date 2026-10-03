@@ -13,7 +13,7 @@ from app.agent import guangya_share_actions as shares
 from app.agent import guangya_workspace_actions as workspace
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
-from app.clients.guangya import GuangYaClient, IncompleteOfflineTaskListError
+from app.clients.guangya import DirectoryEntryLimitError, GuangYaClient, IncompleteOfflineTaskListError
 from tests.test_agent_guangya_sdk_capabilities import _RecycleClient, _ShareClient
 
 
@@ -77,6 +77,100 @@ class GuangYaReadContractTests(unittest.TestCase):
             with self.subTest(method=method):
                 self.assertEqual(len(getattr(client, method)()), 2)
                 self.assertEqual(getattr(client.raw, sdk).call_count, 2)
+
+    def test_directory_pagination_accepts_stable_total_across_pages(self):
+        client = ReadClient(None)
+        client.raw.fs_files.side_effect = [
+            {"data": {"total": 2, "list": [{"fileId": "a", "fileName": "A"}]}},
+            {"data": {"total": 2, "list": [{"fileId": "b", "fileName": "B"}], "hasMore": False}},
+        ]
+
+        self.assertEqual([item.file_id for item in client.list_dir()], ["a", "b"])
+        self.assertEqual(client.raw.fs_files.call_count, 2)
+
+    def test_directory_pagination_rejects_changed_total(self):
+        cases = (
+            (
+                {"total": 2, "list": [{"fileId": "a", "fileName": "A"}]},
+                {"total": 3, "list": [{"fileId": "b", "fileName": "B"}]},
+            ),
+            (
+                {"total": 3, "list": [{"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"}]},
+                {"total": 2, "list": []},
+            ),
+        )
+        for first, second in cases:
+            client = ReadClient(None)
+            client.raw.fs_files.side_effect = [
+                {"data": first}, {"data": second},
+            ]
+            with self.subTest(first_total=first["total"], second_total=second["total"]):
+                with self.assertRaisesRegex(RuntimeError, "分页总数发生变化") as caught:
+                    client.list_dir()
+                self.assertNotIn("private", str(caught.exception))
+                self.assertEqual(client.raw.fs_files.call_count, 2)
+
+    def test_directory_terminal_page_without_total_checks_locked_count(self):
+        enough = ReadClient(None)
+        enough.raw.fs_files.side_effect = [
+            {"data": {"total": 2, "list": [
+                {"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"},
+            ], "hasMore": True}},
+            {"data": {"list": [], "hasMore": False}},
+        ]
+        self.assertEqual([item.file_id for item in enough.list_dir()], ["a", "b"])
+
+        short = ReadClient(None)
+        short.raw.fs_files.side_effect = [
+            {"data": {"total": 3, "list": [
+                {"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"},
+            ], "hasMore": True}},
+            {"data": {"list": [], "hasMore": False}},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "条目数与总数不一致"):
+            short.list_dir()
+        self.assertEqual(short.raw.fs_files.call_count, 2)
+
+    def test_directory_duplicate_ids_do_not_block_page_progress(self):
+        client = ReadClient(None)
+        client.raw.fs_files.side_effect = [
+            {"data": {"total": 2, "list": [{"fileId": "a", "fileName": "A"}]}},
+            {"data": {"total": 2, "list": [
+                {"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"},
+            ], "hasMore": False}},
+        ]
+
+        self.assertEqual([item.file_id for item in client.list_dir()], ["a", "b"])
+        self.assertEqual(client.raw.fs_files.call_count, 2)
+
+    def test_directory_total_ignores_bool_until_valid_total_appears(self):
+        client = ReadClient(None)
+        client.raw.fs_files.side_effect = [
+            {"data": {"total": True, "list": [{"fileId": "a", "fileName": "A"}], "hasMore": True}},
+            {"data": {"total": 2, "list": [{"fileId": "b", "fileName": "B"}], "hasMore": False}},
+        ]
+
+        self.assertEqual([item.file_id for item in client.list_dir()], ["a", "b"])
+
+    def test_directory_cancellation_and_item_budget_keep_existing_behavior(self):
+        cancelled = ReadClient(None)
+        cancelled.raw.fs_files.return_value = {"data": {
+            "total": 2, "list": [{"fileId": "a", "fileName": "A"}],
+        }}
+        rows = list(cancelled.iter_dir(should_stop=lambda: cancelled.raw.fs_files.call_count > 0))
+        self.assertEqual([item.file_id for item in rows], ["a"])
+        cancelled.raw.fs_files.assert_called_once()
+
+        limited = ReadClient(None)
+        limited.raw.fs_files.side_effect = [
+            {"data": {"total": 3, "list": [
+                {"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"},
+            ]}},
+            {"data": {"total": 3, "list": [{"fileId": "c", "fileName": "C"}]}},
+        ]
+        with self.assertRaises(DirectoryEntryLimitError):
+            list(limited.iter_dir(max_items=2))
+        self.assertEqual(limited.raw.fs_files.call_count, 2)
 
     def test_error_on_second_page_does_not_return_first_page_as_complete(self):
         for method, sdk in (("list_dir", "fs_files"), ("list_recycle", "fs_recycle_files"), ("list_user_shares", "share_user_list")):

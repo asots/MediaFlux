@@ -775,6 +775,50 @@ class GuangYaReadPriorityTests(unittest.TestCase):
 
 
 class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
+    def test_changed_directory_pagination_preserves_existing_strm_and_index(self):
+        files = [
+            {"fileId": name, "fileName": name + ".mkv", "resType": 1,
+             "parentId": "root", "gcid": "etag-" + name, "fileSize": 123}
+            for name in ("A", "B", "C")
+        ]
+        endings = (
+            {"code": 0, "data": {"total": 2, "list": []}},
+            {"code": 0, "data": {"hasMore": False, "list": []}},
+        )
+        for ending in endings:
+            with self.subTest(ending=ending), tempfile.TemporaryDirectory() as root, isolated_test_database(), patch.dict(
+                guangya_module._READ_CONGESTION, {}, clear=True,
+            ), patch.object(GuangYaClient, "raw", new_callable=PropertyMock) as raw:
+                client = object.__new__(GuangYaClient)
+                client._read_metrics_lock = threading.Lock()
+                client._read_metrics = None
+                raw.return_value.fs_files.return_value = {
+                    "code": 0, "data": {"total": 3, "list": files},
+                }
+                first = sync_strm("root", "http://media.invalid", root, client=client)
+                self.assertEqual(first["generated"], 3)
+                before = {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")}
+                from app import database as db
+                with db.get_conn() as conn:
+                    before_index = [tuple(row) for row in conn.execute(
+                        "SELECT source,file_id,strm_path,content_fingerprint FROM strm_index ORDER BY source,file_id"
+                    )]
+                raw.return_value.fs_files.reset_mock()
+                raw.return_value.fs_files.side_effect = [
+                    {"code": 0, "data": {"total": 3, "list": files[:2]}}, ending,
+                ]
+                current = sync_strm("root", "http://media.invalid", root, client=client)
+                self.assertTrue(current["scan_incomplete"], f"cleaned={current['cleaned']}, remaining={len(list(Path(root).rglob('*.strm')))}")
+                self.assertTrue(current["clean_skipped"])
+                self.assertEqual(current["generated"], 0)
+                self.assertEqual(current["cleaned"], 0)
+                self.assertEqual(raw.return_value.fs_files.call_count, 2)
+                self.assertEqual(before, {str(p): p.read_bytes() for p in Path(root).rglob("*.strm")})
+                with db.get_conn() as conn:
+                    self.assertEqual(before_index, [tuple(row) for row in conn.execute(
+                        "SELECT source,file_id,strm_path,content_fingerprint FROM strm_index ORDER BY source,file_id"
+                    )])
+
     def test_full_scan_recovery_and_repeat_preserve_every_file(self):
         calls = []
         limited = False
