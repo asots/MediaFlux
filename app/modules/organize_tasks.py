@@ -52,6 +52,7 @@ from app.repositories.organize_operation_jobs import (
     sanitize_organize_operation_result,
     verify_organize_operation_payload,
     OrganizeOperationCancelled,
+    OrganizeOperationAdmissionError,
     OrganizeOperationExpired,
     OrganizeOperationQueueFullError,
 )
@@ -1011,6 +1012,7 @@ class OrganizeTaskManager:
         owner: str,
         payload: dict[str, Any],
         dedupe_key: str,
+        on_admitted: Callable[[Any, Any, bool], None] | None = None,
     ) -> dict:
         """提交可在进程重启后恢复的单次云盘操作。
 
@@ -1032,7 +1034,10 @@ class OrganizeTaskManager:
                     reference=reference,
                     payload=payload,
                     dedupe_key=dedupe_key,
+                    on_admitted=on_admitted,
                 )
+            except OrganizeOperationAdmissionError:
+                raise
             except OrganizeOperationQueueFullError:
                 return {
                     "ok": False, "error": "光鸭操作队列已满，请等待现有任务完成",

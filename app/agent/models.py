@@ -89,6 +89,9 @@ class ToolContext:
     confirmation_bootstrap: bool = False
     capability_search: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     cancelled: Callable[[], bool] = field(default=lambda: False, repr=False, compare=False)
+    admit_background_operation: Callable[[Any, Any, bool], None] | None = field(
+        default=None, repr=False, compare=False,
+    )
 
 
 ContextualToolHandler = Callable[[dict[str, Any], ToolContext], ToolResult]

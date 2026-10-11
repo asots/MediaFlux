@@ -30,6 +30,7 @@ from app.modules.guangya_rename import (
     load_rename_plan,
 )
 from app.repositories.organize_operation_jobs import (
+    OrganizeOperationAdmissionError,
     organize_operation_owner_digest,
     organize_operation_public_ref,
 )
@@ -317,6 +318,8 @@ def _consume(flow: _Flow) -> bool:
 
 
 def _public_error(exc: Exception) -> AgentToolError:
+    if isinstance(exc, OrganizeOperationAdmissionError):
+        return AgentToolError(str(exc), code="precondition_failed")
     if isinstance(exc, GuangYaRenamePlanStale):
         return AgentToolError(str(exc), code="confirmation_stale")
     if isinstance(exc, GuangYaRenamePlanError):
@@ -702,6 +705,7 @@ def execute_guangya_rename_confirmed(
                 "credential_generation": int(confirmed["credential_generation"]),
             },
             dedupe_key=f"agent-guangya-rename:{flow.plan_id}:{flow.fingerprint}",
+            on_admitted=context.admit_background_operation,
         )
     except AgentToolError:
         raise

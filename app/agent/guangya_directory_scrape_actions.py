@@ -27,7 +27,7 @@ from app.modules.directory_scrape_errors import (
     public_error_message,
 )
 from app.modules.guangya_workspace import resolve_workspace_path
-from app.repositories.organize_operation_jobs import organize_operation_public_ref
+from app.repositories.organize_operation_jobs import OrganizeOperationAdmissionError, organize_operation_public_ref
 
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,180}$")
 _ALLOWED_TYPES = {"auto", "movie", "tv"}
@@ -490,6 +490,8 @@ def _restore_consumed_flow(item: _Flow) -> bool:
 
 
 def _public_error(exc: Exception) -> AgentToolError:
+    if isinstance(exc, OrganizeOperationAdmissionError):
+        return AgentToolError(str(exc), code="precondition_failed")
     if isinstance(exc, DirectoryScrapePublicError):
         return AgentToolError(public_error_message(exc), code="precondition_failed")
     return AgentToolError("光鸭目录刮削当前不可用", code="precondition_failed")
@@ -1122,6 +1124,7 @@ def run_directory_scrape_confirmed(
                 "flow": _durable_flow_payload(flow),
             },
             dedupe_key=f"agent-directory-scrape:{context.owner}:{expected_context}",
+            on_admitted=context.admit_background_operation,
         )
     except AgentToolError:
         raise

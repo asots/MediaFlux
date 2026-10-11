@@ -809,6 +809,11 @@ class SessionStateStore(Protocol):
         change: Callable[[SessionState], Any],
     ) -> Any: ...
 
+    def update_effect_state_in_transaction(
+        self, conn: Any, *, owner: str, session_id: str,
+        change: Callable[[SessionState], Any],
+    ) -> Any: ...
+
     async def due_effect_waits(self, *, limit: int = 16) -> list[dict[str, Any]]: ...
 
     async def load(self, *, owner: str, session_id: str) -> SessionState: ...
@@ -925,6 +930,12 @@ class InMemorySessionStateStore:
             validated = state.clone()
             self._states[key] = validated
             return validated.clone()
+
+    def update_effect_state_in_transaction(
+        self, conn: Any, *, owner: str, session_id: str,
+        change: Callable[[SessionState], Any],
+    ) -> Any:
+        raise RuntimeError("持久队列回执需要与队列共用 SQLite 会话存储")
 
     async def update_effect_state(
         self, *, owner: str, session_id: str,

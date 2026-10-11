@@ -938,6 +938,12 @@ class ToolPipeline:
                 raise ToolPipelineError(
                     "工具不支持确认执行", code="confirmation_not_supported"
                 )
+            from app.agent.effect_completion import EffectCompletionScope
+
+            context = replace(context, completion_scope=EffectCompletionScope(
+                store=self.state_store, lease=context.lease,
+                plan_id=plan.plan_id, channel=context.channel,
+            ))
             value = await _invoke(
                 tool.execute_confirmed,
                 resolved_arguments,
@@ -946,12 +952,6 @@ class ToolPipeline:
                 protection=context,
             )
             if tool.verify is not None:
-                from app.agent.effect_completion import EffectCompletionScope
-
-                context = replace(context, completion_scope=EffectCompletionScope(
-                    store=self.state_store, lease=context.lease,
-                    plan_id=plan.plan_id, channel=context.channel,
-                ))
                 verified = await _invoke(
                     tool.verify,
                     resolved_arguments,

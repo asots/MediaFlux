@@ -34,6 +34,7 @@ from app.modules.guangya_residual_cleanup import (
 from app.modules.guangya_workspace import resolve_workspace_path
 from app.modules.offline import OfflineRules
 from app.repositories.organize_operation_jobs import (
+    OrganizeOperationAdmissionError,
     organize_operation_owner_digest,
     organize_operation_public_ref,
 )
@@ -353,6 +354,8 @@ def _consume(flow: _Flow) -> bool:
 
 
 def _public_error(exc: Exception) -> AgentToolError:
+    if isinstance(exc, OrganizeOperationAdmissionError):
+        return AgentToolError(str(exc), code="precondition_failed")
     if isinstance(exc, GuangYaCleanupPlanStale):
         return AgentToolError(str(exc), code="confirmation_stale")
     if isinstance(exc, GuangYaCleanupPlanError):
@@ -913,6 +916,7 @@ def execute_guangya_cleanup_confirmed(
                 "credential_generation": int(confirmed["credential_generation"]),
             },
             dedupe_key=f"agent-guangya-cleanup:{flow.plan_id}:{flow.fingerprint}",
+            on_admitted=context.admit_background_operation,
         )
     except AgentToolError:
         raise

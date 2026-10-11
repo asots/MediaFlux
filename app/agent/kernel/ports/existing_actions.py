@@ -69,12 +69,18 @@ def _split_runtime_snapshot(
     return generation, domain_fingerprint
 
 
-def _kernel_context(context: ToolCallContext) -> ToolContext:
+def _kernel_context(context: ToolCallContext, *, tool: str = "") -> ToolContext:
+    from app.agent.effect_completion import admit_organize_operation
+
     return ToolContext(
         owner=context.owner,
         session_id=context.session_id,
         request_id=context.request_id,
         confirmation_bootstrap=False,
+        admit_background_operation=(
+            partial(admit_organize_operation, tool=tool, scope=context.completion_scope)
+            if tool and context.completion_scope is not None else None
+        ),
         capability_search=context.capability_search,
         cancelled=lambda: context.cancellation.cancelled,
     )
@@ -279,10 +285,10 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
                     ):
                         raise AgentRuntimeDisabled("Telegram Agent 授权已变化")
                     result = handler(
-                        arguments, domain_snapshot, _kernel_context(context)
+                        arguments, domain_snapshot, _kernel_context(context, tool=spec.name)
                     )
             else:
-                result = handler(arguments, domain_snapshot, _kernel_context(context))
+                result = handler(arguments, domain_snapshot, _kernel_context(context, tool=spec.name))
         except ToolPipelineError:
             raise
         except AgentRuntimeDisabled as exc:

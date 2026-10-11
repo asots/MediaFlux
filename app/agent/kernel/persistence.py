@@ -623,20 +623,30 @@ class SQLiteKernelStore:
         self, owner: str, session_id: str,
         change: Callable[[SessionState], Any],
     ) -> Any:
-        owner_digest, session_digest = self._scope(owner, session_id)
         with session_scope_guard(owner, session_id, kind="commit"), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT 1 FROM agent_kernel_sessions "
-                "WHERE owner_digest=? AND session_digest=?",
-                (owner_digest, session_digest),
-            ).fetchone()
-            if row is None:
-                return None
-            current = self._load_row(conn, owner, session_id)
-            updated, result, changed = _apply_effect_state_change(current, change)
-            if changed:
-                self._write_state(conn, updated)
+            return self.update_effect_state_in_transaction(
+                conn, owner=owner, session_id=session_id, change=change,
+            )
+
+    def update_effect_state_in_transaction(
+        self, conn: Any, *, owner: str, session_id: str,
+        change: Callable[[SessionState], Any],
+    ) -> Any:
+        """借调用方已有事务；确认管道已持会话锁，不另开连接或提交。"""
+        if not conn.in_transaction:
+            raise ValueError("effect admission requires an active SQLite transaction")
+        owner_digest, session_digest = self._scope(owner, session_id)
+        row = conn.execute(
+            "SELECT 1 FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?",
+            (owner_digest, session_digest),
+        ).fetchone()
+        if row is None:
+            return None
+        current = self._load_row(conn, owner, session_id)
+        updated, result, changed = _apply_effect_state_change(current, change)
+        if changed:
+            self._write_state(conn, updated)
         return result
 
     def _due_effect_waits_sync(self, limit: int = 16) -> list[dict[str, Any]]:

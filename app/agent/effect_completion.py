@@ -653,21 +653,34 @@ def _seed_result(seed: Mapping[str, Any]) -> ToolResult:
     )
 
 
-async def _register_effect_wait(result: ToolResult, tracker: _CompletionTracker, tool: str,
-                                scope: EffectCompletionScope) -> None:
+def _effect_wait_registration(
+    result: ToolResult, tracker: _CompletionTracker, tool: str,
+    scope: EffectCompletionScope, *, existing_only: bool,
+) -> Callable[[SessionState], bool]:
+    """同一记录构造/身份核验供事务准入和前台等待使用。"""
     from app.agent.kernel.state import StalePublicationError, publication_matches
 
     now = time.time()
-    sealed = _completion_cipher().encrypt(json.dumps(
-        _effect_seed(result, tracker, tool, scope), ensure_ascii=False, allow_nan=False,
-        separators=(",", ":"),
+    seed = _effect_seed(result, tracker, tool, scope)
+    cipher = _completion_cipher()
+    sealed = cipher.encrypt(json.dumps(
+        seed, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
     ).encode()).decode()
+
     def register(state):
         if not publication_matches(scope.lease, generation=state.generation,
                                    confirmed=state.metadata.get("confirmed_publication")):
             raise StalePublicationError("确认回合已变化，未注册新的结果跟踪")
         waits = state.metadata.setdefault(_EFFECT_WAITS_KEY, {})
-        if scope.plan_id not in waits:
+        if scope.plan_id in waits:
+            previous = json.loads(cipher.decrypt(waits[scope.plan_id]["sealed"].encode()))
+            if any(previous.get(key) != seed[key] for key in seed if key != "result"):
+                raise StalePublicationError("后台任务跟踪不属于当前确认计划")
+            # 补充领域受理明细，不改变已登记的期限、进度或投递状态。
+            waits[scope.plan_id]["sealed"] = sealed
+        else:
+            if existing_only:
+                raise StalePublicationError("后台任务缺少原确认跟踪，请查询任务状态，勿重复提交")
             waits[scope.plan_id] = {
                 "sealed": sealed, "created_at": now, "expires_at": now + _EFFECT_RETENTION_SECONDS,
                 "next_poll_at": now + _EFFECT_POLL_SECONDS, "delivered": False,
@@ -675,8 +688,50 @@ async def _register_effect_wait(result: ToolResult, tracker: _CompletionTracker,
             }
         _next_effect_poll(state)
         return True
-    registered = await scope.store.update_effect_state(owner=scope.lease.owner,
-        session_id=scope.lease.session_id, change=register)
+    return register
+
+
+def admit_organize_operation(conn, row, replayed: bool, *, tool: str, scope: EffectCompletionScope) -> None:
+    """仅由确认管道注入：队列与会话跟踪必须同一事务受理，不能重领旧无主作业。"""
+    from app.agent.kernel.state import StalePublicationError
+    from app.repositories.organize_operation_jobs import (
+        organize_operation_owner_digest, organize_operation_public_ref,
+    )
+
+    if row["owner_digest"] != organize_operation_owner_digest(scope.lease.owner):
+        raise StalePublicationError("后台任务不属于当前会话")
+    result = ToolResult(True, "accepted", "光鸭后台任务已受理", data={
+        "operation_ref": organize_operation_public_ref(str(row["job_id"])),
+        "queued": row["status"] == "pending",
+    })
+    if row["job_kind"] == "agent_guangya_fs_change":
+        result.data["operation"] = "filesystem_change"
+    tracker = _CompletionTracker("guangya_operation", {"operation_ref": result.data["operation_ref"]})
+    registration = _effect_wait_registration(result, tracker, tool, scope, existing_only=replayed)
+
+    def register(state):
+        if state.generation != scope.lease.generation or state.metadata.get("confirmed_publication") != {
+            "generation": scope.lease.generation, "turn_id": scope.lease.turn_id, "plan_id": scope.plan_id,
+        }:
+            raise StalePublicationError("原确认已失效，未受理后台任务")
+        return registration(state)
+
+    registered = scope.store.update_effect_state_in_transaction(
+        conn, owner=scope.lease.owner, session_id=scope.lease.session_id, change=register,
+    )
+    if registered is not True:
+        raise StalePublicationError("原会话已清理，未受理后台任务")
+
+
+async def _register_effect_wait(result: ToolResult, tracker: _CompletionTracker, tool: str,
+                                scope: EffectCompletionScope) -> None:
+    from app.agent.kernel.state import StalePublicationError
+
+    registered = await scope.store.update_effect_state(
+        owner=scope.lease.owner, session_id=scope.lease.session_id,
+        change=_effect_wait_registration(result, tracker, tool, scope,
+                                         existing_only=tracker.kind == "guangya_operation"),
+    )
     if registered is not True:
         raise StalePublicationError("原会话已清理，未重建结果跟踪")
 

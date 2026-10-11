@@ -10,6 +10,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app.agent.public_safety import sanitize_resource_title
@@ -68,6 +69,13 @@ logger = logging.getLogger(__name__)
 
 class OrganizeOperationQueueFullError(RuntimeError):
     """持久队列达到安全容量上限。"""
+
+
+class OrganizeOperationAdmissionError(RuntimeError):
+    """会话跟踪未与队列原子提交；必须透传，不可回退为受理成功。"""
+
+    def __init__(self):
+        super().__init__("后台任务跟踪未能可靠登记，本次未受理新任务；已有任务请先查询状态，勿重复提交")
 
 
 class OrganizeOperationCancelled(RuntimeError):
@@ -476,8 +484,9 @@ def enqueue_organize_operation_job(
     dedupe_key: str,
     job_id: str | None = None,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+    on_admitted: Callable[[sqlite3.Connection, sqlite3.Row, bool], None] | None = None,
 ) -> tuple[sqlite3.Row, bool]:
-    """幂等创建持久化操作；返回 ``(row, replayed)``。"""
+    """幂等入队；同步准入回调与任务同事务，失败不启动 worker。"""
     safe_kind = _safe_kind(job_kind)
     owner_digest = organize_operation_owner_digest(owner)
     safe_id = _safe_job_id(job_id or uuid.uuid4().hex)
@@ -509,53 +518,57 @@ def enqueue_organize_operation_job(
             "ORDER BY created_at,job_id LIMIT 1",
             (owner_digest, digest),
         ).fetchone()
-        if existing is not None:
-            _bind_fs_change_plan_to_job(existing)
-            return existing, True
-        owner_active = conn.execute(
-            "SELECT COUNT(*) AS total FROM organize_operation_jobs "
-            "WHERE owner_digest=? AND status IN ('pending','running')",
-            (owner_digest,),
-        ).fetchone()
-        if int(owner_active["total"] or 0) >= _MAX_ACTIVE_PER_OWNER:
-            raise OrganizeOperationQueueFullError("当前会话的光鸭操作排队已满")
-        global_active = conn.execute(
-            "SELECT COUNT(*) AS total FROM organize_operation_jobs "
-            "WHERE status IN ('pending','running')"
-        ).fetchone()
-        if int(global_active["total"] or 0) >= _MAX_ACTIVE_GLOBAL:
-            raise OrganizeOperationQueueFullError("光鸭操作队列已满")
-        try:
-            conn.execute(
-                "INSERT INTO organize_operation_jobs("
-                "job_id,job_kind,owner_digest,operation,reference,payload_json,payload_auth,"
-                "dedupe_digest,status,lease_generation,result_json,error_code,error,"
-                "cancel_requested,expires_at,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,'pending',0,'{}','','',0,?,?,?)",
-                (
-                    safe_id, safe_kind, owner_digest, safe_operation, safe_reference,
-                    safe_payload, auth, digest, expires_at, timestamp, timestamp,
-                ),
-            )
-        except sqlite3.IntegrityError:
-            existing = conn.execute(
-                "SELECT * FROM organize_operation_jobs WHERE owner_digest=? "
-                "AND dedupe_digest=? AND status IN ('pending','running') "
-                "ORDER BY created_at,job_id LIMIT 1",
-                (owner_digest, digest),
+        replayed = existing is not None
+        if existing is None:
+            owner_active = conn.execute(
+                "SELECT COUNT(*) AS total FROM organize_operation_jobs "
+                "WHERE owner_digest=? AND status IN ('pending','running')",
+                (owner_digest,),
             ).fetchone()
-            if existing is not None:
-                _bind_fs_change_plan_to_job(existing)
-                return existing, True
-            raise
-        _trim_terminal_history(conn, owner_digest)
-        row = conn.execute(
+            if int(owner_active["total"] or 0) >= _MAX_ACTIVE_PER_OWNER:
+                raise OrganizeOperationQueueFullError("当前会话的光鸭操作排队已满")
+            global_active = conn.execute(
+                "SELECT COUNT(*) AS total FROM organize_operation_jobs "
+                "WHERE status IN ('pending','running')"
+            ).fetchone()
+            if int(global_active["total"] or 0) >= _MAX_ACTIVE_GLOBAL:
+                raise OrganizeOperationQueueFullError("光鸭操作队列已满")
+            try:
+                conn.execute(
+                    "INSERT INTO organize_operation_jobs("
+                    "job_id,job_kind,owner_digest,operation,reference,payload_json,payload_auth,"
+                    "dedupe_digest,status,lease_generation,result_json,error_code,error,"
+                    "cancel_requested,expires_at,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,'pending',0,'{}','','',0,?,?,?)",
+                    (
+                        safe_id, safe_kind, owner_digest, safe_operation, safe_reference,
+                        safe_payload, auth, digest, expires_at, timestamp, timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                existing = conn.execute(
+                    "SELECT * FROM organize_operation_jobs WHERE owner_digest=? "
+                    "AND dedupe_digest=? AND status IN ('pending','running') "
+                    "ORDER BY created_at,job_id LIMIT 1",
+                    (owner_digest, digest),
+                ).fetchone()
+                if existing is None:
+                    raise
+                replayed = True
+        if not replayed:
+            _trim_terminal_history(conn, owner_digest)
+        row = existing if existing is not None else conn.execute(
             "SELECT * FROM organize_operation_jobs WHERE job_id=?", (safe_id,)
         ).fetchone()
         if row is None:
             raise sqlite3.DatabaseError("光鸭操作任务写入后不可见")
+        if on_admitted is not None:
+            try:
+                on_admitted(conn, row, replayed)
+            except Exception as exc:
+                raise OrganizeOperationAdmissionError() from exc
         _bind_fs_change_plan_to_job(row)
-        return row, False
+        return row, replayed
 
 
 def get_organize_operation_job(job_id: str) -> sqlite3.Row | None:

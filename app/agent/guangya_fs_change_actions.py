@@ -39,6 +39,7 @@ from app.modules.guangya_workspace import (
     valid_observation_ref,
 )
 from app.repositories.organize_operation_jobs import (
+    OrganizeOperationAdmissionError,
     get_organize_operation_job,
     organize_operation_owner_digest,
     organize_operation_public_ref,
@@ -472,6 +473,8 @@ def guangya_fs_change_execute_arguments(arguments: dict[str, Any]) -> dict[str, 
 
 
 def _public_error(exc: Exception) -> AgentToolError:
+    if isinstance(exc, OrganizeOperationAdmissionError):
+        return AgentToolError(str(exc), code="precondition_failed")
     if isinstance(exc, (GuangYaFSChangeStale, GuangYaWorkspaceStale)):
         return AgentToolError(str(exc), code="confirmation_stale")
     if isinstance(exc, (GuangYaFSChangeError, GuangYaWorkspaceError)):
@@ -708,6 +711,7 @@ def execute_guangya_fs_change_confirmed(
                 "credential_generation": int(confirmed["credential_generation"]),
             },
             dedupe_key=f"agent-guangya-fs-change:{flow.plan_id}:{flow.fingerprint}",
+            on_admitted=context.admit_background_operation,
         )
     except AgentToolError:
         raise
