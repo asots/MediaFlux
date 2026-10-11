@@ -719,10 +719,13 @@ async function resubmitIssuesBatch(target){
         const failed=Number(data.failed||0);
         const skipped=Number(data.skipped||0);
         const type=failed?(completed?'warning':'error'):((Number(data.partial||0)||skipped)?'warning':'success');
+        const reasons=(Array.isArray(data.items)?data.items:[])
+            .filter(item=>item.error&&['skipped','failed','partial'].includes(item.outcome))
+            .slice(0,3).map(item=>`请求 #${item.source_request_id}：${item.error}`);
         appAlert({
             type,
             title:type==='success'?'批量重新提交完成':type==='error'?'批量重新提交失败':'批量重新提交已处理',
-            message:`成功 ${Number(data.succeeded||0)} 条 · 部分成功 ${Number(data.partial||0)} 条 · 跳过 ${skipped} 条 · 失败 ${failed} 条`,
+            message:`成功 ${Number(data.succeeded||0)} 条 · 部分成功 ${Number(data.partial||0)} 条 · 跳过 ${skipped} 条 · 失败 ${failed} 条${reasons.length?'\n'+reasons.join('\n'):''}`,
         });
         await Promise.all([loadIssues(downloadIssuePage),loadOverview(true),loadLogs(downloadLogPage)]);
         return completed>0;

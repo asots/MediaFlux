@@ -850,14 +850,20 @@ class RSSEngine:
         )
         infohash = self._torrent_infohash(torrent_url) if torrent_url else ""
         if entry["status"] == "downloaded" or bool(entry["processed"]):
-            return {
-                "ok": True,
-                "method": method,
-                "status": "downloaded",
-                "existing": True,
-                "infohash": infohash,
-                "already_processed": True,
-            }
+            # 后端曾受理不等于云端文件已落稳。只重开明确关联的后处理失败，
+            # 活跃、结果未知、正常完成及手动跳过仍保留原去重语义。
+            if (entry["status"] == "downloaded"
+                    and db.update_rss_entries_processed([entry_id], False)):
+                entry = db.get_rss_entry(entry_id)
+            else:
+                return {
+                    "ok": True,
+                    "method": method,
+                    "status": "downloaded",
+                    "existing": True,
+                    "infohash": infohash,
+                    "already_processed": True,
+                }
         if not torrent_url:
             code, message = ("missing_torrent_url", "条目无种子链接") if isinstance(payload, dict) else ("invalid_payload", "条目数据无效")
             if entry_already_claimed or db.claim_rss_entry(entry_id):
@@ -892,23 +898,49 @@ class RSSEngine:
                 else str(get("RSS_QB_CATEGORY", "") or "")
             )
             from app.indexers.downloads import submit_download_input
-
-            submission = submit_download_input(
-                item,
-                method,
-                origin=f"rss:{int(entry['rss_item_id'])}",
-                gy_target_dir=str(self._entry_value(entry, "gy_target_dir", "") or ""),
-                gy_target_name=str(
-                    self._entry_value(entry, "gy_target_dir_name", "") or ""
-                ),
-                qb_save_path=qb_save_path,
-                qb_category=qb_category,
-                qb_runtime_config=runtime,
-                qb_task_id_hint=infohash if method == "qb" else "",
-                rss_item_id=int(entry["rss_item_id"]),
-                rss_entry_id=entry_id,
-                log_path=_safe_download_source_marker(torrent_url),
+            from app.modules.download_dispatcher import (
+                guangya_download_needs_resubmit,
+                public_dispatch_summary,
+                resubmit_download_request,
             )
+
+            linked_key = str(self._entry_value(entry, "download_request_key", "") or "")
+            retry_source = db.get_download_request_by_request_key(linked_key) if linked_key else None
+            if (method == "guangya" and retry_source is not None
+                    and guangya_download_needs_resubmit(retry_source)):
+                from app.repositories.rss import bind_rss_entry_download
+
+                # 保留已验证身份；successor 认领和后端受理投影沿现有统一事务，
+                # 不清空键、不把完成的光鸭后端降成 failed 来绕过去重。
+                bind_rss_entry_download(entry_id, linked_key, method)
+                dispatch = resubmit_download_request(
+                    int(retry_source["id"]), method,
+                    origin=f"rss:{int(entry['rss_item_id'])}",
+                    rss_item_id=int(entry["rss_item_id"]),
+                    log_path=_safe_download_source_marker(torrent_url),
+                )
+                submission = {
+                    "request_id": int(dispatch.get("request_id") or retry_source["id"]),
+                    "summary": public_dispatch_summary(dispatch),
+                    "dispatch": dispatch,
+                }
+            else:
+                submission = submit_download_input(
+                    item,
+                    method,
+                    origin=f"rss:{int(entry['rss_item_id'])}",
+                    gy_target_dir=str(self._entry_value(entry, "gy_target_dir", "") or ""),
+                    gy_target_name=str(
+                        self._entry_value(entry, "gy_target_dir_name", "") or ""
+                    ),
+                    qb_save_path=qb_save_path,
+                    qb_category=qb_category,
+                    qb_runtime_config=runtime,
+                    qb_task_id_hint=infohash if method == "qb" else "",
+                    rss_item_id=int(entry["rss_item_id"]),
+                    rss_entry_id=entry_id,
+                    log_path=_safe_download_source_marker(torrent_url),
+                )
             request_id = int(submission.get("request_id") or 0)
         except ValueError:
             db.record_rss_entry_failure(entry_id, "invalid_payload", False)

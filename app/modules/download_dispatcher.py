@@ -634,6 +634,16 @@ def _request_content_type(row) -> str:
         return ""
 
 
+def guangya_download_needs_resubmit(row) -> bool:
+    """只有下载已结束、落稳/整理明确失败且没有活跃同伴时才接管旧请求。"""
+    return (
+        str(row["status"] or "") in {"completed", "failed"}
+        and str(row["gy_status"] or "") == "completed"
+        and str(row["organize_status"] or "") == "failed"
+        and str(row["qb_status"] or "") not in _ACTIVE_BACKEND_STATUSES
+    )
+
+
 def download_resubmit_capabilities(
     row,
     *,
@@ -715,9 +725,19 @@ def download_resubmit_capabilities(
     elif gy_status == "resubmitted":
         gy_enabled = False
         gy_reason = "光鸭任务已重新提交"
-    elif gy_status == "completed" and not allow_completed:
+    elif gy_status == "completed" and not (allow_completed or guangya_download_needs_resubmit(row)):
         gy_enabled = False
         gy_reason = "光鸭任务已完成"
+
+    # 总状态可能已完成，但另一后端仍活跃；此时不能归档 canonical 请求，
+    # 否则下载跟踪会失去旧任务。活动根状态的失败目标仍走既有原地补投。
+    if str(row["status"] or "") in {"completed", "failed", "cancelled"}:
+        if gy_status in _ACTIVE_BACKEND_STATUSES:
+            qb_enabled = False
+            qb_reason = "光鸭任务仍在处理或提交结果待确认，不能接管原下载请求"
+        if qb_status in _ACTIVE_BACKEND_STATUSES:
+            gy_enabled = False
+            gy_reason = "qBittorrent 任务仍在处理或提交结果待确认，不能接管原下载请求"
 
     both_enabled = qb_enabled and gy_enabled
     if both_enabled:
@@ -727,7 +747,8 @@ def download_resubmit_capabilities(
     elif qb_status == "resubmitted" or gy_status == "resubmitted":
         both_reason = "至少一个下载目标已重新提交"
     elif not allow_completed and (
-        qb_status == "completed" or gy_status == "completed"
+        qb_status == "completed"
+        or (gy_status == "completed" and not guangya_download_needs_resubmit(row))
     ):
         both_reason = "至少一个下载目标已完成"
     else:
@@ -745,6 +766,8 @@ def resubmit_download_request(
     *,
     allow_completed: bool = False,
     origin: str = "web",
+    rss_item_id: int | None = None,
+    log_path: str | None = None,
 ) -> dict[str, Any]:
     """安全重试指定目标；活动请求仅补投失败目标，其余创建历史 successor。"""
     if targets not in SUPPORTED_TARGETS:
@@ -764,6 +787,12 @@ def resubmit_download_request(
             "error": str(target_capability.get("reason") or "当前目标不可重新提交"),
         }
 
+    dispatch_kwargs: dict[str, Any] = {}
+    if rss_item_id is not None:
+        dispatch_kwargs["rss_item_id"] = rss_item_id
+    if log_path is not None:
+        dispatch_kwargs["log_path"] = log_path
+
     # 部分成功请求仍需跟踪另一个后端，不能创建同源 successor，也不能
     # 因两个方向的分支不同而绕过取消检查。统一复用已有目标级 CAS；
     # 另一端即使结果未知也只保留观察，绝不随本次重试再次提交。
@@ -777,7 +806,6 @@ def resubmit_download_request(
             "submitted", "downloading", "completed", "outcome_unknown",
         }
     ):
-        retry_kwargs: dict[str, str] = {}
         if targets == "qb" and str(source_row["kind"] or "") == "http":
             previous_hash = str(source_row["qb_task_id"] or "").strip().lower()
             hint = (
@@ -785,8 +813,10 @@ def resubmit_download_request(
                 else http_torrent_infohash_hint(str(source_row["source_value"] or ""))
             )
             if hint:
-                retry_kwargs["qb_task_id_hint"] = hint
-        result = dispatch_missing_targets(int(source_request_id), targets, **retry_kwargs)
+                dispatch_kwargs["qb_task_id_hint"] = hint
+        result = dispatch_missing_targets(
+            int(source_request_id), targets, **dispatch_kwargs,
+        )
         return {
             **result,
             "source_request_id": int(source_request_id),
@@ -917,7 +947,6 @@ def resubmit_download_request(
             "error": "同一资源已有下载任务正在处理",
         }
 
-    dispatch_kwargs: dict[str, str] = {}
     if qb_task_id_hint and targets in {"qb", "both"}:
         dispatch_kwargs["qb_task_id_hint"] = qb_task_id_hint
     successor = db.get_download_request(successor_id)

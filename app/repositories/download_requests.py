@@ -400,12 +400,23 @@ def create_download_request(request_key: str, kind: str, title: str = "",
         conn.execute("BEGIN IMMEDIATE")
         if retry_source_request_id is not None:
             source = conn.execute(
-                "SELECT status FROM download_requests WHERE id=?",
+                "SELECT status,qb_status,gy_status FROM download_requests WHERE id=?",
                 (int(retry_source_request_id),),
             ).fetchone()
             if source is None or str(source["status"] or "") != str(retry_source_status):
                 raise DownloadRequestRetryFenceError(
                     "原下载请求状态已变化，未重新提交"
+                )
+            selected_statuses = (
+                [source["qb_status"], source["gy_status"]]
+                if initial_targets == "both" or source["status"] in terminal_statuses
+                else [source["gy_status"]] if initial_targets == "guangya"
+                else [source["qb_status"]] if initial_targets == "qb" else []
+            )
+            if any(status in {"submitting", "submitted", "downloading", "outcome_unknown", "resubmitted"}
+                   for status in selected_statuses):
+                raise DownloadRequestRetryFenceError(
+                    "原下载后端仍在处理或结果待核验，未重新提交"
                 )
         keys = _compatible_request_keys(conn, keys, source_alias_key)
         rows = _request_rows_for_keys(

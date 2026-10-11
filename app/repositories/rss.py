@@ -323,11 +323,13 @@ def bind_rss_entry_download(entry_id: int, request_key: str, backend: str) -> No
 
 def _sync_rss_download_entries_conn(conn: sqlite3.Connection, request_id: int, timestamp: str) -> int:
     """只投影选定后端的明确受理；已处理不是文件下载完成，不重写手动标记。"""
-    row = conn.execute("SELECT status,qb_status,gy_status FROM download_requests WHERE id=?", (request_id,)).fetchone()
+    row = conn.execute("SELECT status,qb_status,gy_status,organize_status FROM download_requests WHERE id=?", (request_id,)).fetchone()
     if row is None or row["status"] in {"cancelled", "resubmitted"}:
         return 0
     accepted = tuple(backend for backend, field in (("qb", "qb_status"), ("guangya", "gy_status"))
-                     if row[field] in {"submitted", "downloading", "completed"})
+                     if row[field] in {"submitted", "downloading", "completed"}
+                     and not (backend == "guangya" and row[field] == "completed"
+                              and row["organize_status"] == "failed"))
     if not accepted:
         return 0
     placeholders = ",".join("?" for _ in accepted)
@@ -835,6 +837,23 @@ def skip_pending_rss_entries(entry_ids: Iterable[int], reason: str) -> int:
     return updated
 
 
+def _rss_processed_update_condition(processed: bool) -> str:
+    if processed:
+        return "status IN ('pending','failed','skipped')"
+    # downloaded 仅代表曾被后端受理。落稳失败的条目允许显式重开；成功任务
+    # 和活跃/未知任务保持去重，身份绑定不清空，重提仍走统一 successor CAS。
+    return (
+        "(status IN ('failed','skipped') OR (status='downloaded' "
+        "AND download_backend='guangya' AND EXISTS ("
+        "SELECT 1 FROM download_requests r WHERE r.id IN ("
+        "SELECT request_id FROM download_request_keys WHERE request_key=rss_entries.download_request_key UNION "
+        "SELECT id FROM download_requests WHERE request_key=rss_entries.download_request_key) "
+        "AND r.status IN ('completed','failed') AND r.gy_status='completed' "
+        "AND r.organize_status='failed' "
+        "AND COALESCE(r.qb_status,'') NOT IN ('submitting','submitted','downloading','outcome_unknown'))))"
+    )
+
+
 def update_rss_entries_processed(entry_ids: list[int], processed: bool) -> int:
     ids = list(dict.fromkeys(int(item) for item in entry_ids))
     if not ids:
@@ -842,22 +861,23 @@ def update_rss_entries_processed(entry_ids: list[int], processed: bool) -> int:
     placeholders = ",".join("?" for _ in ids)
     status = "skipped" if processed else "pending"
     processed_at = db.now() if processed else None
-    allowed_statuses = ("pending", "failed", "skipped") if processed else ("failed", "skipped")
-    allowed = ",".join("?" for _ in allowed_statuses)
+    condition = _rss_processed_update_condition(processed)
     with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE rss_entries SET processed=?, processed_at=?, status=?, "
             "failure_code='', failure_retryable=0, failed_at=NULL "
-            f"WHERE id IN ({placeholders}) AND status IN ({allowed})",
-            [1 if processed else 0, processed_at, status, *ids, *allowed_statuses],
+            f"WHERE id IN ({placeholders}) AND {condition} RETURNING id",
+            [1 if processed else 0, processed_at, status, *ids],
         )
-        if not processed and cur.rowcount:
+        updated_ids = [int(row[0]) for row in cur.fetchall()]
+        if not processed and updated_ids:
+            updated_placeholders = ",".join("?" for _ in updated_ids)
             conn.execute(
                 f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
-                f"WHERE rss_entry_id IN ({placeholders})",
-                [db.now(), *ids],
+                f"WHERE rss_entry_id IN ({updated_placeholders})",
+                [db.now(), *updated_ids],
             )
-        return cur.rowcount
+        return len(updated_ids)
 
 
 def update_rss_entries_processed_snapshot(
@@ -889,7 +909,7 @@ def update_rss_entries_processed_snapshot(
     if not normalized or len(normalized) > 50:
         return 0
     allowed_statuses = (
-        {"pending", "failed", "skipped"} if processed else {"failed", "skipped"}
+        {"pending", "failed", "skipped"} if processed else {"failed", "skipped", "downloaded"}
     )
     if any(item["status"] not in allowed_statuses for item in normalized):
         return 0
@@ -917,17 +937,16 @@ def update_rss_entries_processed_snapshot(
         if current != normalized:
             conn.rollback()
             return 0
-        allowed = ",".join("?" for _ in allowed_statuses)
+        condition = _rss_processed_update_condition(processed)
         cur = conn.execute(
             f"UPDATE rss_entries SET processed=?,processed_at=?,status=?,"
             "failure_code='',failure_retryable=0,failed_at=NULL "
-            f"WHERE id IN ({placeholders}) AND status IN ({allowed})",
+            f"WHERE id IN ({placeholders}) AND {condition}",
             [
                 1 if processed else 0,
                 processed_at,
                 target_status,
                 *ids,
-                *sorted(allowed_statuses),
             ],
         )
         if int(cur.rowcount or 0) != len(normalized):

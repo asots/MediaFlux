@@ -749,7 +749,12 @@ async function batchMark(processed,trigger){
     try{
         const data=await batchRequest('/api/rss/entries/mark',{processed},processed?'确认将选中的 {count} 个条目标记为已处理？':'确认将选中的 {count} 个条目标记为未处理？',trigger);
         if(!data)return;
-        await appAlert({type:'success',title:'条目状态已更新',message:`已更新 ${data.updated} 个条目。`});
+        const updated=Number(data.updated)||0;
+        await appAlert({
+            type:updated?'success':'warning',
+            title:updated?'条目状态已更新':'没有可更新的条目',
+            message:updated?`已更新 ${updated} 个条目。`:'条目状态未改变；正在下载、结果待核验或已成功完成的记录不会被重置。请刷新后核对下载与整理状态。'
+        });
         loadEntries();
     }catch(error){await appAlert({type:'error',title:'批量更新失败',message:error.message||'请求失败'});}
 }

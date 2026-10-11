@@ -1246,6 +1246,79 @@ class OrganizeCorrectionService:
                 logger.warning(warnings[-1])
         return warnings
 
+    def _finalize_reorganized_source(
+        self, source_dir_id: str, rules: OrganizeRules,
+    ) -> list[str]:
+        """成功提交后闭环旧确认，并复用现有来源/下载隔离目录收尾。"""
+        from app.modules.download_staging_cleanup import source_inside_protected_staging
+        from app.modules.organize_confirmations import _finalize_confirmed_downloads
+        from app.modules.organize_tasks import (
+            OrganizeTaskManager,
+            _cleanup_manual_source_root,
+            _protected_organize_root_ids,
+        )
+        from app.repositories.download_staging import list_staging_cleanup_requests
+        from app.repositories.download_staging_reconcile import (
+            reconcile_reorganized_confirmations,
+        )
+
+        source_dir_id = str(source_dir_id or "").strip()
+        if not source_dir_id:
+            return []
+        stats: dict = {}
+        warnings: list[str] = []
+        try:
+            tokens = reconcile_reorganized_confirmations([source_dir_id])
+            # 必须在持久收尾可能删除 staging 根之前判定来源归属；通用扫描
+            # 永不绕过下载确认、请求身份或结果未知的删除保护。
+            staging_ids = set(db.list_protected_guangya_staging_ids())
+            staging_source = source_dir_id in staging_ids or (
+                rules.clean_empty and source_inside_protected_staging(
+                    self.client, source_dir_id, staging_ids,
+                )
+            )
+            for token in tokens:
+                confirmation = db.get_organize_confirmation(token)
+                _finalize_confirmed_downloads(
+                    json.loads(confirmation["payload_json"]), self.client, stats, rules,
+                    confirmation_token=token,
+                )
+            if staging_source and not tokens:
+                # 普通整理/冲突跳过后可能没有确认卡；只收尾原本已完成的下载，
+                # 无成功确认依据的 requires_manual 仍由原安全规则保护。
+                rows = list_staging_cleanup_requests(source_id=source_dir_id)
+                completed = [row for row in rows if row.get("organize_status") == "completed"]
+                if completed:
+                    report = OrganizeTaskManager._cleanup_download_staging(
+                        self.organizer, [int(row["id"]) for row in completed],
+                        [{"id": str(row["gy_target_dir"]), "name": str(row["gy_staging_name"])}
+                         for row in completed], rules=rules,
+                    )
+                    for reason in report.get("reasons", []):
+                        Organizer._append_reason(stats, "empty_dir_cleanup_reasons", reason, limit=8)
+            if rules.clean_empty and not staging_source:
+                protected, error = _protected_organize_root_ids(rules)
+                if error:
+                    raise RuntimeError(error)
+                report = self.organizer.clean_empty_dirs(
+                    source_dir_id, with_report=True, with_diagnostics=True,
+                    protected_source_ids=protected,
+                )
+                for reason in report.get("reasons", []):
+                    Organizer._append_reason(stats, "empty_dir_cleanup_reasons", reason, limit=8)
+                # 子树扫描或删除失败时保留源根，不破坏已提交业务或补偿现场。
+                if not any(report.get(key) for key in (
+                    "scan_failures", "delete_failures", "unsupported", "unavailable",
+                )):
+                    _cleanup_manual_source_root(
+                        self.organizer, source_dir_id, "", rules, stats, trigger_type="manual",
+                    )
+        except Exception as exc:  # noqa: BLE001 - 收尾失败不能回滚已持久化的整理结果。
+            logger.warning("重新整理后源目录收尾失败 type=%s", type(exc).__name__)
+            warnings.append(f"源目录收尾失败，已保留未删除目录: {type(exc).__name__}")
+        warnings.extend(stats.get("empty_dir_cleanup_reasons", []))
+        return warnings
+
     def _notify_reorganize_result(
         self,
         preview: dict,
@@ -1381,7 +1454,10 @@ class OrganizeCorrectionService:
             self._cleanup_created_dirs(created_dirs)
             db.update_organize_log(log_id, status=self._failure_status(log_id, "failed"), error=str(exc))
             raise
-        warnings = self._notify_reorganize_result(preview, items, rules)
+        warnings = self._finalize_reorganized_source(
+            str(previous_log["source_dir_id"] or "") if previous_log else "", rules,
+        )
+        warnings.extend(self._notify_reorganize_result(preview, items, rules))
         warnings.extend(self._run_post_actions(
             items=items,
             rules=rules,
