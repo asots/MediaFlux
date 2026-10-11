@@ -266,9 +266,13 @@ def delete_item(request: Request, data: dict | None = Body(default=None)):
         return JSONResponse({"error": "删除项目版本无效"}, status_code=400)
 
     def execute_delete() -> dict:
+        from app.modules.download_staging_cleanup import (
+            assert_guangya_download_delete_allowed,
+        )
         from app.modules.organize_delete_audit import (
             DeleteCandidate,
             execute_recycle_bin_delete,
+            record_blocked_delete,
         )
 
         client = GuangYaClient()
@@ -295,6 +299,13 @@ def delete_item(request: Request, data: dict | None = Body(default=None)):
                 size=max(0, int(item.size or 0)),
                 gcid=str(item.etag or ""),
             )
+            try:
+                assert_guangya_download_delete_allowed(client, item)
+            except DirectoryScrapeConflictError as exc:
+                record_blocked_delete(
+                    trigger="web_direct_delete", reason=public_error_message(exc), candidate=candidate,
+                )
+                raise
             audit = execute_recycle_bin_delete(
                 client,
                 trigger="web_direct_delete",

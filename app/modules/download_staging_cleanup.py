@@ -391,10 +391,13 @@ def staging_roots_in_source(client, rows: list[dict], source_id: str) -> list[di
     return result
 
 
-def source_inside_protected_staging(client, source_id: str, protected: set[str]) -> bool:
+def source_inside_protected_staging(client, source_id: str, protected: set[str],
+                                    *, info_cache: dict | None = None) -> bool:
     """直接选中活动隔离根内部的子目录，也不能绕过下载写保护。"""
     if not protected:
         return False
+    if not source_id:
+        raise RuntimeError('来源目录身份无法确认，已停止清理')
     current = source_id
     seen: set[str] = set()
     while current:
@@ -405,11 +408,54 @@ def source_inside_protected_staging(client, source_id: str, protected: set[str])
         if current in seen or len(seen) >= 64:
             raise RuntimeError('来源目录父链异常，已停止清理')
         seen.add(current)
-        info = client.file_info(current)
+        if info_cache is None:
+            info = client.file_info(current)
+        else:
+            if current not in info_cache:
+                info_cache[current] = client.file_info(current)
+            info = info_cache[current]
         if info is None or not bool(getattr(info, 'is_dir', False)):
             raise RuntimeError('来源目录身份无法确认，已停止清理')
         current = str(getattr(info, 'parent_id', '') or '')
+        if not current:
+            raise RuntimeError('来源目录父链不完整，已停止清理')
     return False
+
+
+def assert_guangya_download_delete_allowed(client, item) -> None:
+    """在手动删除的 Writer 回调内检查下载占用；不改变自动整理的自有清理权限。"""
+    from app.modules.directory_scrape_errors import DirectoryScrapeConflictError
+
+    try:
+        requests = list_staging_cleanup_requests(active_only=True)
+        if not requests:
+            return
+        info_cache = {str(item.file_id): item} if item.is_dir else {}
+        for row in requests:
+            root_id = str(row['gy_target_dir'])
+            inside = str(item.file_id) == root_id or source_inside_protected_staging(
+                client, str(item.file_id if item.is_dir else item.parent_id), {root_id},
+                info_cache=info_cache,
+            )
+            contains = not inside and item.is_dir and source_inside_protected_staging(
+                client, root_id, {str(item.file_id)}, info_cache=info_cache,
+            )
+            if inside or contains:
+                raise DirectoryScrapeConflictError(
+                    f"此项目或其目录正被下载请求 #{row['id']} 使用，请等待下载和整理结束后再删除"
+                )
+        # 父链读取可能耗时，期间新入队确认/新认领下载不能沿用旧的空闲结论。
+        before = {(row['id'], row['gy_target_dir']) for row in requests}
+        after = {(row['id'], row['gy_target_dir'])
+                 for row in list_staging_cleanup_requests(active_only=True)}
+        if before != after:
+            raise DirectoryScrapeConflictError('下载任务占用已变化，未删除项目，请重新确认')
+    except DirectoryScrapeConflictError:
+        raise
+    except Exception as exc:  # 安全状态/云盘父链读取失败，不执行破坏性操作。
+        raise DirectoryScrapeConflictError(
+            '暂时无法确认目录与下载任务的关联，已取消删除，请稍后重试'
+        ) from exc
 
 
 def merge_cleanup_report(target: dict, other: dict) -> None:

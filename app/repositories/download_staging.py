@@ -20,15 +20,27 @@ _COLUMNS = (
 )
 
 
-def list_staging_cleanup_requests(*, source_id: str = '', limit: int = 1000, conn=None) -> list[dict]:
+def list_staging_cleanup_requests(*, source_id: str = '', limit: int = 1000,
+                                  active_only: bool = False, conn=None) -> list[dict]:
     """读取有界隔离请求；超限让调用方停止，而不是静默漏掉保护对象。"""
     where = "gy_isolated=1 AND TRIM(COALESCE(gy_target_dir,'')) NOT IN ('','0')"
     params: list[object] = []
     if source_id:
         where += ' AND gy_target_dir=?'
         params.append(str(source_id))
-    else:
+    elif not active_only:
         where += " AND COALESCE(gy_staging_cleanup_status,'')!='completed'"
+    if active_only:
+        # 手动删除只保护仍可能写入的任务；自动清理仍沿用原有更严格的保留策略。
+        where += (
+            " AND (gy_status IN ('submitting','submitted','downloading','outcome_unknown','manual_review') "
+            "OR (gy_status='completed' AND ("
+            "organize_status IN ('pending','settling','queued','starting','running') "
+            "OR (organize_started>=0 AND COALESCE(organize_status,'')='') "
+            "OR EXISTS (SELECT 1 FROM organize_confirmations c WHERE c.status IN ('queued','running') "
+            "AND CASE WHEN json_valid(c.payload_json) THEN "
+            "CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT) END=download_requests.gy_target_dir))))"
+        )
     params.append(max(1, min(int(limit), 1000)) + 1)
     with (nullcontext(conn) if conn is not None else db.get_conn()) as connection:
         if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='download_requests'").fetchone() is None:
