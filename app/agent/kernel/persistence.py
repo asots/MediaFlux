@@ -36,7 +36,7 @@ from .state import (
     _apply_effect_state_change,
     _begin_publication,
     _cancel_publication,
-    _commit_conversation,
+    commit_conversation,
     _consume_delivered_effect_receipts,
     _effect_time_is_due,
     candidate_metadata_only,
@@ -613,7 +613,7 @@ class SQLiteKernelStore:
                 state.metadata["task"] = reduce_task(state.metadata.get("task"), task_patch, owner=state.owner, session_id=state.session_id)
                 task_changed(state)
             if conversation is not None:
-                state.conversation = _commit_conversation(conversation, state.metadata, updates)
+                commit_conversation(state, conversation, updates)
             apply_actions(state, lease, updates, self._clock(), conn)
             state.apply(updates)
             self._write_state(conn, state)

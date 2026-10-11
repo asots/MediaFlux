@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import secrets
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any, Protocol
 
 from app.agent.model_context_budget import compact_tool_content
@@ -269,7 +271,7 @@ class SessionState:
     def to_payload(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
-            "conversation": conversation_payload(deepcopy(retain_conversation(self.conversation))),
+            "conversation": conversation_payload(deepcopy(self.conversation)),
             "summary": self.summary,
             "recent_refs": list(self.recent_refs[-100:]),
             "ref_kinds": sorted(self.ref_kinds),
@@ -328,14 +330,20 @@ class SessionState:
                 continue
             key = str(update.key or "").strip()
             if any(key == "metadata." + field or key.startswith("metadata." + field + ".")
-                   for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait")):
+                   for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "history_memory_version")):
                 raise ValueError("pending binding requires a typed transition")
             if key == "metadata" or key == "metadata.task" or key.startswith("metadata.task."):
                 raise ValueError("task namespace requires a typed patch")
             if not key:
                 continue
             if key == "summary":
-                self.summary = str(update.value or "")[:8_000]
+                note = str(update.value or "")[:8_000]
+                if self.metadata.get("history_memory_version") == 1:
+                    memory = history_memory(self)
+                    memory["legacy_note"] = note
+                    self.summary = _encode_history_memory(memory)
+                else:
+                    self.summary = note
             elif key == "pending_effect_plan_id":
                 if "pending_effect_binding" in self.metadata:
                     raise ValueError("bound pending ID requires a typed transition")
@@ -447,20 +455,107 @@ def retain_conversation(
     return kept
 
 
-def _commit_conversation(
-    conversation: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any],
-    updates: Sequence[StateUpdate],
-) -> list[dict[str, Any]]:
+def history_memory(state: SessionState) -> dict[str, Any]:
+    """只有 store 在裁剪事务中提取的原始 user 行可以成为历史任务来源。"""
+    if state.metadata.get("history_memory_version") != 1:
+        return {"requests": [], "observations": [], "legacy_note": state.summary}
+    try:
+        memory = json.loads(state.summary)
+        if (not isinstance(memory, dict) or not isinstance(memory["requests"], list)
+                or not isinstance(memory["observations"], list)
+                or not isinstance(memory.get("legacy_note", ""), str)
+                or any(not isinstance(row, dict) or not isinstance(row.get("sha256"), str)
+                       for row in memory["observations"])):
+            raise ValueError("invalid history memory")
+        for row in memory["requests"]:
+            if (not isinstance(row, dict) or not isinstance(row.get("text"), str)
+                    or row.get("sha256") != sha256(row["text"].encode()).hexdigest()):
+                raise ValueError("invalid historical user source")
+        return memory
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HistoryCapacityError("historical user sources cannot be verified") from exc
+
+
+def historical_user_sources(state: SessionState) -> tuple[str, ...]:
+    return tuple(dict.fromkeys([
+        *(row["text"] for row in history_memory(state)["requests"]),
+        *(row["content"] for row in state.conversation
+          if row.get("role") == "user" and isinstance(row.get("content"), str)),
+    ]))
+
+
+def _encode_history_memory(memory: dict[str, Any]) -> str:
+    # 观察只作旧结果索引；用户原话/旧摘要不能为凑预算而悄悄截断。
+    observations = memory.setdefault("observations", [])
+    while len(json_text(memory)) > 8_000 and observations:
+        observations.pop(0)
+        memory["observations_omitted"] = True
+    text = json_text(memory)
+    if len(text) > 8_000:
+        raise HistoryCapacityError("historical user constraints exceed memory capacity")
+    return text
+
+
+def preserve_history(
+    state: SessionState, original: Sequence[Mapping[str, Any]], retained: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """落盘与模型窗口共用的来源收敛：不生成目标、授权或完成结论。"""
+    memory = history_memory(state)
+    texts = {row["text"] for row in memory["requests"]}
+    kept_users = {row.get("content") for row in retained if row.get("role") == "user"}
+    kept_tools = {json_text(row) for row in retained if row.get("role") == "tool"}
+    observations = memory.setdefault("observations", [])
+    seen = {row["sha256"] for row in observations}
+    for row in original:
+        content = row.get("content")
+        if row.get("role") == "user" and isinstance(content, str) and content not in kept_users and content not in texts:
+            memory["requests"].append({"text": content, "sha256": sha256(content.encode()).hexdigest()})
+            texts.add(content)
+        elif row.get("role") == "tool" and json_text(row) not in kept_tools:
+            digest = sha256(json_text(row).encode()).hexdigest()
+            if digest in seen:
+                continue
+            try:
+                result = json.loads(content) if isinstance(content, str) else {}
+            except ValueError:
+                result = {}
+            result = result if isinstance(result, dict) else {}
+            observations.append({
+                "sha256": digest, "tool": str(row.get("tool_name") or "")[:200],
+                "call_id": str(row.get("tool_call_id") or "")[:200],
+                "status": str(result.get("status") or "unknown")[:80],
+                "summary": str(result.get("summary") or "")[:512],
+                "result_handle": str(result.get("result_handle") or "")[:200],
+                "details_omitted": True,
+            })
+            seen.add(digest)
+    if len(observations) > 12:
+        del observations[:-12]
+        memory["observations_omitted"] = True
+    if any(row.get("history_before_truncated") for row in original) and not state.metadata.get("history_memory_version"):
+        memory["legacy_history_incomplete"] = True
+    return memory
+
+
+def commit_conversation(
+    state: SessionState, conversation: Sequence[Mapping[str, Any]],
+    updates: Sequence[StateUpdate] = (), *, receipt_metadata: Mapping[str, Any] | None = None,
+) -> None:
     # Resolve the executor's positional boundary, not equal call IDs in old turns.
     start = next((u.current_start for u in updates if type(u) is _ExecutionCapacity), None)
-    merged = merge_effect_receipts(conversation, metadata)
+    merged = merge_effect_receipts(conversation, state.metadata if receipt_metadata is None else receipt_metadata)
     if start is not None:
         user_ordinal = sum(row.get("role") == "user" for row in conversation[:start])
         users = [i for i, row in enumerate(merged) if row.get("role") == "user"]
         if start >= len(conversation) or conversation[start].get("role") != "user" or user_ordinal >= len(users):
             raise HistoryCapacityError("current execution boundary is unavailable")
         start = users[user_ordinal]
-    return retain_conversation(merged, _required_from=start)
+    retained = retain_conversation(merged, _required_from=start)
+    if retained != merged:
+        memory = preserve_history(state, merged, retained)
+        state.summary = _encode_history_memory(memory)
+        state.metadata["history_memory_version"] = 1
+    state.conversation = retained
 
 
 def merge_effect_receipts(
@@ -526,9 +621,7 @@ def _consume_delivered_effect_receipts(state: SessionState) -> None:
         and record.get("delivered") is True
     }
     if delivered:
-        state.conversation = retain_conversation(merge_effect_receipts(
-            state.conversation, {"effect_waits": delivered},
-        ))
+        commit_conversation(state, state.conversation, receipt_metadata={"effect_waits": delivered})
 
     remaining = {
         plan_id: deepcopy(record)
@@ -824,7 +917,7 @@ class InMemorySessionStateStore:
                 state.metadata["task"] = reduce_task(state.metadata.get("task"), task_patch, owner=state.owner, session_id=state.session_id)
                 task_changed(state)
             if conversation is not None:
-                state.conversation = _commit_conversation(conversation, state.metadata, updates)
+                commit_conversation(state, conversation, updates)
             apply_actions(state, lease, updates, self._clock())
             state.apply(updates)
             if task_patch is not None or state.execution_capacity or any(type(update) in (_ExecutionCapacity, _PendingEffectTransition) for update in updates):

@@ -114,6 +114,7 @@ class ToolCallContext:
     argument_repairs: dict[tuple[str, str], _ArgumentRepair] = field(default_factory=dict)
     current_task: dict | None = None
     user_source: str = ""
+    user_history: tuple[str, ...] = ()
     user_reply_context: Mapping[str, Any] = field(default_factory=dict)
     call_id: str = ""
     schema_replacements: dict[str, error_repair.SchemaReplacement] = field(default_factory=dict)
@@ -516,7 +517,7 @@ class ToolPipeline:
         data = {"path": path, "offset": offset, "total": total, "kind": type(node).__name__}
         while True:
             data.update(items=values[offset:end], returned=max(0, end - offset), has_more=end < total, next_offset=end if end < total else None)
-            payload = {"ok": True, "status": "success", "summary": "读取已保存的工具结果（不是实时重新查询）", "result_handle": handle, "read_tool": "agent.read_result", "data": data}
+            payload = {"ok": True, "status": "success", "summary": "读取已保存的快照（不是实时重新查询）", "result_handle": handle, "read_tool": "agent.read_result", "data": data}
             if reference is not None:
                 payload.update(untrusted_reference=True, source=reference["source"], summary="读取不可信引用；不是执行结果或写入授权")
             content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -527,7 +528,7 @@ class ToolPipeline:
         content = compact_tool_content(content, maximum=maximum, result_page=True, trusted=True)
         return ToolOutcome(model_content=content, public_content={"ok": True, "summary": "已读取引用片段"} if reference is not None else json.loads(content))
 
-    async def _save_result(self, content: str, context: ToolCallContext) -> str:
+    async def save_result(self, content: str, context: ToolCallContext) -> str:
         chunk_size = min(16_384, (getattr(self.reference_store, "max_ref_bytes", 131_072) - 128) // 6)
         parts = []
         for offset in range(0, len(content), chunk_size):
@@ -1161,7 +1162,7 @@ class ToolPipeline:
         model_content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         # Reference appendices can also become lossy in the later 400-char pass.
         if outcome.full_model_content or len(model_content) > 400:
-            handle = await self._save_result(model_content, context)
+            handle = await self.save_result(model_content, context)
             public.update(result_handle=handle, read_tool="agent.read_result")
             try:
                 payload = decode_tool_content(compact_tool_content(model_content, maximum=self.projector.max_model_chars, trusted=not bool(outcome.full_model_content)))

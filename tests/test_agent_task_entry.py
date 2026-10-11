@@ -613,10 +613,10 @@ def test_literal_optins_visibility_related_and_description():
             "TMDB/qBittorrent",
             "blocked",
             "No write authority",
-            "create/revise",
+            "create:",
             "checkpoint",
             "cancel",
-            "exact current user source",
+            "current user source only",
             "task_id/epoch/revision",
         ):
             assert contract in text

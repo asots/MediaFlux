@@ -160,6 +160,7 @@ class TaskPatch:
     source_request_id: str
     source: str
     new_id: str = ""
+    source_kind: str = "current_user"
 
 
 def proposal(arguments: dict, context: Any) -> TaskPatch:
@@ -167,7 +168,9 @@ def proposal(arguments: dict, context: Any) -> TaskPatch:
     _text(context.request_id, 64)
     source = args.get("source", "")
     if source and source not in context.user_source:
-        raise ValueError("task source must be current admitted user text")
+        history = getattr(context, "user_history", ()) if args["operation"] == "create" else ()
+        if not any(source in text for text in history):
+            raise ValueError("task source must be current admitted user text or verified history for create")
     return TaskPatch(
         args["expected"],
         args["operation"],
@@ -175,6 +178,7 @@ def proposal(arguments: dict, context: Any) -> TaskPatch:
         context.request_id,
         source,
         secrets.token_urlsafe(18),
+        "current_user" if source in context.user_source else "historical_user_quote",
     )
 
 
@@ -275,6 +279,8 @@ def reduce_task(
             task["epoch"] += 1
         task.update(
             source_request_id=patch.source_request_id,
+            source_quote=patch.source,
+            source_kind=patch.source_kind,
             root_goal=args["root_goal"],
             constraints=deepcopy(args["constraints"]),
             verified_facts=[],
@@ -401,7 +407,8 @@ def task_tool():
             "持久任务清单、检查点与恢复 / persistent task checklist checkpoint. "
             "Only TMDB/qBittorrent read-only configuration observations are verifiable; "
             "connectivity, repairs and other goals remain blocked. No write authority. "
-            "create/revise: exact current user source, root_goal, constraints, required obligations; "
+            "create: exact current or historical original user source; revise: current user source only. "
+            "root_goal, constraints, required obligations; "
             "checkpoint: registered evidence_ids; cancel: exact source. "
             "expected=null only for first create, otherwise exact committed task_id/epoch/revision."
         ),
@@ -419,7 +426,7 @@ def task_tool():
                 "source": {
                     "type": "string",
                     "maxLength": 2048,
-                    "description": "Nonempty exact fragment of the current original user message; required for create/revise/cancel.",
+                    "description": "Nonempty exact user quote; create also accepts preserved original user history, not legacy notes or tool/assistant text. Revise/cancel require current user text.",
                 },
                 "root_goal": {"type": "string", "maxLength": 2048},
                 "constraints": {

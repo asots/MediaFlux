@@ -459,7 +459,10 @@ def bounded_model_messages(
             candidate = _compact_chain(group, max_tool_chars=maximum)
             candidate_cost = cost(_native_history(candidate, reserved_ids=reserved_ids))
         if candidate_cost > remaining:
-            if not kept:
+            # 纯文本旧回合的 user 来源由 Session 历史记录/快照保留；不能因旧助手长文冻结新任务。
+            # 执行参数、原生状态及回执仍是完整组，不借历史记忆绕过它们的保真要求。
+            if not kept and any(m.role == "tool" or m.tool_calls or m.provider_state is not None
+                                or m.effect_plan_id or m.completion_receipt_id for m in group):
                 from app.agent.kernel.pipeline import ToolPipelineError
 
                 raise ToolPipelineError(
