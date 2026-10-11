@@ -26,6 +26,7 @@ from app.agent.public_view import (
 from app.concurrency import CrossLoopAsyncLock
 from app.sensitive_data import contains_sensitive_credential
 
+from . import error_repair
 from .capabilities import CapabilityRetriever, ToolCatalog, ToolEffect
 from .conversation_codec import pending_content
 from .state import _ExecutionCapacity, _PublicationFinished
@@ -460,7 +461,7 @@ class AgentSession:
 
         def record_result(
             name: str, arguments: Mapping[str, Any], result: Mapping[str, Any],
-            *, error: ToolPipelineError | None = None,
+            *, error: ToolPipelineError | None = None, recovered_failures: tuple[str, ...] = (), rejected_call: str = "",
         ) -> None:
             nonlocal last_business_tool, context_revision, has_tool_result
             if name == DISCOVERY_TOOL:
@@ -469,18 +470,18 @@ class AgentSession:
             if name != last_business_tool:
                 context_revision += 1
             last_business_tool = name
-            attempt = (name, 0 if arguments else context_revision, json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, default=str))
+            attempt = (name, 0 if arguments else context_revision,
+                       "unparsed:" + rejected_call if rejected_call else json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, default=str))
             has_tool_result = has_tool_result or (error is None and result.get("ok") is not False)
             if result.get("status") == "rate_limited" and error is None:
                 error = ToolPipelineError(sanitize_public_text(result.get("error") or result.get("summary") or "工具调用受到频率限制"), code="rate_limited")
-            progress_results.append((public_tool_label(name), {**result, "_recovery_tracked": error is not None and error.code != "invalid_arguments"}))
+            progress_results.append((public_tool_label(name), {**result, "_recovery_tracked": error is not None}))
             if error is not None:
                 unresolved_errors[attempt] = error
             else:
                 unresolved_errors.pop(attempt, None)
-                # 无参错误仍受上下文隔离约束；显式参数沿用旧行为，可信修复关系另行约定。
                 for previous, failure_error in list(unresolved_errors.items()):
-                    if previous[0] == name and previous[1] in (0, context_revision) and failure_error.code == "invalid_arguments":
+                    if failure_error.repair_ticket and failure_error.repair_ticket in recovered_failures:
                         unresolved_errors.pop(previous)
 
         async def persist_conversation(
@@ -1184,6 +1185,11 @@ class AgentSession:
                     or business_tool_calls >= self.limits.max_tool_calls
                     or (round_index == self.limits.max_model_rounds - 1 and total_tool_calls > 0)
                 )
+                if tool_context.schema_replacements and not explaining and resume_context is None:
+                    repair_tool = self.catalog.get("agent.repair")
+                    selected_names.add(repair_tool.name)
+                    selected_model_names.add(repair_tool.model_name)
+                    tool_definitions = tuple(t for t in tool_definitions if t["name"] != repair_tool.model_name) + (repair_tool.model_definition(),)
                 request_tools = () if final_synthesis_round or explaining else tool_definitions
                 request_system_prompt = self.system_prompt + (
                     f"\n本轮系统预算：业务工具调用已使用 {business_tool_calls}/{self.limits.max_tool_calls}，"
@@ -1468,9 +1474,10 @@ class AgentSession:
                                 "工具参数不是有效 JSON 对象；请按 Schema 重新提交完整参数。",
                                 code="invalid_arguments",
                             )
+                            error.repair_ticket = error_repair.issue(tool, None, tool_context)
                             # No object identity can be inferred from undecodable JSON.
                             # Track a parameterless syntax failure, never execute it as {}.
-                            record_result(tool.name, {}, {"ok": False, "status": error.code, "summary": str(error)}, error=error)
+                            record_result(tool.name, {}, {"ok": False, "status": error.code, "summary": str(error)}, error=error, rejected_call=call.call_id)
                             await close_failed_call(call, error, tool_name=tool.name, input_schema=tool.input_schema)
                             continue
                         canonical_call = ModelToolCall(
@@ -1587,7 +1594,7 @@ class AgentSession:
                                 continue
                             messages, completed_call_ids = staged, done
                             discovery.context["has_task"] = True
-                            record_result(tool.name, call.arguments, result.outcome.audit_result())
+                            record_result(tool.name, call.arguments, result.outcome.audit_result(), recovered_failures=result.recovered_failures)
                             await publish_tool_result(canonical_call, result)
                             continue
                         append_tool_result(call, result)
@@ -1618,7 +1625,7 @@ class AgentSession:
                                 },
                             )
                             return
-                        record_result(tool.name, call.arguments, result.outcome.audit_result())
+                        record_result(tool.name, call.arguments, result.outcome.audit_result(), recovered_failures=result.recovered_failures)
                         # 完成事实在对外通知、进入下一项I/O之前落盘；新追问才能继承本批前半段。
                         await persist_conversation(close_pending=True)
                         await publish_tool_result(canonical_call, result)
@@ -1648,7 +1655,11 @@ class AgentSession:
                         code="empty_model_response",
                     )
                 if unresolved_errors:
-                    pending_error = next(iter(unresolved_errors.values()))
+                    # Prefer the operational blocker while retaining every rejected request
+                    # in the evidence summary; a schema error must not hide a timeout.
+                    pending_error = next((error for error in unresolved_errors.values()
+                                          if error.code != "invalid_arguments"),
+                                         next(iter(unresolved_errors.values())))
                     message = f"仍有工具调用受到频率限制：{pending_error}" if pending_error.code == "rate_limited" else str(pending_error)
                     await failure(pending_error.code, message, analysis_text=assistant_text)
                     return
@@ -1848,6 +1859,9 @@ class AgentSession:
         # 仅重述本轮已提供给模型的工具契约，不回显调用参数，也不进入用户事件。
         repair = ({"expected_input_schema": dict(input_schema)}
                   if error.code == "invalid_arguments" and input_schema is not None else {})
+        if error.repair_ticket:
+            repair["repair"] = {"tool": "agent.repair", "ticket": error.repair_ticket,
+                                "semantics": "explicit replacement of this rejected invocation; valid arguments stay fixed"}
         content = json.dumps(
             {
                 **repair,

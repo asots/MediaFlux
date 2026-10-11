@@ -526,6 +526,8 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="核对完成。"),
                                    ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
                 model, state, catalog = ScriptedModel(rounds), InMemorySessionStateStore(), ToolCatalog([tool])
+                from tests.error30_model_inputs import ExplicitRepairModel
+                model = ExplicitRepairModel(model, {"corrected"})
                 session = AgentSession(model=model, catalog=catalog,
                     retriever=CapabilityRetriever(minimum=1, maximum=1),
                     pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
@@ -4062,6 +4064,9 @@ class ConfirmedEffectReplayTests(unittest.IsolatedAsyncioTestCase):
                          [ModelEvent(ModelEventType.TEXT_DELTA, text="变更已完成。"),
                           ModelEvent(ModelEventType.FINISH, finish_reason="stop")]]
                 session, model, prepares, writes, reads = self.runtime(tail)
+                if repair:
+                    from tests.error30_model_inputs import ExplicitRepairModel
+                    session.model = ExplicitRepairModel(model, {"repeat"})
                 events = await self.confirm(session)
                 final = await consume_events(_events_stream(events))
                 self.assertEqual(final.status, "success")

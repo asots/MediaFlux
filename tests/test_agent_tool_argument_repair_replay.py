@@ -369,7 +369,10 @@ def test_malformed_native_binding_cannot_be_dropped(protocol):
 def test_second_batch_repair_does_not_replay_first_result(store):
     async def run():
         executed=[]
-        transport=Wire('chat_completions',[payload('chat_completions','json','{"query":"first"}','call-first'),payload('chat_completions','json',cid='call-bad'),payload('chat_completions','json','{"query":"corrected"}','call-corrected'),final('chat_completions')])
+        from tests.error30_model_inputs import explicit_repair_wire
+        transport=explicit_repair_wire('chat_completions',[payload('chat_completions','json','{"query":"first"}','call-first'),payload('chat_completions','json',cid='call-bad'),payload('chat_completions','json','{"query":"corrected"}','call-corrected'),final('chat_completions')],
+            index=2, arguments={"query":"corrected"}, reply_factory=lambda args:
+                payload('chat_completions','json',encode(args),'call-corrected',name='agent__repair'))
         events=[e async for e in make_session(transport.adapter,store,executed).run(AgentInput(message='只读核验',owner='owner',session_id='second'))]
         transport.verify(4)
         assert executed == [{'query':'first'},{'query':'corrected'}]

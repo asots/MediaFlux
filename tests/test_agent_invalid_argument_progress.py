@@ -56,7 +56,7 @@ def reply(*, name="", arguments=None, index=0, text=FINAL):
     return encode({"choices": [{"message": message, "finish_reason": "tool_calls" if name else "stop"}]}).encode(), "application/json"
 
 
-async def scenario(store, good, *, ending="answer", mixed=True):
+async def scenario(store, good, *, ending="answer", mixed=True, explicit_repair=False):
     bad = {**X, "limit": "bad"}
     steps = [(A, bad)]
     if mixed:
@@ -93,7 +93,15 @@ async def scenario(store, good, *, ending="answer", mixed=True):
         limits = SessionLimits(max_model_rounds=len(steps) + 1)
     elif ending == "tool-empty":
         limits = SessionLimits(max_tool_calls=len(steps))
-    wire = Wire("chat_completions", replies)
+    class RepairWire(Wire):
+        async def handler(self, request):
+            if explicit_repair and len(self.requests) == len(steps) - 1:
+                body = json.loads(request.content)
+                rejection = next(json.loads(m["content"]) for m in body["messages"] if m.get("role") == "tool")
+                entry = rejection["repair"]
+                self.replies[0] = reply(name="agent__repair", arguments={"ticket": entry["ticket"], "arguments": good}, index=len(steps) - 1)
+            return await super().handler(request)
+    wire = RepairWire("chat_completions", replies)
     session = AgentSession(
         model=wire.adapter, catalog=catalog, retriever=CapabilityRetriever(minimum=len(catalog), maximum=len(catalog)),
         pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store, journal=store, limits=limits,
@@ -155,7 +163,7 @@ def test_invalid_object_remains_disclosed_after_other_object_success(store, othe
 @pytest.mark.parametrize("mixed", [False, True])
 def test_same_object_argument_repair_still_executes_without_state_or_call_changes(store, mixed):
     # Mixed-partial suppression of the old parameter error belongs to #30, not this repair.
-    final, answers = asyncio.run(scenario(store, {**X, "limit": 1}, mixed=mixed))
+    final, answers = asyncio.run(scenario(store, {**X, "limit": 1}, mixed=mixed, explicit_repair=True))
     assert final["status"] == ("partial" if mixed else "success")
     if mixed:
         assert final["finish_reason"] == "provider_timeout"

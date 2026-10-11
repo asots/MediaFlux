@@ -17,6 +17,7 @@ from app.agent.public_safety import sanitize_public_text
 from app.concurrency import CrossLoopAsyncLock
 
 from .capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from . import error_repair
 from .task_state import TaskPatch, task_tool, observation_patch
 from .effects import (
     ConfirmationEffectPlanStore,
@@ -50,10 +51,12 @@ from .ux_selection import (
 
 
 class ToolPipelineError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "tool_failed", task_patch: TaskPatch | None = None) -> None:
+    def __init__(self, message: str, *, code: str = "tool_failed", task_patch: TaskPatch | None = None, invalid_fields: tuple[str, ...] = ()) -> None:
         super().__init__(message)
         self.code = code
         self.task_patch = task_patch
+        self.repair_ticket = ""
+        self.invalid_fields = invalid_fields
 
 
 class _ReadPermitRejected(ToolPipelineError):
@@ -113,6 +116,7 @@ class ToolCallContext:
     user_source: str = ""
     user_reply_context: Mapping[str, Any] = field(default_factory=dict)
     call_id: str = ""
+    schema_replacements: dict[str, error_repair.SchemaReplacement] = field(default_factory=dict)
 
     def policy_context(self) -> dict[str, Any]:
         return {
@@ -132,6 +136,7 @@ class PipelineResult:
     effect_plan: EffectPlan | None = None
     elapsed_ms: int = 0
     task_patch: TaskPatch | None = None
+    recovered_failures: tuple[str, ...] = ()
 
 
 class AuthorizationPolicy(Protocol):
@@ -427,6 +432,15 @@ class ToolPipeline:
         self.authorization = authorization or DefaultAuthorizationPolicy()
         self.rate_limiter = rate_limiter or InMemoryRateLimiter()
         self.effect_lifecycle = effect_lifecycle or NoopEffectLifecycle()
+        if not catalog.has(error_repair.REPAIR_TOOL):
+            catalog.register(KernelToolSpec(
+                name=error_repair.REPAIR_TOOL, domain="agent", effect=ToolEffect.READ,
+                description="明确替代本轮指定的参数拒绝调用，不是声称旧目标已知。使用失败返回的一次性ticket，提供原工具完整修正arguments；不得更改已有效的参数。仍需原权限与写入确认，预览/提交不代表业务完成。",
+                input_schema={"type": "object", "required": ["ticket", "arguments"], "properties": {
+                    "ticket": {"type": "string"}, "arguments": {"type": "object"}}, "additionalProperties": False},
+                read=self._replace_schema_failure, availability=lambda context: False,
+                metadata={"kernel_utility": True},
+            ))
         if not catalog.has("agent.task"):
             catalog.register(task_tool())
         if not catalog.has("agent.read_result"):
@@ -441,6 +455,27 @@ class ToolPipeline:
                 }, "additionalProperties": False},
                 read=self._read_result, metadata={"kernel_utility": True},
             ))
+
+    async def _replace_schema_failure(self, arguments: dict[str, Any], context: ToolCallContext) -> PipelineResult:
+        entry = context.schema_replacements.get(arguments["ticket"])
+        if entry is None or entry.scope != error_repair.scope(context):
+            raise ToolPipelineError("修复入口无效或不属于本轮", code="repair_invalid")
+        replacement = arguments["arguments"]
+        if not error_repair.preserves(entry, replacement):
+            raise ToolPipelineError("明确修复不能更改原有效参数", code="repair_conflict")
+        context.schema_replacements.pop(arguments["ticket"])
+        lineage = (*entry.predecessors, arguments["ticket"])
+        try:
+            result = await self.execute(entry.tool, replacement, context=context)
+        except ToolPipelineError as exc:
+            next_entry = context.schema_replacements.get(exc.repair_ticket)
+            if next_entry is not None:
+                context.schema_replacements[exc.repair_ticket] = replace(next_entry, predecessors=lineage)
+            raise
+        content = result.outcome.public_content
+        if result.effect_plan is None and content.get("ok") is not False and content.get("status", "success") in {"success", "completed"}:
+            return replace(result, recovered_failures=lineage)
+        return result
 
     async def _read_result(self, arguments: dict[str, Any], context: ToolCallContext) -> ToolOutcome:
         from . import telegram_reference
@@ -457,7 +492,7 @@ class ToolPipeline:
             except ReferenceError as exc:
                 raise ToolPipelineError("结果快照已过期或不属于当前会话，请重新观察原对象。", code="reference_invalid") from exc
             if arguments["path"] != "/text":
-                raise ToolPipelineError("引用仅允许读取 /text", code="invalid_arguments")
+                raise ToolPipelineError("引用仅允许读取 /text", code="invalid_arguments", invalid_fields=("path",))
             node = {"text": reference["text"]}
         path = arguments["path"]
         try:
@@ -467,7 +502,7 @@ class ToolPipeline:
                 key = part.replace("~1", "/").replace("~0", "~")
                 node = node[int(key)] if isinstance(node, list) and key.isdecimal() else node[key]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ToolPipelineError("结果路径不存在；请使用原结果truncation中的path。", code="invalid_arguments") from exc
+            raise ToolPipelineError("结果路径不存在；请使用原结果truncation中的path。", code="invalid_arguments", invalid_fields=("path",)) from exc
         offset, limit = arguments.get("offset", 0), arguments.get("limit", 50)
         if isinstance(node, dict):
             values = [{"key": key, "value": value} for key, value in node.items()]
@@ -566,6 +601,9 @@ class ToolPipeline:
         except KeyError as exc:
             raise ToolPipelineError("未知工具", code="tool_not_found") from exc
         raw_arguments = dict(arguments or {})
+        if tool.name == error_repair.REPAIR_TOOL:
+            _validate_json_schema(raw_arguments, tool.input_schema)
+            return await self._replace_schema_failure(raw_arguments, context)
         if (
             context.resource_candidate_ref and tool.name == "ingest.submit"
             and raw_arguments.get("source_type") == RESOURCE_KIND
@@ -609,20 +647,21 @@ class ToolPipeline:
                 if value is not None and key in tool.input_schema.get("properties", {})
                 and (key not in collision or key in tool.input_schema.get("required", ()))
             )
+            exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, collisions=collision)
             raise
         try:
             normalized = tool.validator(raw_arguments)
-        except ToolPipelineError:
+        except ToolPipelineError as exc:
+            if exc.code == "invalid_arguments":
+                exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, invalid_fields=exc.invalid_fields)
             raise
         except Exception as exc:
             safe_message = sanitize_public_text(
                 getattr(exc, "safe_message", ""),
                 limit=500,
             )
-            raise ToolPipelineError(
-                safe_message or "工具参数无效",
-                code="invalid_arguments",
-            ) from exc
+            error = ToolPipelineError(safe_message or "工具参数无效", code="invalid_arguments")
+            raise error from exc
         if not isinstance(normalized, dict):
             raise ToolPipelineError(
                 "工具参数校验器返回无效结果", code="invalid_arguments"
@@ -662,6 +701,8 @@ class ToolPipeline:
             try:
                 value = await _invoke(tool.read, resolved, context)
             except ToolPipelineError as exc:
+                if exc.code == "invalid_arguments":
+                    exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, invalid_fields=exc.invalid_fields)
                 if tool.observe is not None:
                     exc.task_patch = observation_patch(context.current_task, owner=context.owner,
                         session_id=context.session_id, tool=tool.name, call_id=context.call_id,

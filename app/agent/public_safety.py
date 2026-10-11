@@ -97,6 +97,7 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "agent.action_history": "Agent 操作记录",
     "agent.cancel_job": "取消后台检查",
     "agent.read_result": "工具结果续读",
+    "agent.repair": "修正工具参数",
     "agent.capabilities": "Agent 能力查询",
     "agent.job_status": "后台检查进度",
     "automation.diagnose_pipeline": "自动化链路诊断",

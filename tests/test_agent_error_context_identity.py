@@ -32,7 +32,7 @@ FINAL = "按已取得的证据完成核验。"
 ERRORS = {"schema", "invalid_arguments", "provider_timeout"}
 
 
-async def observe(store, steps, *, protocol="chat_completions", schema=False, ending="answer"):
+async def observe(store, steps, *, protocol="chat_completions", schema=False, ending="answer", explicit_repair=False):
     """Real validation/session/wire/storage; replace only read-side business I/O."""
     entered, business, returned = [], [], []
     pending = [step for step in steps if step[2] != "schema" and step[0] != DISCOVERY_TOOL]
@@ -45,7 +45,7 @@ async def observe(store, steps, *, protocol="chat_completions", schema=False, en
             entered.append((name, dict(arguments), outcome))
             if outcome in ERRORS:
                 # Handler validation rejects before the isolated business boundary.
-                raise ToolPipelineError("缺少当前对象参数" if outcome == "invalid_arguments" else "对象z仍未完成", code=outcome)
+                raise ToolPipelineError("缺少当前对象参数" if outcome == "invalid_arguments" else "对象z仍未完成", code=outcome, invalid_fields=("ref",) if outcome == "invalid_arguments" else ())
             business.append((name, dict(arguments), outcome))
             value = {"ok": True, "status": "success", "summary": outcome,
                      "data": {"items": [{"title": outcome}]}}
@@ -71,7 +71,19 @@ async def observe(store, steps, *, protocol="chat_completions", schema=False, en
         limits = SessionLimits(max_model_rounds=len(steps) + 1)
     elif ending == "tool-empty":
         limits = SessionLimits(max_tool_calls=len(steps))
-    wire = Wire(protocol, replies)
+    class RepairWire(Wire):
+        async def handler(self, request):
+            # Model fixture explicitly chooses a server repair, before the real
+            # protocol decoder sees it. Native private state stays unchanged.
+            if explicit_repair and len(self.requests) == len(steps) - 1:
+                from tests.error30_model_inputs import repair_entries
+                entries = repair_entries(json.loads(request.content))
+                assert entries, "actual request must advertise the scoped repair"
+                self.replies[0] = reply(protocol, name="agent__repair", arguments={
+                    "ticket": entries[-1]["ticket"], "arguments": steps[-1][1],
+                }, index=len(steps) - 1, private=True)
+            return await super().handler(request)
+    wire = RepairWire(protocol, replies)
     session = AgentSession(
         model=wire.adapter, catalog=catalog, retriever=CapabilityRetriever(minimum=len(catalog), maximum=len(catalog)),
         pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store, journal=store, limits=limits,
@@ -152,7 +164,7 @@ def test_empty_request_cannot_recover_across_business_context(store, protocol):
 @pytest.mark.parametrize("schema", [False, True], ids=["handler", "schema"])
 def test_immediate_empty_to_explicit_repair_keeps_success(store, protocol, schema):
     steps = [(A, {}, "schema" if schema else "invalid_arguments"), (A, X, "原对象修参独有资料")]
-    final, _ = asyncio.run(observe(store, steps, protocol=protocol, schema=schema))
+    final, _ = asyncio.run(observe(store, steps, protocol=protocol, schema=schema, explicit_repair=True))
     assert final["status"] == "success"
     assert final["answer"] == FINAL
     assert final["finish_reason"] == ("end_turn" if protocol == "anthropic_messages" else "stop")
@@ -193,7 +205,7 @@ def test_empty_to_explicit_repair_uses_current_business_context(store, schema, c
         steps.insert(1, (DISCOVERY_TOOL, {}, "discovery"))
     else:
         steps.insert(1, bad)
-    final, _ = asyncio.run(observe(store, steps, schema=schema))
+    final, _ = asyncio.run(observe(store, steps, schema=schema, explicit_repair=True))
     assert final["status"] == "success"
     assert final["answer"] == FINAL
 
@@ -228,6 +240,10 @@ def test_context_failure_and_independent_success_survive_terminal_paths(store, e
         steps.append((C, {"ref": "object-z"}, "provider_timeout"))
     steps += [(B, {}, "独立健康结果"), (A, X, "切换后显式成功结果")]
     final, answers = asyncio.run(observe(store, steps, ending=ending))
+    # Both failures remain; operational timeout is the primary blocker rather
+    # than an earlier validation issue. Neither disappears from the evidence.
+    if mixed and ending == "answer":
+        reason = "provider_timeout"
     assert_partial(final, answers, reason=reason, titles=("独立健康结果", "切换后显式成功结果"))
     for answer in answers:
         assert "缺少当前对象参数" in answer
