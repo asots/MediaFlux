@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -51,6 +52,7 @@ from app.repositories.organize_operation_jobs import (
     sanitize_organize_operation_result,
     verify_organize_operation_payload,
     OrganizeOperationCancelled,
+    OrganizeOperationExpired,
     OrganizeOperationQueueFullError,
 )
 from app.modules.directory_scrape_errors import (
@@ -1193,6 +1195,9 @@ class OrganizeTaskManager:
                 task_id, expected_lease_generation=generation
             ):
                 raise OrganizeOperationCancelled("光鸭操作已取消")
+            # 领取时冻结的期限不得因等待/重领而延长；每次领域读写前沿用同一守卫。
+            if time.time() >= float(row["expires_at"]):
+                raise OrganizeOperationExpired("原执行期限已到，已停止后续操作；已受理的云端操作未被撤销，请核验其结果")
 
         cancel_check()
         kind = str(row.get("job_kind") or "")
@@ -1246,10 +1251,12 @@ class OrganizeTaskManager:
                 logger.error("持久化整理操作失败 operation=%s type=%s", operation, type(exc).__name__)
                 result = getattr(exc, "operation_result", {})
                 cancelled = isinstance(exc, OrganizeOperationCancelled)
-                status = "cancelled" if cancelled else "manual_review" if isinstance(exc, GuangYaFSCheckpointError) else "failed"
+                expired = isinstance(exc, OrganizeOperationExpired)
+                status = "cancelled" if cancelled else "manual_review" if expired or isinstance(exc, GuangYaFSCheckpointError) else "failed"
                 error_code = "" if cancelled else type(exc).__name__
                 error = "" if cancelled else (
                     public_error_message(exc) if isinstance(exc, DirectoryScrapePublicError)
+                    else str(exc) if expired
                     else "操作检查点未能保存，请核对云端结果，勿重复提交" if status == "manual_review"
                     else f"{operation}失败，请重新检查后重试"
                 )

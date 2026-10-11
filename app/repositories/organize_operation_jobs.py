@@ -38,7 +38,7 @@ CLOUD_COPY_PENDING_CODE = "ProviderCopyPending"
 CLOUD_COPY_POLL_SECONDS = 10
 _PROVIDER_COPY_EXPIRED_CODE = "ProviderCopyOutcomeUnknown"
 _PROVIDER_COPY_EXPIRED_ERROR = (
-    "复制请求已提交，队列已过期；云端处理结果未知，可能仍在执行。"
+    "复制请求可能已提交，队列已过期；云端处理结果未知，可能仍在执行。"
     "请先核对目标目录，勿直接重试或视为已取消。"
 )
 _MAX_OPERATION_ITEMS = 400
@@ -74,6 +74,10 @@ class OrganizeOperationCancelled(RuntimeError):
     """持久任务收到协作式取消；当前 provider 写入尚未开始。"""
 
     provider_write_not_started = True
+
+
+class OrganizeOperationExpired(RuntimeError):
+    """原执行期限已到；不得继续写入，不声称云端已受理操作被撤销。"""
 
 
 def _database() -> "ModuleType":
@@ -393,40 +397,26 @@ def _expire_pending(conn: sqlite3.Connection, current_epoch: float) -> int:
         "SELECT * FROM organize_operation_jobs WHERE status='pending' AND expires_at<=?",
         (float(current_epoch),),
     ).fetchall()
-    copy_expired = conn.execute(
-        "UPDATE organize_operation_jobs SET status='manual_review',reference='',"
-        "payload_json='{}',payload_auth='',error_code=?,error=?,"
-        "finished_at=COALESCE(finished_at,?),updated_at=? "
-        "WHERE status='pending' AND expires_at<=? AND error_code=?",
-        (
-            _PROVIDER_COPY_EXPIRED_CODE, _PROVIDER_COPY_EXPIRED_ERROR,
-            timestamp, timestamp, float(current_epoch), CLOUD_COPY_PENDING_CODE,
-        ),
-    )
-    expired = conn.execute(
-        "UPDATE organize_operation_jobs SET status='cancelled',payload_json='{}',"
-        "payload_auth='',error_code='QueueExpired',error='排队确认已过期，请重新预检',"
-        "finished_at=COALESCE(finished_at,?),updated_at=? "
-        "WHERE status='pending' AND expires_at<=? "
-        "AND COALESCE(error_code,'')<>?",
-        (timestamp, timestamp, float(current_epoch), CLOUD_COPY_PENDING_CODE),
-    )
+    changed = 0
     for row in expired_rows:
-        is_copy_pending = str(row["error_code"] or "") == CLOUD_COPY_PENDING_CODE
-        _sync_cloud_plan_terminal(
-            row,
-            status="manual_review" if is_copy_pending else "cancelled",
-            error_code=(
-                _PROVIDER_COPY_EXPIRED_CODE if is_copy_pending else "QueueExpired"
-            ),
+        copy_pending = _has_unsettled_copy(row)
+        status = "manual_review" if copy_pending else "cancelled"
+        code = _PROVIDER_COPY_EXPIRED_CODE if copy_pending else "QueueExpired"
+        error = _PROVIDER_COPY_EXPIRED_ERROR if copy_pending else "排队确认已过期，请重新预检"
+        updated = conn.execute(
+            "UPDATE organize_operation_jobs SET status=?,reference=CASE WHEN ? THEN '' ELSE reference END,payload_json='{}',"
+            "payload_auth='',error_code=?,error=?,finished_at=COALESCE(finished_at,?),updated_at=? "
+            "WHERE job_id=? AND status='pending' AND expires_at<=?",
+            (status, copy_pending, code, error, timestamp, timestamp, str(row["job_id"]), float(current_epoch)),
         )
+        if updated.rowcount == 1:
+            changed += 1
+            _sync_cloud_plan_terminal(row, status=status, error_code=code)
     conn.execute(
         "DELETE FROM organize_operation_jobs WHERE purged_at IS NOT NULL "
         "AND status<>'running'"
     )
-    return max(0, int(copy_expired.rowcount or 0)) + max(
-        0, int(expired.rowcount or 0)
-    )
+    return changed
 
 
 def _delete_job_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
@@ -660,23 +650,7 @@ def defer_organize_operation_job(
             or float(row["expires_at"] or 0) <= time.time()
         ):
             return False
-        try:
-            if not verify_organize_operation_payload(row):
-                return False
-            payload = json.loads(str(row["payload_json"] or "{}"))
-            if not isinstance(payload, dict):
-                return False
-            from app.modules.guangya_fs_change import can_resume_fs_change_plan
-
-            can_resume = can_resume_fs_change_plan(
-                payload,
-                job_id=str(row["job_id"]),
-                owner_digest=str(row["owner_digest"]),
-                lease_generation=generation,
-            )
-        except Exception:  # noqa: BLE001 - 不确定的计划不得重新排队
-            return False
-        if can_resume is not True:
+        if not _fs_job_recovery(row)["resumable"]:
             return False
 
         current_epoch = time.time()
@@ -697,6 +671,34 @@ def defer_organize_operation_job(
             ),
         )
         return cur.rowcount == 1
+
+
+def _fs_job_recovery(row: sqlite3.Row) -> dict[str, Any]:
+    """数据库事务内仅读计划/阶段日志；不能从临时队列错误码推断复制是否结束。"""
+    try:
+        if not verify_organize_operation_payload(row):
+            raise ValueError("invalid operation payload")
+        payload = _cloud_plan_job_payload(row)
+        if payload is None:
+            raise ValueError("missing operation payload")
+        from app.modules.guangya_fs_change import inspect_fs_change_plan_recovery
+        return inspect_fs_change_plan_recovery(
+            payload, job_id=str(row["job_id"]),
+            owner_digest=str(row["owner_digest"]),
+            lease_generation=int(row["lease_generation"]),
+        )
+    except Exception:  # noqa: BLE001 - 失去检查点不能等同于复制尚未发起。
+        return {"resumable": False, "copy_in_flight": None}
+
+
+def _has_unsettled_copy(row: sqlite3.Row) -> bool:
+    """取消与过期共用复制事实；队列 marker 不是唯一的已受理凭据。"""
+    active = None
+    if str(row["job_kind"] or "") == "agent_guangya_fs_change":
+        active = _fs_job_recovery(row)["copy_in_flight"]
+        if active is True or (active is None and row["started_at"]):
+            return True
+    return active is None and str(row["error_code"] or "") == CLOUD_COPY_PENDING_CODE
 
 
 def request_cancel_organize_operation_job(
@@ -726,8 +728,7 @@ def request_cancel_organize_operation_job(
             return row, "terminal"
         if status not in {"pending", "running"}:
             return row, "stale"
-        # 复制请求已由 Provider 接受；停止本地轮询会丢失可信终态回执。
-        if str(row["error_code"] or "") == CLOUD_COPY_PENDING_CODE:
+        if _has_unsettled_copy(row):
             return row, "uncancellable"
 
         if status == "pending":
@@ -914,29 +915,15 @@ def recover_orphaned_organize_operation_jobs() -> int:
                 or not verify_organize_operation_payload(row)
             ):
                 continue
-            try:
-                payload = json.loads(str(row["payload_json"] or "{}"))
-                if not isinstance(payload, dict):
-                    continue
-                from app.modules.guangya_fs_change import can_resume_fs_change_plan
-
-                can_resume = can_resume_fs_change_plan(
-                    payload,
-                    job_id=str(row["job_id"]),
-                    owner_digest=str(row["owner_digest"]),
-                    lease_generation=int(row["lease_generation"]),
-                )
-            except Exception:  # noqa: BLE001 - 不确定的计划必须沿用人工复核
-                can_resume = False
-            if can_resume is not True:
+            if not _fs_job_recovery(row)["resumable"]:
                 continue
             resume_checked_at = time.time()
             cur = conn.execute(
                 "UPDATE organize_operation_jobs SET status='pending',"
-                "lease_generation=lease_generation+1,error_code='WorkerInterruptedResume',"
+                "lease_generation=lease_generation+1,error_code=CASE WHEN error_code=? THEN error_code ELSE 'WorkerInterruptedResume' END,"
                 "error='',updated_at=? WHERE job_id=? AND status='running' "
                 "AND cancel_requested=0 AND purged_at IS NULL AND expires_at>?",
-                (timestamp, str(row["job_id"]), resume_checked_at),
+                (CLOUD_COPY_PENDING_CODE, timestamp, str(row["job_id"]), resume_checked_at),
             )
             if cur.rowcount == 1:
                 resumed_job_ids.add(str(row["job_id"]))

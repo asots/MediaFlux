@@ -644,9 +644,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         }
 
         with patch(
-            "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+            "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
             create=True,
-            return_value=True,
+            return_value={'resumable': True, 'copy_in_flight': True},
         ) as can_resume:
             self.assertTrue(defer_organize_operation_job(
                 job_id,
@@ -719,9 +719,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         second_id = str(second["job_id"])
         claimed_waiting = claim_organize_operation_job(waiting_id)
         with patch(
-            "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+            "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
             create=True,
-            return_value=True,
+            return_value={'resumable': True, 'copy_in_flight': True},
         ):
             self.assertTrue(defer_organize_operation_job(
                 waiting_id,
@@ -775,9 +775,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
 
         for key in ("wrong-lease", "cancelled", "purged", "expired", "tampered"):
             with self.subTest(case=key), patch(
-                "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+                "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
                 create=True,
-                return_value=True,
+                return_value={'resumable': True, 'copy_in_flight': True},
             ) as can_resume:
                 row = cases[key]
                 generation = int(claims[key]["lease_generation"])
@@ -798,9 +798,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         generation = int(claims["checkpoint"]["lease_generation"])
         before = get_organize_operation_job(str(checkpoint["job_id"]))
         with patch(
-            "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+            "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
             create=True,
-            return_value=False,
+            return_value={'resumable': False, 'copy_in_flight': None},
         ) as can_resume:
             self.assertFalse(defer_organize_operation_job(
                 str(checkpoint["job_id"]), expected_lease_generation=generation
@@ -824,9 +824,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         wrong_kind, _ = self._enqueue(dedupe="defer-wrong-kind")
         wrong_kind_claim = claim_organize_operation_job(str(wrong_kind["job_id"]))
         with patch(
-            "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+            "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
             create=True,
-            return_value=True,
+            return_value={'resumable': True, 'copy_in_flight': True},
         ) as can_resume:
             self.assertFalse(defer_organize_operation_job(
                 str(wrong_kind["job_id"]),
@@ -843,9 +843,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         job_id = str(created["job_id"])
         claimed = claim_organize_operation_job(job_id)
         with patch(
-            "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+            "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
             create=True,
-            return_value=True,
+            return_value={'resumable': True, 'copy_in_flight': True},
         ):
             self.assertTrue(defer_organize_operation_job(
                 job_id,
@@ -890,9 +890,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
 
         with (
             patch(
-                "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+                "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
                 create=True,
-                return_value=True,
+                return_value={'resumable': True, 'copy_in_flight': True},
             ) as can_resume,
             patch(
                 "app.modules.guangya_fs_change.finalize_fs_change_plan_job"
@@ -998,14 +998,14 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
                 (time.time() - 1, str(cases["expired"]["job_id"])),
             )
 
-        def cannot_resume(payload, *_args):
+        def cannot_resume(payload, *_args, **_kwargs):
             if payload.get("case") == "raises":
                 raise RuntimeError("plan unavailable")
-            return False
+            return {"resumable": False, "copy_in_flight": None}
 
         with (
             patch(
-                "app.modules.guangya_fs_change.can_resume_fs_change_plan",
+                "app.modules.guangya_fs_change.inspect_fs_change_plan_recovery",
                 create=True,
                 side_effect=cannot_resume,
             ) as can_resume,
@@ -1013,10 +1013,11 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         ):
             self.assertEqual(recover_orphaned_organize_operation_jobs(), len(cases) + 1)
 
-        self.assertEqual(can_resume.call_count, 3)
+        # 缺少签名任务绑定的旧 payload 在队列侧即拒绝，不再送入计划恢复读取器。
+        self.assertEqual(can_resume.call_count, 2)
         self.assertEqual(
             {str(call.args[0].get("case")) for call in can_resume.call_args_list},
-            {"false", "raises", "legacy"},
+            {"false", "raises"},
         )
         self.assertEqual(
             get_organize_operation_job(str(cases["cancelled"]["job_id"]))["status"],

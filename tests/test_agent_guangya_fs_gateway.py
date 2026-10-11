@@ -322,9 +322,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     with self.assertRaises(WorkerExit):
                         guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
                 self.assertEqual(calls, ["rename"])
-                self.assertTrue(guangya_fs_change.can_resume_fs_change_plan(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1))
+                self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1)["resumable"])
                 # 新worker领队列后、更新计划代数前再崩溃，也不能遗失同一检查点。
-                self.assertTrue(guangya_fs_change.can_resume_fs_change_plan(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=3))
+                self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=3)["resumable"])
                 if crash_at == "changed_after_checkpoint":
                     original_rename("rename", "externally-changed.mp4")
                 with mock.patch.object(client, "rename", wraps=original_rename) as resumed:
@@ -444,9 +444,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         event["auth"] = guangya_fs_change._auth(event)
                     changed = b"".join(lines[:-1]) + (json.dumps(event) + "\n").encode()
                 path.write_bytes(changed)
-                self.assertFalse(guangya_fs_change.can_resume_fs_change_plan(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1))
+                self.assertFalse(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1)["resumable"])
         path.write_bytes(original_bytes)
-        self.assertTrue(guangya_fs_change.can_resume_fs_change_plan(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1))
+        self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1)["resumable"])
 
     def test_checkpoint_failure_before_provider_call_halts_without_claiming_a_write(self):
         client = FakeGatewayClient()
@@ -684,7 +684,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         plan, payload = self._recovery_plan(client)
         first = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
-        self.assertTrue(guangya_fs_change.can_resume_fs_change_plan(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1))
+        self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1)["resumable"])
         terminal_execution = guangya_fs_change._read(plan["plan_id"])["execution"]
         client.logged_in = False  # 已核验历史回执不依赖当前是否仍登录。
         client.credential_generation += 1
@@ -692,8 +692,8 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             recovered = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
         self.assertEqual(recovered, first)
         self.assertEqual(guangya_fs_change._read(plan["plan_id"])["execution"], {**terminal_execution, "lease_generation": 3})
-        self.assertFalse(guangya_fs_change.can_resume_fs_change_plan(payload, job_id=payload["job_id"], owner_digest="digest:someone-else", lease_generation=3))
-        self.assertFalse(guangya_fs_change.can_resume_fs_change_plan(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1))
+        self.assertFalse(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:someone-else", lease_generation=3)["resumable"])
+        self.assertFalse(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1)["resumable"])
 
     def test_strm_trigger_skips_successful_unrelated_prefix_sibling_change(self):
         client = FakeGatewayClient()
@@ -2322,8 +2322,8 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=generation)
                 self.assertEqual(waiting.exception.position, 1)
                 self.assertEqual(waiting.exception.operation_result["stats"]["failed"], 0)
-                self.assertTrue(guangya_fs_change.can_resume_fs_change_plan(payload,
-                    job_id=payload["job_id"], owner_digest=plan["owner_digest"], lease_generation=generation))
+                self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload,
+                    job_id=payload["job_id"], owner_digest=plan["owner_digest"], lease_generation=generation)["resumable"])
                 self.assertEqual(guangya_fs_change._read(plan["plan_id"])["status"], "running")
                 self.assertEqual(client.file_info("source").parent_id, "0")
             self.assertEqual(copy.call_count, 1)

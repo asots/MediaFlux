@@ -230,29 +230,41 @@ def _read(plan_id: str) -> dict[str, Any]:
     return payload
 
 
-def can_resume_fs_change_plan(
+def inspect_fs_change_plan_recovery(
     payload: dict[str, Any], *, job_id: str, owner_digest: str, lease_generation: int,
-) -> bool:
-    """整理全局锁内仅读检查点；只有原任务可被重排，不能据此认定云端已完成。"""
+) -> dict[str, Any]:
+    """仅读同一签名检查点，恢复与取消共用；None 表示无法排除已发送复制。"""
+    unknown = {"resumable": False, "copy_in_flight": None}
     try:
         plan = _read(str(payload.get("plan_id") or ""))
         _validate_plan_identity(plan, expected_fingerprint=str(payload.get("plan_fingerprint") or ""))
         if (plan.get("job_id") != job_id or plan.get("owner_digest") != owner_digest
                 or payload.get("owner_digest") != owner_digest):
-            return False
+            return unknown
         if plan.get("status") == "queued":
-            return True  # worker 尚未开启写入窗口。
+            return {"resumable": True, "copy_in_flight": False}
         execution = plan.get("execution") or {}
         if plan.get("status") == "running" and execution.get("checkpoint_version") == 2:
-            _read_fs_checkpoints(plan)  # 破损/不完整的日志只能保守收束，不能重排写入。
-        return bool(
+            execution = _read_fs_checkpoints(plan)
+        resumable = bool(
             plan.get("status") in {"running", "completed", "partial"}
             and execution.get("checkpoint_version") == 2
             and 0 < int(execution.get("lease_generation") or 0) <= lease_generation
             and len(execution.get("operation_items") or []) == len(plan.get("operations") or [])
         )
+        if not resumable:
+            return unknown
+        copies = execution.get("copy_tasks") or {}
+        active = any(
+            item["op"] == "copy" and (
+                outcome["status"] in {"unknown", "partial"}
+                or (str(index) in copies and outcome["status"] not in {"completed", "failed", "blocked"})
+            )
+            for index, (item, outcome) in enumerate(zip(plan["operations"], execution["operation_items"]), 1)
+        )
+        return {"resumable": True, "copy_in_flight": active}
     except (GuangYaFSChangeError, TypeError, ValueError, KeyError):
-        return False
+        return unknown
 
 
 def _append_journal(plan_id: str, event: dict[str, Any]) -> None:
@@ -1793,9 +1805,9 @@ def _load_fs_execution_plan(payload, lease_generation):
     previous = plan.get("execution") or {}
     if recovering and not (
         lease_generation > int(previous.get("lease_generation") or 0)
-        and can_resume_fs_change_plan(payload, job_id=job_id,
+        and inspect_fs_change_plan_recovery(payload, job_id=job_id,
             owner_digest=str(payload.get("owner_digest") or ""),
-            lease_generation=int(previous.get("lease_generation") or 0))
+            lease_generation=int(previous.get("lease_generation") or 0))["resumable"]
     ):
         raise GuangYaFSChangeStale("光鸭变更计划没有可核对的中断检查点")
     if not hmac.compare_digest(
