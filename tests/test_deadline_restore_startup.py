@@ -80,7 +80,7 @@ def test_prepared_restore_with_missing_canonical_is_recovered(tmp_path, backgrou
 
 @pytest.mark.parametrize('start_background', [False, True])
 @pytest.mark.parametrize('pending_env', [False, True])
-def test_genuinely_fresh_guidance_does_not_publish_or_promote(tmp_path, start_background, pending_env):
+def test_fresh_setup_form_does_not_publish_or_promote(tmp_path, start_background, pending_env):
     config_dir = tmp_path / 'config'
     config_dir.mkdir()
     pending = config_dir / '.user.env.recovery.probe.bak'
@@ -95,10 +95,11 @@ def test_genuinely_fresh_guidance_does_not_publish_or_promote(tmp_path, start_ba
         app = main.create_app(start_background=start_background)
         with TestClient(app) as client:
             assert client.get('/setup').status_code == 200
-            assert 'initialize' in client.get('/setup').text
+            assert 'name="username"' in client.get('/setup').text
+            assert 'name="setup_code"' not in client.get('/setup').text
             assert client.get('/readyz').status_code == 503
             assert client.post('/setup', data={}).status_code == 403
-        assert config._cache is None
+        assert config._cache == {}  # 表单读取空快照，不晋升磁盘恢复片段。
         assert not backup._RUNTIME_LIFECYCLE_REGISTRY
         return True
 

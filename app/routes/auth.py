@@ -1,6 +1,7 @@
 """FastAPI 认证与首次初始化路由。"""
 from __future__ import annotations
 
+import asyncio
 import hmac
 
 from fastapi import APIRouter, Form, Request
@@ -12,8 +13,11 @@ from app.modules import first_run
 from app.modules.login_wallpaper import get_login_wallpaper
 from app.security import (
     clear_login_failures,
+    clear_setup_failures,
     login_rate_limited,
     record_login_failure,
+    record_setup_failure,
+    setup_rate_limited,
 )
 from app.web import render_template
 
@@ -51,28 +55,43 @@ def render_setup(
 
 
 @router.get("/login", name="auth.login")
-def login_page(request: Request):
+async def login_page(request: Request):
     if first_run.needs_initialization():
         return RedirectResponse("/setup", status_code=302)
+    # 安装已提交但浏览器中断了原请求时，登录页仍可在同一服务内完成激活。
+    activate = getattr(request.app.state, "activate_runtime", None)
+    if activate is not None and not request.app.state.ready:
+        await activate()
     if request.session.get("logged_in"):
         return RedirectResponse("/", status_code=302)
-    return _render_login(request)
+    return await asyncio.to_thread(_render_login, request)
 
 
 @router.post("/login", name="auth.login_submit")
-def login_submit(
+async def login_submit(
     request: Request,
     username: str = Form(default=""),
     password: str = Form(default=""),
 ):
     if first_run.needs_initialization():
         return RedirectResponse("/setup", status_code=302)
+    activate = getattr(request.app.state, "activate_runtime", None)
+    if activate is not None and not request.app.state.ready:
+        try:
+            await activate()
+        except Exception as exc:  # noqa: BLE001 - 未就绪时不得签发已登录会话。
+            logger.error("登录前运行时启动失败 type=%s", type(exc).__name__)
+            request.session.clear()
+            return await asyncio.to_thread(
+                _render_login, request, status_code=503,
+                error="服务尚未就绪，请检查日志并重启服务后登录",
+            )
     if request.session.get("logged_in"):
         return RedirectResponse("/", status_code=302)
     identity = request.client.host if request.client else "unknown"
     if login_rate_limited(identity):
-        return _render_login(
-            request,
+        return await asyncio.to_thread(
+            _render_login, request,
             status_code=429,
             error="登录失败次数过多，请稍后再试",
         )
@@ -94,8 +113,8 @@ def login_submit(
         logger.info(f"用户登录成功: {username}")
         return RedirectResponse("/", status_code=302)
     record_login_failure(identity)
-    return _render_login(
-        request,
+    return await asyncio.to_thread(
+        _render_login, request,
         status_code=401,
         error="用户名或密码错误",
     )
@@ -110,7 +129,7 @@ def setup_page(request: Request):
 
 
 @router.post("/setup", name="auth.setup_submit")
-def setup_submit(
+async def setup_submit(
     request: Request,
     username: str = Form(default=""),
     password: str = Form(default=""),
@@ -119,8 +138,35 @@ def setup_submit(
     if not first_run.needs_initialization():
         return RedirectResponse("/login", status_code=302)
 
-    from fastapi.responses import PlainTextResponse
-    return PlainTextResponse("停止服务并显式运行 initialize；完成后重启登录", status_code=403)
+    identity = request.client.host if request.client else "unknown"
+    if setup_rate_limited(identity):
+        return render_setup(request, status_code=429, error="初始化失败次数过多，请稍后再试", username=username[:128])
+    activate = getattr(request.app.state, "activate_runtime", None)
+    if activate is None:
+        return render_setup(request, status_code=503, error="服务尚未完成启动，请稍后重试")
+    try:
+        if password != password_confirm:
+            raise ValueError("两次输入的密码不一致")
+        await asyncio.to_thread(
+            first_run.initialize_admin, username, password,
+            secret_key=request.app.state.setup_secret_key,
+        )
+    except ValueError as exc:
+        record_setup_failure(identity)
+        return render_setup(request, status_code=400, error=str(exc), username=username[:128])
+    except first_run.InitializationError as exc:
+        if exc.initialized_by_competitor:
+            return RedirectResponse("/login", status_code=303)
+        record_setup_failure(identity)
+        return render_setup(request, status_code=409, error=str(exc), username=username[:128])
+    try:
+        await activate()
+    except Exception as exc:  # noqa: BLE001 - 服务启动失败不重放已提交的初始化。
+        logger.error("首次安装后的运行时启动失败 type=%s", type(exc).__name__)
+        return render_setup(request, status_code=503, error="管理员已保存，但服务启动失败，请检查日志并重启服务后登录")
+    clear_setup_failures(identity)
+    request.session.clear()
+    return RedirectResponse("/login", status_code=303)
 
 
 @router.post("/logout", name="auth.logout")

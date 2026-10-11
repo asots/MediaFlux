@@ -13,6 +13,7 @@ class DockerWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.text = Path(".github/workflows/docker.yml").read_text(encoding="utf-8")
+        cls.web_smoke = Path("packaging/scripts/web_setup_smoke.py").read_text(encoding="utf-8")
 
     def test_test_jobs_prepare_private_tmp_before_execution(self) -> None:
         jobs = yaml.safe_load(self.text)["jobs"]
@@ -74,6 +75,48 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn("docker stop --timeout 60 mediaflux-smoke", self.text)
         self.assertIn(".State.ExitCode", self.text)
         self.assertIn("docker rm --force mediaflux-smoke", self.text)
+
+    def test_fresh_smokes_share_web_setup_without_preseeded_admin(self) -> None:
+        jobs = yaml.safe_load(self.text)["jobs"]
+        step = next(step for step in jobs["smoke"]["steps"]
+                    if step.get("name") == "Start image and wait for health check")
+        self.assertNotIn("env", step)
+        first = step["run"]
+        shared = "packaging/scripts/web_setup_smoke.py"
+        self.assertEqual(self.text.count("python - < " + shared), 2)
+        self.assertLess(first.index("/setup"), first.index(shared))
+        self.assertLess(first.index(shared), first.index("/readyz"))
+        self.assertEqual(first.count("docker run --detach"), 1)
+        self.assertIn("python - < " + shared + " >/dev/null 2>&1", first)
+        for field in ("MEDIAFLUX_INITIALIZED", "ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD", "--env"):
+            self.assertNotIn(field, first)
+        upgrade = next(step for step in jobs["smoke"]["steps"]
+                       if step.get("name") == "Smoke test persisted v0.1.4 database upgrade")
+        self.assertEqual(upgrade["env"]["MEDIAFLUX_INITIALIZED"], "1")
+        self.assertIn("sqlite3.connect", upgrade["run"])
+        self.assertNotIn(shared, upgrade["run"])
+
+    def test_amd64_smoke_executes_web_flow_and_redacts_noisy_failure(self) -> None:
+        from tests.test_bootstrap_release_contract import BootstrapReleaseContractTests
+
+        harness = BootstrapReleaseContractTests()
+        for mode, expected in (("success", 0), ("setup", 37), ("login", 41)):
+            with self.subTest(mode=mode):
+                # The harness also checks every generated password is absent from stdout/stderr/argv.
+                code, events = harness.run_smoke(mode, step_name="Start image and wait for health check")
+                self.assertEqual(code, expected)
+                starts = [e for e in events if "--detach" in e["args"]]
+                forms = [e for e in events if "requests" in e]
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(len(forms), 1)
+                self.assertGreaterEqual(len(forms[0]["settings"]["ENV_WEB_PASSWORD"]), 32)
+                if mode == "success":
+                    self.assertEqual([(r["method"], r["path"]) for r in forms[0]["requests"]], [
+                        ("GET", "/setup"), ("POST", "/setup"), ("GET", "/login"),
+                        ("POST", "/login"), ("GET", "/readyz"),
+                    ])
+                else:
+                    self.assertFalse(any("version" in e["args"] or "doctor" in e["args"] for e in events))
 
     def test_graceful_shutdown_accepts_uvicorn_sigterm_and_requires_lifespan_exit(
         self,
@@ -191,10 +234,10 @@ class DockerWorkflowTests(unittest.TestCase):
 
     def test_expected_readiness_retries_are_quiet_until_terminal_failure(self) -> None:
         smoke_job = self.text.split("  smoke:", 1)[1].split("  build:", 1)[0]
-        for port in (1258, 1259):
+        for port, path in ((1258, "setup"), (1259, "readyz")):
             with self.subTest(port=port):
                 self.assertIn(
-                    f"curl --fail --silent http://127.0.0.1:{port}/readyz >/dev/null 2>&1",
+                    f"curl --fail --silent http://127.0.0.1:{port}/{path} >/dev/null 2>&1",
                     smoke_job,
                 )
         self.assertIn("docker logs mediaflux-smoke", smoke_job)
@@ -231,10 +274,8 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn("$IMAGE_REPOSITORY@$platform_digest", self.text)
         self.assertIn('container="mediaflux-${safe_platform}-${smoke_dir##*.}"', self.text)
         self.assertIn('volume=$(docker volume create)', self.text)
-        self.assertIn('--confirm-new-installation --expect-env-sha256 absent --settings-fd 0', self.text)
         self.assertIn('trap cleanup EXIT', self.text)
         self.assertIn('runtime_args=(--platform "$platform" --user 0:0', self.text)
-        self.assertIn('docker run --rm -i "${runtime_args[@]}"', self.text)
         self.assertIn('docker run --detach "${runtime_args[@]}"', self.text)
         self.assertIn("http://127.0.0.1:1258/readyz", self.text)
         self.assertIn('docker pull --quiet --platform "$platform"', self.text)
@@ -246,6 +287,16 @@ class DockerWorkflowTests(unittest.TestCase):
             "      - name: Smoke test candidate images", 1
         )[1].split("      - name: Re-verify release tag before promotion", 1)[0]
         self.assertNotIn("$IMAGE_REPOSITORY@$IMAGE_DIGEST", candidate_smoke)
+        self.assertIn("http://127.0.0.1:1258/setup", candidate_smoke)
+        self.assertIn('docker exec -i "$container" python -', candidate_smoke)
+        self.assertIn('response.code == 303 and response.headers["Location"] == "/login"', self.web_smoke)
+        self.assertIn('with request("/login",', self.web_smoke)
+        self.assertIn('with request("/readyz")', self.web_smoke)
+        self.assertEqual(candidate_smoke.count('docker run --detach "${runtime_args[@]}"'), 1)
+        for retired in ("mediaflux.py initialize", "--settings-fd", "--expect-env-sha256", "--grant-file"):
+            self.assertNotIn(retired, candidate_smoke)
+        self.assertNotIn('docker restart', candidate_smoke)
+
 
     def test_registry_existence_checks_fail_closed_before_promotion(self) -> None:
         promote = self.text.split("      - name: Promote verified image tags", 1)[1]

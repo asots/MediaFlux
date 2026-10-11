@@ -106,8 +106,7 @@ class FirstRunTests(unittest.TestCase):
 
 
     def _initialize(self, username='admin', password='correct-horse'):
-        from tests.test_setup_bootstrap_support import initialize_paths
-        return initialize_paths(self.paths, {'ENV_WEB_PASSPORT':username, 'ENV_WEB_PASSWORD':password})
+        return self.first_run.initialize_admin(username, password)
 
     def _web(self, username='admin', password='correct-horse', inspect=None):
         from tests.test_setup_bootstrap_support import initialize_web_paths
@@ -121,8 +120,7 @@ class FirstRunTests(unittest.TestCase):
 
     def _fields(self, page):
         return {'username':'admin','password':'correct-horse','password_confirm':'correct-horse',
-                'csrf_token':self._csrf_token(page),
-                'setup_code':(self.paths.runtime_dir / 'test-setup-grant').read_text()}
+                'csrf_token':self._csrf_token(page)}
 
     def _assert_unpublished(self):
         self.assertFalse(self.paths.env_file.exists())
@@ -144,7 +142,7 @@ class FirstRunTests(unittest.TestCase):
         from app.agent.feature_gate import RuntimeFenceError
         self.assertEqual(self._fence()['phase'], 'changing')
         before = self.paths.env_file.read_bytes()
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(self.first_run.InitializationError):
             self._initialize()
         self._reload_runtime_modules()
         with self.assertRaises(RuntimeFenceError):
@@ -159,31 +157,29 @@ class FirstRunTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers['location'], '/')
 
-    def test_retired_api_and_ungranted_http_cannot_create_authority(self):
-        with self.assertRaises(self.first_run.InitializationError):
-            self.first_run.initialize_admin('admin', 'correct-horse')
-        self._assert_unpublished()
-        with self._new_client() as client:
-            response = client.post('/setup', data={
-                'username': 'admin', 'password': 'correct-horse',
-                'password_confirm': 'correct-horse', 'csrf_token': 'invented',
-                'setup_code': 'leftover-file-is-not-live-authority',
-            })
-            self.assertEqual(response.status_code, 403)
-            self.assertNotIn('session', client.cookies)
-        self._assert_unpublished()
-        self._web()
+    def test_initialize_admin_is_the_single_installation_entry_and_cannot_overwrite(self):
+        self.assertIsNone(self._initialize())
+        self.assertFalse(self.first_run.needs_initialization())
         self._assert_stable()
+        before = self.paths.env_file.read_bytes(), self.paths.database_path.stat().st_ino
+        with self.assertRaises(self.first_run.InitializationError):
+            self._initialize('replacement', 'another-password')
+        self.assertEqual(before, (self.paths.env_file.read_bytes(), self.paths.database_path.stat().st_ino))
+        with self._new_client() as client:
+            self._login(client)
 
-    def test_empty_data_dir_guidance_never_creates_schema(self):
+    def test_empty_data_dir_serves_setup_without_creating_schema_or_configuration(self):
         self.assertFalse(self.paths.config_dir.exists())
         self.assertTrue(self.first_run.needs_initialization())
         with self._new_client() as client:
             response = client.get('/login', follow_redirects=False)
             self.assertEqual(client.get('/readyz').status_code, 503)
-            page = client.get('/setup')
-            self.assertEqual(page.headers['cache-control'], 'no-store')
-            self.assertIn('initialize', page.text)
+            self.assertEqual(client.get('/healthz').status_code, 200)
+            page = self._setup_page(client)
+            self.assertIn('class="login-form setup-form"', page.text)
+            self.assertNotIn('name="setup_code"', page.text)
+            self.assertNotIn('--confirm-new-installation', page.text)
+            self._assert_unpublished()
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers['location'], '/setup')
         self._assert_unpublished()
@@ -191,11 +187,11 @@ class FirstRunTests(unittest.TestCase):
     def test_fresh_login_submit_cannot_initialize_or_authenticate(self):
         with self._new_client() as client:
             response = client.post('/login', data={'username':'admin','password':'correct-horse'}, follow_redirects=False)
-            self.assertEqual(response.status_code, 405)
-            self.assertNotIn('session', client.cookies)
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers['location'], '/setup')
         self._assert_unpublished()
 
-    def test_incomplete_artifacts_never_gain_initialization_authority(self):
+    def test_incomplete_artifacts_never_publish_without_valid_setup(self):
         cases = {'empty_user_env':'', 'ordinary_config':'TMDB_API_KEY=kept\nWEB_HOST=0.0.0.0\n', 'username_only':None, 'password_only':None, 'initialized_flag_only':None, 'database_only':None}
         for name, content in cases.items():
             with self.subTest(name=name):
@@ -272,6 +268,11 @@ class FirstRunTests(unittest.TestCase):
         )
         self._reload_runtime_modules()
         self.assertTrue(self.first_run.needs_initialization())
+        before = self.paths.env_file.read_bytes()
+        with self.assertRaises(self.first_run.InitializationError):
+            self._initialize('replacement', 'replacement-password')
+        self.assertEqual(self.paths.env_file.read_bytes(), before)
+        self.assertFalse(self.paths.database_path.exists())
 
     def test_runtime_path_reset_uses_a_new_startup_snapshot(self):
         self.paths.config_dir.mkdir(parents=True)
@@ -306,22 +307,30 @@ class FirstRunTests(unittest.TestCase):
             self.assertNotIn('id="setup-username" type="text" name="username" class="form-input" placeholder="admin" value="" autocomplete="username" autofocus', page.text)
         self._web(inspect=inspect)
 
-    def test_live_setup_avoids_wallpaper_and_restarted_login_keeps_wallpaper(self):
+    def test_setup_avoids_wallpaper_and_same_process_login_keeps_wallpaper(self):
         with patch('app.routes.auth.get_login_wallpaper', return_value=None) as wallpaper:
-            self._web(inspect=lambda page, client: wallpaper.assert_not_called())
-            self._reload_runtime_modules()
             with self._new_client() as client:
+                page = self._setup_page(client)
+                wallpaper.assert_not_called()
+                response = client.post('/setup', data=self._fields(page), follow_redirects=False)
+                self.assertEqual(response.status_code, 303)
+                wallpaper.assert_not_called()
                 self.assertEqual(client.get('/login').status_code, 200)
-            wallpaper.assert_called_once()
+                wallpaper.assert_called_once()
 
-    def test_live_setup_post_requires_csrf_without_consuming_grant(self):
+    def test_setup_post_requires_csrf_and_keeps_the_form_available(self):
         def inspect(page, client):
             fields = self._fields(page)
             fields.pop('csrf_token')
             response = client.post('/setup', data=fields, headers=self._origin())
             self.assertEqual(response.status_code, 403)
             self._assert_unpublished()
-            self.assertIn('class="login-form setup-form"', self._setup_page(client).text)
+            page = self._setup_page(client)
+            self.assertIn('class="login-form setup-form"', page.text)
+            fields = self._fields(page)
+            client.cookies.clear()
+            self.assertEqual(client.post('/setup', data=fields).status_code, 403)
+            self._assert_unpublished()
         self._web(inspect=inspect)
 
     def test_live_setup_post_validates_fields_without_writing_configuration(self):
@@ -338,23 +347,23 @@ class FirstRunTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 400)
                     self._assert_unpublished()
                     self.assertIn('class="login-form setup-form"', self._setup_page(client).text)
+                    from app.security import clear_setup_failures
+                    clear_setup_failures('testclient')
         self._web(inspect=inspect)
 
-    def test_explicit_initialize_rejects_control_characters_before_username_stripping(self):
-        from app.modules.setup_bootstrap import BootstrapError
-        with self.assertRaises(BootstrapError):
+    def test_initialize_admin_rejects_control_characters_before_username_stripping(self):
+        with self.assertRaises(ValueError):
             self._initialize('admin\r\n')
         self._assert_unpublished()
 
-    def test_explicit_initialize_rejects_all_splitline_separators_without_publishing_file(self):
-        from app.modules.setup_bootstrap import BootstrapError
+    def test_initialize_admin_rejects_all_splitline_separators_without_publishing_file(self):
         for separator in ('\v','\f','\x1c','\x1d','\x1e','\x85','\u2028','\u2029'):
             with self.subTest(separator=repr(separator)):
-                with self.assertRaises(BootstrapError):
+                with self.assertRaises(ValueError):
                     self._initialize(f'admin{separator}name', f'correct{separator}horse')
                 self._assert_unpublished()
 
-    def test_explicit_initialize_uses_owned_paths_not_early_config_module_path(self):
+    def test_initialize_admin_uses_owned_paths_not_early_config_module_path(self):
         other_env = Path(self.temp.name) / 'early-config/config/user.env'
         with patch.object(self.config, 'ENV_FILE', other_env):
             self._initialize()
@@ -362,16 +371,16 @@ class FirstRunTests(unittest.TestCase):
         self.assertFalse(other_env.exists())
         self._assert_stable()
 
-    def test_failed_canonical_publish_requires_a_new_explicit_operation(self):
+    def test_failed_canonical_publish_does_not_mark_initialized_and_can_retry(self):
         with patch('app.config._publish_noreplace', side_effect=OSError('publish failed')):
-            with self.assertRaises(OSError):
+            with self.assertRaises(self.first_run.InitializationError):
                 self._initialize()
         self._assert_unpublished()
         self._initialize()
         self.assertTrue(self.paths.env_file.exists())
         self._assert_stable()
 
-    def test_explicit_initialize_preserves_unrelated_config_and_replaces_partial_credentials(self):
+    def test_initialize_admin_preserves_unrelated_config_and_replaces_partial_credentials(self):
         self.paths.config_dir.mkdir(parents=True)
         self.paths.env_file.write_text('TMDB_API_KEY=keep-me\nENV_WEB_PASSPORT=stale-only\n', encoding='utf-8')
         self._reload_runtime_modules()
@@ -383,20 +392,16 @@ class FirstRunTests(unittest.TestCase):
         self.assertEqual(values['MEDIAFLUX_INITIALIZED'], '1')
         self._assert_stable()
 
-    def test_explicit_initialize_refuses_changed_env_cas(self):
-        import hashlib
-        import json
-        from app.modules.setup_bootstrap import run_new_installation, BootstrapError
-        self.paths.ensure_writable_dirs()
-        self.paths.env_file.write_text('TMDB_API_KEY=original\n')
-        expected = hashlib.sha256(self.paths.env_file.read_bytes()).hexdigest()
+    def test_initialize_admin_uses_frozen_env_cas_not_the_latest_file(self):
+        self.paths.config_dir.mkdir(parents=True)
+        self.paths.env_file.write_bytes(b'TMDB_API_KEY=original\n')
+        self._reload_runtime_modules()
+        self.assertTrue(self.first_run.needs_initialization())
         competitor = b'TMDB_API_KEY=competitor\nENV_WEB_PASSPORT=other\nENV_WEB_PASSWORD=other-password\n'
         self.paths.env_file.write_bytes(competitor)
-        with tempfile.TemporaryFile() as payload:
-            payload.write(json.dumps({'ENV_WEB_PASSPORT':'admin','ENV_WEB_PASSWORD':'correct-horse'}).encode())
-            payload.seek(0)
-            with self.assertRaisesRegex(BootstrapError, 'env_compare_and_swap_mismatch'):
-                run_new_installation(self.paths, expected, settings_fd=payload.fileno())
+        with self.assertRaises(self.first_run.InitializationError):
+            self._initialize()
+        self.assertTrue(self.first_run.needs_initialization())
         self.assertEqual(self.paths.env_file.read_bytes(), competitor)
         self.assertFalse(self.paths.database_path.exists())
 
@@ -409,7 +414,7 @@ class FirstRunTests(unittest.TestCase):
                 raise FileExistsError(errno.EEXIST, 'exists', str(target))
             return real_publish(temporary, target)
         with patch('app.config._publish_noreplace', side_effect=competing_publish):
-            with self.assertRaises(Exception):
+            with self.assertRaises(self.first_run.InitializationError):
                 self._initialize()
         self.assertEqual(self.paths.env_file.read_bytes(), competitor)
         self._assert_failed_installation()
@@ -423,12 +428,12 @@ class FirstRunTests(unittest.TestCase):
                 raise FileExistsError(errno.EEXIST, 'exists', str(target))
             return real_publish(temporary, target)
         with patch('app.config._publish_noreplace', side_effect=competing_publish):
-            with self.assertRaises(Exception):
+            with self.assertRaises(self.first_run.InitializationError):
                 self._initialize()
         self.assertEqual(self.paths.env_file.read_bytes(), competitor)
         self._assert_failed_installation()
 
-    def test_explicit_initialize_writes_private_configuration_without_network_binding(self):
+    def test_initialize_admin_writes_private_configuration_without_network_binding(self):
         self._initialize('  admin  ')
         self._reload_runtime_modules()
         self.assertFalse(self.first_run.needs_initialization())
@@ -439,7 +444,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertTrue(values['WEB_SECRET_KEY'])
         self._assert_stable()
 
-    def test_explicit_initialize_preserves_password_whitespace_in_user_env(self):
+    def test_initialize_admin_preserves_password_whitespace_in_user_env(self):
         password = '  correct-$horse"  '
         self._initialize('admin', password)
         self.assertEqual(self.config._read_env_file()['ENV_WEB_PASSWORD'], password)
@@ -448,7 +453,7 @@ class FirstRunTests(unittest.TestCase):
         with self._new_client() as client:
             self._login(client, password=password)
 
-    def test_explicit_initialize_only_allows_one_concurrent_creator(self):
+    def test_initialize_admin_only_allows_one_concurrent_creator(self):
         self.paths.ensure_writable_dirs()
         barrier = threading.Barrier(3)
         errors = []
@@ -472,27 +477,31 @@ class FirstRunTests(unittest.TestCase):
         self.assertEqual(self.config._read_env_file()['ENV_WEB_PASSPORT'], successes[0])
         self._assert_stable()
         before = self.paths.env_file.read_bytes()
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(self.first_run.InitializationError):
             self._initialize('three')
         self.assertEqual(self.paths.env_file.read_bytes(), before)
 
-    def test_live_setup_requires_restart_login_without_writing_network_binding(self):
-        def inspect(page, client):
-            self.assertNotIn('name="allow_lan"', page.text)
-            self.assertNotIn('session', client.cookies)
-            # Submit the old forged allow_lan field through the real handler.
-            real_post = client.post
-            def submit_with_ignored_lan(url, **kwargs):
-                kwargs['data'] = {**kwargs['data'], 'allow_lan': '1'}
-                return real_post(url, **kwargs)
-            client.post = submit_with_ignored_lan
-        self._web(inspect=inspect)
-        self._reload_runtime_modules()
+    def test_live_setup_immediately_activates_and_logs_in_without_network_configuration(self):
         with self._new_client() as client:
-            self.assertEqual(client.get('/', follow_redirects=False).headers['location'], str(client.base_url.join('/login')))
+            page = self._setup_page(client)
+            self.assertNotIn('name="allow_lan"', page.text)
+            self.assertEqual(client.get('/readyz').status_code, 503)
+            self._assert_unpublished()
+            response = client.post('/setup', data={**self._fields(page), 'allow_lan':'1'},
+                                   follow_redirects=False)
+            self.assertEqual(response.status_code, 303)
+            self.assertEqual(response.headers['location'], '/login')
+            self.assertEqual(client.get('/readyz').status_code, 200)
+            self.assertFalse(self.first_run.needs_initialization())
             self._login(client)
             self.assertEqual(client.get('/').status_code, 200)
+            before = self.paths.env_file.read_bytes()
+            response = client.post('/setup', data={**self._fields(client.get('/')), 'username':'attacker'},
+                                   follow_redirects=False)
+            self.assertIn(response.status_code, (302, 303))
+            self.assertEqual(self.paths.env_file.read_bytes(), before)
         self.assertNotIn('WEB_HOST', self.config._read_env_file())
+        self._assert_stable()
 
     def test_removed_network_applying_route_returns_not_found(self):
         with self._new_client() as client:
@@ -500,7 +509,7 @@ class FirstRunTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    def test_unicode_credentials_survive_live_setup_restart_logout_and_login(self):
+    def test_unicode_credentials_survive_setup_cold_login_logout_and_login(self):
         username, password = '管理员', '密码足够长度1234'
         self._web(username, password)
         self._reload_runtime_modules()
@@ -512,27 +521,22 @@ class FirstRunTests(unittest.TestCase):
             self.assertEqual(logout.headers['location'], '/login')
             self._login(client, username, password)
 
-    def test_live_grant_rate_limit_is_operation_local_and_does_not_block_login(self):
-        from app.modules.setup_bootstrap import BootstrapError
-        from app.security import login_rate_limited
-        from tests.test_setup_bootstrap_support import initialize_web_paths
-        def inspect(page, client):
-            fields = {**self._fields(page), 'setup_code':'invalid'}
-            for _ in range(10):
-                self.assertEqual(client.post('/setup', data=fields, headers=self._origin()).status_code, 403)
-            self.assertEqual(client.post('/setup', data=self._fields(page), headers=self._origin()).status_code, 429)
+    def test_setup_rate_limit_does_not_block_login_and_preserves_unpublished_state(self):
+        from app.security import _SETUP_MAX_FAILURES, clear_setup_failures, login_rate_limited
+        with self._new_client() as client:
+            page = self._setup_page(client)
+            invalid = {**self._fields(page), 'password_confirm':'mismatch'}
+            for _ in range(_SETUP_MAX_FAILURES):
+                self.assertEqual(client.post('/setup', data=invalid).status_code, 400)
+            response = client.post('/setup', data=self._fields(page))
+            self.assertEqual(response.status_code, 429)
             self.assertFalse(login_rate_limited('testclient'))
             self._assert_unpublished()
-            raise BootstrapError('test finishes limited operation')
-        with self.assertRaisesRegex(BootstrapError, 'test finishes limited operation'):
-            initialize_web_paths(self.paths, 'admin', 'correct-horse', inspect)
-        self._assert_unpublished()
-        # The stale delivery file is not authority; only a new explicit live operation is.
-        (self.paths.runtime_dir / 'test-setup-grant').unlink()
-        self._web()
-        self._reload_runtime_modules()
-        with self._new_client() as client:
+            clear_setup_failures('testclient')
+            response = client.post('/setup', data=self._fields(self._setup_page(client)), follow_redirects=False)
+            self.assertEqual(response.status_code, 303)
             self._login(client)
+            self.assertEqual(client.get('/readyz').status_code, 200)
 
 
     def test_corrupt_non_utf8_config_is_preserved_and_all_initialization_refused(self):
@@ -545,8 +549,8 @@ class FirstRunTests(unittest.TestCase):
             self.assertEqual(page.status_code, 200)
             self.assertIn('user.env', page.text)
             self.assertIn('恢复', page.text)
-            self.assertEqual(client.post('/setup', data={'username':'admin','password':'correct-horse'}).status_code, 403)
-        with self.assertRaises(UnicodeDecodeError):
+            self.assertEqual(client.post('/setup', data=self._fields(page)).status_code, 409)
+        with self.assertRaises(self.first_run.InitializationError):
             self._initialize()
         self.assertEqual(self.paths.env_file.read_bytes(), broken)
         self.assertFalse(self.paths.database_path.exists())
@@ -561,8 +565,8 @@ class FirstRunTests(unittest.TestCase):
         with self._new_client() as client:
             page = client.get('/setup')
             self.assertIn('user.env', page.text)
-            self.assertEqual(client.post('/setup', data={}).status_code, 403)
-        with self.assertRaises(self.config.UnsafeConfigFileError):
+            self.assertEqual(client.post('/setup', data=self._fields(page)).status_code, 409)
+        with self.assertRaises(self.first_run.InitializationError):
             self._initialize()
         self.assertEqual(external.read_text(encoding='utf-8'), 'TMDB_API_KEY=outside\n')
         self.assertTrue(self.paths.env_file.is_symlink())
@@ -571,47 +575,57 @@ class FirstRunTests(unittest.TestCase):
     def test_permission_failure_never_promotes_competitor_credentials(self):
         self.paths.config_dir.mkdir(parents=True)
         self.paths.env_file.write_text('TMDB_API_KEY=keep-me\nENV_WEB_PASSPORT=partial\n')
+        self._reload_runtime_modules()
         competitor = b'ENV_WEB_PASSPORT=other\nENV_WEB_PASSWORD=other-password\nWEB_SECRET_KEY=competitor-secret\nMEDIAFLUX_INITIALIZED=1\n'
         calls = []
         def fail_permissions(path):
             calls.append(path)
             self.paths.env_file.write_bytes(competitor)
             raise self.config.AtomicPublishError('private permissions failed')
-        with patch('app.config._apply_private_permissions', side_effect=fail_permissions):
-            with self.assertRaises(self.config.AtomicPublishError):
-                self._initialize()
+        with (
+            patch('app.config._apply_private_permissions', side_effect=fail_permissions),
+            self.assertRaises(self.first_run.InitializationError),
+        ):
+            self._initialize()
         self.assertTrue(calls)
         self.assertEqual(self.paths.env_file.read_bytes(), competitor)
         self._assert_failed_installation()
 
-    def test_successful_explicit_publish_verifies_and_syncs_physical_env(self):
+    def test_successful_publish_verifies_and_syncs_physical_env(self):
+        from app.modules import backup
         events = []
-        real_fsync, real_read = os.fsync, os.read
-        def is_env(fd):
-            if not self.paths.env_file.exists():
-                return False
-            current, target = os.fstat(fd), self.paths.env_file.stat()
-            return (current.st_dev, current.st_ino) == (target.st_dev, target.st_ino)
-        def observe_read(fd, size):
-            payload = real_read(fd, size)
-            if is_env(fd):
+        real_fsync = os.fsync
+        real_read = self.config._read_verified_file_bytes
+        real_sync = backup._fsync_directory
+        def observe_read(path, **kwargs):
+            payload = real_read(path, **kwargs)
+            if path == self.paths.env_file:
                 events.append(('read', payload))
             return payload
         def observe_sync(fd):
             result = real_fsync(fd)
-            if is_env(fd):
-                events.append(('sync', None))
+            info = os.fstat(fd)
+            if stat.S_ISREG(info.st_mode):
+                events.append(('file_sync', info.st_dev, info.st_ino))
             return result
-        with patch('os.read', side_effect=observe_read), patch('os.fsync', side_effect=observe_sync):
+        def observe_directory(path):
+            result = real_sync(path)
+            if path == self.paths.config_dir and self.paths.env_file.exists():
+                events.append(('directory_sync', None))
+            return result
+        with patch.object(self.config, '_read_verified_file_bytes', side_effect=observe_read), \
+             patch('os.fsync', side_effect=observe_sync), \
+             patch.object(backup, '_fsync_directory', side_effect=observe_directory):
             self._initialize()
-        payload = self.paths.env_file.read_bytes()
+        payload, info = self.paths.env_file.read_bytes(), self.paths.env_file.stat()
+        file_sync = ('file_sync', info.st_dev, info.st_ino)
+        self.assertIn(file_sync, events)
         self.assertIn(('read', payload), events)
         read_index = events.index(('read', payload))
-        self.assertIn(('sync', None), events[read_index + 1:])
+        self.assertLess(events.index(file_sync), read_index)
+        self.assertIn(('directory_sync', None), events[read_index + 1:])
         self._assert_stable()
-        self._reload_runtime_modules()
         self.assertFalse(self.first_run.needs_initialization())
-        self.assertTrue(self.paths.env_file.exists())
 
 
 if __name__ == "__main__":

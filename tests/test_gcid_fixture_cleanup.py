@@ -23,12 +23,10 @@ def test_failed_api_setup_restores_owned_resources():
     previous_env = dict(os.environ)
     previous_notify = telegram_notification_center.send_event_result
     observed = []
-    guard_calls = 0
 
     def fail_startup(*args, **kwargs):
-        nonlocal guard_calls
-        guard_calls += 1
-        if guard_calls == 1:
+        # 只在客户端已归属清理栈后的 lifespan 注入故障，不依赖安装/工厂的加锁次数。
+        if not hasattr(case, "client_context"):
             return runtime_lifecycle_guard(*args, **kwargs)
         expected = Path(case.temp.name) / "api.db"
         assert db.resolve_db_path() == expected.resolve()

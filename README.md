@@ -121,7 +121,7 @@ mkdir -p mediaflux && cd mediaflux
 curl -fsSL https://raw.githubusercontent.com/li88iioo/MediaFlux/main/docker-compose.yml -o docker-compose.yml
 ```
 
-打开 `docker-compose.yml`，把下载目录和媒体库左侧路径改成宿主机实际路径。新安装先按[显式首次安装](docs/首次安装.md)完成一次初始化，再启动：
+打开 `docker-compose.yml`，把下载目录和媒体库左侧路径改成宿主机实际路径。配置好上述路径后直接启动，随后在浏览器完成[首次安装](docs/首次安装.md)：
 
 ```bash
 docker compose up -d
@@ -148,7 +148,7 @@ docker compose up -d
    ```
 
 3. **初始化设置**：
-   普通启动仅提供初始化说明，不会创建数据库、配置或管理员。停止服务后，按[显式首次安装](docs/首次安装.md)运行一次 `initialize --web`，读取本机私有授权码并在浏览器填写管理员凭据；完成后退出、重启服务，再通过 `/login` 登录。
+   首次启动后访问 `http://127.0.0.1:1258/setup`，填写管理员用户名、密码和确认密码；成功后直接进入 `/login`，无需重启。已有账号直接登录；已有数据库或恢复异常时拒绝重新初始化，请检查备份与恢复状态。详见[首次安装](docs/首次安装.md)。
 
 ---
 

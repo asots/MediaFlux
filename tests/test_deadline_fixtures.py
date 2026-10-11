@@ -1,8 +1,8 @@
 """Opt-in installed fixtures retain normal storage and cleanup boundaries."""
 import os
-from pathlib import Path
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 from app import config, database, runtime_paths
 from tests.support import initialized_web_runtime
@@ -30,20 +30,37 @@ def test_installed_web_fixture_uses_physical_stable_storage_and_restores_scope()
     assert dict(os.environ) == environment
 
 
+
+def test_installed_web_fixture_isolates_ambient_marker_and_restores_it():
+    from unittest.mock import patch
+
+    from app.agent.feature_gate import read_runtime_fence
+    before = _runtime_scope()
+    with patch.dict(os.environ, {'MEDIAFLUX_INITIALIZED': '1'}):
+        ambient = dict(os.environ)
+        with initialized_web_runtime() as paths:
+            assert paths.env_file.is_file()
+            assert database._configured_test_mode is False
+            with database.get_conn() as conn:
+                assert read_runtime_fence(conn).phase == 'stable'
+        assert dict(os.environ) == ambient
+        assert os.environ['MEDIAFLUX_INITIALIZED'] == '1'
+    assert _runtime_scope() == before
+
 def test_installed_web_fixture_does_not_initialize_unselected_fresh_paths(tmp_path):
-    from app.modules.setup_bootstrap import needs_guidance
     paths = runtime_paths.RuntimePaths(
         program_dir=Path(__file__).resolve().parents[1],
         data_dir=tmp_path / 'data', config_dir=tmp_path / 'config',
         cache_dir=tmp_path / 'cache', log_dir=tmp_path / 'logs',
         strm_dir=tmp_path / 'strm', trash_dir=tmp_path / 'trash',
     )
-    assert needs_guidance(paths)
     with initialized_web_runtime():
-        assert needs_guidance(paths)
+        assert config.PATHS != paths
+        assert runtime_paths.get_runtime_paths() != paths
         assert not paths.database_path.exists()
         assert not paths.env_file.exists()
-    assert needs_guidance(paths)
+    assert not paths.database_path.exists()
+    assert not paths.env_file.exists()
 
 
 def _runtime_scope():
@@ -60,6 +77,7 @@ def _run_fixture_class(case):
 
 def test_web_test_class_performs_real_installation_and_restores_after_suite():
     from fastapi.testclient import TestClient
+
     from app.agent.feature_gate import read_runtime_fence
     from app.main import create_app
     from tests.support import InitializedWebTestCase
@@ -154,3 +172,18 @@ def test_isolated_database_class_restores_nested_installation_scope():
     assert result.testsRun == 1 and result.wasSuccessful(), result.errors + result.failures
     assert len(paths) == 2 and all(not path.exists() for path in paths)
     assert _runtime_scope() == before
+
+
+def test_installed_web_fixture_restores_stale_startup_override_snapshot(monkeypatch):
+    keys = frozenset({
+        'ENV_WEB_PASSPORT', 'ENV_WEB_PASSWORD', 'WEB_SECRET_KEY', 'MEDIAFLUX_INITIALIZED',
+    })
+    snapshot = config._STARTUP_ENV_OVERRIDES | keys
+    monkeypatch.setattr(config, '_STARTUP_ENV_OVERRIDES', snapshot)
+    environment = dict(os.environ)
+    with initialized_web_runtime():
+        _payload, values = config.read_env_snapshot_no_recovery(config.ENV_FILE)
+        assert all(values.get(key) for key in keys)
+        assert keys.isdisjoint(config._STARTUP_ENV_OVERRIDES)
+    assert config._STARTUP_ENV_OVERRIDES is snapshot
+    assert dict(os.environ) == environment

@@ -50,7 +50,7 @@ def initialized_web_runtime(paths=None):
     """Opt-in real installation for ordinary, already-installed Web controls.
 
     Never use for fresh-installation, recovery, or changing-fence tests. The
-    operation creates physical storage through the normal operator entry, not
+    operation creates physical storage through the single installation transaction, not
     through test-mode schema/fence shortcuts.
     """
     from contextlib import ExitStack
@@ -83,8 +83,14 @@ def initialized_web_runtime(paths=None):
             "ENV_WEB_PASSWORD": os.environ.get("ENV_WEB_PASSWORD", "123456"),
             "WEB_SECRET_KEY": os.environ.get("WEB_SECRET_KEY", "test-secret"),
         }
+        # 本夹具拥有这些安装输入；其它测试 reload(config) 留下的快照不能把它们误判为部署覆盖。
+        stack.enter_context(patch.object(
+            config, "_STARTUP_ENV_OVERRIDES",
+            config._STARTUP_ENV_OVERRIDES.difference(credentials, {"MEDIAFLUX_INITIALIZED"}),
+        ))
         with patch.dict(os.environ):
-            for key in credentials:
+            # 仅隔离本次夹具的安装输入；退出 patch 后恢复外部实例环境。
+            for key in (*credentials, "MEDIAFLUX_INITIALIZED"):
                 os.environ.pop(key, None)
             os.environ["MEDIAFLUX_TEST_MODE"] = "0"
             os.environ.pop("MEDIAFLUX_TEST_DB_PATH", None)
@@ -92,7 +98,7 @@ def initialized_web_runtime(paths=None):
             initialize_paths(paths, settings)
             first_run._reset_startup_state_for_tests()
             # Preserve legacy login credentials using the real controlled
-            # config publisher after the explicit installation has completed.
+            # config publisher after the installation has completed.
             config.set_and_save(credentials)
         db.configure_database(paths.database_path, test_mode=False)
         first_run._reset_startup_state_for_tests()

@@ -86,9 +86,9 @@ def test_actual_lifespan_storage_authorization(state):
                 case._reload_runtime_modules()
             env_before = case.paths.env_file.read_bytes() if case.paths.env_file.exists() else None
             if state == 'missing-db':
-                with case._new_client() as client:
-                    assert client.get('/readyz').status_code == 503
-                    assert client.post('/setup', data={}).status_code == 403
+                # 已有管理员配置却丢失DB，不能作为可提交的全新安装开放。
+                with pytest.raises(RuntimeError):
+                    case._new_client()
                 assert not case.paths.database_path.exists()
             elif state == 'stable':
                 with case._new_client():

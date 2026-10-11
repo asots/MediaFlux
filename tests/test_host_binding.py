@@ -97,9 +97,17 @@ class MainHostBindingTests(unittest.TestCase):
             "ENV_WEB_PASSPORT=admin\nENV_WEB_PASSWORD=correct-horse\n",
             encoding="utf-8",
         )
-        from tests.test_setup_bootstrap_support import initialize_paths
-        initialize_paths(self.paths)
+        # 已有账号与真实 legacy DB 走正常迁移，不能套用新安装事务。
+        from app import database
+        from app.env_file import read_env_bytes
+
+        database.init_db()
+        database_inode = self.paths.database_path.stat().st_ino
         self._reload_modules()
+        values = read_env_bytes(self.paths.env_file.read_bytes())
+        self.assertEqual(values["ENV_WEB_PASSPORT"], "admin")
+        self.assertEqual(values["ENV_WEB_PASSWORD"], "correct-horse")
+        self.assertEqual(self.paths.database_path.stat().st_ino, database_inode)
         with patch("app.main.uvicorn.run") as run:
             self.main.run()
         self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")

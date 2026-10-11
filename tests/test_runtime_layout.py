@@ -297,17 +297,6 @@ class RuntimeLayoutTests(unittest.TestCase):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
                 paths = make_paths(Path(directory))
-                from tests.test_setup_bootstrap import cold_run
-                def initialize():
-                    import json
-                    from app.cli import main as cli_main
-                    with tempfile.TemporaryFile() as payload:
-                        payload.write(json.dumps({'ENV_WEB_PASSPORT': 'operator', 'ENV_WEB_PASSWORD': 'test-bootstrap-password'}).encode())
-                        payload.seek(0)
-                        os.environ['MEDIAFLUX_CONFIG_DIR'] = str(paths.config_dir)
-                        return cli_main(['initialize', '--data-dir', str(paths.data_dir), '--confirm-new-installation', '--expect-env-sha256', 'absent', '--settings-fd', str(payload.fileno())])
-                self.assertEqual(cold_run(paths.data_dir, initialize), {'result': 0})
-
                 def serve(*_args, paths=paths, fail=fail, **_kwargs):
                     self.assertEqual(paths.pid_file.read_text(), str(os.getpid()))
                     self.assertFalse((paths.data_dir / "mediaflux.pid").exists())

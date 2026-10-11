@@ -172,24 +172,20 @@ jobs:
             --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
             --tag mediaflux:smoke .
       - name: Start image and wait for health check
-        env:
-          WEB_SECRET_KEY: ci-smoke-secret-key-with-more-than-32-bytes
-          MEDIAFLUX_INITIALIZED: "1"
-          ENV_WEB_PASSPORT: admin
-          ENV_WEB_PASSWORD: ci-smoke-password-with-more-than-16-bytes
         run: |
           set -euo pipefail
+          set +x
           mkdir -p "$RUNNER_TEMP/mediaflux-db" "$RUNNER_TEMP/mediaflux-strm"
           sudo chown -R 10001:10001 "$RUNNER_TEMP/mediaflux-db" "$RUNNER_TEMP/mediaflux-strm"
           docker run --detach --name mediaflux-smoke \
             --publish 127.0.0.1:1258:1258 \
-            --env WEB_SECRET_KEY --env MEDIAFLUX_INITIALIZED \
-            --env ENV_WEB_PASSPORT --env ENV_WEB_PASSWORD \
             --volume "$RUNNER_TEMP/mediaflux-db:/app/db" \
             --volume "$RUNNER_TEMP/mediaflux-strm:/data/strm" \
             mediaflux:smoke
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:1258/readyz >/dev/null 2>&1; then
+            if curl --fail --silent http://127.0.0.1:1258/setup >/dev/null 2>&1; then
+              docker exec -i mediaflux-smoke python - < packaging/scripts/web_setup_smoke.py >/dev/null 2>&1
+              curl --fail --silent --show-error http://127.0.0.1:1258/readyz >/dev/null
               docker exec mediaflux-smoke python mediaflux.py version --json > "$RUNNER_TEMP/docker-version.json"
               jq -e --arg sha "$SOURCE_SHA" \
                 '.version == "0.0.0-ci" and .package == "docker" and .commit == $sha' \
@@ -544,12 +540,8 @@ jobs:
           smoke_dir=""
           volume=""
           cleanup_resources() {
-            if [[ -n "$smoke_dir" ]]; then
-              for cidfile in "$smoke_dir/init.cid" "$smoke_dir/start.cid"; do
-                if [[ -s "$cidfile" ]]; then
-                  docker rm --force "$(<"$cidfile")" >/dev/null 2>&1 || true
-                fi
-              done
+            if [[ -n "$smoke_dir" && -s "$smoke_dir/start.cid" ]]; then
+              docker rm --force "$(<"$smoke_dir/start.cid")" >/dev/null 2>&1 || true
             fi
             if [[ -n "$volume" ]]; then
               docker volume rm "$volume" >/dev/null 2>&1 || true
@@ -596,24 +588,11 @@ jobs:
             runtime_args=(--platform "$platform" --user 0:0
               --mount "type=volume,source=$volume,target=/app/db"
               --env MEDIAFLUX_DATA_DIR=/app/db --env MEDIAFLUX_CONFIG_DIR=/app/db)
-            # Persist only selected settings through private, finite fd0 input.
-            # Both invocations load the same physical user.env, not ambient secrets.
-            python3 -c 'import json,secrets; print(json.dumps({"MEDIAFLUX_INITIALIZED":"1","ENV_WEB_PASSPORT":"admin","ENV_WEB_PASSWORD":secrets.token_urlsafe(32),"WEB_SECRET_KEY":secrets.token_urlsafe(48)}))' \
-              > "$smoke_dir/settings.json"
-            if docker run --rm -i "${runtime_args[@]}" --cidfile "$smoke_dir/init.cid" \
-              "$image_reference" python mediaflux.py initialize --data-dir /app/db \
-              --confirm-new-installation --expect-env-sha256 absent --settings-fd 0 \
-              < "$smoke_dir/settings.json" >/dev/null 2>&1; then
-              rm -- "$smoke_dir/settings.json"
-            else
-              status=$?
-              echo "$platform explicit initialization failed" >&2
-              exit "$status"
-            fi
+            # Fresh volumes use the ordinary service and Web form, with no second start.
             docker run --detach "${runtime_args[@]}" --name "$container" \
               --cidfile "$smoke_dir/start.cid" "$image_reference" >/dev/null
             ready=false
-            echo "Waiting for $platform candidate readiness"
+            echo "Waiting for $platform candidate Web setup"
             for attempt in $(seq 1 45); do
               if [[ "$(docker inspect --format '{{.State.Running}}' "$container")" != "true" ]]; then
                 echo "$platform candidate exited before readiness" >&2
@@ -622,10 +601,10 @@ jobs:
                 exit 1
               fi
               if docker exec "$container" python -c \
-                "import urllib.request; urllib.request.urlopen('http://127.0.0.1:1258/readyz', timeout=3)" \
+                "import urllib.request; urllib.request.urlopen('http://127.0.0.1:1258/setup', timeout=3)" \
                 >/dev/null 2>&1; then
                 ready=true
-                echo "$platform candidate ready (attempt $attempt)"
+                echo "$platform candidate Web setup available (attempt $attempt)"
                 break
               fi
               sleep 2
@@ -634,6 +613,14 @@ jobs:
               docker logs "$container"
               docker rm --force "$container" >/dev/null 2>&1 || true
               exit 1
+            fi
+            # Passwords stay inside this stdin script; never put them in argv or logs.
+            if docker exec -i "$container" python - < packaging/scripts/web_setup_smoke.py >/dev/null 2>&1; then
+              echo "$platform Web setup and same-process login passed"
+            else
+              status=$?
+              echo "$platform Web setup/login failed" >&2
+              exit "$status"
             fi
             docker stop --timeout 60 "$container" >/dev/null
             shutdown_exit=$(docker inspect --format '{{.State.ExitCode}}' "$container")

@@ -5,8 +5,9 @@ import asyncio
 import atexit
 import hmac
 import os
+import secrets
 import threading
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from urllib.parse import parse_qs
 
 import uvicorn
@@ -17,6 +18,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import config, database
@@ -163,6 +165,16 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             return self._headers(
                 request, JSONResponse({"error": "unauthorized"}, status_code=401)
             )
+        if request.url.path not in {"/setup", "/login", "/healthz", "/readyz"} and not request.url.path.startswith("/static/"):
+            initializing = first_run.needs_initialization()
+            not_ready = getattr(request.app.state, "activate_runtime", None) is not None and not request.app.state.ready
+            if (initializing or not_ready) and any(
+                route.matches(request.scope)[0] is Match.FULL for route in request.app.router.routes
+            ):
+                # 旧会话也不能越过首装/启动边界；不存在的路由仍交给框架返回404。
+                if initializing and not request.url.path.startswith("/api/"):
+                    return self._headers(request, RedirectResponse("/setup", status_code=302))
+                return self._headers(request, JSONResponse({"error": "service not ready"}, status_code=503))
         if request.method not in SAFE_METHODS:
             if request.url.path == "/login":
                 from app.modules.first_run import needs_initialization
@@ -243,7 +255,6 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
 
 def _secret_key() -> str:
-    fresh_install = first_run.needs_initialization()
     configured_secret = web_secret.configured_web_secret()
     production = config.get("APP_ENV", "development").strip().lower() == "production"
     try:
@@ -251,9 +262,6 @@ def _secret_key() -> str:
     except web_secret.WebSecretUnavailable as exc:
         raise RuntimeError("生产模式必须配置 WEB_SECRET_KEY") from exc
 
-    if fresh_install:
-        # 首启（包括 production）必须可达 /setup；密钥会随初始化配置一起原子持久化。
-        return secret_key
     if production and config.web_credentials()[1] == "123456":
         raise RuntimeError("生产模式禁止使用默认 Web 密码")
     if not configured_secret:
@@ -535,8 +543,6 @@ def stop_background_services() -> bool:
 
 
 def create_app(*, start_background: bool = False) -> FastAPI:
-    from app.modules.setup_bootstrap import guidance_app
-    from app.runtime_paths import get_runtime_paths
     # 恢复事务可能回滚 user.env。必须在首次读取配置、首启状态和会话密钥前
     # 完成恢复，否则本进程会拿着恢复前后的混合快照运行到下一次重启。
     from app.modules.backup import recover_pending_restore, runtime_lifecycle_guard
@@ -574,23 +580,29 @@ def create_app(*, start_background: bool = False) -> FastAPI:
                     config.PATHS,
                     lifecycle_lock_held=True,
                 )
-        # A prepared restore may temporarily move the canonical DB away.
-        # Only genuine absence after recovery is first-installation guidance.
-        if not os.path.lexists(database.resolve_db_path()):
-            release_startup_guard()
-            return guidance_app(get_runtime_paths())
         if recovered:
             config.reload_after_restore()
             first_run.refresh_startup_state_after_restore()
-        # Reject damaged/changing/lost authorization before secret fallback writes.
-        _initialize_runtime_storage()
-        secret_key = _secret_key()
+        fresh_install = not os.path.lexists(database.resolve_db_path()) and first_run.needs_initialization()
+        if fresh_install:
+            # 表单渲染只读配置，不能由普通config.get晋升未完成的恢复备份。
+            with config._lock:
+                if config._cache is None:
+                    _payload, values, _error = first_run._read_env_snapshot(config.PATHS)
+                    config._cache = values
+            # 首装表单只用进程内会话密钥；数据库、env与签名密钥在提交时一起发布。
+            secret_key = web_secret.configured_web_secret() or secrets.token_urlsafe(48)
+            release_startup_guard()
+        else:
+            # 损坏、changing或丢失配置的旧安装，不能退化为重新创建管理员。
+            _initialize_runtime_storage()
+            secret_key = _secret_key()
     except BaseException:
         release_startup_guard()
         raise
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
+    async def installed_lifespan(_app: FastAPI):
         nonlocal startup_guard_writers_stopped
         _app.state.ready = False
         with ExitStack() as lifetime:
@@ -805,10 +817,42 @@ def create_app(*, start_background: bool = False) -> FastAPI:
                         )
                     startup_guard_writers_stopped = shutdown_complete
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 正常启动和网页初装完成共享同一个服务生命周期，不启动第二套Web服务器。
+        async with AsyncExitStack() as lifetime:
+            lifetime.enter_context(runtime_lifecycle_guard(config.PATHS))
+            activation_lock = asyncio.Lock()
+
+            async def activate_runtime():
+                nonlocal startup_guard_released, startup_guard_atexit_registered
+                async with activation_lock:
+                    if _app.state.ready:
+                        return
+                    if not startup_guard_writers_stopped:
+                        raise RuntimeError("上次运行时尚未停止，请重启服务")
+                    if start_background and startup_guard_released:
+                        # 首装激活后与已有安装持有相同的进程租约；写入者未停完不能释放给恢复操作。
+                        with startup_guard_state_lock:
+                            startup_guard.enter_context(runtime_lifecycle_guard(config.PATHS))
+                            startup_guard_released = False
+                            atexit.register(release_startup_guard)
+                            startup_guard_atexit_registered = True
+                    await lifetime.enter_async_context(installed_lifespan(_app))
+
+            _app.state.activate_runtime = activate_runtime
+            if not first_run.needs_initialization():
+                await activate_runtime()
+            try:
+                yield
+            finally:
+                _app.state.activate_runtime = None
+
     try:
         app = FastAPI(title="MediaFlux", docs_url=None, redoc_url=None, lifespan=lifespan)
         app.state.background_services_enabled = start_background
         app.state.ready = False
+        app.state.setup_secret_key = secret_key if fresh_install else None
         app.state.release_startup_lifecycle_guard = release_startup_guard
         app.add_middleware(AgentBodyLimitMiddleware)
         app.add_middleware(SecurityMiddleware)
@@ -920,7 +964,7 @@ def create_app(*, start_background: bool = False) -> FastAPI:
     except BaseException:
         release_startup_guard()
         raise
-    if startup_guard is not None:
+    if not startup_guard_released:
         # 仅在应用完整构造成功后注册进程退出兜底；正常 lifespan/启动器
         # 释放时会同步注销，避免重复应用工厂积累 closure。
         atexit.register(release_startup_guard)
@@ -931,17 +975,8 @@ def create_app(*, start_background: bool = False) -> FastAPI:
 
 def run(*, host: str | None = None, port: int | None = None) -> None:
     """兼容 ASGI 直接启动，并始终保持单 worker。"""
-    if not os.path.lexists(database.resolve_db_path()):
-        from app.defaults import DEFAULT_WEB_PORT
-        from app.modules.setup_bootstrap import setup_host, BootstrapError
-        try:
-            effective_host = setup_host(host or os.getenv("WEB_HOST"))
-        except BootstrapError as exc:
-            raise first_run.UnsafeFirstRunBindingError(str(exc)) from None
-        effective_port = DEFAULT_WEB_PORT if port is None else port
-    else:
-        effective_host = _resolve_bind_host(host)
-        effective_port = config.flask_port() if port is None else port
+    effective_host = _resolve_bind_host(host)
+    effective_port = config.flask_port() if port is None else port
     logger.info(f"MediaFlux FastAPI 启动于 {effective_host}:{effective_port}")
     try:
         uvicorn.run(

@@ -1,4 +1,4 @@
-"""Storage cuts in explicit initialization; no fake stable fixtures."""
+"""真实安装事务的持久化失败与旧数据保护，不合成 stable fence。"""
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -11,22 +11,22 @@ from tests.test_setup_bootstrap import cold_run, initialize
 @pytest.mark.parametrize('cut', ['env_directory', 'commit_before', 'commit_after'])
 def test_failed_durability_never_reports_success_or_replays(tmp_path, cut):
     def action():
-        import tempfile
-        from app.cli import main
-        from app import database
-        from app.modules import setup_bootstrap as setup
-        sync = setup._sync_directory
-        get_conn = database.get_conn
+        from app import config, database
+        from app.modules import backup
+        from app.runtime_paths import get_runtime_paths
+        from tests.test_setup_bootstrap_support import initialize_paths
+        paths = get_runtime_paths()
+        sync, get_conn = backup._fsync_directory, database.get_conn
         if cut == 'env_directory':
             def fail(path):
-                if path == tmp_path / 'config' and (path / 'user.env').exists():
+                if path == paths.config_dir and paths.env_file.exists():
                     raise OSError('injected directory durability failure')
                 sync(path)
-            setup._sync_directory = fail
+            backup._fsync_directory = fail
         else:
             @contextmanager
             def uncertain():
-                canonical = database.resolve_db_path() == tmp_path / 'db/mediaflux.db'
+                canonical = database.resolve_db_path() == paths.database_path
                 with get_conn() as conn:
                     yield conn
                     if canonical and cut == 'commit_before':
@@ -34,75 +34,60 @@ def test_failed_durability_never_reports_success_or_replays(tmp_path, cut):
                 if canonical and cut == 'commit_after':
                     raise OSError('after actual commit')
             database.get_conn = uncertain
-        with tempfile.TemporaryFile() as payload:
-            payload.write(json.dumps({'ENV_WEB_PASSPORT': 'operator', 'ENV_WEB_PASSWORD': 'test-bootstrap-password'}).encode())
-            payload.seek(0)
-            return main(['initialize', '--data-dir', str(tmp_path), '--confirm-new-installation', '--expect-env-sha256', 'absent', '--settings-fd', str(payload.fileno())])
+        before = config._cache
+        try:
+            initialize_paths(paths)
+        except Exception:  # noqa: BLE001 - 故障注入边界需要检查任意失败后的状态
+            assert database.DB_PATH == paths.database_path
+            assert config._cache == before
+            return 2
+        return 0
     assert cold_run(tmp_path, action) == {'result': 2}
     with sqlite3.connect(tmp_path / 'db/mediaflux.db') as conn:
         row = json.loads(conn.execute("SELECT value FROM settings_kv WHERE key='agent.runtime_fence.v1'").fetchone()[0])
     assert row['phase'] == ('stable' if cut == 'commit_after' else 'changing')
+    before = (tmp_path / 'db/mediaflux.db').stat().st_ino, (tmp_path / 'config/user.env').read_bytes()
     assert initialize(tmp_path) == {'result': 2}
+    assert before == ((tmp_path / 'db/mediaflux.db').stat().st_ino, (tmp_path / 'config/user.env').read_bytes())
 
 
 @pytest.mark.parametrize('production', [False, True])
 def test_existing_env_generated_secret_is_durable_and_unrelated_values_preserved(tmp_path, production):
     from app.env_file import read_env_bytes
-    import hashlib
     config = tmp_path / 'config'
     config.mkdir()
     env = config / 'user.env'
-    env.write_text("ENV_WEB_PASSPORT=operator\nENV_WEB_PASSWORD=test-bootstrap-password\nKEEP_THIS=value\nAPP_ENV=" + ('production' if production else 'development') + '\n')
-    expected = hashlib.sha256(env.read_bytes()).hexdigest()
-    assert initialize(tmp_path, {'APP_ENV': 'production' if production else 'development'}, expected) == {'result': 0}
+    env.write_text('ENV_WEB_PASSPORT=stale-only\nKEEP_THIS=value\n')
+    assert initialize(tmp_path, {'APP_ENV': 'production' if production else 'development', 'ENV_WEB_PASSPORT': 'operator'}, env.read_bytes()) == {'result': 0}
     values = read_env_bytes(env.read_bytes())
     assert values['KEEP_THIS'] == 'value'
     assert len(values['WEB_SECRET_KEY']) >= 32
     assert not (config / '.web-secret-key').exists()
 
 
-@pytest.mark.parametrize('shape', ['database', '-wal', '-shm', '-journal', 'env_backup'])
+@pytest.mark.parametrize('shape', ['database', '-wal', '-shm', '-journal', 'env_backup', 'restore_journal', 'orphan_stage'])
 def test_existing_artifact_refused_without_publication(tmp_path, shape):
-    db = tmp_path / 'db'
+    db, config = tmp_path / 'db', tmp_path / 'config'
     db.mkdir()
-    config = tmp_path / 'config'
     config.mkdir()
-    target = config / '.user.env.recovery.leftover.bak' if shape == 'env_backup' else db / ('mediaflux.db' + ('' if shape == 'database' else shape))
+    if shape == 'env_backup':
+        target = config / '.user.env.recovery.leftover.bak'
+    elif shape == 'restore_journal':
+        def select():
+            from app.modules.backup import _restore_journal_path
+            from app.runtime_paths import get_runtime_paths
+            return str(_restore_journal_path(get_runtime_paths()))
+        from pathlib import Path
+        target = Path(cold_run(tmp_path, select)['result'])
+        target.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        target = db / ('.installation-orphan.db' if shape == 'orphan_stage' else 'mediaflux.db' + ('' if shape == 'database' else shape))
     target.write_bytes(b'preserve')
     assert initialize(tmp_path) == {'result': 2}
     assert target.read_bytes() == b'preserve'
     assert not (config / 'user.env').exists()
-
-
-def test_fd_zero_bounded_pipe_input(tmp_path):
-    def action():
-        import os
-        from app.cli import main
-        read, write = os.pipe()
-        os.write(write, b'{"ENV_WEB_PASSPORT":"operator","ENV_WEB_PASSWORD":"test-bootstrap-password"}')
-        os.close(write)
-        os.dup2(read, 0)
-        os.close(read)
-        return main(['initialize', '--data-dir', str(tmp_path), '--confirm-new-installation', '--expect-env-sha256', 'absent', '--settings-fd', '0'])
-    assert cold_run(tmp_path, action) == {'result': 0}
-
-
-def test_release_flat_layout_fd_zero_selected_settings(tmp_path):
-    def action():
-        import os
-        import tempfile
-        from app.cli import main
-        os.environ['MEDIAFLUX_CONFIG_DIR'] = str(tmp_path)
-        os.environ['MEDIAFLUX_CONTAINER'] = '1'
-        with tempfile.TemporaryFile() as payload:
-            payload.write(json.dumps({'MEDIAFLUX_INITIALIZED': '1', 'ENV_WEB_PASSPORT': 'operator', 'ENV_WEB_PASSWORD': 'test-bootstrap-password', 'WEB_SECRET_KEY': 'synthetic-selected-release-secret'}).encode())
-            payload.seek(0)
-            os.dup2(payload.fileno(), 0)
-            return main(['initialize', '--data-dir', str(tmp_path), '--confirm-new-installation', '--expect-env-sha256', 'absent', '--settings-fd', '0'])
-    assert cold_run(tmp_path, action) == {'result': 0}
-    assert (tmp_path / 'user.env').is_file()
-    with sqlite3.connect(tmp_path / 'mediaflux.db') as conn:
-        assert json.loads(conn.execute("SELECT value FROM settings_kv WHERE key='agent.runtime_fence.v1'").fetchone()[0])['phase'] == 'stable'
+    if shape != 'database':
+        assert not (db / 'mediaflux.db').exists()
 
 
 @pytest.mark.parametrize('secret', [True, False])

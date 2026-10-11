@@ -1,6 +1,5 @@
-"""Bounded actual exec/kill/contend and selected finite input controls."""
+"""真实 exec 竞争/SIGKILL 验收；无旧 FD0 或授权服务。"""
 import json
-import os
 from pathlib import Path
 import signal
 import sqlite3
@@ -12,15 +11,14 @@ from contextlib import contextmanager
 
 import pytest
 
-SETTINGS = {'MEDIAFLUX_INITIALIZED':'1','ENV_WEB_PASSPORT':'operator','ENV_WEB_PASSWORD':'test-bootstrap-password','WEB_SECRET_KEY':'synthetic-selected-release-secret'}
+from tests.bootstrap_completion_worker import SETTINGS
 
 
 @contextmanager
 def worker(root, mode):
     root.mkdir(exist_ok=True)
-    with tempfile.TemporaryFile() as payload, tempfile.TemporaryFile() as log:
-        payload.write(json.dumps(SETTINGS).encode()); payload.seek(0)
-        proc = subprocess.Popen([sys.executable,'-B',str(Path(__file__).with_name('bootstrap_completion_worker.py')),str(root),mode], stdin=payload,stdout=log,stderr=subprocess.STDOUT)
+    with tempfile.TemporaryFile() as log:
+        proc = subprocess.Popen([sys.executable,'-B',str(Path(__file__).with_name('bootstrap_completion_worker.py')),str(root),mode], stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
         try:
             yield proc, log
         finally:
@@ -55,7 +53,7 @@ def wait_for(fn):
         time.sleep(.01)
 
 
-def test_release_shaped_fd0_exec_then_cold_exec_login(tmp_path):
+def test_flat_layout_single_installation_exec_then_cold_login(tmp_path):
     with worker(tmp_path,'initialize') as args:
         assert finish(*args) == 0
     from app.env_file import read_env_bytes
@@ -86,8 +84,8 @@ def test_real_sigkill_at_canonical_boundaries(tmp_path, cut):
         assert not (tmp_path/'mediaflux.db').exists()
         assert list(tmp_path.glob('.installation-*.db'))
         # A fresh exec at the SAME flat paths cannot promote the orphan.
-        with worker(tmp_path,'guidance') as args:
-            assert finish(*args) == 0
+        with worker(tmp_path,'initialize') as args:
+            assert finish(*args) == 2
         assert not (tmp_path/'mediaflux.db').exists()
     else:
         assert fence(tmp_path)['phase'] == 'changing'
@@ -97,23 +95,3 @@ def test_real_sigkill_at_canonical_boundaries(tmp_path, cut):
             assert finish(*args) == 0
         assert fence(tmp_path)['phase'] == 'changing'
     assert not (tmp_path/'user.env').exists()
-
-
-@pytest.mark.parametrize('kind',['duplicate','oversize','timeout'])
-def test_fd_rejects_duplicate_oversize_and_real_timeout(kind):
-    from app.modules.setup_bootstrap import read_settings_fd, BootstrapError
-    if kind == 'timeout':
-        read, write = os.pipe()
-        start=time.monotonic()
-        try:
-            with pytest.raises(BootstrapError, match='settings_read_deadline'):
-                read_settings_fd(read)
-            assert 9 <= time.monotonic()-start < 13
-        finally:
-            os.close(read); os.close(write)
-    else:
-        with tempfile.TemporaryFile() as payload:
-            payload.write(b'{"A":"one","A":"two"}' if kind=='duplicate' else b'x'*65537)
-            payload.seek(0)
-            with pytest.raises(BootstrapError,match='duplicate_settings_key' if kind=='duplicate' else 'settings_too_large'):
-                read_settings_fd(payload.fileno())

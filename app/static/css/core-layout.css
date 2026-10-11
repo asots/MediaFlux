@@ -596,6 +596,19 @@ textarea.form-input {
     display: none !important;
 }
 
+/* 首装错误区固定占位；长恢复提示可完整滚动，普通登录不受影响。 */
+.form-error.setup-form-error {
+    display: flex !important;
+    height: 80px;
+    flex-shrink: 0;
+    align-items: flex-start;
+    line-height: 1.5;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+}
+.form-error.setup-form-error.is-empty { visibility: hidden; }
+.form-error.setup-form-error > span { min-width: 0; overflow-wrap: anywhere; }
+
 /* 增强密码切换控件 (Password toggle integration) - 强制 100% 对齐 */
 .secret-input-shell {
     position: relative;

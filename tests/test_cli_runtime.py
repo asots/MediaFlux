@@ -51,6 +51,14 @@ class CliRuntimeTests(unittest.TestCase):
             source_root = Path(temporary_directory) / "source-copy"
             shutil.copytree(self.PROJECT_ROOT / "app", source_root / "app")
             shutil.copy2(self.PROJECT_ROOT / "mediaflux.py", source_root / "mediaflux.py")
+            # 只加载 Web helper，不执行 tests 包级运行目录覆盖。
+            helper_package = source_root / "tests"
+            helper_package.mkdir()
+            (helper_package / "__init__.py").write_text("", encoding="utf-8")
+            shutil.copy2(
+                self.PROJECT_ROOT / "tests" / "test_setup_bootstrap_support.py",
+                helper_package / "test_setup_bootstrap_support.py",
+            )
 
             environment = os.environ.copy()
             for name in (
@@ -62,6 +70,11 @@ class CliRuntimeTests(unittest.TestCase):
                 "MEDIAFLUX_TEST_MODE",
                 "MEDIAFLUX_TEST_DB_PATH",
                 "MEDIAFLUX_INITIALIZED",
+                "MEDIAFLUX_TESTING",
+                "MEDIAFLUX_CONTAINER",
+                "MEDIAFLUX_ALLOW_REMOTE_SETUP",
+                "WEB_SECRET_KEY",
+                "APP_ENV",
                 "ENV_WEB_PASSPORT",
                 "ENV_WEB_PASSWORD",
                 "WEB_HOST",
@@ -121,19 +134,18 @@ sys.addaudithook(audit)
         web_port: int,
         user_env: str | None = None,
         initialized: bool = True,
+        extra_env: dict[str, str] | None = None,
     ) -> dict[str, object]:
         if initialized:
-            settings = {"ENV_WEB_PASSPORT": "admin", "ENV_WEB_PASSWORD": "correct-horse"}
+            settings = {"ENV_WEB_PASSPORT": "admin", "ENV_WEB_PASSWORD": "correct-horse", "WEB_SECRET_KEY": "task3-cli-runtime-secret-32-bytes-or-more"}
             settings.update(dict(line.split("=", 1) for line in (user_env or "").splitlines() if "=" in line))
             result = self._run_probe(
                 """
-                import json, os, tempfile
-                from app.cli import main
-                with tempfile.TemporaryFile() as payload:
-                    payload.write(os.environ["PROBE_SETTINGS"].encode())
-                    payload.seek(0)
-                    code = main(["initialize", "--data-dir", os.environ["MEDIAFLUX_DATA_DIR"], "--confirm-new-installation", "--expect-env-sha256", "absent", "--settings-fd", str(payload.fileno())])
-                print("TASK3_RESULT=" + json.dumps({"exit_code": code}))
+                import json, os
+                from app.runtime_paths import RuntimePaths
+                from tests.test_setup_bootstrap_support import initialize_paths
+                initialize_paths(RuntimePaths.from_environment(), json.loads(os.environ["PROBE_SETTINGS"]))
+                print("TASK3_RESULT=" + json.dumps({"exit_code": 0}))
                 """, env={"PROBE_SETTINGS": json.dumps(settings)}, runtime_root=runtime_root,
             )
             self.assertEqual(result["exit_code"], 0)
@@ -153,21 +165,28 @@ sys.addaudithook(audit)
             from app import config, database, logger
 
             call = uvicorn_run.call_args.kwargs
-            guidance = os.environ["PROBE_INITIALIZED"] == "0"
-            if guidance:
+            if os.environ["PROBE_INITIALIZED"] == "0":
                 from fastapi.testclient import TestClient
                 with TestClient(uvicorn_run.call_args.args[0]) as client:
                     assert client.get('/readyz').status_code == 503
-                    assert client.post('/setup', data={}).status_code == 403
+                    page = client.get('/setup')
+                    assert page.status_code == 200
+                    assert 'name="username"' in page.text
+                    assert 'name="password_confirm"' in page.text
+                    assert 'name="setup_code"' not in page.text
                 assert not database.resolve_db_path().exists()
+                assert not config.PATHS.env_file.exists()
+                assert not (config.PATHS.config_dir / '.web-secret-key').exists()
             result = {
                 "exit_code": exit_code,
                 "app_main_before_start": app_main_before_start,
                 "app_main_after_start": "app.main" in sys.modules,
+                "web_app_is_global": uvicorn_run.call_args.args[0] is sys.modules["app.main"].app,
+                "app_env": os.environ.get("APP_ENV"),
                 "host": call["host"],
                 "port": call["port"],
                 "workers": call["workers"],
-                "log_config_is_none": None if guidance else call["log_config"] is None,
+                "log_config_is_none": call["log_config"] is None,
                 "access_log": call["access_log"],
                 "data_dir": str(config.PATHS.data_dir),
                 "config_dir": str(config.PATHS.config_dir),
@@ -183,10 +202,20 @@ sys.addaudithook(audit)
                 "TASK3_ARGS": json.dumps(args),
                 "WEB_PORT": str(web_port),
                 "PROBE_INITIALIZED": "1" if initialized else "0",
-                "WEB_SECRET_KEY": "task3-cli-runtime-secret",
+                "WEB_SECRET_KEY": "task3-cli-runtime-secret-32-bytes-or-more",
+                "APP_ENV": "development",
+                **(extra_env or {}),
             },
             runtime_root=runtime_root,
         )
+
+    def test_cli_help_only_lists_normal_runtime_commands(self) -> None:
+        from app.cli import build_parser
+
+        help_text = build_parser().format_help()
+        self.assertIn("start", help_text)
+        self.assertIn("backup", help_text)
+        self.assertNotIn("initialize", help_text)
 
     def test_version_command_is_machine_readable(self) -> None:
         output = io.StringIO()
@@ -234,6 +263,26 @@ sys.addaudithook(audit)
             )
 
         self.assertEqual(result["host"], "127.0.0.1")
+        self.assertFalse(result["app_main_before_start"])
+        self.assertTrue(result["app_main_after_start"])
+        self.assertTrue(result["web_app_is_global"])
+        self.assertTrue(result["log_config_is_none"])
+        self.assertFalse(result["access_log"])
+
+    def test_fresh_start_allows_explicit_remote_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            result = self._probe_start(
+                ["start", "--data-dir", str(root)],
+                runtime_root=root,
+                web_host="0.0.0.0",
+                web_port=1258,
+                initialized=False,
+                extra_env={"MEDIAFLUX_ALLOW_REMOTE_SETUP": "1"},
+            )
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["host"], "0.0.0.0")
+        self.assertTrue(result["web_app_is_global"])
 
     def test_fresh_start_rejects_non_loopback_environment_host(self) -> None:
         from app import cli
@@ -252,11 +301,9 @@ sys.addaudithook(audit)
         from app.modules import first_run
 
         events: list[str] = []
-        from tests.test_setup_bootstrap import initialize
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
-        self.assertEqual(initialize(root), {"result": 0})
         paths = RuntimePaths.from_environment({"MEDIAFLUX_DATA_DIR": str(root), "MEDIAFLUX_CONFIG_DIR": str(root / "config")})
         from app.modules.backup import runtime_lifecycle_guard as real_lifecycle_guard
 
@@ -862,76 +909,57 @@ sys.addaudithook(audit)
                     cli_main.assert_called_once_with(expected_args)
 
 
-    def test_container_fresh_start_is_guidance_without_setup_authority(self) -> None:
-        from app import cli
-
-        web_app = SimpleNamespace(state=SimpleNamespace())
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            paths = RuntimePaths(
-                program_dir=root / "program",
-                data_dir=root / "data",
-                config_dir=root / "config",
-                cache_dir=root / "cache",
-                log_dir=root / "logs",
-                strm_dir=root / "strm-data",
-                trash_dir=root / "trash",
+    def test_container_fresh_start_uses_global_web_app_in_production(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            result = self._probe_start(
+                ["start", "--data-dir", str(root)],
+                runtime_root=root,
+                web_host=None,
+                web_port=1258,
+                initialized=False,
+                extra_env={"MEDIAFLUX_CONTAINER": "1", "APP_ENV": "development"},
             )
-            with patch.dict(
-                os.environ,
-                {"MEDIAFLUX_CONTAINER": "1"},
-                clear=True,
-            ), patch("app.cli.get_runtime_paths", return_value=paths), patch("app.cli.uvicorn.run") as run:
-                exit_code = cli._start(None, None, None)
-                from fastapi.testclient import TestClient
-                with TestClient(run.call_args.args[0]) as client:
-                    self.assertEqual(client.get('/readyz').status_code, 503)
-                    self.assertEqual(client.post('/setup', data={}).status_code, 403)
-                self.assertFalse(paths.database_path.exists())
-                self.assertFalse(paths.env_file.exists())
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["host"], "0.0.0.0")
+        self.assertEqual(result["workers"], 1)
+        self.assertEqual(result["app_env"], "production")
+        self.assertTrue(result["web_app_is_global"])
 
-        self.assertEqual(exit_code, 0)
-        self.assertIsNot(run.call_args.args[0], web_app)
-        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
-        self.assertEqual(run.call_args.kwargs["workers"], 1)
-
-    def test_container_preseeded_credentials_do_not_grant_initialization(self) -> None:
-        from app import cli
-
-        web_app = SimpleNamespace(state=SimpleNamespace())
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            paths = RuntimePaths(
-                program_dir=root / "program",
-                data_dir=root / "data",
-                config_dir=root / "config",
-                cache_dir=root / "cache",
-                log_dir=root / "logs",
-                strm_dir=root / "strm-data",
-                trash_dir=root / "trash",
+    def test_container_can_keep_first_setup_on_loopback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            result = self._probe_start(
+                ["start", "--data-dir", str(root)],
+                runtime_root=root,
+                web_host=None,
+                web_port=1258,
+                initialized=False,
+                extra_env={"MEDIAFLUX_CONTAINER": "1", "MEDIAFLUX_ALLOW_REMOTE_SETUP": "0"},
             )
-            with patch.dict(
-                os.environ,
-                {
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["host"], "127.0.0.1")
+        self.assertTrue(result["web_app_is_global"])
+
+    def test_container_credentials_without_installed_storage_do_not_create_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            result = self._probe_start(
+                ["start", "--data-dir", str(root)],
+                runtime_root=root,
+                web_host=None,
+                web_port=1258,
+                initialized=False,
+                extra_env={
                     "MEDIAFLUX_CONTAINER": "1",
                     "ENV_WEB_PASSPORT": "admin",
                     "ENV_WEB_PASSWORD": "correct-horse",
                 },
-                clear=True,
-            ), patch("app.cli.get_runtime_paths", return_value=paths), patch("app.cli.uvicorn.run") as run:
-                exit_code = cli._start(None, None, None)
-                from fastapi.testclient import TestClient
-                with TestClient(run.call_args.args[0]) as client:
-                    self.assertEqual(client.get('/readyz').status_code, 503)
-                    self.assertEqual(client.post('/setup', data={}).status_code, 403)
-                self.assertFalse(paths.database_path.exists())
-                self.assertFalse(paths.env_file.exists())
-
-        self.assertEqual(exit_code, 0)
-        self.assertIsNot(run.call_args.args[0], web_app)
-        run.assert_called_once()
+            )
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["host"], "0.0.0.0")
+        self.assertEqual(result["app_env"], "production")
+        self.assertTrue(result["web_app_is_global"])
 
     def test_dockerfile_marks_container_and_uses_fixed_internal_healthcheck(self) -> None:
         dockerfile = (self.PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")

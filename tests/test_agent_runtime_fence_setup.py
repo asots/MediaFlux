@@ -27,23 +27,20 @@ def test_setup_then_normal_publication():
         case = support.FirstRunTests()
         case.setUp()
         try:
-            from tests.test_setup_bootstrap_support import initialize_web_paths
-            def inspect_page(page, client):
-                case._setup_page(client)  # retain exact static fingerprints/form oracle
-            initialize_web_paths(case.paths, 'admin', 'synthetic-correct-horse', inspect_page)
-            case._reload_runtime_modules()
             with case._new_client() as client:
-                page = client.get('/login')
-                response = client.post('/login', data={
-                    'csrf_token': case._csrf_token(page), 'username': 'admin',
-                    'password': 'synthetic-correct-horse',
-                }, follow_redirects=False)
-                assert response.status_code == 302
+                page = case._setup_page(client)
+                response = client.post('/setup', data=case._fields(page), follow_redirects=False)
+                assert response.status_code == 303
+                assert response.headers['location'] == '/login'
+                case._login(client)
                 case.config.set_and_save({'AGENT_LLM_MODEL': 'synthetic-new-model'})
                 assert case.config.get('AGENT_LLM_MODEL') == 'synthetic-new-model'
                 from app.agent.feature_gate import read_runtime_fence
                 with case.database.get_conn() as conn:
-                    assert read_runtime_fence(conn).phase == 'stable'
+                    fence = read_runtime_fence(conn)
+                    assert fence.phase == 'stable'
+                    assert fence.config_digest == case.config.capture_runtime_config_snapshot().config_digest
+                assert client.get('/readyz').status_code == 200
         finally:
             os.environ.pop('AGENT_LLM_MODEL', None)
             case.tearDown()

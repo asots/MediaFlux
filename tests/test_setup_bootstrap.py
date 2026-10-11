@@ -1,12 +1,10 @@
-"""Explicit first installation, using real isolated processes and SQLite."""
-import hashlib
+"""单一安装事务与普通 Web 初装；仅使用隔离进程和真实临时 SQLite。"""
 import json
 import os
 import select
 import signal
 import sqlite3
 import sys
-import tempfile
 import time
 
 
@@ -53,17 +51,28 @@ def cold_run(root, action):
             pass
 
 
-def initialize(root, settings=None, expected='absent'):
+def initialize(root, settings=None, expected=None):
+    """保留跨测试名称/结果契约；唯一安装实现接收冻结的原始 env 字节。"""
     def action():
-        from app.cli import main
-        with tempfile.TemporaryFile() as payload:
-            payload.write(json.dumps(settings or {'ENV_WEB_PASSPORT': 'operator', 'ENV_WEB_PASSWORD': 'test-bootstrap-password'}).encode())
-            payload.seek(0)
-            return main(['initialize', '--data-dir', str(root), '--confirm-new-installation', '--expect-env-sha256', expected, '--settings-fd', str(payload.fileno())])
+        import secrets
+        from app.env_file import read_env_bytes
+        from app.modules.setup_bootstrap import BootstrapError, initialize_installation
+        from app.runtime_paths import get_runtime_paths
+        values = read_env_bytes(expected) if expected is not None else {}
+        values.setdefault('ENV_WEB_PASSPORT', 'operator')
+        values.setdefault('ENV_WEB_PASSWORD', 'test-bootstrap-password')
+        values.setdefault('WEB_SECRET_KEY', secrets.token_urlsafe(48))
+        values.update(settings or {})
+        values['MEDIAFLUX_INITIALIZED'] = '1'
+        try:
+            initialize_installation(get_runtime_paths(), values, expected_env=expected)
+        except BootstrapError:
+            return 2
+        return 0
     return cold_run(root, action)
 
 
-def test_explicit_cli_publishes_stable_and_cold_login(tmp_path):
+def test_single_installation_publishes_stable_and_cold_login(tmp_path):
     assert initialize(tmp_path) == {'result': 0}
     env = tmp_path / 'config/user.env'
     assert env.is_file()
@@ -87,72 +96,6 @@ def test_explicit_cli_publishes_stable_and_cold_login(tmp_path):
     assert cold_run(tmp_path, login) == {'result': [200, 302, '/', 200]}
 
 
-def test_ordinary_missing_storage_is_guidance_without_recovery(tmp_path):
-    config = tmp_path / 'config'
-    config.mkdir()
-    backup = config / '.user.env.recovery.probe.bak'
-    backup.write_text("ENV_WEB_PASSWORD='private-not-for-publication'\n")
-    before = hashlib.sha256(backup.read_bytes()).hexdigest()
-    def guidance():
-        from app.cli import main
-        import uvicorn
-        from fastapi.testclient import TestClient
-        def run(app, **kwargs):
-            with TestClient(app) as client:
-                assert client.get('/setup').status_code == 200
-                assert 'initialize' in client.get('/setup').text
-                assert client.post('/setup', data={}).status_code == 403
-                assert client.get('/readyz').status_code == 503
-            assert 'app.main' not in sys.modules
-            # Existing lifecycle lock imports database -> config (pure import).
-            assert sys.modules['app.config']._cache is None
-            assert 'app.modules.first_run' not in sys.modules
-        uvicorn.run = run
-        return main(['start', '--data-dir', str(tmp_path)])
-    assert cold_run(tmp_path, guidance) == {'result': 0}
-    assert hashlib.sha256(backup.read_bytes()).hexdigest() == before
-    assert not (config / 'user.env').exists()
-    assert not (config / '.web-secret-key').exists()
-    assert not (tmp_path / 'db/mediaflux.db').exists()
-
-
-def test_browser_live_grant_actual_form_and_single_consume(tmp_path):
-    def browser():
-        import re
-        import uvicorn
-        from fastapi.testclient import TestClient
-        from app.cli import main
-        observed = []
-        failures = []
-        def serve(server):
-            try:
-                with TestClient(server.config.app, base_url='http://127.0.0.1:1258') as client:
-                    page = client.get('/setup')
-                    assert page.status_code == 200
-                    code = (tmp_path / 'grant').read_text()
-                    assert code not in page.text
-                    assert 'setup_code' in page.text
-                    token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
-                    fields = {'username': 'operator', 'password': 'test-bootstrap-password', 'password_confirm': 'test-bootstrap-password', 'setup_code': code, 'csrf_token': token}
-                    wrong = dict(fields, setup_code='incorrect')
-                    observed.append(client.post('/setup', data=wrong, headers={'Origin': 'http://127.0.0.1:1258'}).status_code)
-                    observed.append(client.post('/setup', data=fields, headers={'Origin': 'http://evil.invalid'}).status_code)
-                    assert not (tmp_path / 'db/mediaflux.db').exists()
-                    result = client.post('/setup', data=fields, headers={'Origin': 'http://127.0.0.1:1258'})
-                    observed.append(result.status_code)
-                    assert 'restart' in result.text and 'session' not in client.cookies
-                    observed.append(client.post('/setup', data=fields, headers={'Origin': 'http://127.0.0.1:1258'}).status_code)
-            except BaseException as exc:
-                failures.append(type(exc).__name__)
-        uvicorn.Server.run = serve
-        result = main(['initialize', '--data-dir', str(tmp_path), '--confirm-new-installation', '--expect-env-sha256', 'absent', '--web', '--grant-file', str(tmp_path / 'grant')])
-        return [result, observed, failures]
-    assert cold_run(tmp_path, browser) == {'result': [0, [403, 403, 200, 409], []]}
-    assert (tmp_path / 'grant').stat().st_mode & 0o077 == 0
-    with sqlite3.connect(tmp_path / 'db/mediaflux.db') as conn:
-        assert json.loads(conn.execute("SELECT value FROM settings_kv WHERE key='agent.runtime_fence.v1'").fetchone()[0])['phase'] == 'stable'
-
-
 def test_env_cas_preserves_bytes_on_refusal(tmp_path):
     config = tmp_path / 'config'
     config.mkdir()
@@ -162,3 +105,41 @@ def test_env_cas_preserves_bytes_on_refusal(tmp_path):
     assert initialize(tmp_path) == {'result': 2}
     assert env.read_bytes() == before
     assert not (tmp_path / 'db/mediaflux.db').exists()
+
+
+def test_recovery_residual_is_never_read_or_rebuilt_by_setup(tmp_path):
+    import hashlib
+    config = tmp_path / 'config'
+    config.mkdir()
+    backup = config / '.user.env.recovery.probe.bak'
+    backup.write_text("ENV_WEB_PASSWORD='private-not-for-publication'\n")
+    before = hashlib.sha256(backup.read_bytes()).hexdigest()
+    def setup():
+        import re
+        from fastapi.testclient import TestClient
+        from app.main import create_app
+        with TestClient(create_app()) as client:
+            page = client.get('/setup')
+            assert page.status_code == 200
+            assert 'name="setup_code"' not in page.text
+            assert client.get('/readyz').status_code == 503
+            assert not (tmp_path / 'db/mediaflux.db').exists()
+            assert not (config / 'user.env').exists()
+            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            response = client.post('/setup', data={'username':'operator', 'password':'test-bootstrap-password',
+                                                  'password_confirm':'test-bootstrap-password', 'csrf_token':token},
+                                   follow_redirects=False)
+            return response.status_code
+    assert cold_run(tmp_path, setup) == {'result': 409}
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() == before
+    assert not (config / 'user.env').exists()
+    assert not (config / '.web-secret-key').exists()
+    assert not (tmp_path / 'db/mediaflux.db').exists()
+
+
+def test_writable_shared_ancestor_does_not_prevent_installation(tmp_path):
+    root = tmp_path / 'shared'
+    root.mkdir(mode=0o777)
+    root.chmod(0o777)
+    assert initialize(root) == {'result': 0}
+    assert (root / 'config/user.env').stat().st_mode & 0o077 == 0

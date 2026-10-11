@@ -38,7 +38,7 @@
                 <p class="login-sub">{% if setup_mode %}控制台初始化 · 配置首个管理员凭据{% else %}自动化媒体整理引擎控制面板{% endif %}</p>
 
                 <!-- 极简错误警报框 -->
-                <div class="form-error{% if not error %} is-empty{% endif %}" role="alert">
+                <div class="form-error{% if setup_mode %} setup-form-error{% endif %}{% if not error %} is-empty{% endif %}" role="alert"{% if setup_mode %} tabindex="0" aria-label="初始化错误详情"{% endif %}>
                     <i data-lucide="alert-triangle" style="width:15px;height:15px;flex-shrink:0;"></i>
                     <span>{{ error }}</span>
                 </div>
@@ -74,8 +74,7 @@
                         </div>
                     </div>
 
-                    {% if bootstrap_grant %}<label for="setup-code">本地一次性初始化码</label><input id="setup-code" type="password" name="setup_code" autocomplete="off" required>{% endif %}
-                    <button type="submit" class="btn btn-primary">完成初始化，然后重启登录<i data-lucide="arrow-right"></i></button>
+                    <button type="submit" class="btn btn-primary">创建管理员，前往登录<i data-lucide="arrow-right"></i></button>
                 </form>
                 {% else %}
                 <form class="login-form" method="post" action="{{ url_for('auth.login_submit') }}">

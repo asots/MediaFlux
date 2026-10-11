@@ -29,7 +29,7 @@ from app.agent.kernel.provider_model import (
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput
 from app.agent.kernel.transports import TelegramKernelTransport, WebKernelTransport
-from tests.support import isolated_test_database
+from tests.support import initialized_web_runtime, isolated_test_database
 
 
 class NativeRuntime:
@@ -160,26 +160,27 @@ class NativeRuntime:
 
 @contextmanager
 def api_client(runtime, monkeypatch, csrf="explain-csrf"):
-    from app.main import SecurityMiddleware
-    from app.routes import agent_api
+    with initialized_web_runtime():
+        from app.main import SecurityMiddleware
+        from app.routes import agent_api
 
-    application = FastAPI()
-    application.include_router(agent_api.router)
-    application.add_middleware(SecurityMiddleware)
-    application.add_middleware(SessionMiddleware, secret_key="explain-test-secret")
+        application = FastAPI()
+        application.include_router(agent_api.router)
+        application.add_middleware(SecurityMiddleware)
+        application.add_middleware(SessionMiddleware, secret_key="explain-test-secret")
 
-    @application.get("/_test_login")
-    def login(request: Request):
-        request.session.update(logged_in=True, csrf_token=csrf)
-        return {"ok": True}
+        @application.get("/_test_login")
+        def login(request: Request):
+            request.session.update(logged_in=True, csrf_token=csrf)
+            return {"ok": True}
 
-    monkeypatch.setattr(
-        agent_api.config, "web_credentials", lambda: ("explain-account", "unused")
-    )
-    monkeypatch.setattr(agent_api, "get_agent_kernel_runtime", lambda: runtime)
-    monkeypatch.setattr(agent_api, "is_agent_enabled", lambda: True)
-    with TestClient(application, raise_server_exceptions=False) as client:
-        yield client, agent_api.web_kernel_owner("explain-account")
+        monkeypatch.setattr(
+            agent_api.config, "web_credentials", lambda: ("explain-account", "unused")
+        )
+        monkeypatch.setattr(agent_api, "get_agent_kernel_runtime", lambda: runtime)
+        monkeypatch.setattr(agent_api, "is_agent_enabled", lambda: True)
+        with TestClient(application, raise_server_exceptions=False) as client:
+            yield client, agent_api.web_kernel_owner("explain-account")
 
 
 def test_web_security_cold_confirm_and_tool_rejection(monkeypatch):

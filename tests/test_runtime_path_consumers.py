@@ -113,11 +113,10 @@ class RuntimePathConsumerTests(unittest.TestCase):
             root_path = Path(root)
             with isolated_runtime_paths(root_path) as paths:
                 # 测试命令会启用测试模式；这里验证消费者的真实写入位置。
-                with patch.dict(
-                    os.environ,
-                    {"MEDIAFLUX_TEST_MODE": "0", "MEDIAFLUX_DISABLE_FILE_LOGGING": "0"},
-                    clear=False,
-                ):
+                environment = {key: value for key, value in os.environ.items()
+                               if key not in {"ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD", "MEDIAFLUX_INITIALIZED"}}
+                environment.update(MEDIAFLUX_TEST_MODE="0", MEDIAFLUX_DISABLE_FILE_LOGGING="0")
+                with patch.dict(os.environ, environment, clear=True):
                     config, database, logger, guangya = reload_runtime_modules()
 
                     from tests.test_setup_bootstrap_support import initialize_paths

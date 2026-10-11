@@ -165,9 +165,29 @@ def _validate_credentials(username: str, password: str) -> str:
     return normalized_username
 
 
-def initialize_admin(username: str, password: str) -> None:
-    """HTTP setup never creates authority or replaces administrator credentials."""
-    raise InitializationError("请停止服务并显式运行 initialize；已有存储只能受控恢复")
+def initialize_admin(username: str, password: str, *, secret_key: str | None = None) -> None:
+    """网页首装的唯一管理员入口；冻结快照与安装事务共同禁止覆盖已有实例。"""
+    normalized_username = _validate_credentials(username, password)
+    from app.modules.setup_bootstrap import BootstrapError, initialize_installation
+
+    global _startup_state
+    with _state_lock:
+        state = _startup_snapshot()
+        if not state.needs_initialization:
+            raise InitializationError("MediaFlux 已初始化，不能覆盖现有管理员凭据", initialized_by_competitor=True)
+        if state.config_error:
+            raise InitializationError(state.config_error)
+        settings = {"ENV_WEB_PASSPORT": normalized_username, "ENV_WEB_PASSWORD": password}
+        if secret_key is not None:
+            settings["WEB_SECRET_KEY"] = secret_key
+        try:
+            initialize_installation(state.paths, settings, expected_env=state.env_bytes)
+        except BootstrapError as exc:
+            raise InitializationError(
+                "初始化未能安全完成，请检查配置和存储；已有数据或恢复记录不能重新初始化。"
+            ) from exc
+        # 只有事务明确成功才切换登录态；半发布或未知COMMIT仍留在未初始化边界。
+        _startup_state = _capture_startup_state(state.paths)
 
 
 # Snapshot is captured on explicit consumption, never merely on import.

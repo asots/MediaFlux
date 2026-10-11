@@ -1,58 +1,54 @@
-"""Approved explicit-operation prerequisites; no synthetic fence or test mode."""
-import hashlib
-import json
-import tempfile
+"""真实单一安装夹具；不注入 schema、fence 或测试安装分支。"""
+import os
+import secrets
 
 
 def initialize_paths(paths, settings=None):
-    from app.modules.setup_bootstrap import run_new_installation
-    paths.ensure_writable_dirs()
-    expected = hashlib.sha256(paths.env_file.read_bytes()).hexdigest() if paths.env_file.exists() else 'absent'
-    with tempfile.TemporaryFile() as payload:
-        payload.write(json.dumps(settings or {}).encode())
-        payload.seek(0)
-        return run_new_installation(paths, expected, settings_fd=payload.fileno())
+    """可预配业务配置，但所有写入均由唯一安装事务完成。"""
+    from app import config
+    from app.modules.setup_bootstrap import initialize_installation
+
+    expected, values = config.read_env_snapshot_no_recovery(paths.env_file)
+    values.setdefault('ENV_WEB_PASSPORT', 'operator')
+    values.setdefault('ENV_WEB_PASSWORD', 'test-bootstrap-password')
+    values.setdefault('WEB_SECRET_KEY', os.environ.get('WEB_SECRET_KEY') or secrets.token_urlsafe(48))
+    values.update(settings or {})
+    values['MEDIAFLUX_INITIALIZED'] = '1'
+    return initialize_installation(paths, values, expected_env=expected)
 
 
 def initialize_web_paths(paths, username, password, inspect_page=None):
-    """Real ASGI grant consumption; only the TCP server is substituted."""
+    """通过普通应用真实完成表单安装，同一客户端立即登录，不替换服务器。"""
     import re
-    import uvicorn
-    from unittest.mock import patch
     from fastapi.testclient import TestClient
-    from app.modules.setup_bootstrap import run_new_installation
-    paths.ensure_writable_dirs()
-    grant = paths.runtime_dir / 'test-setup-grant'
-    failures = []
-    def serve(server):
-        try:
-            with TestClient(server.config.app, base_url='http://127.0.0.1:1258') as client:
-                page = client.get('/setup')
-                assert page.status_code == 200
-                assert not paths.env_file.exists()
-                assert not (paths.config_dir / '.web-secret-key').exists()
-                if inspect_page:
-                    inspect_page(page, client)
-                token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
-                again = client.get('/setup')
-                assert token in again.text  # live memory-only CSRF material
-                response = client.post('/setup', data={
-                    'username': username, 'password': password,
-                    'password_confirm': password, 'csrf_token': token,
-                    'setup_code': grant.read_text(),
-                }, headers={'Origin': 'http://127.0.0.1:1258'})
-                assert response.status_code == 200
-                assert 'restart' in response.text
-                assert 'session' not in client.cookies
-        except BaseException as exc:
-            failures.append(exc)
-    with patch.object(uvicorn.Server, 'run', serve):
-        try:
-            result = run_new_installation(paths, 'absent', web=True, grant_file=grant)
-        except Exception:
-            if failures:
-                raise failures[0]
-            raise
-    if failures:
-        raise failures[0]
-    return result
+    from app.main import create_app
+
+    with TestClient(create_app(), base_url='http://127.0.0.1:1258') as client:
+        page = client.get('/setup')
+        assert page.status_code == 200
+        assert 'name="setup_code"' not in page.text
+        assert not paths.env_file.exists()
+        assert not paths.database_path.exists()
+        assert not (paths.config_dir / '.web-secret-key').exists()
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+        assert token in client.get('/setup').text
+        if inspect_page:
+            inspect_page(page, client)
+        page = client.get('/setup')
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+        response = client.post('/setup', data={
+            'username': username, 'password': password,
+            'password_confirm': password, 'csrf_token': token,
+        }, headers={'Origin': str(client.base_url).rstrip('/')}, follow_redirects=False)
+        assert response.status_code in (302, 303), response.text
+        assert response.headers['location'] == '/login'
+        assert not client.cookies.get('session')
+        page = client.get('/login')
+        assert page.status_code == 200
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+        response = client.post('/login', data={
+            'username': username, 'password': password, 'csrf_token': token,
+        }, follow_redirects=False)
+        assert response.status_code == 302, response.text
+        assert response.headers['location'] == '/'
+        assert client.get('/readyz').status_code == 200
