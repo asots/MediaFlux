@@ -245,9 +245,28 @@ class ThirdPartyLoggingTests(unittest.TestCase):
     def test_global_error_handler_logs_summary_without_a_second_traceback(self):
         from starlette.requests import Request
 
+        from contextlib import ExitStack
+        from tests.support import initialized_web_runtime
+
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(initialized_web_runtime())
+        had_main = "app.main" in sys.modules
         from app import main
 
-        handler = main.app.exception_handlers[Exception]
+        if not had_main:
+            # Import constructs a separate global app; release only our import.
+            def cleanup_import():
+                import app
+                try:
+                    main.app.state.release_startup_lifecycle_guard()
+                finally:
+                    sys.modules.pop("app.main", None)
+                    app.__dict__.pop("main", None)
+            stack.callback(cleanup_import)
+        application = main.create_app(start_background=False)
+        stack.callback(application.state.release_startup_lifecycle_guard)
+        handler = application.exception_handlers[Exception]
         request = Request({
             "type": "http",
             "http_version": "1.1",

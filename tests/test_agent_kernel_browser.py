@@ -395,7 +395,7 @@ class AgentKernelBrowserTests(unittest.TestCase):
 
     def test_preview_terminal_replaces_confirmation_with_visible_result(self) -> None:
         for event_type, payload, expected in (
-            ("turn.cancelled", {"reason": "user_cancelled"}, "本次任务已停止。"),
+            ("turn.cancelled", {"reason": "user_cancelled"}, "本轮处理已停止。"),
             ("turn.failed", {"message": "预检后的检查点失败"}, "预检后的检查点失败"),
             ("turn.completed", {"status": "partial", "answer": "预检未完成，请重新检查。"}, "预检未完成，请重新检查。"),
         ):
@@ -514,7 +514,7 @@ class AgentKernelBrowserTests(unittest.TestCase):
 
         terminal_cases = (
             ("turn.failed", {"message": "终态失败说明"}, ".is-interrupted", "终态失败说明"),
-            ("turn.cancelled", {}, ".agent-cancelled", "本次任务已停止。"),
+            ("turn.cancelled", {}, ".agent-cancelled", "本轮处理已停止。"),
         )
         for event_type, payload, terminal_selector, expected in terminal_cases:
             with self.subTest(terminal=event_type):

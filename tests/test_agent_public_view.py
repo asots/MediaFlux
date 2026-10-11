@@ -252,6 +252,7 @@ class AgentKernelPublicViewTests(unittest.TestCase):
             "summary": "文件变更部分完成",
             "data": {
                 "stats": {"total": 1},
+                "scope_note": "仅处理已确认的剧集目录",
                 "operation_items": [{
                     "position": 2,
                     "operation": "relocate",
@@ -267,11 +268,22 @@ class AgentKernelPublicViewTests(unittest.TestCase):
             [("只读查询", {"ok": True, "summary": "已找到相关目录"})],
             confirmed_result=confirmed,
             write_attempted=True,
+            current_errors=["目录详情查询失败"],
         )
 
-        self.assertEqual(result, format_public_result(confirmed))
-        self.assertNotIn("后续写操作尚未执行", result)
-        self.assertNotIn("只读查询", result)
+        receipt = format_public_result(confirmed)
+        self.assertIn(receipt, result)
+        self.assertEqual(result.count(receipt), 1)
+        self.assertIn("后续写操作尚未执行；已确认操作以以上回执为准。", result)
+        self.assertIn("本轮工具核对结果（不代表后续操作已完成）：", result)
+        self.assertIn("只读查询", result)
+        self.assertIn("已找到相关目录", result)
+        self.assertIn("执行范围：仅处理已确认的剧集目录", result)
+        self.assertIn("已移动；改名未完成", result)
+        self.assertIn("写后核验未完成", result)
+        self.assertIn("部分完成：后续查询未完成", result)
+        self.assertIn("未完成的查询：目录详情查询失败", result)
+        self.assertIn("新的写操作仍需确认，不会自动重放。", result)
 
     def test_fs_change_items_do_not_mix_with_read_only_or_candidate_items(self):
         read_only = format_partial_progress(

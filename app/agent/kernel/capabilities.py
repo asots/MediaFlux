@@ -45,6 +45,7 @@ class KernelToolSpec:
     context_requirements: frozenset[str] = frozenset()
     validator: Validator = identity_validator
     read: ToolCallable | None = None
+    observe: ToolCallable | None = None
     prepare: ToolCallable | None = None
     execute_confirmed: ToolCallable | None = None
     verify: ToolCallable | None = None
@@ -281,9 +282,16 @@ class CapabilityRetriever:
         catalog: ToolCatalog,
         *,
         context: Mapping[str, Any] | None = None,
+        include_discoverable_utilities: bool = False,
     ) -> CapabilitySelection:
         runtime = context or {}
-        visible = [tool for tool in catalog.visible(runtime) if not tool.metadata.get("kernel_utility")]
+        visible = [
+            tool for tool in catalog.visible(runtime)
+            if not tool.metadata.get("kernel_utility") or (
+                include_discoverable_utilities is True
+                and tool.metadata.get("query_discoverable") is True
+            )
+        ]
         if not visible:
             return CapabilitySelection((), {})
         query_tokens = _tokens(message)

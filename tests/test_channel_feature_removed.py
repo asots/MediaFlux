@@ -4,8 +4,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
-import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,31 +13,25 @@ from fastapi.testclient import TestClient
 
 from app import database as db
 from app.main import create_app
+from tests.support import initialized_web_runtime
 
 
 class ChannelFeatureRemovalTests(unittest.TestCase):
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.db_patch = patch("app.database.DB_PATH", Path(self.temp.name) / "channel-removed.db")
-        self.db_patch.start()
-        self.env_patch = patch.dict(os.environ, {
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.dict(os.environ, {
             "MEDIAFLUX_INITIALIZED": "1",
             "WEB_SECRET_KEY": "channel-removal-test-secret",
             "ENV_WEB_PASSPORT": "admin",
             "ENV_WEB_PASSWORD": "123456",
-        })
-        self.env_patch.start()
-        db.init_db()
+        }))
+        stack.enter_context(initialized_web_runtime())
         self.client = TestClient(create_app(), raise_server_exceptions=False)
+        stack.callback(self.client.close)
         self._authenticate()
-
-    def tearDown(self):
-        self.client.close()
-        self.env_patch.stop()
-        self.db_patch.stop()
-        self.temp.cleanup()
 
     @staticmethod
     def _csrf(response) -> str:

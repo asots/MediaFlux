@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import unittest
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -80,34 +81,32 @@ class FakeImporter:
 
 class GCIDImportAPITests(InitializedWebTestCase):
     def setUp(self) -> None:
+        # Notifications outlive client/reset/DB cleanup, as in the old tearDown.
+        notifications = ExitStack()
+        self.addCleanup(notifications.close)
+        resources = ExitStack()
+        self.addCleanup(resources.close)
         self.temp = tempfile.TemporaryDirectory()
-        self.db_patch = patch("app.database.DB_PATH", Path(self.temp.name) / "api.db")
-        self.db_patch.start()
-        self.env_patch = patch.dict(os.environ, {
+        resources.callback(self.temp.cleanup)
+        resources.enter_context(patch("app.database.DB_PATH", Path(self.temp.name) / "api.db"))
+        resources.enter_context(patch.dict(os.environ, {
             "MEDIAFLUX_INITIALIZED": "1",
             "WEB_SECRET_KEY": "task8-test-secret",
             "ENV_WEB_PASSPORT": "admin",
             "ENV_WEB_PASSWORD": "123456",
-        })
-        self.env_patch.start()
-        self.enterContext(patch(
+        }))
+        notifications.enter_context(patch(
             "app.modules.telegram_notification_center.send_event_result",
             return_value=notifier.TelegramSendResult(ok=True),
         ))
         reset = getattr(gcid_import, "reset_runtime_state", None)
         if reset:
+            resources.callback(reset)
             reset()
+        db.init_db()
         self.client_context = TestClient(create_app(), raise_server_exceptions=False)
-        self.client = self.client_context.__enter__()
-
-    def tearDown(self) -> None:
-        self.client_context.__exit__(None, None, None)
-        reset = getattr(gcid_import, "reset_runtime_state", None)
-        if reset:
-            reset()
-        self.env_patch.stop()
-        self.db_patch.stop()
-        self.temp.cleanup()
+        resources.callback(self.client_context.close)
+        self.client = resources.enter_context(self.client_context)
 
     @staticmethod
     def _csrf(response) -> str:

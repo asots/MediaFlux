@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
+from contextlib import ExitStack
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,8 +14,29 @@ from app.runtime_paths import RuntimePaths, configure_runtime_paths
 
 class MainHostBindingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        root = Path(self.temp.name)
+        from app import config, database, runtime_paths
+        from app.modules import first_run, web_secret
+
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.temp = stack.enter_context(tempfile.TemporaryDirectory())
+        root = Path(self.temp)
+        # reload mutates module dictionaries in place. Restore the actual prior
+        # bindings, not a new application against the suite's schema-only DB.
+        stack.enter_context(patch.dict(os.environ))
+        stack.callback(configure_runtime_paths, runtime_paths._configured_paths)
+        for module in (config, database, web_secret, first_run):
+            stack.enter_context(patch.dict(module.__dict__))
+        previous_main = sys.modules.get("app.main")
+        if previous_main is not None:
+            stack.enter_context(patch.dict(previous_main.__dict__))
+        else:
+            def remove_new_main():
+                import app
+                sys.modules.pop("app.main", None)
+                app.__dict__.pop("main", None)
+            stack.callback(remove_new_main)
+        stack.callback(self._release_fixture_app)
         self.paths = RuntimePaths(
             program_dir=root / "program",
             data_dir=root / "data",
@@ -29,27 +52,25 @@ class MainHostBindingTests(unittest.TestCase):
         configure_runtime_paths(self.paths)
         self._reload_modules()
 
-    def tearDown(self) -> None:
-        configure_runtime_paths(None)
-        os.environ.clear()
-        os.environ.update(self.environment)
-        # 本测试会 reload 持有运行路径常量的模块；恢复默认路径后也必须再次
-        # reload，避免后续测试继续引用已经清理的临时目录。
-        self._reload_modules()
-        self.temp.cleanup()
+    def _release_fixture_app(self) -> None:
+        main = getattr(self, "main", None)
+        if main is not None:
+            release = getattr(main.app.state, "release_startup_lifecycle_guard", None)
+            if release is not None:
+                release()
 
     def _reload_modules(self) -> None:
         import app.config as config
         import app.database as database
         import app.modules.first_run as first_run
         import app.modules.web_secret as web_secret
-        import app.main as main
 
         importlib.reload(config)
         importlib.reload(database)
         importlib.reload(web_secret)
         importlib.reload(first_run)
         first_run._reset_startup_state_for_tests()
+        import app.main as main
         self.main = importlib.reload(main)
 
     def test_main_run_fresh_defaults_to_loopback(self):
@@ -76,6 +97,8 @@ class MainHostBindingTests(unittest.TestCase):
             "ENV_WEB_PASSPORT=admin\nENV_WEB_PASSWORD=correct-horse\n",
             encoding="utf-8",
         )
+        from tests.test_setup_bootstrap_support import initialize_paths
+        initialize_paths(self.paths)
         self._reload_modules()
         with patch("app.main.uvicorn.run") as run:
             self.main.run()

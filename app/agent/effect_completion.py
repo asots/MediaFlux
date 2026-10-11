@@ -751,6 +751,7 @@ def _effect_reply_key(seed: Mapping[str, Any]) -> str:
 def agent_effect_reply_is_current(event_key: str) -> bool:
     """Outbox 投递前核对签名会话，删除/重置后的迟到通知不再发送。"""
     from app import database as db
+    from app.agent.kernel.conversation_codec import conversation_rows
     from app.agent.kernel.persistence import SQLiteKernelStore
 
     match = re.fullmatch(
@@ -772,11 +773,12 @@ def agent_effect_reply_is_current(event_key: str) -> bool:
             row["state_json"], row["state_hmac"],
             domain=f"state:v1:{owner}:{session}:{row['generation']}".encode(), expected_type=dict,
         )
+        conversation = conversation_rows(payload.get("conversation", []))
     except (ValueError, TypeError):
         return False
     return any(
         hashlib.sha256(str(message.get("completion_receipt_id") or "").encode()).hexdigest() == plan
-        for message in payload.get("conversation") or []
+        for message in conversation
     )
 
 

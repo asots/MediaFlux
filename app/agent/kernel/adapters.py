@@ -12,8 +12,17 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .events import AgentEvent, AgentEventType
+from .projection import _model_safe
 
 EventObserver = Callable[[AgentEvent], Awaitable[None]]
+
+
+def _public_payload(event: AgentEvent) -> dict[str, Any]:
+    """Project result copies only; journal and native identities stay intact."""
+    payload = dict(event.payload)
+    if "result" in payload:
+        payload["result"] = _model_safe(payload["result"])
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +65,7 @@ class TurnView:
     tool_calls: tuple[str, ...] = ()
     event_count: int = 0
     candidate_view: Mapping[str, Any] | None = None
+    task: Mapping[str, Any] | None = None
 
     @property
     def terminal(self) -> bool:
@@ -74,6 +84,8 @@ class TurnView:
             "turn_id": self.turn_id,
             "request_id": self.request_id,
             "status": self.status,
+            "turn_status": self.status,
+            "task": deepcopy(self.task),
             "answer": self.answer,
             "effect_result": deepcopy(dict(self.effect_result)),
             "error": {
@@ -106,6 +118,7 @@ class TurnViewBuilder:
         self._error_code = ""
         self._error_message = ""
         self._tool_calls: list[str] = []
+        self._task: Mapping[str, Any] | None = None
 
     def apply(self, event: AgentEvent) -> None:
         identity = (event.session_id, event.turn_id, event.request_id)
@@ -117,7 +130,9 @@ class TurnViewBuilder:
             raise ValueError("AgentEvent sequence 必须严格递增")
         self._last_sequence = event.sequence
         self._count += 1
-        payload = dict(event.payload)
+        payload = _public_payload(event)
+        if "task" in payload:
+            self._task = deepcopy(payload["task"])
 
         if event.type is AgentEventType.TOOL_PROGRESS and payload.get("candidate_view", False) is None:
             self._candidate_view = None
@@ -213,6 +228,7 @@ class TurnViewBuilder:
             tool_calls=tuple(self._tool_calls),
             event_count=self._count,
             candidate_view=deepcopy(self._candidate_view),
+            task=deepcopy(self._task),
         )
 
 
@@ -240,8 +256,10 @@ async def consume_events(
 
 
 async def iter_ndjson(events: AsyncIterable[AgentEvent]) -> AsyncIterator[bytes]:
-    """将事件原样编码为 Web NDJSON；不等待最终 trace 再伪流式回放。"""
+    """将事件的公开副本编码为 Web NDJSON，不修改冷存储审计。"""
 
     async for event in events:
-        line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        public = event.to_dict()
+        public["payload"] = _public_payload(event)
+        line = json.dumps(public, ensure_ascii=False, separators=(",", ":"))
         yield f"{line}\n".encode()

@@ -192,6 +192,9 @@ class MediaPathMappingTests(IsolatedDatabaseTestCase):
             os.environ.pop(key, None)
 
     def test_mapping_full_crud_preserves_credentials_and_other_server(self):
+        from app.agent.feature_gate import initialize_runtime_fence
+
+        initialize_runtime_fence()
         from app.agent.configuration_management_actions import (
             execute_path_mapping,
             list_path_mappings,

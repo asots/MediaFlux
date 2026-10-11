@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,6 +79,7 @@ class ProviderOperationSpec:
             "description": self.description,
             "risk": self.risk.value,
             "input_schema": ", ".join(field_summaries) or "none",
+            "parameters": deepcopy(dict(self.parameters)),
             "limits": {
                 "max_items": self.max_items,
                 "timeout_seconds": self.timeout_seconds,

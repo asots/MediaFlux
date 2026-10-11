@@ -9,13 +9,15 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from contextlib import nullcontext
 from typing import Any, Protocol
 
-from app.agent.model_context_budget import compact_tool_content, decode_tool_content
+from app.agent.model_context_budget import RESULT_PATH_MAX, compact_tool_content, decode_tool_content
 from app.agent.public_safety import sanitize_public_text
 from app.concurrency import CrossLoopAsyncLock
 
 from .capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from .task_state import TaskPatch, task_tool, observation_patch
 from .effects import (
     ConfirmationEffectPlanStore,
     EffectPlan,
@@ -28,11 +30,14 @@ from .references import InMemoryReferenceStore, ReferenceError, ReferenceStore
 from .session_guard import guarded_state_call, session_scope_guard
 from .state import (
     CancellationToken,
+    PendingEffectGuard,
     PublicationLease,
+    SessionState,
     SessionBusyError,
     SessionStateStore,
     StalePublicationError,
     StateUpdate,
+    _PendingEffectTransition,
 )
 from .ux_selection import (
     CANDIDATE_VIEW_KEY,
@@ -45,9 +50,22 @@ from .ux_selection import (
 
 
 class ToolPipelineError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "tool_failed") -> None:
+    def __init__(self, message: str, *, code: str = "tool_failed", task_patch: TaskPatch | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.task_patch = task_patch
+
+
+class _ReadPermitRejected(ToolPipelineError):
+    """Proven pre-handler denial, issued only at the acquire boundary."""
+    def __init__(self, error, tool_name):
+        ToolPipelineError.__init__(self, str(error), code=error.code)
+        self._rate_limit = error.rate_limit
+        self.tool_name = tool_name
+
+    @property
+    def rate_limit(self):
+        return self._rate_limit
 
 
 class ConfirmationClaimError(ToolPipelineError):
@@ -55,6 +73,20 @@ class ConfirmationClaimError(ToolPipelineError):
 
     def __init__(self) -> None:
         super().__init__("确认计划无效、已过期或已被使用", code="confirmation_invalid")
+
+
+class _SchemaCollisionError(ToolPipelineError):
+    """A root-level, schema-proven collision between exactly two keys."""
+
+    def __init__(self, message: str, keys: frozenset[str]) -> None:
+        super().__init__(message, code="invalid_arguments")
+        self.keys = keys
+
+
+@dataclass
+class _ArgumentRepair:
+    required_keys: set[str] = field(default_factory=set)
+    collisions: set[frozenset[str]] = field(default_factory=set)
 
 
 ProgressSink = Callable[[Mapping[str, Any]], Awaitable[None]]
@@ -76,7 +108,11 @@ class ToolCallContext:
     channel: str = "api"
     completion_scope: Any = None
     confirmed_effect: PipelineResult | None = None
-    argument_repairs: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    argument_repairs: dict[tuple[str, str], _ArgumentRepair] = field(default_factory=dict)
+    current_task: dict | None = None
+    user_source: str = ""
+    user_reply_context: Mapping[str, Any] = field(default_factory=dict)
+    call_id: str = ""
 
     def policy_context(self) -> dict[str, Any]:
         return {
@@ -95,6 +131,7 @@ class PipelineResult:
     outcome: ToolOutcome
     effect_plan: EffectPlan | None = None
     elapsed_ms: int = 0
+    task_patch: TaskPatch | None = None
 
 
 class AuthorizationPolicy(Protocol):
@@ -122,29 +159,6 @@ class EffectLifecycle(Protocol):
         arguments: Mapping[str, Any],
         prepared: PreparedEffect,
         context: ToolCallContext,
-    ) -> PreparedEffect: ...
-
-    def prepare_failed(
-        self, *, prepared: PreparedEffect, context: ToolCallContext
-    ) -> None: ...
-
-    def completed(self, *, plan: EffectPlan, value: Any, elapsed_ms: int) -> None: ...
-
-    def failed(self, *, plan: EffectPlan, code: str, elapsed_ms: int) -> None: ...
-
-    def interrupted(self, *, plan: EffectPlan) -> None: ...
-
-    def cancelled(self, *, plan: EffectPlan) -> None: ...
-
-
-class NoopEffectLifecycle:
-    def prepared(
-        self,
-        *,
-        tool: KernelToolSpec,
-        arguments: Mapping[str, Any],
-        prepared: PreparedEffect,
-        context: ToolCallContext,
     ) -> PreparedEffect:
         del tool, arguments, context
         return prepared
@@ -165,6 +179,10 @@ class NoopEffectLifecycle:
 
     def cancelled(self, *, plan: EffectPlan) -> None:
         del plan
+
+
+class NoopEffectLifecycle(EffectLifecycle):
+    pass
 
 
 class DefaultAuthorizationPolicy:
@@ -241,6 +259,17 @@ _TYPE_CHECKS: dict[str, tuple[type, ...]] = {
 }
 
 
+def _json_unique_key(value: Any) -> Any:
+    """Hash JSON values without conflating booleans and numbers or object order."""
+    if isinstance(value, dict):
+        return ("object", frozenset((key, _json_unique_key(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return ("array", tuple(_json_unique_key(item) for item in value))
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return ("number", value)
+    return (type(value), value)
+
+
 def _validate_json_schema(
     value: Any, schema: Mapping[str, Any], *, path: str = "arguments"
 ) -> None:
@@ -248,10 +277,17 @@ def _validate_json_schema(
         raise ToolPipelineError(message, code="invalid_arguments")
 
     schema_type = schema.get("type")
-    expected = _TYPE_CHECKS.get(schema_type) if isinstance(schema_type, str) else None
-    if expected is not None and (not isinstance(value, expected) or (schema_type in {"integer", "number"} and isinstance(value, bool))):
+    types = [schema_type] if isinstance(schema_type, str) else schema_type
+    if isinstance(types, list) and not any(
+        isinstance(value, _TYPE_CHECKS.get(kind, ()))
+        and not (kind in {"integer", "number"} and isinstance(value, bool))
+        for kind in types
+    ):
         invalid(f"{path} 类型无效")
-    if "enum" in schema and value not in schema.get("enum", ()):
+    if "enum" in schema and not any(
+        _json_unique_key(value) == _json_unique_key(option)
+        for option in schema["enum"]
+    ):
         invalid(f"{path} 不在允许范围内")
     if isinstance(value, str):
         if len(value) < int(schema.get("minLength", 0) or 0):
@@ -281,9 +317,69 @@ def _validate_json_schema(
             child = properties.get(key)
             if isinstance(child, Mapping):
                 _validate_json_schema(item, child, path=f"{path}.{key}")
-    if isinstance(value, (list, tuple)) and isinstance(schema.get("items"), Mapping):
-        for index, item in enumerate(value):
-            _validate_json_schema(item, schema["items"], path=f"{path}[{index}]")
+        if schema.get("minProperties") is not None and len(value) < schema["minProperties"]:
+            invalid(f"{path} 参数数量少于允许值 {schema['minProperties']}")
+        if schema.get("maxProperties") is not None and len(value) > schema["maxProperties"]:
+            if (path == "arguments" and schema["maxProperties"] == 1 and len(value) == 2
+                    and all(key in properties and item is not None for key, item in value.items())):
+                # Equivalent to the existing two-key presence exclusion: allow
+                # omission repair, but retain required keys and older value locks.
+                raise _SchemaCollisionError(
+                    f"{path}：" + "、".join(sorted(value)) + " 只能提供其中一个", frozenset(value),
+                )
+            invalid(f"{path} 参数数量超过允许值 {schema['maxProperties']}")
+    if isinstance(value, (list, tuple)):
+        if isinstance(schema.get("items"), Mapping):
+            for index, item in enumerate(value):
+                _validate_json_schema(item, schema["items"], path=f"{path}[{index}]")
+        if schema.get("minItems") is not None and len(value) < schema["minItems"]:
+            invalid(f"{path} 项数少于允许值 {schema['minItems']}")
+        if schema.get("maxItems") is not None and len(value) > schema["maxItems"]:
+            invalid(f"{path} 项数超过允许值 {schema['maxItems']}")
+        if schema.get("uniqueItems") is True:
+            seen = set()
+            for index, item in enumerate(value):
+                key = _json_unique_key(item)
+                if key in seen:
+                    invalid(f"{path}[{index}] 与此前项重复")
+                seen.add(key)
+
+    def matches(branch: Mapping[str, Any]) -> bool:
+        try:
+            _validate_json_schema(value, branch, path=path)
+        except ToolPipelineError:
+            return False
+        return True
+
+    def invalid_combination(message: str, groups: Any) -> None:
+        # Only pure two-key presence exclusions are omission-repairable. Nested
+        # and value-dependent branches remain fail-closed, not inferred from text.
+        if path == "arguments" and isinstance(value, dict) and isinstance(groups, list):
+            if len(groups) == 2 and all(
+                isinstance(branch, Mapping) and set(branch) == {"required"}
+                and isinstance(branch["required"], list) and len(branch["required"]) == 1
+                and isinstance(branch["required"][0], str) for branch in groups
+            ):
+                keys = frozenset(branch["required"][0] for branch in groups)
+                if len(keys) == 2 and all(value.get(key) is not None for key in keys):
+                    raise _SchemaCollisionError(
+                        message + "：" + "、".join(sorted(keys)) + " 只能提供其中一个", keys,
+                    )
+        invalid(message)
+
+    for keyword in ("oneOf", "anyOf"):
+        branches = schema.get(keyword)
+        if isinstance(branches, list):
+            matched = sum(matches(branch) for branch in branches)
+            if (keyword == "oneOf" and matched != 1) or (keyword == "anyOf" and not matched):
+                invalid_combination(f"{path} 不符合 {keyword} 参数组合约束",
+                                    branches if keyword == "oneOf" else None)
+    forbidden = schema.get("not")
+    if isinstance(forbidden, Mapping) and matches(forbidden):
+        required = forbidden.get("required")
+        groups = ([{"required": [key]} for key in required]
+                  if set(forbidden) == {"required"} and isinstance(required, list) else None)
+        invalid_combination(f"{path} 不允许此参数组合（not）", groups)
 
 
 async def _invoke(
@@ -303,8 +399,6 @@ async def _invoke(
             return await value
         return value
     except ToolPipelineError:
-        raise
-    except asyncio.CancelledError:
         raise
     except Exception as exc:
         raise ToolPipelineError("工具执行失败", code="tool_execution_failed") from exc
@@ -333,13 +427,15 @@ class ToolPipeline:
         self.authorization = authorization or DefaultAuthorizationPolicy()
         self.rate_limiter = rate_limiter or InMemoryRateLimiter()
         self.effect_lifecycle = effect_lifecycle or NoopEffectLifecycle()
+        if not catalog.has("agent.task"):
+            catalog.register(task_tool())
         if not catalog.has("agent.read_result"):
             catalog.register(KernelToolSpec(
                 name="agent.read_result", domain="agent", effect=ToolEffect.READ,
-                description="续取被截断的工具结果；只读同一用户会话的脱敏快照，不重新执行业务。handle取result_handle，path取truncation.path(JSON Pointer)，按next_offset继续。",
+                description="续取同一用户会话的冻结脱敏快照，不重新执行业务。handle=result_handle；path=truncation.path（原快照JSON Pointer，空串为根）；offset=next_offset。total为原节点长度，returned仅计当前直接项/字符，不保证子项完整。scope=subtree表示祖先覆盖所有省略，须从其next_offset重读，用更小limit并按字典key或数组原索引下钻；否则续接前缀。页data.next_offset仅翻同级页；有truncation必须另取子项，即使data.has_more=false。字符串偏移按Unicode字符。元数据或键无法安全分页时报context_budget_exceeded，不应原参数重试。",
                 input_schema={"type": "object", "required": ["handle", "path"], "properties": {
                     "handle": {"type": "string", "minLength": 1, "maxLength": 200},
-                    "path": {"type": "string", "pattern": "^(/.*)?$", "maxLength": 1000},
+                    "path": {"type": "string", "pattern": "^(/.*)?$", "maxLength": RESULT_PATH_MAX},
                     "offset": {"type": "integer", "minimum": 0},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                 }, "additionalProperties": False},
@@ -347,16 +443,27 @@ class ToolPipeline:
             ))
 
     async def _read_result(self, arguments: dict[str, Any], context: ToolCallContext) -> ToolOutcome:
+        from . import telegram_reference
         handle = arguments["handle"]
+        reference = None
         try:
             manifest = await self.reference_store.resolve(handle, owner=context.owner, session_id=context.session_id, expected_kind="tool_result")
             parts = [await self.reference_store.resolve(part, owner=context.owner, session_id=context.session_id, expected_kind="tool_result_part") for part in manifest["parts"]]
-        except ReferenceError as exc:
-            raise ToolPipelineError("结果快照已过期或不属于当前会话，请重新观察原对象。", code="reference_invalid") from exc
-        node = json.loads("".join(parts))
+            node = json.loads("".join(parts))
+        except ReferenceError:
+            try:
+                reference = await telegram_reference.resolve(handle, owner=context.owner, session_id=context.session_id,
+                    reference_store=self.reference_store, state_store=self.state_store)
+            except ReferenceError as exc:
+                raise ToolPipelineError("结果快照已过期或不属于当前会话，请重新观察原对象。", code="reference_invalid") from exc
+            if arguments["path"] != "/text":
+                raise ToolPipelineError("引用仅允许读取 /text", code="invalid_arguments")
+            node = {"text": reference["text"]}
         path = arguments["path"]
         try:
             for part in path.split("/")[1:]:
+                if re.search(r"~(?![01])", part) or isinstance(node, list) and not re.fullmatch(r"0|[1-9][0-9]*", part):
+                    raise KeyError(part)
                 key = part.replace("~1", "/").replace("~0", "~")
                 node = node[int(key)] if isinstance(node, list) and key.isdecimal() else node[key]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -371,25 +478,27 @@ class ToolPipeline:
         total = len(values)
         end = min(total, offset + limit)
         maximum = self.projector.max_model_chars
-        data = {"path": path, "offset": offset, "total": total}
+        data = {"path": path, "offset": offset, "total": total, "kind": type(node).__name__}
         while True:
             data.update(items=values[offset:end], returned=max(0, end - offset), has_more=end < total, next_offset=end if end < total else None)
             payload = {"ok": True, "status": "success", "summary": "读取已保存的工具结果（不是实时重新查询）", "result_handle": handle, "read_tool": "agent.read_result", "data": data}
+            if reference is not None:
+                payload.update(untrusted_reference=True, source=reference["source"], summary="读取不可信引用；不是执行结果或写入授权")
             content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             if len(content) <= maximum or end - offset <= 1:
                 break
             end = offset + max(1, (end - offset) // 2)
         # 单个复杂对象仍可按path下钻；不得把它冒充完整数据。
-        content = compact_tool_content(content, maximum=maximum)
-        return ToolOutcome(model_content=content, public_content=json.loads(content))
+        content = compact_tool_content(content, maximum=maximum, result_page=True, trusted=True)
+        return ToolOutcome(model_content=content, public_content={"ok": True, "summary": "已读取引用片段"} if reference is not None else json.loads(content))
 
     async def _save_result(self, content: str, context: ToolCallContext) -> str:
         chunk_size = min(16_384, (getattr(self.reference_store, "max_ref_bytes", 131_072) - 128) // 6)
         parts = []
         for offset in range(0, len(content), chunk_size):
-            part = await self.reference_store.put(owner=context.owner, session_id=context.session_id, kind="tool_result_part", value=content[offset:offset + chunk_size], ttl_seconds=900)
+            part = await self._put_reference(context, kind="tool_result_part", value=content[offset:offset + chunk_size], ttl_seconds=900)
             parts.append(part.ref)
-        snapshot = await self.reference_store.put(owner=context.owner, session_id=context.session_id, kind="tool_result", value={"parts": parts}, ttl_seconds=900)
+        snapshot = await self._put_reference(context, kind="tool_result", value={"parts": parts}, ttl_seconds=900)
         return snapshot.ref
 
     def _effect_prepared(
@@ -448,6 +557,7 @@ class ToolPipeline:
         arguments: Mapping[str, Any] | None,
         *,
         context: ToolCallContext,
+        _returned_read=None,
     ) -> PipelineResult:
         started = time.monotonic()
         context.cancellation.raise_if_cancelled()
@@ -478,14 +588,27 @@ class ToolPipeline:
         repair_key = (tool.name, json.dumps(
             [raw_arguments.get(key) for key in tool.input_schema.get("required", ())], sort_keys=True, default=str,
         ))
-        omitted = context.argument_repairs.get(repair_key, set()) - raw_arguments.keys()
+        repair = context.argument_repairs.get(repair_key)
+        omitted = repair.required_keys - raw_arguments.keys() if repair else set()
+        if repair:
+            for collision in repair.collisions:
+                if not any(raw_arguments.get(key) is not None for key in collision):
+                    omitted.update(collision)
         if omitted:
             raise ToolPipelineError("参数修复不能省略此前已提供的字段：" + "、".join(sorted(omitted)) + "；请修正值，不要删除字段退回默认值。", code="invalid_arguments")
         try:
             _validate_json_schema(raw_arguments, tool.input_schema)
-        except ToolPipelineError:
-            # None仅为空占位（例如电影误传season=null），不能强迫重试保留无效字段。
-            context.argument_repairs.setdefault(repair_key, set()).update(key for key, value in raw_arguments.items() if value is not None and key in tool.input_schema.get("properties", {}))
+        except ToolPipelineError as exc:
+            repair = context.argument_repairs.setdefault(repair_key, _ArgumentRepair())
+            collision = exc.keys if isinstance(exc, _SchemaCollisionError) else frozenset()
+            if collision:
+                repair.collisions.add(collision)
+            # Never relax older value-error locks or the required identity fence.
+            repair.required_keys.update(
+                key for key, value in raw_arguments.items()
+                if value is not None and key in tool.input_schema.get("properties", {})
+                and (key not in collision or key in tool.input_schema.get("required", ()))
+            )
             raise
         try:
             normalized = tool.validator(raw_arguments)
@@ -510,16 +633,20 @@ class ToolPipeline:
         plan = completed.effect_plan if completed else None
         if (
             completed and plan and tool.effect is not ToolEffect.READ
-            and (plan.owner, plan.session_id, plan.generation) == (context.owner, context.session_id, context.lease.generation)
+            and (plan.owner, plan.session_id) == (context.owner, context.session_id)
             and tool.name == completed.tool.name and normalized == completed.arguments
             and completed.outcome.public_content.get("ok") is not False
         ):
+            authoritative = await self.state_store.load(owner=context.owner, session_id=context.session_id)
             if not await self.state_store.is_current(context.lease):
                 raise StalePublicationError("turn lost publication authority")
-            # 只回读本次确认的事实，不重放写操作、票据、引用或状态更新。
-            outcome = replace(completed.outcome, refs=(), state_updates=(), effect_plan=None,
-                              model_content="本轮该操作已确认执行；以下为原回执，不是再次执行。\n" + completed.outcome.model_message())
-            return PipelineResult(tool=tool, arguments=normalized, outcome=outcome)
+            if authoritative.metadata.get("confirmed_publication") == {
+                "generation": context.lease.generation, "turn_id": context.lease.turn_id, "plan_id": plan.plan_id,
+            }:
+                # 只回读本次确认的事实，不重放写操作、票据、引用或状态更新。
+                outcome = replace(completed.outcome, refs=(), state_updates=(), effect_plan=None,
+                                  model_content="本轮该操作已确认执行；以下为原回执，不是再次执行。\n" + completed.outcome.model_message())
+                return PipelineResult(tool=tool, arguments=normalized, outcome=outcome)
 
         if tool.effect is ToolEffect.READ:
             if tool.read is None:  # pragma: no cover - ToolSpec 已校验
@@ -532,8 +659,42 @@ class ToolPipeline:
                     StateUpdate(f"metadata.{CANDIDATE_VIEW_KEY}", None),
                 ))
                 await context.report_progress({"tool": tool.name, "candidate_view": None})
-            value = await _invoke(tool.read, resolved, context)
+            try:
+                value = await _invoke(tool.read, resolved, context)
+            except ToolPipelineError as exc:
+                if tool.observe is not None:
+                    exc.task_patch = observation_patch(context.current_task, owner=context.owner,
+                        session_id=context.session_id, tool=tool.name, call_id=context.call_id,
+                        component=normalized.get("component", ""), fact=None)
+                raise
+            patch = value if isinstance(value, TaskPatch) else None
+            if tool.observe is not None and context.current_task is not None:
+                fact = tool.observe(value, normalized)
+                patch = observation_patch(context.current_task, owner=context.owner,
+                    session_id=context.session_id, tool=tool.name, call_id=context.call_id,
+                    component=normalized.get("component", ""), fact=fact)
+                if patch is not None and fact is None:
+                    raise ToolPipelineError("配置观察结果不符合证据合同。", code="invalid_observation", task_patch=patch)
+            if isinstance(value, TaskPatch):
+                value = {"ok": True, "summary": "Task proposal"}
             projected = self.projector.project(value)
+            if _returned_read is not None:
+                from .state import _CancelledReadInline
+                from .projection import _model_safe
+                # Direct compact ToolOutcome envelopes do not prove a full source.
+                if type(_returned_read) is _CancelledReadInline and _returned_read.tool is tool:
+                    if patch is None and (not isinstance(value, ToolOutcome) or projected.full_model_content):
+                        full = projected.full_model_content or projected.model_content
+                        _returned_read.put_once(json.dumps(_model_safe(json.loads(full)), ensure_ascii=False))
+                    else:
+                        _returned_read.reject_incomplete()
+            # Later Session/history pressure can reduce a result to 400 chars.
+            # Freeze this already-safe source before that loss, using the same
+            # scoped TTL store. Reader pages already point at their source:
+            # never snapshot them again or replace their original coordinates.
+            snapshot_only = tool.name != "agent.read_result" and not projected.full_model_content and len(projected.model_content) > 400
+            if snapshot_only:
+                projected = replace(projected, full_model_content=projected.model_content)
             if resource_search and not any(item.kind == RESOURCE_KIND for item in projected.refs):
                 public = candidate_result(projected.public_content, None)
                 projected = replace(
@@ -546,6 +707,7 @@ class ToolPipeline:
             outcome = await self._materialize_refs(
                 projected, context=context,
                 selected_positions=normalized["positions"] if resource_presentation else None,
+                preserve_native=snapshot_only,
             )
             await self._commit_updates(context.lease, outcome.state_updates)
             return PipelineResult(
@@ -553,6 +715,7 @@ class ToolPipeline:
                 arguments=normalized,
                 outcome=outcome,
                 elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+                task_patch=patch,
             )
 
         if tool.prepare is None:  # pragma: no cover - ToolSpec 已校验
@@ -597,7 +760,12 @@ class ToolPipeline:
                     raise
                 try:
                     updates = tuple(preview_outcome.state_updates) + (
-                        StateUpdate("pending_effect_plan_id", plan.plan_id),
+                        _PendingEffectTransition(
+                            "pending_effect_plan_id", plan.plan_id, plan_generation=plan.generation,
+                            goal=({"role": "user", "content": context.user_source,
+                                   **({"reply_context": dict(context.user_reply_context)} if context.user_reply_context else {})}
+                                  if context.user_source else {}),
+                        ),
                     )
                     if tool.name == "ingest.submit" and raw_arguments.get("source_type") == RESOURCE_KIND:
                         updates += (StateUpdate("metadata.ux_candidate_plan", {
@@ -623,6 +791,31 @@ class ToolPipeline:
             self._notify_effect("prepare_failed", prepared=prepared_value, context=context)
             raise
 
+    @staticmethod
+    def _pending_generation(state: SessionState) -> int | None:
+        binding = state.metadata.get("pending_effect_binding")
+        if binding is None:
+            return state.generation
+        if (isinstance(binding, Mapping) and set(binding) == {"plan_id", "plan_generation"}
+                and binding.get("plan_id") == state.pending_effect_plan_id
+                and type(binding.get("plan_generation")) is int
+                and 0 < binding["plan_generation"] <= state.generation):
+            return binding["plan_generation"]
+        return None
+
+    async def get_pending_plan(self, *, owner: str, session_id: str, scoped: bool = False) -> EffectPlan | None:
+        with nullcontext() if scoped else session_scope_guard(owner, session_id):
+            state = await self.state_store.load(owner=owner, session_id=session_id)
+            generation = self._pending_generation(state)
+            if not state.pending_effect_plan_id or generation is None:
+                return None
+            return await asyncio.to_thread(self.effect_store.get_active_plan,
+                owner=owner, session_id=session_id, generation=generation, plan_id=state.pending_effect_plan_id)
+
+    def pending_guard(self, state: SessionState, plan: EffectPlan) -> PendingEffectGuard:
+        clock = getattr(getattr(self.effect_store, "store", None), "_clock", time.time)
+        return PendingEffectGuard(state.generation, plan.plan_id, plan.generation, plan.expires_at, clock)
+
     async def execute_confirmed(
         self, plan_id: str, *, context: ToolCallContext,
     ) -> PipelineResult:
@@ -640,12 +833,18 @@ class ToolPipeline:
         current = await self.state_store.load(owner=context.owner, session_id=context.session_id)
         if current.generation != context.lease.generation:
             raise StalePublicationError("turn lost publication authority")
+        pending = await self.get_pending_plan(owner=context.owner, session_id=context.session_id, scoped=True)
+        if pending is None or pending.plan_id != plan_id:
+            await self._commit_updates(context.lease, (
+                _PendingEffectTransition("pending_effect_plan_id", plan_id, mode="clear_if_equals"),
+            ))
+            raise ConfirmationClaimError()
         try:
             plan = await asyncio.to_thread(
                 self.effect_store.claim,
                 owner=context.owner,
                 session_id=context.session_id,
-                generation=context.lease.generation,
+                generation=pending.generation,
                 plan_id=plan_id,
             )
         except ToolPipelineError:
@@ -654,7 +853,7 @@ class ToolPipeline:
             # 只有确定失效的当前计划才清理；存储故障不能撤销仍可确认的计划。
             if isinstance(exc, EffectPlanError) and current.pending_effect_plan_id == plan_id:
                 await self._commit_updates(context.lease, (
-                    StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),
+                    _PendingEffectTransition("pending_effect_plan_id", plan_id, mode="clear_if_equals"),
                 ))
             raise ConfirmationClaimError() from exc
 
@@ -672,7 +871,7 @@ class ToolPipeline:
                             "plan_id": plan.plan_id,
                         },
                     ),
-                    StateUpdate(
+                    _PendingEffectTransition(
                         "pending_effect_plan_id",
                         plan.plan_id,
                         mode="clear_if_equals",
@@ -756,22 +955,25 @@ class ToolPipeline:
         self, plan_id: str, *, lease: PublicationLease,
     ) -> bool:
         with session_scope_guard(lease.owner, lease.session_id, kind="effect"):
-            cancelled_plan = await asyncio.to_thread(
-                self.effect_store.cancel,
-                owner=lease.owner,
-                session_id=lease.session_id,
-                generation=lease.generation,
-                plan_id=plan_id,
-            )
-            if cancelled_plan is not None:
-                self._notify_effect("cancelled", plan=cancelled_plan)
-            # 过期的当前票据也应清理，但旧票据不能清掉新 pending。
-            # 比较在 store.commit 原子应用时执行，而不是先 load 再无条件写。
-            await self._commit_updates(
-                lease,
-                (StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),),
-            )
-            return cancelled_plan is not None
+            return await self._cancel_effect_scoped(plan_id, lease=lease)
+
+    async def _cancel_effect_scoped(self, plan_id: str, *, lease: PublicationLease) -> bool:
+        current = await self.state_store.load(owner=lease.owner, session_id=lease.session_id)
+        if current.generation != lease.generation:
+            raise StalePublicationError("turn lost publication authority")
+        if current.pending_effect_plan_id != plan_id:
+            return False
+        generation = self._pending_generation(current)
+        cancelled_plan = await asyncio.to_thread(
+            self.effect_store.cancel, owner=lease.owner, session_id=lease.session_id,
+            generation=generation if generation is not None else current.generation, plan_id=plan_id,
+        )
+        if cancelled_plan is not None:
+            self._notify_effect("cancelled", plan=cancelled_plan)
+        await self._commit_updates(lease, (
+            _PendingEffectTransition("pending_effect_plan_id", plan_id, mode="clear_if_equals"),
+        ))
+        return cancelled_plan is not None
 
     async def _authorize(
         self, tool: KernelToolSpec, arguments: dict[str, Any], context: ToolCallContext, *, confirmation: bool = False,
@@ -784,11 +986,29 @@ class ToolPipeline:
                 code="confirmation_stale" if confirmation else "reference_invalid",
             ) from exc
         await self.authorization.authorize(tool, resolved, context)
-        await self.rate_limiter.acquire(
-            owner=context.owner, tool_name=f"confirm:{tool.name}" if confirmation else tool.name,
-            cost=max(1.0, tool.cost) if confirmation else tool.cost, arguments=resolved,
-        )
+        from .ports.mediaflux_policy import ToolRateLimitError
+        try:
+            await self.rate_limiter.acquire(
+                owner=context.owner, tool_name=f"confirm:{tool.name}" if confirmation else tool.name,
+                cost=max(1.0, tool.cost) if confirmation else tool.cost, arguments=resolved,
+            )
+        except ToolRateLimitError as exc:
+            if not confirmation and tool.effect is ToolEffect.READ and not tool.name.startswith("agent."):
+                class RejectedReadPermit(_ReadPermitRejected, ToolRateLimitError):
+                    pass
+                raise RejectedReadPermit(exc, tool.name) from exc
+            raise
         context.cancellation.raise_if_cancelled()
+        # A preview cannot reenter a held confirmation, even with an old lease.
+        # Reject busy before stale so the confirmed receipt can finish settling.
+        scope = (session_scope_guard(context.owner, context.session_id)
+                 if not confirmation and tool.effect is not ToolEffect.READ else nullcontext())
+        with scope:
+            if context.lease.read_wait_id:
+                # Same-connection fence check linearizes handler start after acquire.
+                await self.state_store.commit(context.lease)
+            elif not await self.state_store.is_current(context.lease):
+                raise StalePublicationError("turn revoked before handler")
         return resolved
 
     async def _resolve_references(
@@ -824,12 +1044,22 @@ class ToolPipeline:
             ]
         return value
 
+
+    async def _put_reference(self, context, **kwargs):
+        put = getattr(self.reference_store, "put_for_turn", None)
+        if put is not None:
+            return await put(context.lease, owner=context.owner, session_id=context.session_id, **kwargs)
+        if not await self.state_store.is_current(context.lease):
+            raise StalePublicationError("turn revoked before reference")
+        return await self.reference_store.put(owner=context.owner, session_id=context.session_id, **kwargs)
+
     async def _materialize_refs(
         self,
         outcome: ToolOutcome,
         *,
         context: ToolCallContext,
         selected_positions: list[int] | None = None,
+        preserve_native: bool = False,
     ) -> ToolOutcome:
         if not outcome.refs and not outcome.full_model_content:
             return outcome
@@ -843,9 +1073,8 @@ class ToolPipeline:
                 raise ToolPipelineError(
                     "工具返回了无效引用", code="invalid_tool_result"
                 )
-            reference = await self.reference_store.put(
-                owner=context.owner,
-                session_id=context.session_id,
+            reference = await self._put_reference(
+                context,
                 kind=item.kind,
                 value=item.value,
                 ttl_seconds=item.ttl_seconds,
@@ -889,11 +1118,25 @@ class ToolPipeline:
                     "positions": candidate_view["recommended_positions"], "target": "preferred",
                 }
         model_content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        if len(model_content) > self.projector.max_model_chars:
+        # Reference appendices can also become lossy in the later 400-char pass.
+        if outcome.full_model_content or len(model_content) > 400:
             handle = await self._save_result(model_content, context)
-            payload.update(result_handle=handle, read_tool="agent.read_result")
             public.update(result_handle=handle, read_tool="agent.read_result")
-            model_content = compact_tool_content(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), maximum=self.projector.max_model_chars)
+            try:
+                payload = decode_tool_content(compact_tool_content(model_content, maximum=self.projector.max_model_chars, trusted=not bool(outcome.full_model_content)))
+                payload.update(result_handle=handle, read_tool="agent.read_result")
+                model_content = compact_tool_content(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), maximum=self.projector.max_model_chars, trusted=True)
+            except ToolPipelineError as exc:
+                # Eager snapshots must not narrow the pre-projected ToolOutcome
+                # domain: atomic status/code facts may fit native history even
+                # when they cannot fit a compact continuation envelope. Keep the
+                # original fact (never infer success from the public summary).
+                # The complete scoped snapshot remains publicly readable; normal
+                # Session/provider/state admission still applies without changes.
+                if (exc.code != "context_budget_exceeded" or not preserve_native or exposed or has_candidates
+                        or outcome.full_model_content != outcome.model_content):
+                    raise
+                model_content = outcome.model_content
         updates = tuple(outcome.state_updates) + (
             StateUpdate("recent_refs", [item["ref"] for item in exposed], mode="append"),
             StateUpdate("ref_kinds", [item["kind"] for item in exposed], mode="append"),

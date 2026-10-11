@@ -33,9 +33,10 @@ from app.agent.kernel.state import (
     SelectionInvalidError,
     SessionBusyError,
 )
-from app.agent.kernel.transports import EffectEnvelope, QueryEnvelope
+from app.agent.kernel.transports import EffectEnvelope, ExplainEnvelope, QueryEnvelope
+from app.agent.kernel.task_state import classify_public_task
 from app.agent.owner_routes import configured_telegram_user_ids
-from app.agent.public_safety import public_tool_label
+from app.agent.public_safety import public_tool_label, sanitize_public_text
 from app.agent.public_view import format_public_result
 from app.agent.rate_limit import agent_rate_limiter
 from app.bot.progress import TelegramProgress, send_typing
@@ -57,7 +58,7 @@ _MAX_MESSAGE = 3900
 _QUERY_LIMIT_PER_MINUTE = 12
 _CALLBACK_LIMIT_PER_MINUTE = 40
 _CALLBACK_RE = re.compile(
-    r"^agk:(?P<action>[cx]):(?:(?P<route>[A-Za-z0-9_-]{8,16}):)?"
+    r"^agk:(?P<action>[cxe]):(?:(?P<route>[A-Za-z0-9_-]{8,16}):)?"
     r"(?P<plan>[A-Za-z0-9_-]{16,96})$"
 )
 _PATROL_PROMPTS = {
@@ -331,6 +332,33 @@ def _preview_lines(
     return lines
 
 
+def _task_summary(task: Any) -> str:
+    status = classify_public_task(task)
+    labels = {
+        "complete": "已声明检查项已核验",
+        "partial": "已声明检查项尚未全部核验",
+        "blocked": "存在阻塞",
+        "cancelled": "会话声明任务已取消",
+        "untracked": "未建立任务验收清单",
+        "unknown": "任务验收状态未知",
+    }
+    lines = ["会话声明任务快照：" + labels[status]]
+    if status in {"untracked", "unknown"}:
+        return lines[0]
+
+    def safe(value: str) -> str:
+        return _safe_text(sanitize_public_text(value, limit=240), limit=240) or "（内容已隐藏）"
+
+    lines.append("目标：" + safe(task["root_goal"]))
+    remaining = set(task["remaining_obligation_ids"])
+    descriptions = [item["description"] for item in task["obligations"] if item["id"] in remaining]
+    lines.extend("待核验：" + safe(value) for value in descriptions[:4])
+    lines.extend("阻塞：" + safe(item["text"]) for item in task["blockers"][:3])
+    if len(descriptions) > 4 or len(task["blockers"]) > 3:
+        lines.append("仅显示部分检查项与阻塞。")
+    return "\n".join(lines)
+
+
 def _render_turn(view: TurnView) -> str:
     if view.status in {"success", "partial"}:
         chain = _tool_chain_line(view.tool_calls)
@@ -344,7 +372,7 @@ def _render_turn(view: TurnView) -> str:
                 if view.effect_result else "执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。")
     elif view.status == "cancelled":
         body = (format_public_result(view.effect_result) + "\n\n已停止后续处理；已完成操作不会撤销。"
-                if view.effect_result else "已停止本次任务。")
+                if view.effect_result else "已停止本轮处理。")
     elif view.status == "failed":
         body = (format_public_result(
             {**view.effect_result, "ok": False,
@@ -354,8 +382,8 @@ def _render_turn(view: TurnView) -> str:
     elif view.status == "approval_required":
         body = "等待确认。"
     else:
-        body = _safe_text(view.answer or "任务已结束。")
-    return render_telegram_markdown(body)
+        body = _safe_text(view.answer or "本轮处理已结束。")
+    return render_telegram_markdown(body + "\n\n" + _task_summary(view.task))
 
 
 class _ExistingMessageProgress(TelegramProgress):
@@ -542,6 +570,9 @@ def _approval_markup(
         telebot_module.types.InlineKeyboardButton(
             "取消", callback_data=callback_prefix.format(action="x") + approval.plan_id
         ),
+        telebot_module.types.InlineKeyboardButton(
+            "只解释影响", callback_data=callback_prefix.format(action="e") + approval.plan_id
+        ),
     )
     return markup
 
@@ -555,8 +586,18 @@ def _reply_context(message: Any) -> dict[str, Any]:
         or getattr(replied, "text", "")
         or getattr(replied, "caption", "")
         or ""
-    ).strip()
-    return {"text": text[:2_000]} if text else {}
+    )
+    if not text.strip():
+        return {}
+    kind = "quote" if getattr(quote, "text", "") else "text" if getattr(replied, "text", "") else "caption"
+    return {"text": text, "source": {
+        "kind": kind,
+        "chat_id": str(getattr(getattr(replied, "chat", None) or getattr(message, "chat", None), "id", "")),
+        "message_id": getattr(replied, "message_id", None),
+        "thread_id": getattr(replied, "message_thread_id", None),
+        "incoming_message_id": getattr(message, "message_id", None),
+        "incoming_thread_id": getattr(message, "message_thread_id", None),
+    }}
 
 
 def _execute_query(
@@ -619,8 +660,9 @@ def _execute_query(
             body = "\n".join(
                 _preview_lines(view.approval, tool_calls=view.tool_calls)
             )
-            progress.finish(
-                body,
+            body += "\n\n" + render_telegram_markdown(_task_summary(view.task))
+            progress.finish_many(
+                split_telegram_html(body, limit=_MAX_MESSAGE),
                 reply_markup=_approval_markup(
                     telebot_module,
                     view.approval,
@@ -805,6 +847,21 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         except Exception:  # noqa: BLE001 - 无法核对当前计划时不触发任何写入
             bot.answer_callback_query(call.id, "当前计划暂时无法核对，请稍后重试。", show_alert=True)
             return
+    if match.group("action") == "e":
+        bot.answer_callback_query(call.id, "只解释，不执行或修改计划")
+        try:
+            view = asyncio.run(runtime.telegram.explain(ExplainEnvelope(
+                owner=envelope.owner, session_id=envelope.session_id, plan_id=envelope.plan_id,
+                request_id=envelope.request_id, channel="telegram",
+                message="请只解释这张冻结计划的影响、范围和可撤销性，不执行或修改计划。",
+            )))
+            body = _render_turn(view) + "\n\n原确认按钮仍可使用（有效期不延长）。普通回复将替换待确认计划。"
+            for text in split_telegram_html(body, limit=_MAX_MESSAGE):
+                bot.send_message(call.message.chat.id, text, parse_mode="HTML", message_thread_id=message_thread_id)
+        except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
+            logger.warning("Telegram Agent 解释失败 type=%s", type(exc).__name__)
+            bot.send_message(call.message.chat.id, "解释未完成，未执行或修改计划。", message_thread_id=message_thread_id)
+        return
     if match.group("action") == "x":
         try:
             discarded = asyncio.run(
@@ -847,7 +904,7 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
             notice = "⚠️ 这次确认未被接受\n" + _render_turn(view)
             notice += "\n\n请先查询任务状态；若尚未执行，请重新生成预览后确认。"
             _settle_candidate_draft(owner, session_id, envelope.plan_id, notice)
-            progress.finish(notice, clear_reply_markup=True)
+            progress.finish_many(split_telegram_html(notice, limit=_MAX_MESSAGE), clear_reply_markup=True)
             return
         if view.approval is not None:
             receipt = render_telegram_markdown(format_public_result(view.effect_result)) if view.effect_result else ""
@@ -860,6 +917,7 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
                 refresh_notice
                 + (receipt + "\n\n" if receipt else "")
                 + "\n".join(_preview_lines(view.approval, tool_calls=view.tool_calls))
+                + "\n\n" + render_telegram_markdown(_task_summary(view.task))
             )
             markup = _approval_markup(
                 telebot_module,
@@ -1035,7 +1093,7 @@ def _telegram_model_page(
             timeout_seconds=_TELEGRAM_MODEL_LIST_TIMEOUT_SECONDS,
         )
     )
-    current_model = get_telegram_model_preference(owner, session_id) or settings.model
+    current_model = get_telegram_model_preference(owner, session_id, settings=settings) or settings.model
     page_count = max(1, (len(models) + _TELEGRAM_MODEL_PAGE_SIZE - 1) // _TELEGRAM_MODEL_PAGE_SIZE)
     page = max(0, min(int(page), page_count - 1))
     start = page * _TELEGRAM_MODEL_PAGE_SIZE

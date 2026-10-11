@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from functools import partial
 from typing import Any
 
 from app.agent.confirmation_contract import build_confirmation_contract
@@ -147,8 +148,45 @@ def _related_tools(spec: ToolSpec) -> tuple[str, ...]:
     )
 
 
+def observe_configuration(value: Any, arguments: dict) -> dict | None:
+    if not isinstance(value, ToolResult) or value.ok is not True:
+        return None
+    data = value.data
+    if not isinstance(data, dict) or arguments.get("component") not in {"tmdb", "qbittorrent"}:
+        return None
+    if (data.get("component") != arguments["component"]
+            or value.status != data.get("status")
+            or data.get("status") not in {"ready", "incomplete", "not_configured"}
+            or type(data.get("enabled")) is not bool
+            or data.get("probe_mode") != "configuration_only"
+            or data.get("network_accessed") is not False):
+        return None
+    return {key: data[key] for key in ("component", "status", "enabled", "probe_mode", "network_accessed")}
+
+
 def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
     effect = _effect(spec)
+    build_spec = partial(
+        KernelToolSpec,
+        name=spec.name,
+        model_name=spec.model_name,
+        domain=_domain(spec),
+        description=spec.description,
+        examples=spec.examples,
+        input_schema=spec.parameters,
+        effect=effect,
+        validator=spec.validator,
+        runtime_status=spec.runtime_status,
+        metadata={
+            "source_kind": spec.source_kind,
+            "freshness": spec.freshness,
+            "workflow": spec.workflow,
+            "workflow_stage": spec.workflow_stage,
+            "related_tools": _related_tools(spec),
+            "retrieval_terms": _retrieval_terms(spec),
+            "risk": spec.risk.value,
+        },
+    )
 
     if effect is ToolEffect.READ:
 
@@ -172,27 +210,10 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
                 )
             return result
 
-        return KernelToolSpec(
-            name=spec.name,
-            model_name=spec.model_name,
-            domain=_domain(spec),
-            description=spec.description,
-            examples=spec.examples,
-            input_schema=spec.parameters,
-            effect=effect,
-            validator=spec.validator,
+        return build_spec(
             read=read,
-            runtime_status=spec.runtime_status,
+            observe={"config.explain_component": observe_configuration}.get(spec.name),
             cost=1.0 if spec.freshness != "live" else 1.25,
-            metadata={
-                "source_kind": spec.source_kind,
-                "freshness": spec.freshness,
-                "workflow": spec.workflow,
-                "workflow_stage": spec.workflow_stage,
-                "related_tools": _related_tools(spec),
-                "retrieval_terms": _retrieval_terms(spec),
-                "risk": spec.risk.value,
-            },
         )
 
     def prepare(arguments: dict[str, Any], context: ToolCallContext) -> PreparedEffect:
@@ -315,29 +336,11 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
             scope=context.completion_scope,
         )
 
-    return KernelToolSpec(
-        name=spec.name,
-        model_name=spec.model_name,
-        domain=_domain(spec),
-        description=spec.description,
-        examples=spec.examples,
-        input_schema=spec.parameters,
-        effect=effect,
-        validator=spec.validator,
-        runtime_status=spec.runtime_status,
+    return build_spec(
         prepare=prepare,
         execute_confirmed=execute_confirmed,
         verify=verify,
         cost=2.0 if effect is ToolEffect.DANGER else 1.5,
-        metadata={
-            "source_kind": spec.source_kind,
-            "freshness": spec.freshness,
-            "workflow": spec.workflow,
-            "workflow_stage": spec.workflow_stage,
-            "related_tools": _related_tools(spec),
-            "retrieval_terms": _retrieval_terms(spec),
-            "risk": spec.risk.value,
-        },
     )
 
 

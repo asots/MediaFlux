@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from app import database as db
+from app.agent.feature_gate import RuntimeFence, RuntimeFenceError, read_runtime_fence, require_runtime_fence
 
 from app import config
 from app.agent.confirmation import SQLiteConfirmationStore
@@ -45,6 +48,34 @@ from .transports import TelegramKernelTransport, WebKernelTransport
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeCreationBinding:
+    fence: RuntimeFence
+    effective_digest: str
+    snapshot: config.RuntimeConfigSnapshot = field(repr=False, compare=False)
+
+
+def _capture_creation_binding() -> RuntimeCreationBinding:
+    snapshot = config.capture_runtime_config_snapshot()
+    if not db.resolve_db_path().is_file():
+        raise RuntimeFenceError("runtime_database_unavailable")
+    with db.get_conn() as conn:
+        fence = read_runtime_fence(conn)
+        require_runtime_fence(conn, fence)
+    if fence.config_digest != snapshot.config_digest:
+        raise RuntimeFenceError("runtime_snapshot_mismatch")
+    return RuntimeCreationBinding(fence, snapshot.effective_digest, snapshot)
+
+
+def _recheck_creation_binding(binding: RuntimeCreationBinding) -> None:
+    try:
+        current = _capture_creation_binding()
+    except RuntimeFenceError as exc:
+        raise RuntimeFenceError("runtime_changed_during_creation") from exc
+    if current != binding:
+        raise RuntimeFenceError("runtime_changed_during_creation")
+
+
+@dataclass(frozen=True, slots=True)
 class AgentKernelRuntime:
     session: AgentSession
     store: SQLiteKernelStore
@@ -52,6 +83,7 @@ class AgentKernelRuntime:
     metrics: KernelMetrics
     web: WebKernelTransport
     telegram: TelegramKernelTransport
+    creation_binding: RuntimeCreationBinding | None = None
 
 
 _lock = threading.Lock()
@@ -96,6 +128,25 @@ def build_agent_kernel_runtime(
     store: SQLiteKernelStore | None = None,
     confirmation_store: SQLiteConfirmationStore | None = None,
 ) -> AgentKernelRuntime:
+    if model is not None:
+        # Explicit injection never becomes a default paid adapter, even if falsey.
+        return _build_agent_kernel_runtime(model=model, store=store, confirmation_store=confirmation_store)
+    with config.runtime_config_read_guard():
+        binding = _capture_creation_binding()
+    with config.use_runtime_config_snapshot(binding.snapshot):
+        runtime = _build_agent_kernel_runtime(store=store, confirmation_store=confirmation_store, creation_binding=binding)
+    with config.runtime_config_read_guard():
+        _recheck_creation_binding(binding)
+        return runtime
+
+
+def _build_agent_kernel_runtime(
+    *,
+    model: ModelAdapter | None = None,
+    store: SQLiteKernelStore | None = None,
+    confirmation_store: SQLiteConfirmationStore | None = None,
+    creation_binding: RuntimeCreationBinding | None = None,
+) -> AgentKernelRuntime:
     """组合唯一 Kernel、领域能力、持久化与两个薄入口。"""
     (
         _context_repository,
@@ -125,7 +176,14 @@ def build_agent_kernel_runtime(
             missing_media_runtime=missing_media_runtime
         ),
     )
-    active_model = model or OpenAICompatibleModelAdapter(ProviderSettings.from_config())
+    if model is not None:
+        bool(model)  # Preserve one observable evaluation, never use it to route.
+        active_model = model
+        limits = _session_limits_from_config()
+    else:
+        settings = ProviderSettings.from_config()
+        active_model = OpenAICompatibleModelAdapter(settings)
+        limits = SessionLimits(context_window_tokens=settings.context_window_tokens)
     session = AgentSession(
         model=active_model,
         catalog=catalog,
@@ -133,11 +191,12 @@ def build_agent_kernel_runtime(
         pipeline=pipeline,
         state_store=kernel_store,
         journal=kernel_store,
-        limits=_session_limits_from_config(),
+        limits=limits,
         turn_admission=MediaFluxTurnAdmission(),
         stream_display=lambda: config.get_bool("AGENT_STREAM_DISPLAY_ENABLED"),
     )
     metrics = KernelMetrics()
+    session.read_wait_binding = creation_binding
     lifecycle = AgentSessionLifecycle(
         session=session,
         store=kernel_store,
@@ -151,6 +210,7 @@ def build_agent_kernel_runtime(
         metrics=metrics,
         web=WebKernelTransport(session, metrics=metrics),
         telegram=TelegramKernelTransport(session, metrics=metrics),
+        creation_binding=creation_binding,
     )
 
 
@@ -170,11 +230,21 @@ def build_agent_kernel(
 
 def get_agent_kernel_runtime() -> AgentKernelRuntime:
     global _runtime
-    if _runtime is None:
+    # Never acquire the config lock while holding the cache lock.
+    with config.runtime_config_read_guard():
+        binding = _capture_creation_binding()
         with _lock:
-            if _runtime is None:
-                _runtime = build_agent_kernel_runtime()
-    return _runtime
+            if _runtime is not None and _runtime.creation_binding == binding:
+                return _runtime
+    with config.use_runtime_config_snapshot(binding.snapshot):
+        runtime = _build_agent_kernel_runtime(creation_binding=binding)
+    with config.runtime_config_read_guard():
+        _recheck_creation_binding(binding)
+        with _lock:
+            if _runtime is not None and _runtime.creation_binding == binding:
+                return _runtime
+            _runtime = runtime
+        return runtime
 
 
 def get_agent_kernel() -> AgentSession:

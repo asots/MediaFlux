@@ -11,9 +11,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import config
+from app.agent.feature_gate import initialize_runtime_fence
+from tests.support import isolated_test_database
 
 
 class ConfigAtomicWriteTests(unittest.TestCase):
+    def initialize_publisher(self):
+        self.enterContext(isolated_test_database())
+        initialize_runtime_fence()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.env_file = Path(self.temp.name) / "config" / "user.env"
@@ -65,12 +71,20 @@ class ConfigAtomicWriteTests(unittest.TestCase):
             side_effect=OSError("publish failed"),
         ):
             with self.assertRaises(OSError):
-                config.set_and_save({"SAFE_VALUE": "new"})
+                config.update_env_file(self.env_file, {"SAFE_VALUE": "new"}, expected=None)
 
         self.assertFalse(self.env_file.exists())
         self.assertNotIn("SAFE_VALUE", os.environ)
         self.assertIsNone(config._cache)
         self.assertEqual(list(self.env_file.parent.glob(".user.env.*.tmp")), [])
+
+    def test_formal_publisher_refuses_missing_configuration(self):
+        from app.agent.feature_gate import RuntimeFenceError
+        with isolated_test_database(), self.assertRaisesRegex(RuntimeFenceError, 'runtime_configuration_unavailable'):
+            config.set_and_save({"SAFE_VALUE": "new"})
+        self.assertFalse(self.env_file.exists())
+        self.assertNotIn("SAFE_VALUE", os.environ)
+        self.assertIsNone(config._cache)
 
     def test_unrelated_save_does_not_replay_stale_file_value_over_startup_override(self):
         self.env_file.parent.mkdir(parents=True)
@@ -83,6 +97,7 @@ class ConfigAtomicWriteTests(unittest.TestCase):
             replace=False,
         )
         os.environ["TAVILY_API_KEY"] = "deployment-secret"
+        self.initialize_publisher()
 
         with patch.object(
             config, "_STARTUP_ENV_OVERRIDES", frozenset({"TAVILY_API_KEY"})
@@ -122,6 +137,7 @@ class ConfigAtomicWriteTests(unittest.TestCase):
             replace=False,
         )
         real_snapshot = config.read_env_snapshot
+        self.initialize_publisher()
 
         def snapshot_then_compete(path, **kwargs):
             snapshot = real_snapshot(path, **kwargs)
@@ -383,6 +399,7 @@ class ConfigAtomicWriteTests(unittest.TestCase):
         )
         expected = self.env_file.read_bytes()
         os.environ["UNRELATED"] = "runtime-value"
+        self.initialize_publisher()
         with patch.object(config, "_STARTUP_ENV_OVERRIDES", frozenset()):
             result = config.update_runtime_env_file(
                 self.env_file,
@@ -396,6 +413,7 @@ class ConfigAtomicWriteTests(unittest.TestCase):
         self.assertEqual(os.environ["UNRELATED"], "runtime-value")
 
     def test_update_runtime_env_file_failure_keeps_runtime_state_unchanged(self):
+        config.write_env_file(self.env_file, {"DISCOVERY_ENABLED": "1"}, replace=False)
         os.environ["DISCOVERY_ENABLED"] = "1"
         config._cache = {"DISCOVERY_ENABLED": "1", "UNRELATED": "kept"}
         original_cache = dict(config._cache)
@@ -406,9 +424,10 @@ class ConfigAtomicWriteTests(unittest.TestCase):
             OSError("io failed"),
             ValueError("invalid value"),
         ):
-            with self.subTest(error=type(error).__name__), patch.object(
+            with self.subTest(error=type(error).__name__), isolated_test_database(), patch.object(
                 config, "update_env_file", side_effect=error
             ), patch.object(config, "_STARTUP_ENV_OVERRIDES", frozenset()):
+                initialize_runtime_fence()
                 with self.assertRaises(type(error)):
                     config.update_runtime_env_file(
                         self.env_file,
@@ -438,6 +457,7 @@ class ConfigAtomicWriteTests(unittest.TestCase):
 
     def test_update_runtime_env_file_rejects_startup_override_without_mutation(self):
         config.write_env_file(self.env_file, {"DISCOVERY_ENABLED": "1"}, replace=False)
+        self.initialize_publisher()
         expected = self.env_file.read_bytes()
         os.environ["DISCOVERY_ENABLED"] = "1"
         with patch.object(config, "_STARTUP_ENV_OVERRIDES", frozenset({"DISCOVERY_ENABLED"})):
@@ -546,6 +566,7 @@ class ConfigAtomicWriteTests(unittest.TestCase):
         os.environ["EXPAND_ME"] = "wrong-value"
         self.env_file.parent.mkdir(parents=True)
         self.env_file.write_text("VALUE=${EXPAND_ME}/value\n", encoding="utf-8")
+        self.initialize_publisher()
 
         self.assertEqual(config._read_env_file(self.env_file)["VALUE"], "${EXPAND_ME}/value")
         config.set_and_save({"UNRELATED_SETTING": "ok"})

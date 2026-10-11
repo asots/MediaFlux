@@ -1540,15 +1540,23 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ModelMessage(role="user", content="方案 A"),
         ]
 
-        bounded = bounded_model_messages(
-            messages,
-            system_prompt=session.system_prompt,
-            context_window_tokens=session.limits.context_window_tokens,
-            output_tokens=session.limits.effective_output_tokens,
-            history_end=4,
-            tool_definitions=(catalog.get("library.status").model_definition(),),
-        )
+        try:
+            bounded = bounded_model_messages(
+                messages,
+                system_prompt=session.system_prompt,
+                context_window_tokens=session.limits.context_window_tokens,
+                output_tokens=session.limits.effective_output_tokens,
+                history_end=4,
+                tool_definitions=(catalog.get("library.status").model_definition(),),
+            )
+        except ToolPipelineError as exc:
+            self.assertEqual(exc.code, "context_budget_exceeded")
+            return
 
+        self.assertEqual(
+            next(call.arguments for item in bounded for call in item.tool_calls),
+            messages[1].tool_calls[0].arguments,
+        )
         self.assertEqual(bounded[-1].content, "方案 A")
         self.assertTrue(any("完整读取狐妖小红娘" in item.content for item in bounded))
         self.assertTrue(any("方案 A：按 TMDB" in item.content for item in bounded))
@@ -3816,7 +3824,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(session_summary(after, updated_at=now[0])["pending_approval"])
                     self.assertIsNone(self.active(session, after, plan_id))
                     self.assertEqual(after.conversation, before.conversation)
-                    self.assertEqual(after.metadata, before.metadata, "失败确认不能接管既有回执的发布权")
+                    self.assertEqual(after.metadata, {key: value for key, value in before.metadata.items() if key not in {"pending_effect_binding", "pending_effect_goal"}}, "失败确认不能接管既有回执的发布权")
                     self.assertEqual(public_conversation_messages(after.conversation), public_conversation_messages(before.conversation))
                     self.assertEqual(writes, [1] if continuation else [])
                     self.assert_rejected(await self.confirm(session, sid, plan_id))
@@ -3840,7 +3848,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     after = await session.state_store.load(owner="owner", session_id=sid)
                     self.assertEqual(after.pending_effect_plan_id, "")
                     self.assertEqual(after.conversation, before.conversation)
-                    self.assertEqual(after.metadata, before.metadata)
+                    self.assertEqual(after.metadata, {key: value for key, value in before.metadata.items() if key not in {"pending_effect_binding", "pending_effect_goal"}})
                     self.assertIsNone(self.active(session, after, second))
                     self.assert_rejected(await self.confirm(session, sid, second))
                     self.assertFalse(await session.cancel_effect(owner="owner", session_id=sid, plan_id=second))
@@ -3870,7 +3878,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(writes, [1, 2])
 
     async def test_late_pending_cleanup_is_atomic_and_never_grants_publication(self):
-        from app.agent.kernel.state import StateUpdate
+        from app.agent.kernel.state import StateUpdate, _PendingEffectTransition
         from unittest.mock import patch
 
         for persistent in (False, True):
@@ -3884,7 +3892,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 before = await store.load(owner="owner", session_id=sid)
                 owner_lease = PublicationLease("owner", sid, before.generation, before.metadata["confirmed_publication"]["turn_id"], "owner")
                 late = PublicationLease("owner", sid, before.generation, "late-confirmation", "late")
-                cleanup = (StateUpdate("pending_effect_plan_id", second, mode="clear_if_equals"),)
+                cleanup = (_PendingEffectTransition("pending_effect_plan_id", second, mode="clear_if_equals"),)
                 entered, release = asyncio.Event(), asyncio.Event()
                 commit = store.commit
 
@@ -3898,13 +3906,14 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     task = asyncio.create_task(store.commit(late, updates=cleanup))
                     try:
                         await asyncio.wait_for(entered.wait(), 1)
-                        await store.commit(owner_lease, updates=(StateUpdate("pending_effect_plan_id", "new-plan"),))
+                        replacement = await store.commit(owner_lease, updates=(_PendingEffectTransition("pending_effect_plan_id", "new-plan", plan_generation=owner_lease.generation, goal=before.metadata["pending_effect_goal"]),))
                     finally:
                         release.set()
                     await task
                 after = await store.load(owner="owner", session_id=sid)
                 self.assertEqual(after.pending_effect_plan_id, "new-plan", "晚到 CAS 不能按旧快照清除新计划")
-                self.assertEqual(after.metadata, before.metadata)
+                self.assertEqual(after.metadata, {**before.metadata, "pending_effect_binding": {"plan_id": "new-plan", "plan_generation": before.generation}})
+                self.assertEqual(after.metadata, replacement.metadata)
                 self.assertEqual(after.conversation, before.conversation)
                 self.assertFalse(await store.is_current(late))
                 self.assertTrue(await store.is_current(owner_lease))
@@ -3917,10 +3926,11 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(StalePublicationError):
                         await store.commit(late, conversation=conversation, updates=updates)
                 fresh, _ = await store.begin_turn(owner="owner", session_id=sid, request_id="new-generation")
-                await store.commit(fresh, updates=(StateUpdate("pending_effect_plan_id", second),))
+                fresh_state = await store.commit(fresh, updates=(_PendingEffectTransition("pending_effect_plan_id", second, plan_generation=fresh.generation, goal=before.metadata["pending_effect_goal"]),))
                 with self.assertRaises(StalePublicationError):
                     await store.commit(late, updates=cleanup)
                 self.assertEqual((await store.load(owner="owner", session_id=sid)).pending_effect_plan_id, second)
+                self.assertEqual((await store.load(owner="owner", session_id=sid)).metadata, fresh_state.metadata)
 
     async def test_duplicate_confirm_does_not_cancel_running_continuation(self):
         for persistent in (False, True):

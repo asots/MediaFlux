@@ -22,6 +22,8 @@ STYLES = ROOT / "app" / "static" / "css" / "agent.css"
 
 class AgentPageTests(InitializedWebTestCase):
     def setUp(self):
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         self.client = TestClient(
             create_app(start_background=False), raise_server_exceptions=False
         )

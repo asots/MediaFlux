@@ -17,6 +17,7 @@ from app.agent.kernel.state import (
     InMemorySessionStateStore,
     StalePublicationError,
     StateUpdate,
+    _PendingEffectTransition,
 )
 from app.bot import handlers
 from app.modules import download_dispatcher as dispatcher
@@ -317,8 +318,9 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
                                 ),
                             )
                             _replacements.append(new.plan_id)
-                            await _commit(lease, updates=(StateUpdate(
-                                "pending_effect_plan_id", new.plan_id),))
+                            await _commit(lease, updates=(_PendingEffectTransition(
+                                "pending_effect_plan_id", new.plan_id,
+                                plan_generation=lease.generation, goal={}),))
                         return await _commit(lease, conversation=conversation, updates=updates)
 
                     with patch.object(state, "commit", side_effect=publish_new_plan_before_commit):
@@ -339,7 +341,9 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(store=kind):
                 state, context, _, old_id, _, _ = await self._fixture(kind)
                 lease, _ = await state.begin_turn(owner=context.owner, session_id=context.session_id, request_id="next")
-                await state.commit(lease, updates=(StateUpdate("pending_effect_plan_id", "new-plan"),))
+                await state.commit(lease, updates=(_PendingEffectTransition(
+                    "pending_effect_plan_id", "new-plan",
+                    plan_generation=lease.generation, goal={}),))
                 with self.assertRaises(StalePublicationError):
                     await state.commit(context.lease, updates=(StateUpdate(
                         "pending_effect_plan_id", old_id, mode="clear_if_equals"),))

@@ -28,6 +28,8 @@ class DiscoveryPageTests(InitializedWebTestCase):
     """只验证页面外壳，不要求探索 API 或 Provider 已注册。"""
 
     def setUp(self):
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         self.env_patch = patch.dict(os.environ, {"DISCOVERY_ENABLED": "1"})
         self.env_patch.start()
         self.client = TestClient(create_app(), raise_server_exceptions=False)

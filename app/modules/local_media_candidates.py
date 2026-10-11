@@ -57,26 +57,27 @@ def discover_local_media_candidates(source) -> tuple[list[Path], str]:
         return [], error
     adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
     errors: list[str] = []
-    try:
-        candidates = _direct_media_entries(selected, adapter=adapter, errors=errors)
-    except LocalStorageError:
-        return [], "目录读取失败"
-    root_error = _discovery_error(errors)
-    errors = []
-    if root_error:
-        _append_discovery_error(errors, root_error)
-    expanded: list[Path] = []
-    visited: set[tuple[int, int]] = set()
-    for candidate in candidates:
-        expanded.extend(
-            _expand_media_candidate(
-                candidate,
-                adapter=adapter,
-                depth=0,
-                visited=visited,
-                errors=errors,
+    with adapter.directory_name_scope():
+        try:
+            candidates = _direct_media_entries(selected, adapter=adapter, errors=errors)
+        except LocalStorageError:
+            return [], "目录读取失败"
+        root_error = _discovery_error(errors)
+        errors = []
+        if root_error:
+            _append_discovery_error(errors, root_error)
+        expanded: list[Path] = []
+        visited: set[tuple[int, int]] = set()
+        for candidate in candidates:
+            expanded.extend(
+                _expand_media_candidate(
+                    candidate,
+                    adapter=adapter,
+                    depth=0,
+                    visited=visited,
+                    errors=errors,
+                )
             )
-        )
 
     unique = {str(candidate): candidate for candidate in expanded}
     sample_flags: dict[str, bool] = {}

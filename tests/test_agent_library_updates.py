@@ -684,11 +684,19 @@ class LibraryUpdateActionTests(unittest.TestCase):
         from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.ports import catalog_from_tool_specs
         from app.agent.kernel.session import AgentSession
-        from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+        from app.agent.kernel.state import AgentInput
+        from app.agent.kernel.persistence import SQLiteKernelStore
+        from tests.support import isolated_test_database
         from tests.test_agent_kernel_core import ScriptedModel
         names = [f"取消测试作品{i}" for i in range(10)]
         started, release = threading.Event(), threading.Event()
         lock, reads = threading.Lock(), []
+        projected_values = []
+        class RecordingProjector(DefaultProjector):
+            def project(self, value):
+                outcome = super().project(value)
+                projected_values.append(json.loads(outcome.full_model_content or outcome.model_content))
+                return outcome
         def audit(arguments, *, refresh):
             self.assertTrue(refresh)
             with lock:
@@ -699,13 +707,13 @@ class LibraryUpdateActionTests(unittest.TestCase):
             return _query_audit_result(arguments["query"], status="up_to_date")
         async def run():
             catalog = catalog_from_tool_specs([spec for spec in build_tool_specs() if spec.name == "library.check_updates"])
-            state = InMemorySessionStateStore()
+            state = SQLiteKernelStore(secret_provider=lambda: "cancelled-library-inline-test")
             model = ScriptedModel([[
                 ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("batch", "library.check_updates", {"queries": names})),
                 ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
             ]])
             session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
-                pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+                pipeline=ToolPipeline(catalog=catalog, state_store=state, projector=RecordingProjector()), state_store=state)
             async def collect():
                 return [event async for event in session.run(AgentInput(owner="cancel-owner", session_id="cancel-batch", message="核对这批作品"))]
             task = asyncio.create_task(collect())
@@ -716,16 +724,39 @@ class LibraryUpdateActionTests(unittest.TestCase):
                 events = await asyncio.wait_for(task, 3)
                 self.assertEqual(events[-1].type, AgentEventType.TURN_CANCELLED)
                 self.assertEqual(len(reads), 3)
-                saved = await state.load(owner="cancel-owner", session_id="cancel-batch")
+                cold = SQLiteKernelStore(secret_provider=lambda: "cancelled-library-inline-test")
+                saved = await cold.load(owner="cancel-owner", session_id="cancel-batch")
                 tool = next(item for item in saved.conversation if item["role"] == "tool")
-                rows = json.loads(tool["content"])["data"]["items"]
+                envelope = json.loads(tool["content"])
+                self.assertEqual(len(projected_values), 1)
+                expected = projected_values[0]
+                self.assertEqual(envelope, expected)
+                self.assertNotIn("result_handle", envelope)
+                rows = envelope["data"]["items"]
+                self.assertEqual(len(rows), 10)
+                self.assertFalse(any(event.type == AgentEventType.TOOL_COMPLETED for event in events))
+                following_model = ScriptedModel([[
+                    ModelEvent(ModelEventType.TEXT_DELTA, text="已保留核对结果"),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+                ]])
+                following = AgentSession(model=following_model, catalog=catalog, retriever=CapabilityRetriever(),
+                    pipeline=ToolPipeline(catalog=catalog, state_store=cold), state_store=cold)
+                following_events = [event async for event in following.run(AgentInput(
+                    owner="cancel-owner", session_id="cancel-batch", message="说明已有结果，不再查询"))]
+                self.assertEqual(following_events[-1].type, AgentEventType.TURN_COMPLETED)
+                restored = await cold.load(owner="cancel-owner", session_id="cancel-batch")
+                self.assertEqual(next(row for row in restored.conversation if row["role"] == "tool"), tool)
+                self.assertEqual(json.loads(next(message.content for message in following_model.requests[0].messages
+                                                if message.role == "tool")), expected)
+                self.assertEqual(len(reads), 3)
+                self.assertEqual([row["query"] for row in rows], names)
                 self.assertEqual(sum(row["status"] == "up_to_date" for row in rows), 3)
                 self.assertEqual(sum(row["status"] == "cancelled" for row in rows), 7)
             finally:
                 release.set()
                 if not task.done():
                     task.cancel()
-        with patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
+        with isolated_test_database(), patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
             asyncio.run(run())
 
     def test_movie_comparison_unavailable_counts_as_uncertain_in_batch(self):

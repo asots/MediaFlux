@@ -425,10 +425,16 @@ class DiscoverySearchAPITests(InitializedWebTestCase):
             clear=False,
         )
         self.os_patch.start()
+        from tests.support import initialized_web_runtime
+        from contextlib import ExitStack
+        self._installed_runtime = ExitStack()
+        self.addCleanup(self._installed_runtime.close)
+        self._installed_runtime.enter_context(initialized_web_runtime())
         self.client = TestClient(create_app(), raise_server_exceptions=False)
 
     def tearDown(self):
         self.client.close()
+        self._installed_runtime.close()
         self.os_patch.stop()
         self.cache_patch.stop()
         self.env_patch.stop()

@@ -39,7 +39,45 @@ def make_paths(root: Path) -> RuntimePaths:
     )
 
 
-_LIFECYCLE_RESTORE_SCRIPT = r"""
+# Both exec generations install their own stdlib guard before tests/app import.
+_LIFECYCLE_EXEC_BOOTSTRAP = r"""
+import os
+from pathlib import Path
+import socket
+import sys
+sys.dont_write_bytecode = True
+root = Path(sys.argv[1]).resolve()
+for key in list(os.environ):
+    if key.startswith(('MEDIAFLUX_', 'ENV_WEB_', 'WEB_', 'APP_ENV', 'AGENT_', 'PYTHON')):
+        os.environ.pop(key)
+os.environ.update(
+    MEDIAFLUX_DATA_DIR=str(root / 'data'),
+    MEDIAFLUX_CONFIG_DIR=str(root / 'config'),
+    MEDIAFLUX_CACHE_DIR=str(root / 'cache'),
+    MEDIAFLUX_LOG_DIR=str(root / 'logs'),
+    MEDIAFLUX_STRM_DIR=str(root / 'strm'),
+    MEDIAFLUX_DISABLE_FILE_LOGGING='1', MEDIAFLUX_CONTAINER='1',
+    AGENT_LLM_ENABLED='0', APP_ENV='production',
+)
+assert not any(n == 'app' or n.startswith('app.') for n in sys.modules)
+def audit(event, args):
+    if event in ('socket.connect', 'socket.bind', 'socket.sendto', 'socket.sendmsg') and args[0].family != socket.AF_UNIX:
+        raise AssertionError('exec inet denied')
+    if event in ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo'):
+        raise AssertionError('exec DNS denied')
+sys.addaudithook(audit)
+with socket.socket() as probe:
+    for action in (lambda: socket.getaddrinfo('localhost', 80), lambda: probe.bind(('127.0.0.1', 0))):
+        try:
+            action()
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError('missing exec guard')
+print('EXEC_GUARD_VERIFIED', os.getpid(), flush=True)
+"""
+
+_LIFECYCLE_RESTORE_SCRIPT = _LIFECYCLE_EXEC_BOOTSTRAP + r"""
 import tests
 import asyncio
 import subprocess
@@ -55,13 +93,13 @@ root = Path(sys.argv[1])
 archive = Path(sys.argv[2])
 stop_succeeds = sys.argv[3] == "1"
 paths = RuntimePaths(root / "program", root / "data", root / "config", root / "cache", root / "logs", root / "strm", root / "trash")
-paths.ensure_writable_dirs()
-paths.env_file.write_text("WEB_PORT=1258\n", encoding="utf-8")
-config.PATHS = paths
-config.ENV_FILE = paths.env_file
-config._cache = None
-db.configure_database(paths.database_path, test_mode=True)
-db.init_db()
+from tests.support import initialized_web_runtime
+import atexit
+os.environ['ENV_WEB_PASSWORD'] = 'lifecycle-fixture-password'
+installation = initialized_web_runtime(paths)
+installation.__enter__()
+atexit.register(installation.__exit__, None, None, None)
+assert Path(config.__file__).resolve().is_relative_to(Path.cwd())
 db.kv_set("audit.restore_boundary", "archived-state")
 backup.create_backup(paths, output=archive)
 db.kv_set("audit.restore_boundary", "live-before-stop")
@@ -112,7 +150,7 @@ async def exercise():
 asyncio.run(exercise())
 main.app.state.release_startup_lifecycle_guard()
 main.app.state.release_startup_lifecycle_guard()
-restore_script = r'''
+restore_script = sys.argv[4] + r'''
 import tests
 import sys
 from pathlib import Path
@@ -129,7 +167,8 @@ except BackupError as exc:
     raise SystemExit(27)
 print("restore succeeded")
 '''
-restored = subprocess.run([sys.executable, "-c", restore_script, str(root), str(archive)], capture_output=True, text=True, timeout=30)
+restored = subprocess.run([sys.executable, "-B", "-c", restore_script, str(root), str(archive)], capture_output=True, text=True, timeout=30)
+assert "EXEC_GUARD_VERIFIED" in restored.stdout, restored.stdout + restored.stderr
 if stop_succeeds:
     assert restored.returncode == 0, restored.stdout + restored.stderr
     assert db.kv_get("audit.restore_boundary") == "archived-state"
@@ -150,17 +189,20 @@ class BackupTests(unittest.TestCase):
         completed = subprocess.run(
             [
                 sys.executable,
+                "-B",
                 "-c",
                 _LIFECYCLE_RESTORE_SCRIPT,
                 str(root),
                 str(archive),
                 "1" if stop_succeeds else "0",
+                _LIFECYCLE_EXEC_BOOTSTRAP,
             ],
             capture_output=True,
             text=True,
             timeout=60,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("EXEC_GUARD_VERIFIED", completed.stdout)
         return archive
 
     def test_failed_stop_keeps_restore_blocked_until_old_writer_process_exits(self) -> None:
@@ -233,6 +275,8 @@ class BackupTests(unittest.TestCase):
 
     def test_create_app_recovers_pending_restore_before_reading_session_secret(self) -> None:
         from app import main
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
 
         events: list[str] = []
 
@@ -258,6 +302,8 @@ class BackupTests(unittest.TestCase):
 
     def test_background_app_holds_startup_lifecycle_until_lifespan_or_launcher_releases(self) -> None:
         from app import main
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
 
         events: list[str] = []
 
@@ -289,6 +335,8 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             paths = make_paths(Path(directory))
             paths.ensure_writable_dirs()
+            from tests.support import initialized_web_runtime
+            self.enterContext(initialized_web_runtime(paths))
             with patch.object(main.config, "PATHS", paths), patch.object(
                 main, "_secret_key", return_value="test-secret"
             ), patch.object(
@@ -310,6 +358,8 @@ class BackupTests(unittest.TestCase):
 
     def test_normal_startup_guard_unregisters_atexit_callback_when_released(self) -> None:
         from app import main
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
 
         @contextmanager
         def lifecycle_guard(_paths):
@@ -455,7 +505,9 @@ class BackupTests(unittest.TestCase):
             snapshot_started = threading.Event()
             release_snapshot = threading.Event()
             database_write_started = threading.Event()
+            guard_attempted = threading.Event()
             config_finished = threading.Event()
+            worker_errors = []
             archive_paths: list[Path] = []
             original_snapshot = backup_module._sqlite_backup_file
 
@@ -468,40 +520,53 @@ class BackupTests(unittest.TestCase):
                 archive_paths.append(create_backup(paths, reason="consistent"))
 
             def publish_config() -> None:
-                writer = sqlite3.connect(paths.database_path, timeout=2)
                 try:
-                    writer.execute("UPDATE sample SET value='new'")
-                    database_write_started.set()
-                    app_config.update_runtime_env_file(
-                        paths.env_file,
-                        {"BACKUP_LOCK_TEST": "new"},
-                        expected=expected,
-                    )
-                    writer.commit()
+                    guard_attempted.set()
+                    with app_config.runtime_config_publication({"BACKUP_LOCK_TEST": "new"}):
+                        writer = sqlite3.connect(paths.database_path, timeout=2)
+                        try:
+                            writer.execute("UPDATE sample SET value='new'")
+                            database_write_started.set()
+                            app_config.update_runtime_env_file(
+                                paths.env_file,
+                                {"BACKUP_LOCK_TEST": "new"},
+                                expected=expected,
+                            )
+                            writer.commit()
+                        finally:
+                            writer.close()
                     config_finished.set()
-                finally:
-                    writer.close()
+                except BaseException as exc:
+                    worker_errors.append(exc)
 
             previous = os.environ.pop("BACKUP_LOCK_TEST", None)
+            from tests.support import isolated_test_database
+            from app.agent.feature_gate import initialize_runtime_fence
             try:
-                with patch.object(app_config, "PATHS", paths), patch.object(
+                with isolated_test_database(), patch.object(app_config, "_cache", None), patch.object(app_config, "PATHS", paths), patch.object(
                     app_config, "ENV_FILE", paths.env_file
                 ), patch.object(
                     app_config, "_STARTUP_ENV_OVERRIDES", frozenset()
                 ), patch.object(
                     backup_module, "_sqlite_backup_file", side_effect=slow_snapshot
                 ):
+                    database.configure_database(paths.database_path, test_mode=True)
+                    database.init_db()
+                    initialize_runtime_fence()
                     backup_thread = threading.Thread(target=run_backup)
                     backup_thread.start()
-                    self.assertTrue(snapshot_started.wait(2))
                     config_thread = threading.Thread(target=publish_config)
-                    config_thread.start()
-                    self.assertTrue(database_write_started.wait(2))
-                    time.sleep(0.05)
-                    self.assertFalse(config_finished.is_set())
-                    release_snapshot.set()
-                    backup_thread.join(2)
-                    config_thread.join(2)
+                    try:
+                        self.assertTrue(snapshot_started.wait(2))
+                        config_thread.start()
+                        self.assertTrue(guard_attempted.wait(2))
+                        self.assertFalse(database_write_started.is_set())
+                        self.assertFalse(config_finished.is_set())
+                    finally:
+                        release_snapshot.set()
+                        backup_thread.join(2)
+                        if config_thread.ident is not None:
+                            config_thread.join(2)
             finally:
                 if previous is None:
                     os.environ.pop("BACKUP_LOCK_TEST", None)
@@ -510,6 +575,7 @@ class BackupTests(unittest.TestCase):
 
             self.assertFalse(backup_thread.is_alive())
             self.assertFalse(config_thread.is_alive())
+            self.assertEqual(worker_errors, [])
             self.assertTrue(config_finished.is_set())
             with zipfile.ZipFile(archive_paths[0]) as archive:
                 self.assertEqual(archive.read("config/user.env"), expected)
@@ -524,6 +590,11 @@ class BackupTests(unittest.TestCase):
             finally:
                 archived.close()
             self.assertIn("BACKUP_LOCK_TEST='new'", paths.env_file.read_text(encoding="utf-8"))
+            live = sqlite3.connect(paths.database_path)
+            try:
+                self.assertEqual(live.execute("SELECT value FROM sample").fetchone()[0], "new")
+            finally:
+                live.close()
 
     def test_create_verify_and_restore_preserves_sqlite_env_and_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

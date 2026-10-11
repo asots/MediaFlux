@@ -8,10 +8,15 @@ import math
 import re
 import secrets
 import time
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from app import config
 from app import database as db
 from app.agent.model_catalog import normalize_provider_model_id
+
+if TYPE_CHECKING:
+    from app.agent.kernel.provider_model import ProviderSettings
 
 _MODEL_CALLBACK_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,16}$")
 _MODEL_CALLBACK_TTL_SECONDS = 60 * 60
@@ -32,11 +37,13 @@ def _key(owner: str, session_id: str) -> str:
     return f"telegram_model_preference:v1:{digest}"
 
 
-def _channel_fingerprint() -> str:
-    """摘要化当前 Provider 渠道；KV 只保存摘要，不保存 API key。"""
-    base_url = str(config.get("AGENT_LLM_API_URL", "") or "").strip().rstrip("/")
-    protocol = str(config.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip().casefold()
-    api_key = str(config.get("AGENT_LLM_API_KEY", "") or "")
+def _channel_fingerprint(values: Mapping[str, str] | None = None) -> str:
+    """摘要化同一 Provider 快照；保持历史 KV 摘要格式，不保存 API key。"""
+    if values is None:
+        values = config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))
+    base_url = str(values.get("AGENT_LLM_API_URL", "") or "").strip().rstrip("/")
+    protocol = str(values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip().casefold()
+    api_key = str(values.get("AGENT_LLM_API_KEY", "") or "")
     credential_digest = hashlib.sha256(api_key.encode("utf-8")).digest()
     material = b"\0".join((
         b"mediaflux-telegram-model-channel:v1",
@@ -127,12 +134,22 @@ def resolve_model_callback(
     return route
 
 
-def get_telegram_model_preference(owner: str, session_id: str) -> str:
+def get_telegram_model_preference(
+    owner: str, session_id: str, *, settings: ProviderSettings | None = None,
+) -> str:
     try:
         stored = json.loads(db.kv_get(_key(owner, session_id), "") or "{}")
     except (TypeError, ValueError):
         return ""
-    if not isinstance(stored, dict) or stored.get("channel") != _channel_fingerprint():
+    if settings is None:
+        channel = _channel_fingerprint()
+    else:
+        channel = settings.telegram_channel or _channel_fingerprint({
+            "AGENT_LLM_API_URL": settings.api_url,
+            "AGENT_LLM_PROTOCOL": settings.protocol,
+            "AGENT_LLM_API_KEY": settings.api_key,
+        })
+    if not isinstance(stored, dict) or stored.get("channel") != channel:
         return ""
     return normalize_provider_model_id(stored.get("model_id"))
 

@@ -287,6 +287,8 @@ class LoginWallpaperConfigTests(unittest.TestCase):
 
 class LoginWallpaperPageTests(unittest.TestCase):
     def setUp(self):
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         self.credentials = {
             "MEDIAFLUX_INITIALIZED": os.environ.get("MEDIAFLUX_INITIALIZED"),
             "ENV_WEB_PASSPORT": os.environ.get("ENV_WEB_PASSPORT"),
@@ -298,6 +300,7 @@ class LoginWallpaperPageTests(unittest.TestCase):
         from app.modules import first_run
         first_run._reset_startup_state_for_tests()
         self.client = TestClient(create_app(), raise_server_exceptions=False)
+        self.addCleanup(self.client.close)
 
     def tearDown(self):
         for key, value in self.credentials.items():

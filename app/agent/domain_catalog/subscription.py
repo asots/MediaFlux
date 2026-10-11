@@ -558,6 +558,7 @@ def register_specs(
                     "server": {"type": "string", "enum": ["auto", "jellyfin", "emby"]},
                     **RECENT_MEDIA_PROPERTIES,
                 },
+                "not": {"required": ["library_name", "library_ref"]},
                 "additionalProperties": False,
             },
             context_handler=get_recently_added,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 from app.agent.feature_gate import (
@@ -15,7 +16,7 @@ from app.agent.feature_gate import (
 from app.agent.owner_routes import telegram_owner_route_is_currently_authorized
 from app.agent.provider_actions import get_provider_gateway
 from app.agent.provider_models import ProviderGatewayError
-from app.agent.rate_limit import allow_agent_tool
+from app.agent.rate_limit import RateLimitDecision, consume_agent_tool
 
 from ..capabilities import KernelToolSpec
 from ..pipeline import ToolCallContext, ToolPipelineError
@@ -78,6 +79,29 @@ class MediaFluxAuthorizationPolicy:
         raise ToolPipelineError("Agent 身份无效", code="authorization_denied")
 
 
+class ToolRateLimitError(ToolPipelineError):
+    """Trusted local denial with a fixed, identity-free recovery projection."""
+
+    def __init__(self, decision: RateLimitDecision) -> None:
+        super().__init__(
+            "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；"
+            "请稍后重试，不能据此判断后端故障或没有数据。",
+            code="rate_limited",
+        )
+        self._rate_limit = MappingProxyType({
+            "limit": decision.limit,
+            "cost": decision.cost,
+            "remaining": decision.remaining,
+            "retry_after_seconds": decision.retry_after_seconds,
+            "retry_at_epoch": decision.retry_at_epoch,
+            "reason": decision.reason,
+        })
+
+    @property
+    def rate_limit(self) -> Mapping[str, int | float | str | None]:
+        return self._rate_limit
+
+
 class MediaFluxToolRateLimiter:
     """复用现有 SQLite 共享预算，不因多 Worker 重置工具限流。"""
 
@@ -95,12 +119,8 @@ class MediaFluxToolRateLimiter:
                 scope_suffix = spec.provider
             except ProviderGatewayError as exc:
                 raise ToolPipelineError(exc.safe_message, code=exc.code) from exc
-        allowed = await asyncio.to_thread(
-            allow_agent_tool, owner, canonical, scope_suffix=scope_suffix
+        decision = await asyncio.to_thread(
+            consume_agent_tool, owner, canonical, scope_suffix=scope_suffix
         )
-        if not allowed:
-            raise ToolPipelineError(
-                "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；"
-                "请稍后重试，不能据此判断后端故障或没有数据。",
-                code="rate_limited",
-            )
+        if not decision.allowed:
+            raise ToolRateLimitError(decision)

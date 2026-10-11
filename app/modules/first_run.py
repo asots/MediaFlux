@@ -38,13 +38,13 @@ _LINE_SEPARATORS = frozenset("\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 def _manual_recovery_message(reason: str) -> str:
     return (
         f"无法安全读取 user.env（{reason}）。"
-        "请先备份并移走 user.env，确认文件权限与内容后再重新初始化。"
+        "请停止服务并检查或恢复既有存储；不要移走配置以重置管理员。"
     )
 
 
 def _read_env_snapshot(paths: RuntimePaths) -> tuple[bytes | None, dict[str, str], str]:
     try:
-        payload, values = config.read_env_snapshot(paths.env_file)
+        payload, values = config.read_env_snapshot_no_recovery(paths.env_file)
         return payload, values, ""
     except config.CorruptConfigFileError:
         return None, {}, _manual_recovery_message("内容不是有效 UTF-8")
@@ -166,62 +166,8 @@ def _validate_credentials(username: str, password: str) -> str:
 
 
 def initialize_admin(username: str, password: str) -> None:
-    """创建或安全修复管理员配置，保留恢复文件中的无关设置。"""
-    normalized_username = _validate_credentials(username, password)
-
-    from app.modules.web_secret import get_web_secret
-
-    global _startup_state
-    with _state_lock:
-        state = _startup_snapshot()
-        if not state.needs_initialization:
-            raise InitializationError(
-                "MediaFlux 已初始化，不能覆盖现有管理员凭据",
-                initialized_by_competitor=True,
-            )
-        if state.config_error:
-            raise InitializationError(state.config_error)
-
-        updates = {
-            "ENV_WEB_PASSPORT": normalized_username,
-            "ENV_WEB_PASSWORD": password,
-            "MEDIAFLUX_INITIALIZED": "1",
-            "WEB_SECRET_KEY": get_web_secret(),
-        }
-        try:
-            from app.modules.backup import config_snapshot_guard
-
-            with config_snapshot_guard(state.paths):
-                result = config.update_env_file(
-                    state.paths.env_file,
-                    updates,
-                    expected=state.env_bytes,
-                )
-        except (OSError, UnicodeError, config.AtomicPublishError) as exc:
-            # 任意存储/发布异常后都重新捕获真实状态，避免 setup/login 生命周期卡死。
-            _startup_state = _capture_startup_state(state.paths)
-            initialized_by_competitor = not _startup_state.needs_initialization
-            if initialized_by_competitor:
-                message = "MediaFlux 已由其他进程完成初始化"
-            elif _startup_state.config_error:
-                message = _startup_state.config_error
-            elif isinstance(exc, (FileExistsError, config.ConcurrentConfigUpdateError)):
-                message = "配置已发生变化，请刷新页面后重试"
-            else:
-                message = f"无法安全保存初始化配置：{exc}"
-            raise InitializationError(
-                message,
-                initialized_by_competitor=initialized_by_competitor,
-            ) from exc
-
-        config._apply_runtime_values(result, path=state.paths.env_file)
-        _startup_state = _StartupState(
-            paths=state.paths,
-            needs_initialization=False,
-            env_bytes=result.payload,
-            config_error="",
-        )
+    """HTTP setup never creates authority or replaces administrator credentials."""
+    raise InitializationError("请停止服务并显式运行 initialize；已有存储只能受控恢复")
 
 
-# auth/first_run 在应用 lifespan 前导入时立即冻结启动前状态。
-_startup_snapshot()
+# Snapshot is captured on explicit consumption, never merely on import.

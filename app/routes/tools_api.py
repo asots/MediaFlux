@@ -36,6 +36,8 @@ from app.clients.openai_compatible import (
     resolve_protocol,
     structured_request_body,
     text_stream_request_body,
+    parse_generation_profiles,
+    resolve_generation_profile,
 )
 from app.indexers.errors import IndexerError
 from app.indexers.http import FixedHostHttpClient
@@ -1035,6 +1037,8 @@ async def _test_ai_provider(
     timeout_seconds: int,
 ) -> dict[str, object]:
     """验证结构化输出，并独立探测工具调用与流式输出能力。"""
+    profiles_json = config.get("AGENT_LLM_GENERATION_PROFILES", "")
+    parse_generation_profiles(profiles_json)
     location = normalize_provider_location(base_url, https_only=True, public_only=True)
     protocols = protocol_attempts(protocol)
     client = FixedHostHttpClient(
@@ -1078,6 +1082,9 @@ async def _test_ai_provider(
                 history=history,
                 tools=native_tool_definitions(attempted_protocol, capabilities),
                 max_tokens=64,
+                generation_profile=resolve_generation_profile(
+                    profiles_json, location.base_url, model, attempted_protocol,
+                ),
             ),
             headers=provider_headers(attempted_protocol, api_key),
             max_redirects=0,
@@ -1099,6 +1106,9 @@ async def _test_ai_provider(
             system_prompt="You are a streaming capability probe. Reply with OK.",
             user_content="Reply with OK.",
             max_tokens=16,
+            generation_profile=resolve_generation_profile(
+                profiles_json, location.base_url, model, attempted_protocol,
+            ),
         )
         async with client.stream_post_json(
             location.endpoint(attempted_protocol),
@@ -1146,6 +1156,9 @@ async def _test_ai_provider(
                 schema_name="mediaflux_connectivity_probe",
                 schema=_AI_MODEL_TEST_SCHEMA,
                 max_tokens=32,
+                generation_profile=resolve_generation_profile(
+                    profiles_json, location.base_url, model, attempted_protocol,
+                ),
             )
             response = await client.post_json(
                 location.endpoint(attempted_protocol),

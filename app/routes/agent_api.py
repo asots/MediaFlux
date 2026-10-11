@@ -1,6 +1,7 @@
 """新 Agent Kernel 的薄 Web API；不包含领域意图或业务状态机。"""
 
 from __future__ import annotations
+from app.agent.kernel.task_state import task_projection
 
 import asyncio
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ from app.agent.kernel.bootstrap import get_agent_kernel_runtime
 from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import (
     EffectEnvelope,
+    ExplainEnvelope,
     QueryEnvelope,
     TransportInputError,
 )
@@ -319,6 +321,29 @@ async def cancel_query(request: Request, data: Annotated[Any, Body()] = None):
         return _error(exc)
 
 
+@router.post("/actions/explain")
+async def explain_action(request: Request, data: Annotated[Any, Body()] = None):
+    require_api_login(request)
+    if not isinstance(data, dict) or not set(data).issubset({"session_id", "plan_id", "message", "request_id", "stream"}):
+        return api_error("请求字段无效", 400)
+    try:
+        _require_enabled()
+        _check_rate_limit(request, "explain", limit=12)
+        if not isinstance(data.get("message"), str) or ("stream" in data and type(data["stream"]) is not bool):
+            raise TransportInputError("message 无效")
+        envelope = ExplainEnvelope(owner=_owner(request), session_id=_session_id(data.get("session_id")),
+            plan_id=data.get("plan_id"), message=data["message"],
+            request_id=_request_id(data.get("request_id")), channel="web").normalized()
+        transport = get_agent_kernel_runtime().web
+        if data.get("stream") is True:
+            return StreamingResponse(transport.explain(envelope), media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+        view = await transport.explain_view(envelope)
+        return api_response(view.to_dict(), 200 if view.status == "success" else 409)
+    except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
+        return _error(exc)
+
+
 @router.post("/actions/confirm")
 async def confirm_action(request: Request, data: Annotated[Any, Body()] = None):
     require_api_login(request)
@@ -471,29 +496,28 @@ async def get_session(request: Request, session_id: str):
         pending_approval = None
         pending_plan_id = state.pending_effect_plan_id
         if pending_plan_id and not (active_turn and active_turn["protected"]):
-            plan = await asyncio.to_thread(
-                runtime.lifecycle.effect_store.get_active_plan,
-                owner=owner,
-                session_id=normalized,
-                generation=state.generation,
-                plan_id=pending_plan_id,
-            )
+            plan = await runtime.session.pipeline.get_pending_plan(owner=owner, session_id=normalized)
             if plan is not None:
                 pending_approval = plan.public_approval_dict()
+        last_turn = _last_turn_view(
+            [event for event in events if not observed_request or event.get("request_id") == observed_request],
+            active_turn,
+        )
+        terminal_payload = next((event.get("payload", {}) for event in reversed(events)
+                                 if last_turn and event.get("turn_id") == last_turn["turn_id"]), {})
         response = api_response(
             {
                 "session_id": normalized,
                 "draft_scope": _draft_scope(owner),
                 "generation": state.generation,
+                "task": task_projection(getattr(state, "metadata", {}).get("task")),
+                "turn_status": active_turn["status"] if active_turn else terminal_payload.get("turn_status", terminal_payload.get("status", (last_turn or {}).get("status"))),
                 "messages": messages,
                 "pending_approval": pending_approval,
                 "candidate_view": candidate_view,
                 "active_turn": active_turn,
                 "pending_effect_count": pending_effect_count,
-                "last_turn": _last_turn_view(
-                    [event for event in events if not observed_request or event.get("request_id") == observed_request],
-                    active_turn,
-                ),
+                "last_turn": last_turn,
             }
         )
         response.headers["Cache-Control"] = "private, no-store"

@@ -200,7 +200,7 @@ class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(
             [event.payload["code"] for event in failures],
-            ["capability_discovery_pending"],
+            [],  # Same-batch discoveries now form one bounded union.
         )
 
     async def test_discovered_write_prepares_then_confirm_continues_after_execution(
@@ -306,7 +306,10 @@ def test_discovery_has_its_own_budget_and_no_cross_turn_mutation():
     for _ in range(4):
         finder.search({"tool_names": ["metadata.cast"]})
         finder.consume()
-    with pytest.raises(ToolPipelineError, match="4次"):
+    assert finder.requests == 1  # Identical selection reuses the per-turn cache.
+    for index in range(7):
+        finder.search({"query": f"unmatched-{index}"})
+    with pytest.raises(ToolPipelineError, match="8次"):
         finder.search({"query": "演员"})
     assert CapabilityDiscovery(catalog, context={}).requests == 0
     assert len(catalog) == 1

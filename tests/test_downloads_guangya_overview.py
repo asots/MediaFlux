@@ -17,6 +17,8 @@ from app.routes import downloads_api
 
 class GuangYaDownloadOverviewTests(InitializedWebTestCase):
     def setUp(self):
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         self.client = TestClient(create_app(), raise_server_exceptions=False)
 
     @staticmethod

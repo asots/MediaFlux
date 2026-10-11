@@ -18,7 +18,8 @@ from app.agent.kernel.discovery import CapabilityDiscovery
 from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
-from app.agent.kernel.session import DEFAULT_SYSTEM_PROMPT
+from tests.test_agent_prompt_policy_window import capture_policy_windows
+from tests.test_agent_task_entry import isolated_db as isolated_db
 from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
 from app.agent.models import RiskLevel
 from app.agent.public_safety import public_tool_label, sanitize_public_text
@@ -160,7 +161,9 @@ def test_domestic_calendar_survives_real_retrieval_and_discovery_window(catalog,
     selection = CapabilityRetriever().retrieve(message, catalog, context=context)
     window = CapabilityDiscovery(catalog, context=context).window(selection.tools)
     names = [tool.name for tool in window]
-    assert 6 <= len(names) <= 10
+    assert 6 <= len(names)
+    assert [n for n in names if n in {"agent.capabilities", "agent.task", "agent.read_result"}] == ["agent.capabilities"]
+    assert len([n for n in names if n != "agent.capabilities"]) <= 10
     assert names[0] == "agent.capabilities"
     assert NEW_TOOL in names
     assert selection.scores[NEW_TOOL] > selection.scores[OLD_TOOL]
@@ -291,13 +294,15 @@ def test_rate_policy_has_independent_six_per_minute_bucket_and_canonical_alias(c
         assert allow_agent_tool("calendar-test-owner", NEW_TOOL)
 
 
-def test_public_label_and_kernel_guidance_keep_calendars_and_links_distinct():
+def test_public_label_and_kernel_guidance_keep_calendars_and_links_distinct(isolated_db, tmp_path):
     assert public_tool_label(NEW_TOOL) == "追漫日历"
     assert public_tool_label(OLD_TOOL) == "番剧放送日历"
     assert sanitize_public_text(f"正在执行 {NEW_TOOL}") == "正在执行 追漫日历"
     assert sanitize_public_text("请打开 /discovery/calendar") == ""
+    wire, = capture_policy_windows([[NEW_TOOL, OLD_TOOL]], tmp_path)
+    system = wire["messages"][0]["content"]
     for contract in (
         NEW_TOOL, OLD_TOOL, "Asia/Shanghai", "每项为一条排期事件", "不等于免费进度",
         "本回合不要循环调用", "calendar_url", "Telegram", "不猜站点地址",
     ):
-        assert contract in DEFAULT_SYSTEM_PROMPT
+        assert contract in system

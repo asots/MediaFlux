@@ -54,14 +54,12 @@ CSRF = {"X-CSRF-Token": "ux-csrf"}
 
 @pytest.fixture
 def store(tmp_path):
-    previous_path = db.DB_PATH
-    previous_test_mode = bool(getattr(db, "_configured_test_mode", False))
-    db.configure_database(tmp_path / "agent-ux.db", test_mode=True)
-    db.init_db()
-    try:
+    from tests.support import initialized_web_runtime
+
+    # Store and API middleware share one explicitly installed physical database.
+    # Do not import main against a schema-only DB or bypass startup admission.
+    with initialized_web_runtime():
         yield SQLiteKernelStore(secret_provider=lambda: SECRET)
-    finally:
-        db.configure_database(previous_path, test_mode=previous_test_mode)
 
 
 @pytest.fixture
@@ -247,7 +245,11 @@ def test_metadata_patch_keeps_inflight_pending_generation_and_concurrent_turn(st
         )
         state = await second_store.load(owner=OWNER, session_id=SESSION)
         assert state.conversation == [{"role": "user", "content": "新回合内容"}]
-        assert state.metadata == {"inflight": {"operation": "protected"}, "title": "用户标题", "pinned": True, "new_turn": True}
+        assert state.metadata == {
+            "inflight": {"operation": "protected"}, "title": "用户标题", "pinned": True,
+            "new_turn": True,
+            "active_publication": {"generation": lease.generation, "request_id": "seed", "status": "running"},
+        }
         assert state.generation == lease.generation and state.pending_effect_plan_id == "existing-plan"
     asyncio.run(exercise())
 

@@ -1,6 +1,7 @@
 """Kernel 会话、引用与事件的统一 SQLite 仓储。"""
 
 from __future__ import annotations
+from .task_state import TaskPatch, reduce_task
 
 import base64
 import hashlib
@@ -18,6 +19,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from app import database as db
 from app.modules.web_secret import get_web_secret
 
+from .conversation_codec import conversation_rows, state_json_value
+from .state import TRANSIENT_EXTRA_BYTES, state_capacity
 from .events import AgentEvent
 from .references import OpaqueReference, ReferenceError
 from .session_guard import guarded_state_call, session_io, session_scope_guard
@@ -29,12 +32,14 @@ from .state import (
     SessionState,
     StalePublicationError,
     StateUpdate,
+    PendingEffectGuard,
     _apply_effect_state_change,
+    _begin_publication,
+    _cancel_publication,
+    _commit_conversation,
     _consume_delivered_effect_receipts,
     _effect_time_is_due,
     candidate_metadata_only,
-    merge_effect_receipts,
-    retain_conversation,
     publication_commit_matches,
     publication_matches,
 )
@@ -79,6 +84,7 @@ class SQLiteKernelStore:
     async def begin_turn(
         self, *, owner: str, session_id: str, request_id: str,
         selection_guard: CandidateSelectionGuard | None = None,
+        pending_guard: PendingEffectGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
         try:
             return await guarded_state_call(
@@ -87,11 +93,49 @@ class SQLiteKernelStore:
                 session_id,
                 request_id,
                 selection_guard,
+                pending_guard,
             )
         except SessionBusyError as exc:
             if selection_guard is not None:
                 raise SelectionInvalidError("候选正在处理，请使用最新选择状态。") from exc
             raise
+
+    async def cancel_publication(self, *, owner: str, session_id: str, request_id: str) -> bool:
+        return await guarded_state_call(
+            owner, session_id, self._cancel_publication_sync, owner, session_id, request_id,
+            kind="commit", complete_on_cancel=True,
+        )
+
+    def _cancel_publication_sync(self, owner: str, session_id: str, request_id: str) -> bool:
+        with session_scope_guard(owner, session_id, kind="commit"), db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._load_row(conn, owner, session_id)
+            if not _cancel_publication(state, request_id):
+                return False
+            self._write_state(conn, state)
+            return True
+
+    async def settle_cancelled_read_inline(self, receipt) -> bool:
+        from .state import _CancelledReadInline
+        if type(receipt) is not _CancelledReadInline:
+            return False
+        lease = receipt.lease
+        return await guarded_state_call(
+            lease.owner, lease.session_id, self._settle_cancelled_read_inline_sync, receipt,
+            kind="commit", complete_on_cancel=True,
+        )
+
+    def _settle_cancelled_read_inline_sync(self, receipt) -> bool:
+        from .state import _settle_cancelled_read_inline
+        lease = receipt.lease
+        with session_scope_guard(lease.owner, lease.session_id, kind="commit"), db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._load_row(conn, lease.owner, lease.session_id)
+            updated = _settle_cancelled_read_inline(state, receipt, self.max_state_bytes)
+            if updated is None:
+                return False
+            self._write_state(conn, updated)
+            return True
 
     async def is_current(self, lease: PublicationLease) -> bool:
         return await session_io(self._is_current_sync, lease)
@@ -102,6 +146,7 @@ class SQLiteKernelStore:
         *,
         conversation: Sequence[Mapping[str, Any]] | None = None,
         updates: Sequence[StateUpdate] = (),
+        task_patch: TaskPatch | None = None,
     ) -> SessionState:
         try:
             return await guarded_state_call(
@@ -109,6 +154,7 @@ class SQLiteKernelStore:
                 lease,
                 conversation,
                 tuple(updates),
+                *([task_patch] if task_patch is not None else []),
                 kind="commit",
             )
         except SessionBusyError as exc:
@@ -133,6 +179,47 @@ class SQLiteKernelStore:
     async def due_effect_waits(self, *, limit: int = 16) -> list[dict[str, Any]]:
         return await session_io(self._due_effect_waits_sync, limit)
 
+    async def due_read_waits(self, *, limit: int = 16) -> list[dict[str, Any]]:
+        return await session_io(self._due_read_waits_sync, limit)
+
+    def _due_read_waits_sync(self, limit):
+        maximum = max(0, min(16, int(limit)))
+        due = []
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT owner_digest,session_digest,generation,state_json,state_hmac FROM agent_kernel_sessions "
+                "WHERE json_valid(state_json) AND json_extract(state_json,'$.metadata.read_wait.state') IN ('pending','claimed') "
+                "AND json_extract(state_json,'$.metadata.read_wait.due_at')<=? "
+                "ORDER BY json_extract(state_json,'$.metadata.read_wait.due_at') LIMIT ?",
+                (self._clock(), maximum),
+            ).fetchall()
+            for row in rows:
+                try:
+                    payload = self._decode(row['state_json'], row['state_hmac'],
+                        domain=f"state:v1:{row['owner_digest']}:{row['session_digest']}:{row['generation']}".encode(), expected_type=dict)
+                    record = payload['metadata']['read_wait']
+                    if self._scope(record['owner'], record['session_id']) != (row['owner_digest'], row['session_digest']):
+                        continue
+                    if record['state'] == 'claimed' and record['claim_until'] > self._clock():
+                        continue
+                    due.append(deepcopy(record))
+                except (ValueError, KeyError, TypeError):
+                    continue
+        return due
+
+    async def claim_read_wait(self, candidate, binding):
+        return await guarded_state_call(candidate['owner'], candidate['session_id'],
+            self._claim_read_wait_sync, candidate, binding, kind="commit")
+
+    def _claim_read_wait_sync(self, candidate, binding):
+        from .read_wait import claim
+        with session_scope_guard(candidate['owner'], candidate['session_id'], kind="commit"), db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._load_row(conn, candidate['owner'], candidate['session_id'])
+            lease = claim(state, candidate, self._clock(), binding, conn)
+            self._write_state(conn, state)
+            return (lease, state.clone()) if lease else None
+
     async def load(self, *, owner: str, session_id: str) -> SessionState:
         return await session_io(self._load_sync, owner, session_id)
 
@@ -154,6 +241,14 @@ class SQLiteKernelStore:
             ttl_seconds,
         )
 
+
+    async def put_for_turn(self, lease: PublicationLease, **kwargs) -> OpaqueReference:
+        if kwargs['owner'] != lease.owner or kwargs['session_id'] != lease.session_id:
+            raise StalePublicationError("reference scope mismatch")
+        return await guarded_state_call(lease.owner, lease.session_id, self._put_ref_sync,
+            lease.owner, lease.session_id, kwargs['kind'], kwargs['value'], kwargs.get('ttl_seconds', 900),
+            lease, kind="commit")
+
     async def resolve(
         self,
         ref: str,
@@ -172,6 +267,9 @@ class SQLiteKernelStore:
 
     async def append(self, event: AgentEvent, *, owner: str) -> None:
         await session_io(self._append_event_sync, event, owner)
+
+    async def append_for_turn(self, event: AgentEvent, lease: PublicationLease) -> None:
+        await session_io(self._append_event_sync, event, lease.owner, lease)
 
     async def list_events(
         self,
@@ -228,7 +326,8 @@ class SQLiteKernelStore:
         )
         return owner_digest, session_digest
 
-    def _encode(self, value: Any, *, domain: bytes, maximum: int) -> tuple[str, str]:
+    @staticmethod
+    def _json_payload(value: Any, *, label: str) -> tuple[str, bytes]:
         try:
             encoded = json.dumps(
                 value,
@@ -245,7 +344,13 @@ class SQLiteKernelStore:
             RecursionError,
             UnicodeError,
         ) as exc:
-            raise ValueError("Agent Kernel 数据无法序列化") from exc
+            raise ValueError(f"Agent Kernel {label}无法序列化") from exc
+        return encoded, payload
+
+    def _encode(self, value: Any, *, domain: bytes, maximum: int) -> tuple[str, str]:
+        if domain.startswith(b"state:v1:"):
+            maximum = state_capacity(value, maximum)
+        encoded, payload = self._json_payload(value, label="数据")
         if len(payload) > maximum:
             raise ValueError("Agent Kernel 数据超过持久化上限")
         signature = hmac.new(
@@ -263,14 +368,20 @@ class SQLiteKernelStore:
     ) -> Any:
         text = str(encoded or "")
         payload = text.encode("utf-8")
+        if domain.startswith(b"state:v1:") and len(payload) > self.max_state_bytes + TRANSIENT_EXTRA_BYTES:
+            raise ValueError("Agent Kernel 数据超过持久化上限")
         expected = hmac.new(
             self._secret(), domain + b"\0" + payload, hashlib.sha256
         ).hexdigest()
         if not secrets.compare_digest(expected, str(signature or "")):
             raise ValueError("Agent Kernel 持久化数据校验失败")
-        value = json.loads(text)
+        value = state_json_value(text) if domain.startswith(b"state:v1:") else json.loads(text)
         if not isinstance(value, expected_type):
             raise TypeError("Agent Kernel 持久化数据类型无效")
+        if domain.startswith(b"state:v1:"):
+            if len(payload) > state_capacity(value, self.max_state_bytes):
+                raise ValueError("Agent Kernel 数据超过持久化上限")
+            conversation_rows(value.get("conversation", []))
         return value
 
     def _reference_cipher(self) -> Fernet:
@@ -282,22 +393,7 @@ class SQLiteKernelStore:
     def _encode_reference(
         self, value: Any, *, domain: bytes
     ) -> tuple[str, str]:
-        try:
-            plaintext = json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        except (
-            TypeError,
-            ValueError,
-            OverflowError,
-            RecursionError,
-            UnicodeError,
-        ) as exc:
-            raise ValueError("Agent Kernel 引用无法序列化") from exc
+        _, plaintext = self._json_payload(value, label="引用")
         if len(plaintext) > self.max_ref_bytes:
             raise ValueError("Agent Kernel 引用超过持久化上限")
         encoded = "enc:v1:" + self._reference_cipher().encrypt(plaintext).decode(
@@ -336,41 +432,8 @@ class SQLiteKernelStore:
         # 兼容切换前已签名但未加密的短期引用；新写入一律使用 enc:v1。
         return json.loads(text)
 
-    @staticmethod
-    def _state_payload(state: SessionState) -> dict[str, Any]:
-        return {
-            "session_id": state.session_id,
-            "conversation": deepcopy(retain_conversation(state.conversation)),
-            "summary": state.summary,
-            "recent_refs": list(state.recent_refs[-100:]),
-            "ref_kinds": sorted(state.ref_kinds),
-            "pending_effect_plan_id": state.pending_effect_plan_id,
-            "metadata": deepcopy(state.metadata),
-        }
-
-    @staticmethod
-    def _state_from_payload(
-        *, owner: str, session_id: str, generation: int, payload: Mapping[str, Any]
-    ) -> SessionState:
-        conversation = payload.get("conversation")
-        metadata = payload.get("metadata")
-        return SessionState(
-            owner=owner,
-            session_id=session_id,
-            generation=max(0, int(generation)),
-            conversation=[dict(item) for item in conversation if isinstance(item, dict)]
-            if isinstance(conversation, list)
-            else [],
-            summary=str(payload.get("summary") or "")[:8_000],
-            recent_refs=[
-                str(item) for item in payload.get("recent_refs", ()) if str(item)
-            ][-100:],
-            ref_kinds={str(item) for item in payload.get("ref_kinds", ()) if str(item)},
-            pending_effect_plan_id=str(payload.get("pending_effect_plan_id") or "")[
-                :200
-            ],
-            metadata=deepcopy(metadata) if isinstance(metadata, dict) else {},
-        )
+    _state_payload = staticmethod(SessionState.to_payload)
+    _state_from_payload = staticmethod(SessionState.from_payload)
 
     def _empty_state(self, owner: str, session_id: str) -> SessionState:
         return SessionState(owner=owner, session_id=session_id)
@@ -408,8 +471,10 @@ class SQLiteKernelStore:
 
     def _write_state(self, conn: Any, state: SessionState) -> None:
         owner_digest, session_digest = self._scope(state.owner, state.session_id)
+        payload = self._state_payload(state)
+        conversation_rows(payload["conversation"])
         encoded, signature = self._encode(
-            self._state_payload(state),
+            payload,
             domain=f"state:v1:{owner_digest}:{session_digest}:{state.generation}".encode(),
             maximum=self.max_state_bytes,
         )
@@ -467,12 +532,19 @@ class SQLiteKernelStore:
     def _begin_turn_sync(
         self, owner: str, session_id: str, request_id: str,
         selection_guard: CandidateSelectionGuard | None = None,
+        pending_guard: PendingEffectGuard | None = None,
     ) -> tuple[PublicationLease, SessionState]:
         with session_scope_guard(owner, session_id), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, owner, session_id)
             if selection_guard is not None:
                 selection_guard.check(state)
+            if pending_guard is not None:
+                pending_guard.check(state)
+            else:
+                # Revoke cross-generation authority in this same transaction;
+                # keep the pending ID available for the existing cleanup path.
+                state.metadata.pop("pending_effect_binding", None)
             _consume_delivered_effect_receipts(state)
             owner_digest, session_digest = self._scope(owner, session_id)
             state.generation = max(
@@ -483,6 +555,7 @@ class SQLiteKernelStore:
                     session_digest=session_digest,
                 ),
             ) + 1
+            _begin_publication(state, request_id)
             self._write_state(conn, state)
         lease = PublicationLease(
             owner=owner,
@@ -494,6 +567,18 @@ class SQLiteKernelStore:
         return lease, state.clone()
 
     def _is_current_sync(self, lease: PublicationLease) -> bool:
+        if lease.read_wait_id:
+            from .read_wait import check_claim
+            from app.agent.feature_gate import RuntimeFenceError
+            with db.get_conn() as conn:
+                conn.execute("BEGIN")
+                state = self._load_row(conn, lease.owner, lease.session_id)
+                try:
+                    check_claim(state, lease, self._clock(), conn, publication=True)
+                except (StalePublicationError, RuntimeFenceError):
+                    return False
+                return publication_matches(lease, generation=state.generation,
+                                           confirmed=state.metadata.get("confirmed_publication"))
         owner_digest, session_digest = self._scope(lease.owner, lease.session_id)
         with db.get_conn() as conn:
             row = conn.execute(
@@ -515,16 +600,21 @@ class SQLiteKernelStore:
         lease: PublicationLease,
         conversation: Sequence[Mapping[str, Any]] | None,
         updates: Sequence[StateUpdate],
+        task_patch: TaskPatch | None = None,
     ) -> SessionState:
         with session_scope_guard(lease.owner, lease.session_id, kind="commit"), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, lease.owner, lease.session_id)
             if not publication_commit_matches(lease, state, conversation, updates):
                 raise StalePublicationError("turn no longer owns publication authority")
+            from .read_wait import apply_actions, check_claim, task_changed
+            check_claim(state, lease, self._clock(), conn)
+            if task_patch is not None:
+                state.metadata["task"] = reduce_task(state.metadata.get("task"), task_patch, owner=state.owner, session_id=state.session_id)
+                task_changed(state)
             if conversation is not None:
-                state.conversation = retain_conversation(merge_effect_receipts(
-                    conversation, state.metadata,
-                ))
+                state.conversation = _commit_conversation(conversation, state.metadata, updates)
+            apply_actions(state, lease, updates, self._clock(), conn)
             state.apply(updates)
             self._write_state(conn, state)
         return state.clone()
@@ -743,6 +833,7 @@ class SQLiteKernelStore:
         kind: str,
         value: Any,
         ttl_seconds: int,
+        lease: PublicationLease | None = None,
     ) -> OpaqueReference:
         owner_digest, session_digest = self._scope(owner, session_id)
         normalized_kind = str(kind or "").strip().casefold()
@@ -758,6 +849,12 @@ class SQLiteKernelStore:
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM agent_kernel_refs WHERE expires_at<=?", (now,))
+            if lease is not None:
+                from .read_wait import check_claim
+                state = self._load_row(conn, lease.owner, lease.session_id)
+                if not publication_commit_matches(lease, state, None, ()):
+                    raise StalePublicationError("reference publication revoked")
+                check_claim(state, lease, self._clock(), conn)
             conn.execute(
                 "INSERT INTO agent_kernel_refs(ref_id,owner_digest,session_digest,kind,value_json,value_hmac,expires_at,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?)",
@@ -812,7 +909,7 @@ class SQLiteKernelStore:
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ReferenceError("reference payload is invalid") from exc
 
-    def _append_event_sync(self, event: AgentEvent, owner: str) -> None:
+    def _append_event_sync(self, event: AgentEvent, owner: str, lease: PublicationLease | None = None) -> None:
         owner_digest, session_digest = self._scope(owner, event.session_id)
         encoded, signature = self._encode(
             event.to_dict(),
@@ -822,6 +919,12 @@ class SQLiteKernelStore:
         with db.get_conn() as conn:
             now = self._clock()
             conn.execute("BEGIN IMMEDIATE")
+            if lease is not None:
+                state = self._load_row(conn, owner, lease.session_id)
+                if event.session_id != lease.session_id or not publication_commit_matches(lease, state, None, ()):
+                    raise StalePublicationError("event publication revoked")
+                from .read_wait import check_claim
+                check_claim(state, lease, self._clock(), conn, publication=True)
             conn.execute(
                 "INSERT OR IGNORE INTO agent_kernel_events(event_id,owner_digest,session_digest,turn_id,request_id,sequence,event_type,event_json,event_hmac,occurred_at,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",

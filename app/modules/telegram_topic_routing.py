@@ -374,7 +374,7 @@ async def _generate_private_topic_title(
     from app.modules.telegram_model_preferences import get_telegram_model_preference
 
     settings = ProviderSettings.from_config()
-    selected_model = get_telegram_model_preference(owner, session_id) or settings.model
+    selected_model = get_telegram_model_preference(owner, session_id, settings=settings) or settings.model
     request = ModelRequest(
         system_prompt=_TOPIC_TITLE_SYSTEM_PROMPT,
         messages=(ModelMessage(role="user", content=first_user_message),),

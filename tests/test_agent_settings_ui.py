@@ -5,7 +5,7 @@ import errno
 import json
 import re
 import unittest
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -24,9 +24,16 @@ from app.routes import strm_api
 from app.routes.api import _validate_agent_llm_updates, get_config, save_config
 from app.security import redact_config
 from app.web import relative_url_for
+from tests.support import initialized_web_runtime
 
 
 class AgentSettingsUiTests(unittest.TestCase):
+    def setUp(self):
+        if self._testMethodName == "test_ai_model_list_route_is_registered":
+            stack = ExitStack()
+            self.addCleanup(stack.close)
+            stack.enter_context(initialized_web_runtime())
+
     @staticmethod
     def _request():
         return SimpleNamespace(
@@ -897,6 +904,35 @@ class AgentSettingsUiTests(unittest.TestCase):
         self.assertIn("鉴权失败", serialized)
         self.assertNotIn("not-returned", serialized)
 
+    def test_model_test_ambiguous_or_business_404_does_not_fallback(self):
+        from app.routes import tools_api
+
+        for text in ('{}', '{"error":{"code":"model_not_found","message":"responses api is not supported"}}'):
+            with self.subTest(text=text):
+                calls = []
+                closed = []
+
+                class FakeClient:
+                    def __init__(self, **kwargs):
+                        pass
+
+                    async def post_json(self, url, **kwargs):
+                        calls.append(url)
+                        return SimpleNamespace(status_code=404, text=text)
+
+                    async def aclose(self):
+                        closed.append(True)
+
+                with patch.object(tools_api, "FixedHostHttpClient", FakeClient):
+                    with self.assertRaises(tools_api._AIProviderTestFailure) as caught:
+                        asyncio.run(tools_api._test_ai_provider(
+                            base_url="https://api.example.test/v1", api_key="fixture",
+                            protocol="auto", model="model-test", timeout_seconds=12,
+                        ))
+                self.assertEqual(calls, ["https://api.example.test/v1/responses"])
+                self.assertEqual(caught.exception.status_code, 404)
+                self.assertEqual(closed, [True])
+
     def test_model_test_auto_falls_back_and_reports_full_capability_matrix(self):
         from app.routes import tools_api
 
@@ -925,7 +961,7 @@ class AgentSettingsUiTests(unittest.TestCase):
                 self.stream_calls = []
                 self.closed = False
                 self.responses = [
-                    SimpleNamespace(status_code=404, text="{}"),
+                    SimpleNamespace(status_code=404, text='{"error":"responses api is not supported"}'),
                     SimpleNamespace(
                         status_code=200,
                         text=json.dumps({

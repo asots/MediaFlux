@@ -149,6 +149,150 @@ class LocalStorageTests(unittest.TestCase):
             replacement.write_bytes(b"new video")
             self.assertEqual([item.path for item in adapter.scan()], [replacement])
 
+    def test_independent_operations_refresh_empty_names_with_same_directory_stat(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+            directory_info = root.lstat()
+            original_lstat = Path.lstat
+
+            def lstat(path, *args, **kwargs):
+                # Model a filesystem timestamp collision, not a cached scan result.
+                return directory_info if path == root else original_lstat(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", new=lstat):
+                self.assertFalse(adapter.contains_video())
+                video = root / "Movie.mkv"
+                video.touch()
+                self.assertFalse(adapter.contains_video())
+                video.write_bytes(b"video")
+                self.assertTrue(adapter.contains_video())
+                self.assertEqual([item.path for item in adapter.scan()], [video])
+
+    def test_independent_operations_refresh_nonempty_names_with_same_directory_stat(self):
+        for operation in ("contains_video", "scan", "directory_entries"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                other = root / "Other"
+                other.mkdir()
+                note = root / "readme.txt"
+                note.write_text("not media")
+                adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+                infos = {path: path.lstat() for path in (root, other)}
+                original_lstat = Path.lstat
+
+                def lstat(path, *args, **kwargs):
+                    return infos[path] if path in infos else original_lstat(path, *args, **kwargs)
+
+                def assert_names(expected):
+                    if operation == "contains_video":
+                        self.assertEqual(adapter.contains_video(root), bool(expected))
+                    elif operation == "scan":
+                        self.assertEqual(
+                            [item.path for item in adapter.scan(root, new_inspection=True)], expected,
+                        )
+                    else:
+                        self.assertEqual(set(adapter.directory_entries(root)), {note, other, *expected})
+
+                with patch.object(Path, "lstat", new=lstat):
+                    assert_names([])
+                    video = root / "Movie.mkv"
+                    video.write_bytes(b"video")
+                    assert_names([video])
+                    renamed = root / "Renamed.mkv"
+                    video.rename(renamed)
+                    assert_names([renamed])
+                    # A separate directory must not inherit the first one's names.
+                    self.assertFalse(adapter.contains_video(other))
+                    renamed.unlink()
+                    assert_names([])
+                    nested = other / "Nested.mkv"
+                    nested.write_bytes(b"nested")
+                    self.assertTrue(adapter.contains_video(other))
+                    self.assertEqual([item.path for item in adapter.scan(other)], [nested])
+
+    def test_scan_drops_removed_or_renamed_names_with_same_directory_stat(self):
+        for mutation in ("remove", "rename", "replace"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                video = root / "Movie.mkv"
+                video.write_bytes(b"video")
+                adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+                directory_info = root.lstat()
+                original_lstat = Path.lstat
+
+                def lstat(path, *args, **kwargs):
+                    return directory_info if path == root else original_lstat(path, *args, **kwargs)
+
+                with patch.object(Path, "lstat", new=lstat):
+                    self.assertEqual([item.path for item in adapter.scan()], [video])
+                    replacement = root / "Replacement.mkv"
+                    if mutation == "rename":
+                        video.rename(replacement)
+                    else:
+                        video.unlink()
+                        if mutation == "replace":
+                            replacement.write_bytes(b"replacement")
+                    expected = [] if mutation == "remove" else [replacement]
+                    self.assertEqual(
+                        [item.path for item in adapter.scan(new_inspection=True)], expected,
+                    )
+                    self.assertEqual(adapter.contains_video(), bool(expected))
+
+    def test_directory_name_scope_discards_names_after_normal_or_exceptional_exit(self):
+        for exceptional in (False, True):
+            with self.subTest(exceptional=exceptional), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                video = root / "Movie.mkv"
+                video.write_bytes(b"video")
+                adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+                directory_info = root.lstat()
+                original_lstat = Path.lstat
+
+                def lstat(path, *args, **kwargs):
+                    return directory_info if path == root else original_lstat(path, *args, **kwargs)
+
+                with patch.object(Path, "lstat", new=lstat):
+                    try:
+                        with adapter.directory_name_scope():
+                            self.assertEqual([item.path for item in adapter.scan()], [video])
+                            if exceptional:
+                                raise RuntimeError("abort discovery")
+                    except RuntimeError as exc:
+                        self.assertTrue(exceptional)
+                        self.assertEqual(str(exc), "abort discovery")
+                    replacement = root / "Replacement.mkv"
+                    video.rename(replacement)
+                    self.assertEqual([item.path for item in adapter.scan()], [replacement])
+                    with adapter.directory_name_scope():
+                        self.assertEqual([item.path for item in adapter.scan()], [replacement])
+
+    def test_nested_directory_name_scope_reuses_names_but_reads_live_sizes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "Movie.mkv"
+            video.touch()
+            adapter = LocalFilesystemAdapter(root, cache_directory_names=True)
+            with patch("os.scandir", wraps=os.scandir) as scandir:
+                with adapter.directory_name_scope():
+                    self.assertFalse(adapter.contains_video())
+                    with adapter.directory_name_scope():
+                        video.write_bytes(b"video")
+                        self.assertTrue(adapter.contains_video())
+                    self.assertEqual([item.path for item in adapter.scan()], [video])
+                scandir.assert_called_once()
+                self.assertEqual(Path(scandir.call_args.args[0]), root)
+
+    def test_disabled_directory_name_cache_stays_fresh_inside_explicit_scope(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            adapter = LocalFilesystemAdapter(root)
+            with adapter.directory_name_scope():
+                self.assertFalse(adapter.contains_video())
+                video = root / "Movie.mkv"
+                video.write_bytes(b"video")
+                self.assertTrue(adapter.contains_video())
+
     def test_snapshot_detects_size_mtime_or_inode_change(self):
         with tempfile.TemporaryDirectory() as root_raw:
             root = Path(root_raw)

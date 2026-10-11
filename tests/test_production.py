@@ -561,6 +561,7 @@ class MediaProxyTests(InitializedWebTestCase):
             test_db = Path(root) / "proxy-api.db"
             app = create_app()
             with patch("app.database.DB_PATH", test_db):
+                db.init_db()
                 with TestClient(app, raise_server_exceptions=False) as client:
                     login_page = client.get("/login")
                     token = SecurityTests._csrf_token(login_page)

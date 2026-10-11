@@ -2,19 +2,81 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from .state import CancellationToken
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderState:
+    """Private, immutable wire state; provenance is assigned only by the adapter.
+
+    The JSON layout contains native private blocks and references to ordinary
+    tool calls, never a second copy of executable arguments or arbitrary roles.
+    Ordinary text blocks are untrusted segmentation hints, not canonical text:
+    outbound projection must reconcile them with ModelMessage.content, even
+    for legacy checkpoints. Never edit signed/opaque blocks to reconcile text.
+    """
+
+    protocol: str
+    model: str
+    endpoint: str
+    layout_json: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        # Reject whole states: signed/opaque values must never be truncated.
+        if len(self.layout_json.encode("utf-8")) > 128 * 1024:
+            raise ValueError("Provider private state exceeds limit")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "protocol": self.protocol,
+            "model": self.model,
+            "endpoint": self.endpoint,
+            "layout_json": self.layout_json,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ProviderState:
+        return cls(**{
+            key: str(value[key])
+            for key in ("protocol", "model", "endpoint", "layout_json")
+        })
+
+    def layout(self) -> list[dict[str, Any]]:
+        return json.loads(self.layout_json)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelToolCall:
     call_id: str
     name: str
-    arguments: Mapping[str, Any]
+    arguments: Mapping[str, Any] | None
+    argument_error: Literal["invalid_json"] | None = None
+    raw_arguments: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.argument_error is None:
+            # Ordinary DTOs retain their old construction boundary: Session
+            # rejects non-Mapping roots atomically with structured feedback.
+            if self.raw_arguments is not None:
+                raise ValueError("Invalid tool arguments state")
+        elif (self.argument_error != "invalid_json" or self.arguments is not None
+              or not isinstance(self.raw_arguments, str)
+              or len(self.raw_arguments.encode("utf-8")) > 32_768
+              or not all(isinstance(v, str) and v.strip() for v in (self.call_id, self.name))):
+            raise ValueError("Invalid tool arguments state")
+
+    def to_dict(self) -> dict[str, Any]:
+        result = {"call_id": self.call_id, "name": self.name,
+                  "arguments": dict(self.arguments) if self.arguments is not None else None}
+        if self.argument_error is not None:
+            result.update(argument_error=self.argument_error, raw_arguments=self.raw_arguments)
+        return result
 
 
 class ModelEventType(StrEnum):
@@ -33,6 +95,7 @@ class ModelEvent:
     usage: Mapping[str, int] = field(default_factory=dict)
     finish_reason: str = ""
     raw: Any = None
+    provider_state: ProviderState | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,18 +107,14 @@ class ModelMessage:
     tool_name: str = ""
     effect_plan_id: str = ""
     completion_receipt_id: str = ""
+    provider_state: ProviderState | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.role == "assistant" and self.provider_state is not None:
+            result["provider_state"] = self.provider_state.to_dict()
         if self.tool_calls:
-            result["tool_calls"] = [
-                {
-                    "call_id": call.call_id,
-                    "name": call.name,
-                    "arguments": dict(call.arguments),
-                }
-                for call in self.tool_calls
-            ]
+            result["tool_calls"] = [call.to_dict() for call in self.tool_calls]
         if self.tool_call_id:
             result["tool_call_id"] = self.tool_call_id
         if self.tool_name:
@@ -73,9 +132,14 @@ class ModelMessage:
             if isinstance(raw, Mapping):
                 calls.append(
                     ModelToolCall(
-                        call_id=str(raw.get("call_id") or ""),
-                        name=str(raw.get("name") or ""),
-                        arguments=dict(raw.get("arguments") or {}),
+                        call_id=str(raw.get("call_id") or "")
+                        if raw.get("argument_error") is None else raw.get("call_id"),
+                        name=str(raw.get("name") or "")
+                        if raw.get("argument_error") is None else raw.get("name"),
+                        arguments=dict(raw.get("arguments") or {})
+                        if raw.get("argument_error") is None else raw.get("arguments"),
+                        argument_error=raw.get("argument_error"),
+                        raw_arguments=raw.get("raw_arguments"),
                     )
                 )
         return cls(
@@ -86,6 +150,8 @@ class ModelMessage:
             tool_name=str(value.get("tool_name") or ""),
             effect_plan_id=str(value.get("effect_plan_id") or ""),
             completion_receipt_id=str(value.get("completion_receipt_id") or ""),
+            provider_state=ProviderState.from_dict(value["provider_state"])
+            if value.get("role") == "assistant" and isinstance(value.get("provider_state"), Mapping) else None,
         )
 
 

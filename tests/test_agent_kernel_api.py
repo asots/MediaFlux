@@ -180,6 +180,12 @@ class AgentKernelApiTests(unittest.TestCase):
             lifecycle=self.lifecycle,
             metrics=types.SimpleNamespace(snapshot=lambda: {"turns": 0}),
         )
+        from app.agent.kernel.pipeline import ToolPipeline
+        from app.agent.kernel.capabilities import ToolCatalog
+        self.runtime.session.pipeline = ToolPipeline(
+            catalog=ToolCatalog([]), state_store=self.runtime.store,
+            effect_store=self.lifecycle.effect_store,
+        )
         self.patches = [
             patch.object(agent_kernel_api, "require_api_login", return_value=None),
             patch.object(agent_kernel_api, "_require_enabled", return_value=None),
@@ -299,6 +305,7 @@ class AgentKernelApiTests(unittest.TestCase):
                 {"role": "tool", "content": "内部结果不应展示"},
             ],
             pending_effect_plan_id="plan-restore-0001",
+            metadata={},
         )
         self.lifecycle.effect_store.plan = FakeApprovalPlan({
             "plan_id": "plan-restore-0001",
@@ -774,6 +781,8 @@ class AgentKernelApiTests(unittest.TestCase):
                 self.lifecycle.effect_store = ConfirmationEffectPlanStore(
                     SQLiteConfirmationStore()
                 )
+                self.runtime.session.pipeline.state_store = self.runtime.store
+                self.runtime.session.pipeline.effect_store = self.lifecycle.effect_store
                 response = self.client.get(f"/api/agent/sessions/{session_id}")
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -932,7 +941,7 @@ class AgentKernelApiTests(unittest.TestCase):
 
     def test_session_restore_does_not_revive_consumed_or_expired_plan(self):
         self.runtime.store.state = types.SimpleNamespace(
-            generation=4, conversation=[], pending_effect_plan_id="plan-stale-0001"
+            generation=4, conversation=[], pending_effect_plan_id="plan-stale-0001", metadata={}
         )
         self.lifecycle.effect_store.active = False
 

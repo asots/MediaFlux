@@ -253,6 +253,11 @@ def register_specs(
             parameters={
                 "type": "object",
                 "anyOf": [{"required": ["query", "season"]}, {"required": ["items"]}],
+                "not": {"required": ["items"], "anyOf": [
+                    {"required": [field]} for field in (
+                        "query", "season", "tmdb_id", "library_name", "episodes"
+                    )
+                ]},
                 "properties": {
                     "items": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
                         "type": "object", "required": ["query", "season"], "additionalProperties": False,
@@ -334,6 +339,13 @@ def register_specs(
             parameters={
                 "type": "object",
                 "anyOf": [{"required": ["query"]}, {"required": ["queries"]}],
+                "not": {"anyOf": [
+                    {"required": ["queries", "query"]},
+                    {"required": ["queries", "tmdb_id"]},
+                    {"required": ["queries", "season"]},
+                    {"required": ["media_type", "season"],
+                     "properties": {"media_type": {"enum": ["movie"]}}},
+                ]},
                 "properties": {
                     "query": {"type": "string", "minLength": 1, "maxLength": 120},
                     "queries": {"type": "array", "minItems": 1, "maxItems": 20,

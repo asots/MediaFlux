@@ -152,7 +152,10 @@ class LLMProviderProtocolTests(unittest.TestCase):
         self.assertEqual(regular["max_tokens"], 111)
 
     def test_protocol_fallback_requires_endpoint_incompatibility_signal(self):
-        self.assertTrue(is_protocol_fallback_error(404, "", protocol="responses"))
+        self.assertFalse(is_protocol_fallback_error(404, "", protocol="responses"))
+        self.assertTrue(is_protocol_fallback_error(
+            404, 'responses api is not supported', protocol="responses"
+        ))
         self.assertTrue(is_protocol_fallback_error(
             422, '{"error":"unknown parameter \'input\'"}', protocol="responses"
         ))

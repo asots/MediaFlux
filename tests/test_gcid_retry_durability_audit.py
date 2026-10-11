@@ -14,9 +14,36 @@ from tests.support import IsolatedDatabaseTestCase
 from tests.test_gcid_import_api import FakeImporter, FakeOutcome
 
 
-def _retry_in_process(database_path, task_id, token, marker, entered, release, results):
-    db.configure_database(database_path, test_mode=True)
+class _RetryProcessGates:
+    def __init__(self, context):
+        self.ready = context.Event()
+        self.start = context.Event()
+        self.entered = context.Event()
+        self.executing = context.Event()
+        self.finished = context.Event()
+        self.before_claim = context.Event()
 
+
+def _wait_for_phase(event, phase, timeout=10):
+    if not event.wait(timeout):
+        raise AssertionError(f"process handshake timed out: {phase}")
+
+
+def _process_result(results, phase):
+    from queue import Empty
+
+    try:
+        return results.get(timeout=3)
+    except Empty as exc:
+        raise AssertionError(f"process result timed out: {phase}") from exc
+
+
+def _retry_in_process(
+    database_path, task_id, token, marker, gates, release, results,
+    claim_release, claims, collide,
+):
+    # Spawn imports the tests package first (isolated runtime per process).
+    # Only the scratch database is deliberately shared by both contenders.
     class Importer:
         available = True
         unavailable_reason = ""
@@ -27,33 +54,49 @@ def _retry_in_process(database_path, task_id, token, marker, entered, release, r
             return FakeOutcome(True, remote_file_id="synthetic-remote")
 
     original_execute = gcid_import._execute_items
+    original_claim = gcid_import._claim_task_for_run
 
     def execute_after_gate(*args, **kwargs):
-        entered.set()
-        if not release.wait(15):
-            raise AssertionError("process gate timed out")
+        gates.executing.set()
+        _wait_for_phase(release, token + " execute release", timeout=15)
         return original_execute(*args, **kwargs)
 
+    def claim_after_gate(*args, **kwargs):
+        if collide:
+            # Both callers have passed retry_task's real failed-item precheck.
+            gates.before_claim.set()
+            _wait_for_phase(claim_release, token + " CAS release")
+        claimed = original_claim(*args, **kwargs)
+        claims.put((token, claimed))
+        return claimed
+
     try:
+        db.configure_database(database_path, test_mode=True)
         with (
             patch.object(gcid_import, "_execute_items", side_effect=execute_after_gate),
+            patch.object(gcid_import, "_claim_task_for_run", side_effect=claim_after_gate),
             patch.object(gcid_import, "get_private_importer", return_value=Importer()),
             patch.object(gcid_import.notifier, "notify_gcid_import_started"),
             patch.object(gcid_import.notifier, "notify_gcid_import_finished"),
         ):
+            gates.ready.set()
+            # Startup is separate from the bounded, already-warm execute gate.
+            _wait_for_phase(gates.start, token + " start permit", timeout=30)
+            gates.entered.set()
             task, replayed = gcid_import.retry_task(task_id, operation_token=token)
             results.put((token, task["status"], replayed))
     except BaseException as exc:
         results.put((token, "error", type(exc).__name__))
         raise
+    finally:
+        gates.finished.set()
 
 
 class GCIDRetryDurabilityAuditTests(IsolatedDatabaseTestCase):
     def setUp(self):
         gcid_import.reset_runtime_state()
-        self.addCleanup(patch.stopall)
-        patch.object(gcid_import.notifier, "notify_gcid_import_started").start()
-        patch.object(gcid_import.notifier, "notify_gcid_import_finished").start()
+        self.enterContext(patch.object(gcid_import.notifier, "notify_gcid_import_started"))
+        self.enterContext(patch.object(gcid_import.notifier, "notify_gcid_import_finished"))
 
     def _task(self, suffix=""):
         task_id = db.create_gcid_import_task(
@@ -170,49 +213,119 @@ class GCIDRetryDurabilityAuditTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(fake.calls), 2)
 
     def test_two_real_processes_cannot_execute_the_same_failed_item(self):
+        self._run_two_process_retries(collide=False)
+
+    def test_two_real_processes_collide_at_the_durable_claim(self):
+        self._run_two_process_retries(collide=True)
+
+    def _run_two_process_retries(self, *, collide):
+        expected_database = self.test_db_path.resolve()
+        self.assertEqual(db.resolve_db_path(), expected_database)
+        with db.get_conn() as conn:
+            databases = conn.execute("PRAGMA database_list").fetchall()
+        actual_database = next(row[2] for row in databases if row[1] == "main")
+        self.assertEqual(Path(actual_database).resolve(), expected_database)
         task_id = self._task()
         context = multiprocessing.get_context("spawn")
-        entered = context.Event()
+        gates = [_RetryProcessGates(context) for _ in range(2)]
         release = context.Event()
+        claim_release = context.Event()
         results = context.Queue()
+        claims = context.Queue()
+        tokens = ("process-a", "process-b")
         with TemporaryDirectory() as directory:
             marker = str(Path(directory) / "calls.txt")
             workers = [
                 context.Process(
                     target=_retry_in_process,
                     args=(
-                        str(self.test_db_path),
-                        task_id,
-                        token,
-                        marker,
-                        entered,
-                        release,
-                        results,
+                        str(self.test_db_path), task_id, token, marker, gates[index],
+                        release, results, claim_release, claims, collide,
                     ),
                 )
-                for token in ("process-a", "process-b")
+                for index, token in enumerate(tokens)
             ]
             try:
-                workers[0].start()
-                self.assertTrue(entered.wait(10))
-                workers[1].start()
-                # 新消费者必须能立即读到“已有执行者”，而不是进入第二次私有写入。
-                try:
-                    early = results.get(timeout=3)
-                except Exception:
-                    early = None
-            finally:
+                # No interpreter startup occurs while an owner holds the gate.
+                for worker in workers:
+                    worker.start()
+                for token, gate in zip(tokens, gates):
+                    _wait_for_phase(gate.ready, token + " imports/database ready")
+                if collide:
+                    for gate in gates:
+                        gate.start.set()
+                    for token, gate in zip(tokens, gates):
+                        _wait_for_phase(gate.before_claim, token + " before real CAS")
+                    self.assertEqual(db.get_gcid_import_task(task_id)["status"], "failed")
+                    claim_release.set()
+                    claim_results = [
+                        _process_result(claims, "real CAS result") for _ in workers
+                    ]
+                    self.assertCountEqual([item[0] for item in claim_results], tokens)
+                    self.assertCountEqual([item[1] for item in claim_results], [True, False])
+                    winner = next(token for token, claimed in claim_results if claimed)
+                else:
+                    winner = "process-a"
+                    gates[0].start.set()
+                owner = tokens.index(winner)
+                follower = 1 - owner
+                _wait_for_phase(gates[owner].executing, winner + " owns execute gate")
+                self.assertEqual(db.get_gcid_import_task(task_id)["status"], "running")
+                self.assertFalse(Path(marker).exists())
+                if not collide:
+                    self.assertEqual(_process_result(claims, "A real CAS"), (winner, True))
+                    gates[follower].start.set()
+                _wait_for_phase(gates[follower].entered, tokens[follower] + " retry entry")
+                _wait_for_phase(gates[follower].finished, tokens[follower] + " retry return")
+                early = _process_result(results, "running follower reply")
+                # The return value, not a timeout, establishes overlap.
+                self.assertEqual(early, (tokens[follower], "running", True))
+                self.assertFalse(gates[follower].executing.is_set())
+                self.assertFalse(gates[owner].finished.is_set())
+                self.assertFalse(Path(marker).exists())
                 release.set()
+                _wait_for_phase(gates[owner].finished, winner + " completed execution")
+                self.assertEqual(
+                    _process_result(results, "owner success reply"),
+                    (winner, "success", False),
+                )
+                for token, worker in zip(tokens, workers):
+                    worker.join(10)
+                    self.assertFalse(worker.is_alive(), token + " did not exit")
+                self.assertEqual([worker.exitcode for worker in workers], [0, 0])
+                calls = Path(marker).read_text().splitlines()
+                self.assertEqual(calls, [winner])
+                if not collide:
+                    self.assertEqual(calls, ["process-a"])
+                    self.assertEqual(early, ("process-b", "running", True))
+                self.assertEqual(db.get_gcid_import_task(task_id)["status"], "success")
+                self.assertEqual(
+                    [item["status"] for item in db.list_gcid_import_items(task_id)],
+                    ["success"],
+                )
+                gcid_import.reset_runtime_state()
+                with patch.object(
+                    gcid_import, "get_private_importer",
+                    side_effect=AssertionError("completed task requested an external writer"),
+                ):
+                    replay, replayed = gcid_import.retry_task(task_id, operation_token=winner)
+                    self.assertEqual(replay["status"], "success")
+                    self.assertTrue(replayed)
+                    with self.assertRaisesRegex(ValueError, "任务没有可重试的失败项"):
+                        gcid_import.retry_task(task_id, operation_token="fresh-after-success")
+                self.assertEqual(Path(marker).read_text().splitlines(), calls)
+            finally:
+                # A failed phase stays a failure; release only to clean up.
+                release.set()
+                claim_release.set()
+                for gate in gates:
+                    gate.start.set()
                 for worker in workers:
                     if worker.pid is not None:
-                        worker.join(10)
+                        worker.join(3)
                         if worker.is_alive():
                             worker.terminate()
                             worker.join(5)
-            self.assertEqual([worker.exitcode for worker in workers], [0, 0])
-            calls = Path(marker).read_text().splitlines()
-            self.assertEqual(calls, ["process-a"])
-            self.assertEqual(early, ("process-b", "running", True))
-            self.assertEqual(db.get_gcid_import_task(task_id)["status"], "success")
-        results.close()
-        results.join_thread()
+                for channel in (results, claims):
+                    channel.close()
+                    channel.join_thread()

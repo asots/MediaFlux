@@ -17,6 +17,8 @@ from tests.support import InitializedWebTestCase, isolated_test_database
 
 class DownloadBatchActionApiTests(InitializedWebTestCase):
     def setUp(self) -> None:
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         self.client = TestClient(create_app(), raise_server_exceptions=False)
 
     def tearDown(self) -> None:

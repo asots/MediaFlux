@@ -6,18 +6,14 @@ import hmac
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from app import config
 from app.config import web_credentials
 from app.logger import get_logger
 from app.modules import first_run
 from app.modules.login_wallpaper import get_login_wallpaper
 from app.security import (
     clear_login_failures,
-    clear_setup_failures,
     login_rate_limited,
     record_login_failure,
-    record_setup_failure,
-    setup_rate_limited,
 )
 from app.web import render_template
 
@@ -123,51 +119,8 @@ def setup_submit(
     if not first_run.needs_initialization():
         return RedirectResponse("/login", status_code=302)
 
-    identity = request.client.host if request.client else "unknown"
-    if setup_rate_limited(identity):
-        return render_setup(
-            request,
-            status_code=429,
-            error="初始化失败次数过多，请稍后再试",
-            username=username[:128],
-        )
-    try:
-        normalized_username = first_run._validate_credentials(username, password)
-        if password != password_confirm:
-            raise ValueError("两次输入的密码不一致")
-        first_run.initialize_admin(normalized_username, password)
-    except ValueError as exc:
-        record_setup_failure(identity)
-        return render_setup(
-            request,
-            status_code=400,
-            error=str(exc),
-            username=username[:128],
-        )
-    except first_run.InitializationError as exc:
-        if exc.initialized_by_competitor:
-            return RedirectResponse("/login", status_code=302)
-        return render_setup(
-            request,
-            status_code=409,
-            error=str(exc),
-            username=username[:128],
-        )
-    except config.AtomicPublishError:
-        record_setup_failure(identity)
-        return render_setup(
-            request,
-            status_code=500,
-            error="无法安全保存初始化配置，请重试",
-            username=username[:128],
-        )
-
-    clear_setup_failures(identity)
-    request.session.clear()
-    request.session["logged_in"] = True
-    logger.info("首次管理员初始化完成")
-
-    return RedirectResponse("/", status_code=302)
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("停止服务并显式运行 initialize；完成后重启登录", status_code=403)
 
 
 @router.post("/logout", name="auth.logout")

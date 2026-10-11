@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import codecs
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 import json
 import re
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -34,19 +35,23 @@ _REASONING_MODEL_PREFIXES = (
     "qwq",
 )
 _THINK_BLOCK_RE = re.compile(r"(?is)<think\b[^>]*>.*?</think\s*>")
-_PROTOCOL_FALLBACK_MARKERS = (
-    "unknown endpoint",
-    "unsupported endpoint",
-    "route not found",
-    "no route",
-    "cannot post",
+PROTOCOL_FALLBACK_MAX_BYTES = 8192
+PROTOCOL_FALLBACK_STATUS_CODES = frozenset({400, 404, 405, 415, 422, 501})
+_PROTOCOL_FALLBACK_MESSAGES = frozenset({
+    "unknown endpoint: /v1/responses",
+    "unsupported endpoint: /v1/responses",
+    "cannot post /v1/responses",
+    "cannot post /responses",
     "not found: /v1/responses",
     "unknown parameter 'input'",
     'unknown parameter "input"',
     "unrecognized request argument supplied: input",
-    "input is not a valid",
     "responses api is not supported",
-)
+})
+_PROTOCOL_FALLBACK_CODES = frozenset({
+    "invalid_request_error", "invalid_request", "unsupported_endpoint",
+    "unknown_endpoint", "not_found_error",
+})
 _NON_FALLBACK_MARKERS = (
     "api key",
     "authentication",
@@ -64,7 +69,9 @@ _NON_FALLBACK_MARKERS = (
 class NativeToolCall:
     call_id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: dict[str, Any] | None
+    argument_error: Literal["invalid_json"] | None = None
+    raw_arguments: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +112,7 @@ class NativeToolTurn:
     finish_reason: str
     assistant_entry: object | None = None
     usage: ProviderUsage | None = None
+    private_layout_json: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,16 +186,48 @@ def is_protocol_fallback_error(
     *,
     protocol: object = "",
 ) -> bool:
-    """仅把明确的端点/协议不兼容视为可回退，避免盲重放业务 400。"""
-    status = int(status_code or 0)
-    if status in {404, 405, 415, 501}:
-        return True
-    if status not in {400, 422} or normalize_protocol(protocol) != "responses":
+    """仅完整、有界的明确协议错误授权回退；未知措辞保守终止。"""
+    if (status_code not in PROTOCOL_FALLBACK_STATUS_CODES
+            or normalize_protocol(protocol) != "responses"
+            or not isinstance(response_text, str)):
         return False
-    text = str(response_text or "")[:8192].casefold()
+    try:
+        if len(response_text.encode("utf-8")) > PROTOCOL_FALLBACK_MAX_BYTES:
+            return False
+    except UnicodeError:
+        return False
+    text = response_text.strip().casefold()
     if any(marker in text for marker in _NON_FALLBACK_MARKERS):
         return False
-    return any(marker in text for marker in _PROTOCOL_FALLBACK_MARKERS)
+    if text.startswith(("{", "[")):
+        def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            fields = dict(pairs)
+            if len(fields) != len(pairs):
+                raise ValueError("ambiguous error fields")
+            return fields
+
+        try:
+            envelope = json.loads(text, object_pairs_hook=unique_fields)
+        except ValueError:
+            return False
+        if not isinstance(envelope, dict) or envelope.keys() - {"error", "code", "type"}:
+            return False
+        error = envelope.get("error")
+        fields = [envelope]
+        if isinstance(error, dict):
+            if error.keys() - {"message", "code", "type"}:
+                return False
+            fields.append(error)
+            error = error.get("message")
+        for container in fields:
+            for field in ("code", "type"):
+                value = container.get(field, "")
+                if not isinstance(value, str) or (value and value.casefold() not in _PROTOCOL_FALLBACK_CODES):
+                    return False
+        if not isinstance(error, str):
+            return False
+        text = error.strip()
+    return text.removesuffix(".") in _PROTOCOL_FALLBACK_MESSAGES
 
 
 def provider_retry_delay(
@@ -230,11 +270,87 @@ def strip_reasoning_markup(value: object) -> str:
     return re.sub(r"(?is)</think\s*>", "", text)
 
 
+def parse_generation_profiles(raw: str) -> tuple[dict[str, str], ...]:
+    """Validate locally without retaining raw configuration in exception chains."""
+    try:
+        return _parse_generation_profiles(raw)
+    except (ValueError, TypeError, RecursionError):
+        pass
+    raise ValueError("模型参数档案格式无效或超过安全上限")
+
+
+def _parse_generation_profiles(raw: str) -> tuple[dict[str, str], ...]:
+    """Bounded explicit route/model/protocol profiles; no provider discovery."""
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 65_536:
+        raise ValueError("模型参数档案格式无效或过大")
+    if not raw.strip():
+        return ()
+
+    def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            raise ValueError("模型参数档案字段重复")
+        return result
+
+    rows = json.loads(raw, object_pairs_hook=unique_fields)
+    if not isinstance(rows, list) or len(rows) > 64:
+        raise ValueError("模型参数档案必须是最多 64 项的数组")
+    from app.agent.model_catalog import normalize_provider_model_id
+
+    keys = {"base_url", "model", "protocol", "token_parameter", "temperature"}
+    parsed: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        if (not isinstance(row, dict) or row.keys() != keys
+                or not all(isinstance(value, str) for value in row.values())):
+            raise ValueError("模型参数档案字段无效")
+        for value in row.values():
+            value.encode("utf-8")
+        if normalize_provider_model_id(row["model"]) != row["model"] or not row["model"]:
+            raise ValueError("模型参数档案模型 ID 无效")
+        base_url = normalize_provider_location(row["base_url"]).base_url
+        protocol = row["protocol"]
+        allowed = {
+            "responses": {"max_output_tokens"},
+            "chat_completions": {"max_tokens", "max_completion_tokens"},
+            "anthropic_messages": {"max_tokens"},
+        }
+        if (row["token_parameter"] not in allowed.get(protocol, set())
+                or row["temperature"] not in {"omit", "zero"}):
+            raise ValueError("模型参数档案协议或生成参数无效")
+        identity = (base_url, row["model"], protocol)
+        if identity in seen:
+            raise ValueError("模型参数档案路由身份重复")
+        seen.add(identity)
+        parsed.append({**row, "base_url": base_url})
+    return tuple(parsed)
+
+
+def resolve_generation_profile(
+    raw: str, base_url: str, model: str, protocol: str,
+) -> Mapping[str, str] | None:
+    """Match an already-normalized route; never strip its endpoint suffix again."""
+    profiles = parse_generation_profiles(raw)
+    if not profiles:
+        return None
+    identity = (base_url, model, protocol)
+    return next((row for row in profiles
+                 if (row["base_url"], row["model"], row["protocol"]) == identity), None)
+
+
 def _generation_parameters(
-    *, protocol: str, model: str, max_tokens: int
+    *, protocol: str, model: str, max_tokens: int,
+    generation_profile: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_protocol(protocol)
     parameters: dict[str, Any]
+    if generation_profile is not None:
+        if generation_profile["protocol"] != normalized:
+            raise ValueError("模型参数档案协议不匹配")
+        parameters = {generation_profile["token_parameter"]: max_tokens}
+        if generation_profile["temperature"] == "zero":
+            parameters["temperature"] = 0
+        return parameters
     if normalized == "responses":
         parameters = {"max_output_tokens": max_tokens}
     elif normalized == "chat_completions" and is_reasoning_model(model):
@@ -321,6 +437,7 @@ def structured_request_body(
     schema_name: str,
     schema: dict[str, Any],
     max_tokens: int,
+    generation_profile: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if protocol == "responses":
         body = {
@@ -339,7 +456,8 @@ def structured_request_body(
             },
         }
         body.update(_generation_parameters(
-            protocol=protocol, model=model, max_tokens=max_tokens
+            protocol=protocol, model=model, max_tokens=max_tokens,
+            generation_profile=generation_profile,
         ))
         return body
     if protocol == "anthropic_messages":
@@ -355,7 +473,8 @@ def structured_request_body(
             },
         }
         body.update(_generation_parameters(
-            protocol=protocol, model=model, max_tokens=max_tokens
+            protocol=protocol, model=model, max_tokens=max_tokens,
+            generation_profile=generation_profile,
         ))
         return body
     body = {
@@ -370,7 +489,8 @@ def structured_request_body(
         },
     }
     body.update(_generation_parameters(
-        protocol=protocol, model=model, max_tokens=max_tokens
+        protocol=protocol, model=model, max_tokens=max_tokens,
+        generation_profile=generation_profile,
     ))
     return body
 
@@ -547,23 +667,10 @@ def native_tool_definitions(
 def native_tool_initial_history(
     protocol: str, *, system_prompt: str, user_content: str
 ) -> list[dict[str, Any]]:
-    if protocol == "responses":
-        return [
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": user_content}],
-            },
-        ]
-    if protocol == "chat_completions":
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ]
-    return [{"role": "user", "content": user_content}]
+    history = [native_text_message(protocol, "user", user_content)]
+    if protocol in {"responses", "chat_completions"}:
+        history.insert(0, native_text_message(protocol, "system", system_prompt))
+    return history
 
 
 def native_tool_request_body(
@@ -574,12 +681,16 @@ def native_tool_request_body(
     history: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     max_tokens: int,
+    generation_profile: Mapping[str, str] | None = None,
     stream: bool = False,
 ) -> dict[str, Any]:
     if protocol == "responses":
         body = {
             "model": model,
             "input": history,
+            # Explicit history is replayed across requests/restarts; request the
+            # native opaque state rather than depending on provider-side IDs.
+            "include": ["reasoning.encrypted_content"],
         }
         if tools:
             body.update({
@@ -610,7 +721,8 @@ def native_tool_request_body(
                 "parallel_tool_calls": False,
             })
     body.update(_generation_parameters(
-        protocol=protocol, model=model, max_tokens=max_tokens
+        protocol=protocol, model=model, max_tokens=max_tokens,
+        generation_profile=generation_profile,
     ))
     if stream:
         body["stream"] = True
@@ -624,6 +736,7 @@ def text_stream_request_body(
     system_prompt: str,
     user_content: str,
     max_tokens: int,
+    generation_profile: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """构造不携带工具的纯文本流式请求。"""
     normalized = normalize_protocol(protocol)
@@ -643,7 +756,8 @@ def text_stream_request_body(
             "stream": True,
         }
         body.update(_generation_parameters(
-            protocol=normalized, model=model, max_tokens=max_tokens
+            protocol=normalized, model=model, max_tokens=max_tokens,
+            generation_profile=generation_profile,
         ))
         return body
     if normalized == "anthropic_messages":
@@ -654,7 +768,8 @@ def text_stream_request_body(
             "stream": True,
         }
         body.update(_generation_parameters(
-            protocol=normalized, model=model, max_tokens=max_tokens
+            protocol=normalized, model=model, max_tokens=max_tokens,
+            generation_profile=generation_profile,
         ))
         return body
     body = {
@@ -666,7 +781,8 @@ def text_stream_request_body(
         "stream": True,
     }
     body.update(_generation_parameters(
-        protocol=normalized, model=model, max_tokens=max_tokens
+        protocol=normalized, model=model, max_tokens=max_tokens,
+        generation_profile=generation_profile,
     ))
     return body
 
@@ -802,6 +918,25 @@ async def _iter_sse_data(
         yield "\n".join(data_lines)
 
 
+async def iter_provider_sse_events(
+    chunks: AsyncIterator[bytes], *, max_event_bytes: int = 64 * 1024
+) -> AsyncIterator[dict[str, Any] | None]:
+    """Shared SSE framing/JSON validation; protocol completion stays with callers."""
+    async for data in _iter_sse_data(chunks, max_event_bytes=max_event_bytes):
+        if data.strip() == "[DONE]":
+            yield None
+            return
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise ProviderStreamError("Provider SSE 数据不是有效 JSON") from exc
+        if not isinstance(event, dict):
+            raise ProviderStreamError("Provider SSE 数据格式无效")
+        if event.get("type") == "error" or isinstance(event.get("error"), dict):
+            raise ProviderStreamError("Provider 返回流式错误")
+        yield event
+
+
 async def iter_provider_text_deltas(
     chunks: AsyncIterator[bytes],
     *,
@@ -815,18 +950,12 @@ async def iter_provider_text_deltas(
     completed = False
     reasoning_filter = ReasoningDeltaFilter()
 
-    async for data in _iter_sse_data(chunks, max_event_bytes=max_event_bytes):
-        if normalized == "chat_completions" and data.strip() == "[DONE]":
+    async for event in iter_provider_sse_events(chunks, max_event_bytes=max_event_bytes):
+        if event is None:
+            if normalized != "chat_completions":
+                raise ProviderStreamError("Provider SSE 数据不是有效 JSON")
             completed = True
             break
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError as exc:
-            raise ProviderStreamError("Provider SSE 数据不是有效 JSON") from exc
-        if not isinstance(event, dict):
-            raise ProviderStreamError("Provider SSE 数据格式无效")
-        if event.get("type") == "error" or isinstance(event.get("error"), dict):
-            raise ProviderStreamError("Provider 返回流式错误")
 
         if normalized == "responses":
             event_type = str(event.get("type") or "")
@@ -930,7 +1059,151 @@ def parse_tool_arguments(value: object) -> dict[str, Any]:
     return parsed
 
 
-def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
+def parse_native_call(
+    call_id: object, name: object, value: object, *, allow_argument_errors: bool = False,
+    require_identity: bool = False,
+) -> NativeToolCall:
+    try:
+        arguments = parse_tool_arguments(value)
+    except ToolArgumentsDecodeError as exc:
+        if not (allow_argument_errors and exc.reason == "invalid_json"
+                and isinstance(value, str) and len(value.encode("utf-8")) <= _MAX_TOOL_ARGUMENTS_CHARS
+                and all(isinstance(v, str) and v.strip() for v in (call_id, name))):
+            raise
+        return NativeToolCall(call_id, name, None, "invalid_json", value)
+    if require_identity:
+        call = NativeToolCall(call_id, name, arguments)
+        validate_repair_batch([call], [(call_id, name)], require_identity=True)
+        return call
+    return NativeToolCall(str(call_id or ""), str(name or ""), arguments)
+
+
+def validate_repair_batch(
+    calls: list[NativeToolCall], identities: list[tuple[object, object]], *, require_identity: bool = False,
+) -> None:
+    if require_identity or any(call.argument_error is not None for call in calls):
+        for pair in identities:
+            for value in pair:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("Ambiguous native tool identity")
+                value.encode("utf-8")
+        ids = [pair[0] for pair in identities]
+        if len(set(ids)) != len(ids) or len(ids) != len(calls):
+            raise ValueError("Ambiguous native tool identity")
+
+
+def validate_repair_layout(output: list[Any]) -> None:
+    ids = []
+    for item in output:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid native repair layout")
+        if item.get("type") in {"function_call", "reasoning"}:
+            for key in ("id", "encrypted_content"):
+                if key in item and (not isinstance(item[key], str) or not item[key]):
+                    raise ValueError("Invalid native repair layout")
+            if "id" in item:
+                ids.append(item["id"])
+    if len(set(ids)) != len(ids):
+        raise ValueError("Ambiguous native item identity")
+
+
+def native_tool_call(
+    protocol: str, call_id: str, name: str, arguments: Mapping[str, Any] | None,
+    *, raw_arguments: str | None = None,
+) -> dict[str, Any]:
+    """Serialize a validated call for both parsed turns and explicit history."""
+    if raw_arguments is not None:
+        if arguments is not None or protocol not in {"responses", "chat_completions"}:
+            raise ValueError("Cannot replay malformed native arguments")
+    if protocol not in {"responses", "chat_completions"}:
+        return {"type": "tool_use", "id": call_id, "name": name, "input": dict(arguments)}
+    function = {
+        "name": name,
+        "arguments": raw_arguments if raw_arguments is not None else json.dumps(dict(arguments), ensure_ascii=False, separators=(",", ":")),
+    }
+    if protocol == "responses":
+        return {"type": "function_call", "call_id": call_id, **function}
+    return {"type": "function", "id": call_id, "function": function}
+
+
+def native_text_message(protocol: str, role: str, text: str) -> dict[str, Any]:
+    if protocol == "responses":
+        kind = "output_text" if role == "assistant" else "input_text"
+        return {"role": role, "content": [{"type": kind, "text": text}]}
+    return {"role": role, "content": text}
+
+
+def native_tool_result(protocol: str, call_id: str, output: str) -> dict[str, Any]:
+    """Serialize one result; Anthropic callers group the blocks in a user turn."""
+    if protocol == "responses":
+        return {"type": "function_call_output", "call_id": call_id, "output": output}
+    if protocol == "chat_completions":
+        return {"role": "tool", "tool_call_id": call_id, "content": output}
+    return {"type": "tool_result", "tool_use_id": call_id, "content": output}
+
+
+def native_reasoning_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Responses input allowlist, not an arbitrary raw-envelope replay."""
+    result: dict[str, Any] = {"type": "reasoning"}
+    for key in ("id", "encrypted_content", "status"):
+        if isinstance(item.get(key), str):
+            result[key] = item[key]
+    for key, block_type in (("summary", "summary_text"), ("content", "reasoning_text")):
+        if isinstance(item.get(key), list):
+            result[key] = [{"type": block_type, "text": block["text"]}
+                           for block in item[key] if isinstance(block, dict)
+                           and block.get("type") == block_type and isinstance(block.get("text"), str)]
+    return result
+
+
+def anthropic_private_layout(content: list[Any]) -> str:
+    """Capture native layout from already-normalized ordinary text, without filtering twice."""
+    layout = []
+    has_private = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind in {"thinking", "redacted_thinking"}:
+            fields = ("type", "thinking", "signature") if kind == "thinking" else ("type", "data")
+            if any(not isinstance(block.get(key), str) for key in fields):
+                raise ValueError("Invalid native thinking block")
+            if not block["signature" if kind == "thinking" else "data"]:
+                raise ValueError("Incomplete native thinking block")
+            layout.append({key: block[key] for key in fields})
+            has_private = True
+        elif kind == "text" and isinstance(block.get("text"), str):
+            if block["text"]:
+                layout.append({"type": "text", "text": block["text"]})
+        elif kind in {"tool_use", "tool_ref"}:
+            layout.append({"type": "tool_ref", "call_id": block.get("id") if kind == "tool_use" else block.get("call_id")})
+    return json.dumps(layout, ensure_ascii=False) if has_private else ""
+
+
+def responses_private_layout(output: list[Any], *, required: bool = False) -> str:
+    layout = []
+    has_private = required
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "reasoning":
+            layout.append(native_reasoning_item(item))
+            has_private = True
+        elif item.get("type") == "function_call":
+            ref = {"type": "tool_ref", "call_id": str(item.get("call_id") or item.get("id") or "")}
+            if isinstance(item.get("id"), str):
+                ref["id"] = item["id"]
+            layout.append(ref)
+        elif item.get("type") == "message":
+            for block in item.get("content") or ():
+                if isinstance(block, dict) and block.get("type") in {"output_text", "text"} and isinstance(block.get("text"), str):
+                    text = strip_reasoning_markup(block["text"])
+                    if text:
+                        layout.append({"type": "text", "text": text})
+    return json.dumps(layout, ensure_ascii=False) if has_private else ""
+
+
+def parse_native_tool_turn(envelope: object, protocol: str, *, allow_argument_errors: bool = False) -> NativeToolTurn:
     """解析完整的 Provider 回合；不会执行任何工具。"""
     if not isinstance(envelope, dict) or envelope.get("type") == "error":
         raise ValueError("AI 响应格式无效")
@@ -949,20 +1222,14 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
                 continue
             item_type = item.get("type")
             if item_type == "function_call":
-                call = NativeToolCall(
-                    call_id=str(item.get("call_id") or item.get("id") or ""),
-                    name=str(item.get("name") or ""),
-                    arguments=parse_tool_arguments(item.get("arguments")),
+                call = parse_native_call(
+                    item.get("call_id") if allow_argument_errors else item.get("call_id") or item.get("id"),
+                    item.get("name"), item.get("arguments"), allow_argument_errors=allow_argument_errors,
                 )
+                if call.argument_error is None and not call.call_id:
+                    call = NativeToolCall(str(item.get("id") or ""), call.name, call.arguments)
                 calls.append(call)
-                assistant_items.append({
-                    "type": "function_call",
-                    "call_id": call.call_id,
-                    "name": call.name,
-                    "arguments": json.dumps(
-                        call.arguments, ensure_ascii=False, separators=(",", ":")
-                    ),
-                })
+                assistant_items.append(native_tool_call(protocol, call.call_id, call.name, call.arguments, raw_arguments=call.raw_arguments))
             elif item_type == "message":
                 try:
                     text_parts.append(
@@ -976,12 +1243,19 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
         if isinstance(direct, str) and direct and not text_parts:
             text_parts.append(direct)
         visible_text = strip_reasoning_markup("".join(text_parts))
+        if any(call.argument_error for call in calls):
+            validate_repair_batch(calls, [(item.get("call_id"), item.get("name"))
+                                         for item in output if isinstance(item, dict) and item.get("type") == "function_call"])
+            if envelope.get("error"):
+                raise ValueError("Invalid native repair envelope")
+            validate_repair_layout(output)
         return NativeToolTurn(
             text=visible_text,
             tool_calls=tuple(calls),
             finish_reason=finish_reason,
             assistant_entry=assistant_items,
             usage=usage,
+            private_layout_json=responses_private_layout(output, required=any(call.argument_error for call in calls)),
         )
 
     if protocol == "chat_completions":
@@ -1007,22 +1281,12 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
             function = item.get("function")
             if not isinstance(function, dict):
                 raise ValueError("AI 工具调用格式无效")
-            call = NativeToolCall(
-                call_id=str(item.get("id") or ""),
-                name=str(function.get("name") or ""),
-                arguments=parse_tool_arguments(function.get("arguments")),
+            call = parse_native_call(
+                item.get("id"), function.get("name"), function.get("arguments"),
+                allow_argument_errors=allow_argument_errors,
             )
             calls.append(call)
-            assistant_calls.append({
-                "id": call.call_id,
-                "type": "function",
-                "function": {
-                    "name": call.name,
-                    "arguments": json.dumps(
-                        call.arguments, ensure_ascii=False, separators=(",", ":")
-                    ),
-                },
-            })
+            assistant_calls.append(native_tool_call(protocol, call.call_id, call.name, call.arguments, raw_arguments=call.raw_arguments))
         visible_text = strip_reasoning_markup("".join(text_parts))
         assistant_entry: dict[str, Any] = {
             "role": "assistant",
@@ -1030,18 +1294,34 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
         }
         if assistant_calls:
             assistant_entry["tool_calls"] = assistant_calls
+        if any(call.argument_error for call in calls):
+            validate_repair_batch(calls, [(item.get("id"), item["function"].get("name"))
+                                         for item in message.get("tool_calls") or []
+                                         if isinstance(item, dict) and isinstance(item.get("function"), dict)])
+            if envelope.get("error") or ("reasoning_content" in message and not isinstance(message["reasoning_content"], str)):
+                raise ValueError("Invalid native repair envelope")
         return NativeToolTurn(
             text=visible_text,
             tool_calls=tuple(calls),
             finish_reason=finish_reason,
             assistant_entry=assistant_entry,
             usage=usage,
+            private_layout_json=json.dumps([{"type": "reasoning_content", "text": message["reasoning_content"]}], ensure_ascii=False)
+            if isinstance(message.get("reasoning_content"), str) and message["reasoning_content"] else "[]" if any(call.argument_error for call in calls) else "",
         )
 
     finish_reason = provider_finish_reason(protocol, envelope.get("stop_reason"))
     content = envelope.get("content")
     if not isinstance(content, list):
         raise ValueError("AI 响应格式无效")
+    # Normalize JSON once; public text and private layout share these blocks.
+    # SSE supplies its own finalized per-block text without changing its semantics.
+    content = [
+        {**block, "text": strip_reasoning_markup(block["text"])}
+        if isinstance(block, dict) and block.get("type") == "text"
+        and isinstance(block.get("text"), str) else block
+        for block in content
+    ]
     assistant_blocks: list[dict[str, Any]] = []
     for block in content:
         if not isinstance(block, dict):
@@ -1049,29 +1329,24 @@ def parse_native_tool_turn(envelope: object, protocol: str) -> NativeToolTurn:
         if block.get("type") == "text":
             text = block.get("text")
             if isinstance(text, str) and text:
-                visible = strip_reasoning_markup(text)
-                if visible:
-                    text_parts.append(visible)
-                    assistant_blocks.append({"type": "text", "text": visible})
+                text_parts.append(text)
+                assistant_blocks.append({"type": "text", "text": text})
         elif block.get("type") == "tool_use":
-            call = NativeToolCall(
-                call_id=str(block.get("id") or ""),
-                name=str(block.get("name") or ""),
-                arguments=parse_tool_arguments(block.get("input")),
+            call = parse_native_call(
+                block.get("id"), block.get("name"), block.get("input"), require_identity=True,
             )
             calls.append(call)
-            assistant_blocks.append({
-                "type": "tool_use",
-                "id": call.call_id,
-                "name": call.name,
-                "input": call.arguments,
-            })
+            assistant_blocks.append(native_tool_call(protocol, call.call_id, call.name, call.arguments))
+    validate_repair_batch(calls, [(block.get("id"), block.get("name"))
+                                 for block in content if isinstance(block, dict) and block.get("type") == "tool_use"],
+                          require_identity=True)
     return NativeToolTurn(
         text="".join(text_parts),
         tool_calls=tuple(calls),
         finish_reason=finish_reason,
         assistant_entry={"role": "assistant", "content": assistant_blocks},
         usage=usage,
+        private_layout_json=anthropic_private_layout(content),
     )
 
 
@@ -1083,28 +1358,15 @@ def append_native_tool_results(
 ) -> list[dict[str, Any]]:
     """追加完整、已校验工具结果；调用方必须先完成服务端安全投影。"""
     updated = list(history)
+    results = [native_tool_result(protocol, call.call_id, output) for call, output in outputs]
     if protocol == "responses":
         assistant_items = turn.assistant_entry
         if isinstance(assistant_items, list):
             updated.extend(item for item in assistant_items if isinstance(item, dict))
-        updated.extend(
-            {"type": "function_call_output", "call_id": call.call_id, "output": output}
-            for call, output in outputs
-        )
-        return updated
-    if isinstance(turn.assistant_entry, dict):
+    elif isinstance(turn.assistant_entry, dict):
         updated.append(turn.assistant_entry)
-    if protocol == "chat_completions":
-        updated.extend(
-            {"role": "tool", "tool_call_id": call.call_id, "content": output}
-            for call, output in outputs
-        )
-        return updated
-    updated.append({
-        "role": "user",
-        "content": [
-            {"type": "tool_result", "tool_use_id": call.call_id, "content": output}
-            for call, output in outputs
-        ],
-    })
+    if protocol in {"responses", "chat_completions"}:
+        updated.extend(results)
+    else:
+        updated.append({"role": "user", "content": results})
     return updated

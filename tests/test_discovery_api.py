@@ -146,10 +146,16 @@ class _BaseClientTests(InitializedWebTestCase):
             "DISCOVERY_ENABLED": "1",
         })
         self.env_patch.start()
+        from tests.support import initialized_web_runtime
+        from contextlib import ExitStack
+        self._installed_runtime = ExitStack()
+        self.addCleanup(self._installed_runtime.close)
+        self._installed_runtime.enter_context(initialized_web_runtime())
         self.client = TestClient(create_app(), raise_server_exceptions=False)
 
     def tearDown(self):
         self.client.close()
+        self._installed_runtime.close()
         self.env_patch.stop()
         self.db_patch.stop()
         self.temp.cleanup()
@@ -375,29 +381,18 @@ class DiscoveryAPITests(_BaseClientTests):
         self.assertEqual(detail.json()["title"], "Detail")
 
     def test_authenticated_douban_api_uses_public_client_without_reading_frodo_credentials(self):
-        empty_user_env = Path(self.temp.name) / "empty-user.env"
-        empty_user_env.write_text("", encoding="utf-8")
-
-        with patch.object(app_config, "ENV_FILE", empty_user_env), patch.object(
-            app_config, "_cache", None
-        ), patch.dict(os.environ, {
-            "MEDIAFLUX_INITIALIZED": "1",
-            "DISCOVERY_ENABLED": "1",
-            "WEB_SECRET_KEY": "task5-api-signing-secret",
-            "ENV_WEB_PASSPORT": "admin",
-            "ENV_WEB_PASSWORD": "123456",
-        }, clear=True):
-            self.assertEqual(app_config.all_items(), {})
+        # A public Douban client requires no Frodo credentials, not an empty
+        # installation. Keep the real stable env/DB pair supplied by setUp.
+        installed_env = app_config.ENV_FILE
+        env_before = installed_env.read_bytes()
+        with patch.dict(os.environ, {"WEB_SECRET_KEY": "task5-api-signing-secret"}):
+            os.environ.pop("DOUBAN_FRODO_API_KEY", None)
+            os.environ.pop("DOUBAN_FRODO_API_SECRET", None)
+            self.assertNotIn("DOUBAN_FRODO_API_KEY", app_config.all_items())
+            self.assertNotIn("DOUBAN_FRODO_API_SECRET", app_config.all_items())
             self.assertEqual(
                 app_config.get("WEB_SECRET_KEY"),
                 "task5-api-signing-secret",
-            )
-            self.assertEqual(
-                set(os.environ),
-                {
-                    "MEDIAFLUX_INITIALIZED", "DISCOVERY_ENABLED", "WEB_SECRET_KEY",
-                    "ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD",
-                },
             )
             self.assertNotIn("DOUBAN_FRODO_API_KEY", os.environ)
             self.assertNotIn("DOUBAN_FRODO_API_SECRET", os.environ)
@@ -428,14 +423,11 @@ class DiscoveryAPITests(_BaseClientTests):
                 service.shutdown()
                 client.close()
 
-            self.assertEqual(empty_user_env.read_text(encoding="utf-8"), "")
-            self.assertEqual(
-                set(os.environ),
-                {
-                    "MEDIAFLUX_INITIALIZED", "DISCOVERY_ENABLED", "WEB_SECRET_KEY",
-                    "ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD",
-                },
-            )
+            self.assertEqual(installed_env.read_bytes(), env_before)
+            self.assertNotIn("DOUBAN_FRODO_API_KEY", app_config.all_items())
+            self.assertNotIn("DOUBAN_FRODO_API_SECRET", app_config.all_items())
+            self.assertNotIn("DOUBAN_FRODO_API_KEY", os.environ)
+            self.assertNotIn("DOUBAN_FRODO_API_SECRET", os.environ)
 
         self.assertEqual(items.status_code, 200)
         self.assertEqual(detail.status_code, 200)

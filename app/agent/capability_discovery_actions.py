@@ -17,6 +17,32 @@ CAPABILITY_PARAMETERS = {
             "maxLength": 200,
             "description": "描述需要查找的项目能力，不必知道工具名称。",
         },
+        "queries": {
+            "type": "array", "minItems": 1, "maxItems": 4,
+            "items": {"type": "string", "minLength": 1, "maxLength": 200},
+            "description": "一次联合检索最多4组能力；共享有限工具窗口，下一轮生效。",
+        },
+        "catalog": {
+            "type": "object",
+            "description": "词法未命中时按领域分页探索目录；只返回摘要，再用tool_names加载。空对象浏览全部领域。",
+            "properties": {
+                "domains": {"type": "array", "minItems": 1, "maxItems": 4,
+                            "items": {"type": "string", "minLength": 1, "maxLength": 80}},
+                "offset": {"type": "integer", "minimum": 0, "maximum": 10000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+            },
+            "additionalProperties": False,
+        },
+        "window": {
+            "type": "object",
+            "description": "本轮有界工作集：retain仅保留已加载或同批已成功加载的canonical工具；release取消保留，不立即卸载。不授予执行权限。",
+            "properties": {
+                key: {"type": "array", "maxItems": 12,
+                      "items": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^\S+$"}}
+                for key in ("retain", "release")
+            },
+            "additionalProperties": False,
+        },
         "tool_names": {
             "type": "array",
             "maxItems": 6,
@@ -26,16 +52,50 @@ CAPABILITY_PARAMETERS = {
         },
     },
     "additionalProperties": False,
+    "maxProperties": 1,
 }
 
 
 def capability_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(arguments, dict) or set(arguments) - {"query", "tool_names"}:
-        raise AgentToolError("只允许 query 或 tool_names；留空查看能力概况。")
+    if not isinstance(arguments, dict) or set(arguments) - {"query", "queries", "tool_names", "catalog", "window"}:
+        raise AgentToolError("只允许 query、queries、tool_names、catalog 或 window；留空查看能力概况。")
     if not arguments:
         return {}
     if len(arguments) != 1:
-        raise AgentToolError("query 和 tool_names 只能提供其中一个。")
+        raise AgentToolError("query、queries、tool_names、catalog 和 window 只能提供其中一个。")
+    if "window" in arguments:
+        window = arguments["window"]
+        if not isinstance(window, dict) or set(window) - {"retain", "release"}:
+            raise AgentToolError("window 只允许 retain、release。")
+        normalized = {}
+        for key in ("retain", "release"):
+            names = window.get(key, [])
+            if (not isinstance(names, list) or len(names) > 12
+                    or any(not isinstance(n, str) or not 1 <= len(n) <= 120
+                           or any(c.isspace() for c in n) for n in names)):
+                raise AgentToolError("retain/release 必须是至多12个精确canonical工具名称。")
+            normalized[key] = list(dict.fromkeys(names))
+        if set(normalized["retain"]) & set(normalized["release"]):
+            raise AgentToolError("retain 与 release 不可重叠。")
+        return {"window": normalized}
+    if "queries" in arguments:
+        queries = arguments["queries"]
+        if not isinstance(queries, list) or not 1 <= len(queries) <= 4:
+            raise AgentToolError("queries 必须是1至4组能力描述。")
+        return {"queries": list(dict.fromkeys(capability_arguments({"query": q})["query"] for q in queries))}
+    if "catalog" in arguments:
+        page = arguments["catalog"]
+        if not isinstance(page, dict) or set(page) - {"domains", "offset", "limit"}:
+            raise AgentToolError("catalog 只允许 domains、offset、limit。")
+        domains = page.get("domains", [])
+        if (not isinstance(domains, list) or len(domains) > 4
+                or ("domains" in page and not domains)
+                or any(not isinstance(d, str) or not 1 <= len(d.strip()) <= 80 for d in domains)):
+            raise AgentToolError("domains 必须是1至4个领域名称。")
+        offset, limit = page.get("offset", 0), page.get("limit", 12)
+        if type(offset) is not int or not 0 <= offset <= 10000 or type(limit) is not int or not 1 <= limit <= 12:
+            raise AgentToolError("目录 offset 必须为0至10000整数，limit为1至12整数。")
+        return {"catalog": {"domains": list(dict.fromkeys(d.strip() for d in domains)), "offset": offset, "limit": limit}}
     if "query" in arguments:
         query = arguments["query"]
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:

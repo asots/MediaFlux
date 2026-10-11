@@ -12,7 +12,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -220,8 +220,8 @@ def create_backup(
     include_settings: bool = True,
 ) -> Path:
     """创建原子 ZIP，并与恢复/启动期迁移串行。"""
-    # 固定锁序：配置快照 -> 备份/恢复。配置发布只持有前者，恢复在
-    # runtime lifecycle 独占期只持有后者，因此不会形成反向锁序。
+    # 固定锁序：配置快照 -> 备份/恢复。恢复另外先持有 runtime
+    # lifecycle 独占锁，再按同样的 C -> B 顺序取得这两把锁。
     with config_snapshot_guard(paths):
         with _backup_operation_guard(paths):
             return _create_backup_unlocked(
@@ -647,18 +647,34 @@ def _backup_operation_guard(paths: RuntimePaths):
         lock.release()
 
 
+_CONFIG_SNAPSHOT_OWNERS = threading.local()
+
+
 @contextmanager
 def config_snapshot_guard(paths: RuntimePaths):
-    """串行配置发布与包含配置的备份快照。"""
+    """串行配置快照；仅同进程、同线程、同实际锁文件可嵌套复用。"""
     from app.modules.process_lock import CrossProcessLock
 
     lock = CrossProcessLock("config-snapshot", directory=paths.data_dir)
+    identity = (os.getpid(), threading.get_ident(), lock.path.resolve())
+    owners = getattr(_CONFIG_SNAPSHOT_OWNERS, "active", None)
+    if owners is None:
+        owners = _CONFIG_SNAPSHOT_OWNERS.active = set()
+    if identity in owners:
+        yield
+        return
     if not lock.acquire(blocking=True):  # pragma: no cover - blocking lock returns true or raises
         raise BackupError("另一个配置保存或备份任务正在运行")
     try:
+        owners.add(identity)
         yield
     finally:
-        lock.release()
+        owners.discard(identity)
+        # A fork child may unwind an inherited context, but must never LOCK_UN
+        # the parent's open-file-description. Abnormal-parent-exit descriptor
+        # cleanup is deliberately not a general fork-lifecycle contract here.
+        if os.getpid() == identity[0]:
+            lock.release()
 
 
 _RUNTIME_LIFECYCLE_REGISTRY_LOCK = threading.RLock()
@@ -836,6 +852,58 @@ def restore_backup(paths: RuntimePaths, archive_path: Path) -> BackupManifest:
                     f"{backup_schema_version} 高于当前程序支持的 {SCHEMA_VERSION}，"
                     "已拒绝降级恢复"
                 )
+            # Rebind authorization only in this fully verified offline payload.
+            # The existing journal then publishes DB and (when present) env as
+            # one recoverable transaction; ordinary startup never promotes a
+            # changing fence. Legacy databases without a fence stay unchanged.
+            from app import config
+            from app.agent.feature_gate import RUNTIME_FENCE_KEY, read_runtime_fence
+            from app.env_file import read_env_bytes
+
+            with closing(sqlite3.connect(database_payload)) as restored, restored:
+                # The journal publishes one database file, not its WAL sidecar.
+                restored.execute("PRAGMA journal_mode=DELETE")
+                has_settings = restored.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings_kv'"
+                ).fetchone()
+                if has_settings and restored.execute(
+                    "SELECT 1 FROM settings_kv WHERE key=?", (RUNTIME_FENCE_KEY,)
+                ).fetchone():
+                    try:
+                        fence = read_runtime_fence(restored)
+                    except RuntimeError as exc:
+                        raise BackupError("备份运行授权记录损坏，已拒绝恢复") from exc
+                    if fence.phase != "stable":
+                        raise BackupError("备份运行授权处于未完成变更状态，已拒绝恢复")
+
+                    archived_env = verified_payloads.get("config/user.env")
+                    try:
+                        if archived_env is not None:
+                            env_values = read_env_bytes(archived_env.read_bytes())
+                        else:
+                            _env_payload, env_values = config.read_env_snapshot_no_recovery(
+                                paths.env_file
+                            )
+                            if _env_payload is None:
+                                raise BackupError(
+                                    "备份未包含 user.env，且现有配置不存在，无法绑定恢复授权"
+                                )
+                    except BackupError:
+                        raise
+                    except (OSError, UnicodeError, ValueError, config.AtomicPublishError) as exc:
+                        raise BackupError("无法安全读取恢复后的 user.env，已拒绝恢复") from exc
+
+                    rebound = {
+                        "v": 1,
+                        "incarnation": uuid.uuid4().hex,
+                        "epoch": 1,
+                        "phase": "stable",
+                        "config_digest": config._runtime_digest(env_values),
+                    }
+                    restored.execute(
+                        "UPDATE settings_kv SET value=?,updated_at=CURRENT_TIMESTAMP WHERE key=?",
+                        (json.dumps(rebound, sort_keys=True), RUNTIME_FENCE_KEY),
+                    )
             mapping = _restore_mapping(paths)
             files = {
                 str(entry["name"]): (

@@ -61,13 +61,18 @@ jobs:
             node --check "$file"
           done < <(find app/static/js -type f -name '*.js' ! -name '*.min.js' -print0)
 
+      - name: Prepare private test temporary directory
+        run: echo "TMPDIR=$(mktemp -d "$HOME/.mediaflux-tests.XXXXXXXX")" >> "$GITHUB_ENV"
+
       - name: Run tests
         env:
           PYTHONUNBUFFERED: "1"
           MEDIAFLUX_TESTING: "1"
           MEDIAFLUX_TEST_MODE: "1"
           MEDIAFLUX_DISABLE_FILE_LOGGING: "1"
-        run: python -m pytest tests -q
+        run: |
+          umask 077
+          python -m pytest tests -q
 
   browser:
     runs-on: ubuntu-latest
@@ -105,6 +110,9 @@ jobs:
           fi
           "$browser_path" --version
 
+      - name: Prepare private test temporary directory
+        run: echo "TMPDIR=$(mktemp -d "$HOME/.mediaflux-tests.XXXXXXXX")" >> "$GITHUB_ENV"
+
       - name: Run real browser regression tests without skips
         env:
           PYTHONUNBUFFERED: "1"
@@ -112,6 +120,7 @@ jobs:
           MEDIAFLUX_TEST_MODE: "1"
           MEDIAFLUX_DISABLE_FILE_LOGGING: "1"
         run: |
+          umask 077
           python - <<'PY'
           import unittest
 
@@ -530,6 +539,37 @@ jobs:
           EXPECTED_SHA: ${{ steps.context.outputs.source_sha }}
         run: |
           set -euo pipefail
+          set +x
+          umask 077
+          smoke_dir=""
+          volume=""
+          cleanup_resources() {
+            if [[ -n "$smoke_dir" ]]; then
+              for cidfile in "$smoke_dir/init.cid" "$smoke_dir/start.cid"; do
+                if [[ -s "$cidfile" ]]; then
+                  docker rm --force "$(<"$cidfile")" >/dev/null 2>&1 || true
+                fi
+              done
+            fi
+            if [[ -n "$volume" ]]; then
+              docker volume rm "$volume" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "$smoke_dir" ]]; then
+              rm -rf -- "$smoke_dir"
+            fi
+            smoke_dir=""
+            volume=""
+          }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            set +e
+            cleanup_resources
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
           for platform_and_arch in "linux/amd64:x86_64" "linux/arm64:aarch64"; do
             platform=${platform_and_arch%%:*}
             expected_arch=${platform_and_arch#*:}
@@ -550,13 +590,28 @@ jobs:
               '.version == $version and .arch == $arch and .package == "docker" and .commit == $sha' \
               "$output" >/dev/null
 
-            container="mediaflux-${safe_platform}-startup"
-            docker run --detach --platform "$platform" --name "$container" \
-              --env WEB_SECRET_KEY=ci-platform-secret-key-with-more-than-32-bytes \
-              --env MEDIAFLUX_INITIALIZED=1 \
-              --env ENV_WEB_PASSPORT=admin \
-              --env ENV_WEB_PASSWORD=ci-platform-password-with-more-than-16-bytes \
-              "$image_reference" >/dev/null
+            smoke_dir=$(mktemp -d "$RUNNER_TEMP/mediaflux-smoke.XXXXXXXX")
+            volume=$(docker volume create)
+            container="mediaflux-${safe_platform}-${smoke_dir##*.}"
+            runtime_args=(--platform "$platform" --user 0:0
+              --mount "type=volume,source=$volume,target=/app/db"
+              --env MEDIAFLUX_DATA_DIR=/app/db --env MEDIAFLUX_CONFIG_DIR=/app/db)
+            # Persist only selected settings through private, finite fd0 input.
+            # Both invocations load the same physical user.env, not ambient secrets.
+            python3 -c 'import json,secrets; print(json.dumps({"MEDIAFLUX_INITIALIZED":"1","ENV_WEB_PASSPORT":"admin","ENV_WEB_PASSWORD":secrets.token_urlsafe(32),"WEB_SECRET_KEY":secrets.token_urlsafe(48)}))' \
+              > "$smoke_dir/settings.json"
+            if docker run --rm -i "${runtime_args[@]}" --cidfile "$smoke_dir/init.cid" \
+              "$image_reference" python mediaflux.py initialize --data-dir /app/db \
+              --confirm-new-installation --expect-env-sha256 absent --settings-fd 0 \
+              < "$smoke_dir/settings.json" >/dev/null 2>&1; then
+              rm -- "$smoke_dir/settings.json"
+            else
+              status=$?
+              echo "$platform explicit initialization failed" >&2
+              exit "$status"
+            fi
+            docker run --detach "${runtime_args[@]}" --name "$container" \
+              --cidfile "$smoke_dir/start.cid" "$image_reference" >/dev/null
             ready=false
             echo "Waiting for $platform candidate readiness"
             for attempt in $(seq 1 45); do
@@ -590,6 +645,7 @@ jobs:
             docker logs "$container" > "$shutdown_log" 2>&1
             grep -Fq "Application shutdown complete" "$shutdown_log"
             docker rm "$container" >/dev/null
+            cleanup_resources
           done
 
       - name: Prepare GitHub Release

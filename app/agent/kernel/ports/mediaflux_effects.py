@@ -71,6 +71,27 @@ class MediaFluxEffectLifecycle:
             else None
         )
 
+    def _release_followups(
+        self, metadata_source: EffectPlan | PreparedEffect,
+        owner_source: EffectPlan | ToolCallContext,
+    ) -> None:
+        runtime = self.missing_media_runtime
+        if runtime is not None:
+            runtime.release_followups(
+                owner=owner_source.owner,
+                followups=self._followups(dict(metadata_source.metadata)),
+            )
+
+    def _audit_fields(self, plan: EffectPlan) -> dict[str, Any]:
+        return {
+            "owner": plan.owner,
+            "tool_name": plan.tool_name,
+            "risk": self._risk(plan),
+            "confirmation_contract": self._contract(plan),
+            "confirmation_id": plan.plan_id,
+            "owner_generation": plan.owner_generation,
+        }
+
     def prepared(
         self,
         *,
@@ -99,13 +120,7 @@ class MediaFluxEffectLifecycle:
     def prepare_failed(
         self, *, prepared: PreparedEffect, context: ToolCallContext
     ) -> None:
-        runtime = self.missing_media_runtime
-        if runtime is None:
-            return
-        runtime.release_followups(
-            owner=context.owner,
-            followups=self._followups(dict(prepared.metadata)),
-        )
+        self._release_followups(prepared, context)
 
     def completed(self, *, plan: EffectPlan, value: Any, elapsed_ms: int) -> None:
         runtime = self.missing_media_runtime
@@ -129,14 +144,9 @@ class MediaFluxEffectLifecycle:
             logger.warning("回退凭证创建失败 type=%s", type(exc).__name__)
             value.suggestions.append("本次操作未生成回退凭证；需要恢复时请先检查当前状态。")
         record_confirmed_result(
-            owner=plan.owner,
-            tool_name=plan.tool_name,
-            risk=self._risk(plan),
+            **self._audit_fields(plan),
             result=value,
             elapsed_ms=elapsed_ms,
-            confirmation_contract=self._contract(plan),
-            confirmation_id=plan.plan_id,
-            owner_generation=plan.owner_generation,
         )
         # 配置变化才使全局运行快照失效；普通写入由各领域的对象/版本快照防重放。
         # 历史确认卡没有配置摘要时仍保守失效，不能跳过既有保护。
@@ -146,44 +156,18 @@ class MediaFluxEffectLifecycle:
             invalidate_agent_runtime_generation()
 
     def failed(self, *, plan: EffectPlan, code: str, elapsed_ms: int) -> None:
-        runtime = self.missing_media_runtime
-        if runtime is not None:
-            runtime.release_followups(
-                owner=plan.owner,
-                followups=self._followups(dict(plan.metadata)),
-            )
+        self._release_followups(plan, plan)
         record_confirmation_error(
-            owner=plan.owner,
-            tool_name=plan.tool_name,
-            risk=self._risk(plan),
+            **self._audit_fields(plan),
             code=code,
             elapsed_ms=elapsed_ms,
-            confirmation_contract=self._contract(plan),
-            confirmation_id=plan.plan_id,
-            owner_generation=plan.owner_generation,
         )
 
     def interrupted(self, *, plan: EffectPlan) -> None:
-        runtime = self.missing_media_runtime
-        if runtime is not None:
-            runtime.release_followups(
-                owner=plan.owner,
-                followups=self._followups(dict(plan.metadata)),
-            )
+        self._release_followups(plan, plan)
         record_confirmation_interrupted(
-            owner=plan.owner,
-            confirmation_id=plan.plan_id,
-            owner_generation=plan.owner_generation,
-            tool_name=plan.tool_name,
-            risk=self._risk(plan),
-            confirmation_contract=self._contract(plan),
+            **self._audit_fields(plan),
         )
 
     def cancelled(self, *, plan: EffectPlan) -> None:
-        runtime = self.missing_media_runtime
-        if runtime is None:
-            return
-        runtime.release_followups(
-            owner=plan.owner,
-            followups=self._followups(dict(plan.metadata)),
-        )
+        self._release_followups(plan, plan)

@@ -4,9 +4,131 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 import threading
+import json
+import secrets
+import sqlite3
+from dataclasses import asdict, dataclass, replace
 
 from app import config
 
+
+RUNTIME_FENCE_KEY = "agent.runtime_fence.v1"
+
+
+class RuntimeFenceError(RuntimeError):
+    """Missing, changing or mismatched durable runtime authorization."""
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeFence:
+    v: int
+    incarnation: str
+    epoch: int
+    phase: str
+    config_digest: str
+
+
+def read_runtime_fence(conn: sqlite3.Connection) -> RuntimeFence:
+    row = conn.execute("SELECT value FROM settings_kv WHERE key=?", (RUNTIME_FENCE_KEY,)).fetchone()
+    try:
+        data = json.loads(row[0]) if row else None
+        if not isinstance(data, dict) or set(data) != {"v", "incarnation", "epoch", "phase", "config_digest"}:
+            raise ValueError
+        if type(data["v"]) is not int or data["v"] != 1:
+            raise ValueError
+        if type(data["epoch"]) is not int or not 0 < data["epoch"] < 2**63:
+            raise ValueError
+        if data["phase"] not in ("stable", "changing"):
+            raise ValueError
+        for key, size in (("incarnation", 32), ("config_digest", 64)):
+            value = data[key]
+            if not isinstance(value, str) or len(value) != size or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError
+        return RuntimeFence(**data)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise RuntimeFenceError("runtime_fence_unavailable") from exc
+
+
+def require_runtime_fence(conn: sqlite3.Connection, expected: RuntimeFence) -> None:
+    """Read on the caller's transaction; never open a second connection."""
+    current = read_runtime_fence(conn)
+    if (
+        not isinstance(expected, RuntimeFence)
+        or type(expected.epoch) is not int
+        or type(expected.v) is not int
+        or current.phase != "stable"
+        or current != expected
+    ):
+        raise RuntimeFenceError("runtime_fence_changed")
+
+
+def _write_fence(conn: sqlite3.Connection, fence: RuntimeFence) -> None:
+    conn.execute(
+        "UPDATE settings_kv SET value=?,updated_at=CURRENT_TIMESTAMP WHERE key=?",
+        (json.dumps(asdict(fence), sort_keys=True), RUNTIME_FENCE_KEY),
+    )
+
+
+def begin_runtime_change(conn: sqlite3.Connection, expected: RuntimeFence) -> RuntimeFence:
+    if not conn.in_transaction:
+        raise RuntimeFenceError("runtime_fence_transaction_required")
+    require_runtime_fence(conn, expected)
+    if expected.epoch >= 2**63 - 1:
+        raise RuntimeFenceError("runtime_fence_exhausted")
+    changing = replace(expected, epoch=expected.epoch + 1, phase="changing")
+    _write_fence(conn, changing)
+    return changing
+
+
+def finish_runtime_change(conn: sqlite3.Connection, changing: RuntimeFence, config_digest: str) -> RuntimeFence:
+    if not conn.in_transaction:
+        raise RuntimeFenceError("runtime_fence_transaction_required")
+    if changing.phase != "changing" or read_runtime_fence(conn) != changing:
+        raise RuntimeFenceError("runtime_fence_changed")
+    stable = replace(changing, phase="stable", config_digest=config_digest)
+    _write_fence(conn, stable)
+    return stable
+
+
+def begin_installation_fence(conn: sqlite3.Connection, config_digest: str) -> RuntimeFence:
+    """INSERT-only, caller-owned transaction; never reset existing authority."""
+    if not conn.in_transaction:
+        raise RuntimeFenceError("runtime_fence_transaction_required")
+    if len(config_digest) != 64 or any(c not in "0123456789abcdef" for c in config_digest):
+        raise RuntimeFenceError("runtime_snapshot_invalid")
+    fence = RuntimeFence(1, secrets.token_hex(16), 1, "changing", config_digest)
+    conn.execute("INSERT INTO settings_kv(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)", (RUNTIME_FENCE_KEY, json.dumps(asdict(fence), sort_keys=True)))
+    return fence
+
+
+def initialize_runtime_fence(*, defer_initial_setup: bool = False) -> RuntimeFence | None:
+    """Called only after schema initialization; restarting never grants a new epoch."""
+    from app import database as db
+    with config.runtime_config_read_guard():
+        if not db.resolve_db_path().is_file():
+            raise RuntimeFenceError("runtime_database_unavailable")
+        with db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT 1 FROM settings_kv WHERE key=?", (RUNTIME_FENCE_KEY,)).fetchone()
+            if row:
+                if defer_initial_setup:
+                    raise RuntimeFenceError("existing_runtime_requires_controlled_config_recovery")
+                fence = read_runtime_fence(conn)
+                snapshot = config.capture_runtime_config_snapshot()
+                if fence.phase != "stable":
+                    raise RuntimeFenceError("runtime_fence_changing")
+                if fence.config_digest != snapshot.config_digest:
+                    raise RuntimeFenceError("runtime_snapshot_mismatch")
+                return fence
+            if defer_initial_setup:
+                raise RuntimeFenceError("explicit_installation_required")
+            snapshot = config.capture_runtime_config_snapshot()
+            fence = RuntimeFence(1, secrets.token_hex(16), 1, "stable", snapshot.config_digest)
+            conn.execute(
+                "INSERT INTO settings_kv(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)",
+                (RUNTIME_FENCE_KEY, json.dumps(asdict(fence), sort_keys=True)),
+            )
+            return fence
 
 AGENT_ENABLED_KEY = "AGENT_ENABLED"
 _runtime_generation_lock = threading.Lock()

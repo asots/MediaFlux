@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from tests.support import isolated_test_database
+from tests.support import initialized_web_runtime
 
 
 class ReadinessTests(unittest.TestCase):
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(initialized_web_runtime())
+
     def test_readyz_tracks_application_lifespan_without_changing_healthz(self) -> None:
         app = create_app(start_background=False)
         self.assertFalse(app.state.ready)
 
-        with isolated_test_database("readiness.db"), TestClient(
+        with TestClient(
             app, raise_server_exceptions=False
         ) as client:
             ready = client.get("/readyz")

@@ -12,6 +12,7 @@ from app.agent.kernel.ports.mediaflux_policy import (
     MediaFluxTurnAdmission,
 )
 from app.agent.kernel.state import AgentInput, CancellationToken, PublicationLease
+from app.agent.rate_limit import RateLimitDecision
 from tests.support import isolated_test_database
 
 
@@ -126,8 +127,11 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_rate_limiter_uses_canonical_tool_name(self) -> None:
         limiter = MediaFluxToolRateLimiter()
         with patch(
-            "app.agent.kernel.ports.mediaflux_policy.allow_agent_tool",
-            return_value=True,
+            "app.agent.kernel.ports.mediaflux_policy.consume_agent_tool",
+            return_value=RateLimitDecision(
+                allowed=True, limit=4, cost=1, remaining=3,
+                retry_after_seconds=0.0, retry_at_epoch=None, reason="allowed",
+            ),
         ) as allowed:
             await limiter.acquire(
                 owner="owner",
@@ -140,8 +144,11 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch(
-                "app.agent.kernel.ports.mediaflux_policy.allow_agent_tool",
-                return_value=False,
+                "app.agent.kernel.ports.mediaflux_policy.consume_agent_tool",
+                return_value=RateLimitDecision(
+                    allowed=False, limit=12, cost=1, remaining=0,
+                    retry_after_seconds=65.0, retry_at_epoch=185.0, reason="quota",
+                ),
             ),
             self.assertRaises(ToolPipelineError) as raised,
         ):
@@ -236,8 +243,11 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
         limiter = MediaFluxToolRateLimiter()
         with (
             patch(
-                "app.agent.kernel.ports.mediaflux_policy.allow_agent_tool",
-                return_value=True,
+                "app.agent.kernel.ports.mediaflux_policy.consume_agent_tool",
+                return_value=RateLimitDecision(
+                    allowed=True, limit=8, cost=1, remaining=7,
+                    retry_after_seconds=0.0, retry_at_epoch=None, reason="allowed",
+                ),
             ) as allowed,
             self.assertRaises(ToolPipelineError) as raised,
         ):

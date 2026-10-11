@@ -59,6 +59,11 @@ class WebSecretTests(unittest.TestCase):
     def test_fresh_production_uses_one_in_memory_secret_until_setup_persists_it(self):
         os.environ["APP_ENV"] = "production"
         self._reload_modules()
+        from tests.test_setup_bootstrap_support import initialize_web_paths
+        initialize_web_paths(self.paths, 'admin', 'correct-horse')
+        # D1: setup CSRF lives only in the one-shot process; normal signing
+        # material is generated/persisted by consume, then loaded cold.
+        self._reload_modules()
         from app.main import create_app
         from app.routes.discovery_image import encode_poster_token
 
@@ -71,7 +76,7 @@ class WebSecretTests(unittest.TestCase):
         self.assertEqual(middleware_secret, self.web_secret.get_web_secret())
         self.assertIsInstance(encode_poster_token("tmdb", "poster.jpg"), str)
 
-        self.first_run.initialize_admin("admin", "correct-horse")
+        self.assertFalse((self.paths.config_dir / '.web-secret-key').exists())
 
         self.assertEqual(
             self.config._read_env_file(self.paths.env_file)["WEB_SECRET_KEY"],
@@ -103,6 +108,8 @@ class WebSecretTests(unittest.TestCase):
             "ENV_WEB_PASSPORT=admin\nENV_WEB_PASSWORD=correct-horse\n",
             encoding="utf-8",
         )
+        from tests.test_setup_bootstrap_support import initialize_paths
+        initialize_paths(self.paths)
         self._reload_modules()
         from app.main import create_app
 
@@ -118,6 +125,8 @@ class WebSecretTests(unittest.TestCase):
             encoding="utf-8",
         )
         os.environ["APP_ENV"] = "production"
+        from tests.test_setup_bootstrap_support import initialize_paths
+        initialize_paths(self.paths)
         self._reload_modules()
         from app.main import create_app
 
@@ -128,6 +137,9 @@ class WebSecretTests(unittest.TestCase):
 
     def test_external_secret_is_used_for_session_and_discovery_signing(self):
         os.environ["WEB_SECRET_KEY"] = "external-secret"
+        self._reload_modules()
+        from tests.test_setup_bootstrap_support import initialize_paths
+        initialize_paths(self.paths, {'ENV_WEB_PASSPORT': 'admin', 'ENV_WEB_PASSWORD': 'correct-horse', 'WEB_SECRET_KEY': 'external-secret'})
         self._reload_modules()
         from app.main import create_app
         from app.routes.discovery_image import _serializer

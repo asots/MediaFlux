@@ -52,16 +52,23 @@ def test_telegram_prefers_selected_quote_and_supports_external_quote():
         quote=SimpleNamespace(text=NOTICE),
         reply_to_message=SimpleNamespace(text="旧内容" * 800 + NOTICE, caption=""),
     )
-    assert _reply_context(message) == {"text": NOTICE}
+    assert _reply_context(message) == {"text": NOTICE, "source": {
+        "kind": "quote", "chat_id": "", "message_id": None, "thread_id": None,
+        "incoming_message_id": None, "incoming_thread_id": None,
+    }}
     message.reply_to_message = None
-    assert _reply_context(message) == {"text": NOTICE}
+    assert _reply_context(message)["text"] == NOTICE
+    assert _reply_context(message)["source"]["message_id"] is None
     message.quote.text = "字" * 5_000
-    assert len(_reply_context(message)["text"]) == 2_000
+    assert _reply_context(message)["text"] == message.quote.text
 
 
 def test_telegram_falls_back_to_caption_and_does_not_invent_quote():
     message = SimpleNamespace(reply_to_message=SimpleNamespace(text="", caption=NOTICE))
-    assert _reply_context(message) == {"text": NOTICE}
+    assert _reply_context(message) == {"text": NOTICE, "source": {
+        "kind": "caption", "chat_id": "", "message_id": None, "thread_id": None,
+        "incoming_message_id": None, "incoming_thread_id": None,
+    }}
     assert _reply_context(SimpleNamespace()) == {}
 
 

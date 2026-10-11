@@ -257,9 +257,51 @@ def _secret_key() -> str:
     if production and config.web_credentials()[1] == "123456":
         raise RuntimeError("生产模式禁止使用默认 Web 密码")
     if not configured_secret:
+        # This legacy bootstrap write runs before lifespan. Initialize its
+        # durable guard first, but never turn a vanished established DB into
+        # an authorization-free first installation.
+        _initialize_runtime_storage()
         config.set_and_save({"WEB_SECRET_KEY": secret_key})
         logger.info("安装未配置 WEB_SECRET_KEY，已自动生成并持久化会话密钥")
     return secret_key
+
+
+def _initialize_runtime_storage() -> None:
+    """Validate existing authorization before schema migration can create state."""
+    import sqlite3
+    from contextlib import closing
+    from app.agent.feature_gate import (
+        RUNTIME_FENCE_KEY, RuntimeFenceError, initialize_runtime_fence,
+        read_runtime_fence,
+    )
+
+    with config.runtime_config_read_guard():
+        path = database.resolve_db_path()
+        fresh = first_run.needs_initialization()
+        if not path.is_file():
+            raise RuntimeFenceError("runtime_database_unavailable")
+        else:
+            if fresh:
+                raise RuntimeFenceError("existing_runtime_requires_controlled_config_recovery")
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+                if not fresh:
+                    # Recognize the long-lived organize history, not just a
+                    # SQLite header or a generic settings table. Missing newer
+                    # tables/columns remain the schema migrator's responsibility.
+                    history = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='organize_log'").fetchone()
+                    columns = {row[1] for row in conn.execute('PRAGMA table_info(organize_log)')} if history else set()
+                    if not {'id', 'source', 'original_path', 'new_path', 'status', 'created_at'} <= columns:
+                        raise RuntimeFenceError("runtime_database_schema_unrecognized")
+                tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings_kv'").fetchone()
+                if tables and conn.execute("SELECT 1 FROM settings_kv WHERE key=?", (RUNTIME_FENCE_KEY,)).fetchone():
+                    fence = read_runtime_fence(conn)
+                    if fence.phase != "stable":
+                        raise RuntimeFenceError("runtime_fence_changing")
+                    config.capture_runtime_config_snapshot()
+                    if fresh:
+                        raise RuntimeFenceError("existing_runtime_requires_controlled_config_recovery")
+        database.init_db()
+        initialize_runtime_fence(defer_initial_setup=fresh)
 
 
 def _resolve_bind_host(host: str | None) -> str:
@@ -493,6 +535,8 @@ def stop_background_services() -> bool:
 
 
 def create_app(*, start_background: bool = False) -> FastAPI:
+    from app.modules.setup_bootstrap import guidance_app
+    from app.runtime_paths import get_runtime_paths
     # 恢复事务可能回滚 user.env。必须在首次读取配置、首启状态和会话密钥前
     # 完成恢复，否则本进程会拿着恢复前后的混合快照运行到下一次重启。
     from app.modules.backup import recover_pending_restore, runtime_lifecycle_guard
@@ -530,9 +574,16 @@ def create_app(*, start_background: bool = False) -> FastAPI:
                     config.PATHS,
                     lifecycle_lock_held=True,
                 )
+        # A prepared restore may temporarily move the canonical DB away.
+        # Only genuine absence after recovery is first-installation guidance.
+        if not os.path.lexists(database.resolve_db_path()):
+            release_startup_guard()
+            return guidance_app(get_runtime_paths())
         if recovered:
             config.reload_after_restore()
             first_run.refresh_startup_state_after_restore()
+        # Reject damaged/changing/lost authorization before secret fallback writes.
+        _initialize_runtime_storage()
         secret_key = _secret_key()
     except BaseException:
         release_startup_guard()
@@ -545,7 +596,7 @@ def create_app(*, start_background: bool = False) -> FastAPI:
         with ExitStack() as lifetime:
             lifetime.callback(release_startup_guard)
             lifetime.enter_context(runtime_lifecycle_guard(config.PATHS))
-            database.init_db()
+            _initialize_runtime_storage()
             try:
                 from app.modules.strm import parse_strm_sources
 
@@ -880,8 +931,17 @@ def create_app(*, start_background: bool = False) -> FastAPI:
 
 def run(*, host: str | None = None, port: int | None = None) -> None:
     """兼容 ASGI 直接启动，并始终保持单 worker。"""
-    effective_host = _resolve_bind_host(host)
-    effective_port = config.flask_port() if port is None else port
+    if not os.path.lexists(database.resolve_db_path()):
+        from app.defaults import DEFAULT_WEB_PORT
+        from app.modules.setup_bootstrap import setup_host, BootstrapError
+        try:
+            effective_host = setup_host(host or os.getenv("WEB_HOST"))
+        except BootstrapError as exc:
+            raise first_run.UnsafeFirstRunBindingError(str(exc)) from None
+        effective_port = DEFAULT_WEB_PORT if port is None else port
+    else:
+        effective_host = _resolve_bind_host(host)
+        effective_port = config.flask_port() if port is None else port
     logger.info(f"MediaFlux FastAPI 启动于 {effective_host}:{effective_port}")
     try:
         uvicorn.run(
@@ -895,7 +955,9 @@ def run(*, host: str | None = None, port: int | None = None) -> None:
             access_log=False,
         )
     finally:
-        app.state.release_startup_lifecycle_guard()
+        release = getattr(app.state, 'release_startup_lifecycle_guard', None)
+        if release is not None:
+            release()
 
 
 app = create_app(start_background=True)

@@ -120,6 +120,8 @@ class RuntimePathConsumerTests(unittest.TestCase):
                 ):
                     config, database, logger, guangya = reload_runtime_modules()
 
+                    from tests.test_setup_bootstrap_support import initialize_paths
+                    initialize_paths(paths, {"ENV_WEB_PASSPORT": "operator", "ENV_WEB_PASSWORD": "test-bootstrap-password"})
                     config.set_and_save({"RUNTIME_PATH_CONSUMER_TEST": "1"})
                     database.init_db()
                     with database.get_conn() as connection:

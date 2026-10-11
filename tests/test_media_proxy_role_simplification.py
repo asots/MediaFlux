@@ -88,6 +88,9 @@ class MediaProxyProfileApiTests(InitializedWebTestCase):
              patch("app.database.DB_PATH", Path(root) / "profile-api.db"), \
              patch.object(profiles.config, "get", side_effect=lambda key, default="": values.get(key, default)), \
              patch.object(profiles.config, "get_bool", side_effect=lambda key, default=False: values.get(key, str(default)).lower() in {"1", "true", "yes", "on"}):
+            from app import database
+
+            database.init_db()
             with TestClient(create_app(), raise_server_exceptions=False) as client:
                 login_page = client.get("/login")
                 username, password = web_credentials()

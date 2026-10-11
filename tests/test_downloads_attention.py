@@ -749,6 +749,8 @@ class DownloadAttentionDatabaseTests(IsolatedDatabaseTestCase):
 
 class DownloadAttentionApiTests(IsolatedDatabaseTestCase):
     def setUp(self) -> None:
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         with db.get_conn() as conn:
             conn.execute("DELETE FROM download_log")
             conn.execute("DELETE FROM download_requests")

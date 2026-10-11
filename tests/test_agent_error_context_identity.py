@@ -1,0 +1,234 @@
+"""Existing no-argument context fences also constrain invalid-argument recovery.
+
+This does not infer a trusted repair relation between explicit object arguments.
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+from types import MappingProxyType
+
+import pytest
+
+from app.agent.kernel.adapters import TurnViewBuilder, iter_ndjson
+from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.discovery import DISCOVERY_TOOL
+from app.agent.kernel.events import AgentEvent, AgentEventType
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+from app.agent.kernel.projection import ToolOutcome
+from app.agent.kernel.session import AgentSession, SessionLimits
+from app.agent.kernel.state import AgentInput
+from app.agent.public_view import public_conversation_messages
+from tests.test_agent_invalid_argument_progress import offline as offline, store as store
+from tests.test_agent_kernel_capability_discovery import capability_tool
+from tests.test_agent_recovered_progress import reply
+from tests.test_agent_tool_argument_ingress import PROTOCOLS, Wire, encode
+
+A, B, C = "library.lookup", "library.health", "library.inspect"
+X = {"ref": "object-x"}
+FINAL = "按已取得的证据完成核验。"
+ERRORS = {"schema", "invalid_arguments", "provider_timeout"}
+
+
+async def observe(store, steps, *, protocol="chat_completions", schema=False, ending="answer"):
+    """Real validation/session/wire/storage; replace only read-side business I/O."""
+    entered, business, returned = [], [], []
+    pending = [step for step in steps if step[2] != "schema" and step[0] != DISCOVERY_TOOL]
+
+    def handler(name):
+        def read(arguments, context):
+            expected_name, expected_arguments, outcome = pending.pop(0)
+            assert name == expected_name and dict(arguments) == expected_arguments
+            assert context.owner == "owner-a"
+            entered.append((name, dict(arguments), outcome))
+            if outcome in ERRORS:
+                # Handler validation rejects before the isolated business boundary.
+                raise ToolPipelineError("缺少当前对象参数" if outcome == "invalid_arguments" else "对象z仍未完成", code=outcome)
+            business.append((name, dict(arguments), outcome))
+            value = {"ok": True, "status": "success", "summary": outcome,
+                     "data": {"items": [{"title": outcome}]}}
+            returned.append((value, copy.deepcopy(value)))
+            return ToolOutcome(model_content=encode(value), public_content=MappingProxyType(value))
+        return read
+
+    catalog = ToolCatalog([KernelToolSpec(
+        name=name, domain="library", description="核验当前对象", effect=ToolEffect.READ,
+        input_schema={"type": "object", "properties": {"ref": {"type": "string"}},
+                      "required": ["ref"] if schema and name == A else [], "additionalProperties": False},
+        read=handler(name),
+    ) for name in sorted({step[0] for step in steps} - {DISCOVERY_TOOL})])
+    if any(name == DISCOVERY_TOOL for name, _, _ in steps):
+        catalog.register(capability_tool())
+    replies = [reply(protocol, name=catalog.get(name).model_name, arguments=args, index=index, private=True)
+               for index, (name, args, _) in enumerate(steps)]
+    replies.append((b"not-json", "application/json") if ending == "model-fault" else reply(
+        protocol, text="" if ending in {"round-empty", "tool-empty"} else FINAL,
+    ))
+    limits = None
+    if ending == "round-empty":
+        limits = SessionLimits(max_model_rounds=len(steps) + 1)
+    elif ending == "tool-empty":
+        limits = SessionLimits(max_tool_calls=len(steps))
+    wire = Wire(protocol, replies)
+    session = AgentSession(
+        model=wire.adapter, catalog=catalog, retriever=CapabilityRetriever(minimum=len(catalog), maximum=len(catalog)),
+        pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store, journal=store, limits=limits,
+    )
+    events = [event async for event in session.run(AgentInput(
+        message="分别核验当前对象；切换后的成功不替代旧请求。", owner="owner-a", session_id="context-fence",
+    ))]
+    wire.verify(posts=len(steps) + 1)
+    assert not wire.replies and not pending
+    assert entered == [step for step in steps if step[2] != "schema" and step[0] != DISCOVERY_TOOL]
+    assert business == [step for step in steps if step[2] not in ERRORS and step[0] != DISCOVERY_TOOL]
+    assert all(value == original for value, original in returned)
+
+    fresh = SQLiteKernelStore(secret_provider=lambda: "offline-invalid-progress")
+    saved = await fresh.load(owner="owner-a", session_id="context-fence")
+    journal = await fresh.list_events(owner="owner-a", session_id="context-fence")
+    assert journal == [event.to_dict() for event in events]
+    tools = [row for row in saved.conversation if row["role"] == "tool"]
+    assert [row["tool_call_id"] for row in tools] == [f"call-{i}" for i in range(len(steps))]
+    failed = [event for event in journal if event["type"] == "tool.failed"]
+    codes = ["invalid_arguments" if outcome == "schema" else outcome for _, _, outcome in steps if outcome in ERRORS]
+    assert [event["payload"]["code"] for event in failed] == codes
+    for index, ((name, _, outcome), row) in enumerate(zip(steps, tools)):
+        result = json.loads(row["content"])
+        assert f"call-{index}" in encode(wire.requests[-1])
+        if outcome in ERRORS:
+            assert result["code"] == ("invalid_arguments" if outcome == "schema" else outcome)
+            assert not result.get("data", {}).get("items")
+        elif name != DISCOVERY_TOOL:
+            assert result["data"]["items"][0]["title"] == outcome
+
+    replayed = [AgentEvent(**{**row, "type": AgentEventType(row["type"])}) for row in journal]
+    builder = TurnViewBuilder()
+    for event in replayed:
+        builder.apply(event)
+
+    async def stream():
+        for event in replayed:
+            yield event
+
+    lines = [json.loads(line) async for line in iter_ndjson(stream())]
+    assert lines == journal
+    final = dict(events[-1].payload)
+    view = builder.build().to_dict()
+    answers = [final["answer"], saved.conversation[-1]["content"],
+               public_conversation_messages(saved.conversation)[-1]["content"],
+               view["answer"], lines[-1]["payload"]["answer"]]
+    assert all(answer == answers[0] for answer in answers)
+    assert final["status"] == view["status"] == lines[-1]["payload"]["status"]
+    assert len([row for row in saved.conversation if row.get("provider_state")]) == len(steps)
+    private_marker = {"chat_completions": "PRIVATETHINKING", "responses": "PRIVATEOPAQUE",
+                      "anthropic_messages": "PRIVATESIGNATURE"}[protocol]
+    for index in range(len(steps)):
+        assert f"{private_marker}{index}" in encode(wire.requests[-1])
+    public = encode(journal) + encode(public_conversation_messages(saved.conversation)) + encode(view)
+    for forbidden in ("PRIVATETHINKING", "PRIVATEOPAQUE", "PRIVATESIGNATURE", "_recovery_tracked", "伪造旧对象资料"):
+        assert forbidden not in public
+    return final, answers
+
+
+def assert_partial(final, answers, *, reason="invalid_arguments", titles=()):
+    assert final["status"] == "partial"
+    assert final["finish_reason"] == reason
+    for answer in answers:
+        assert "未完成的查询不能据此判断没有内容" in answer
+        for title in titles:
+            assert title in answer
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+def test_empty_request_cannot_recover_across_business_context(store, protocol):
+    steps = [(A, {}, "invalid_arguments"), (B, {}, "健康检查独有资料"), (A, {}, "切换后对象独有资料")]
+    final, answers = asyncio.run(observe(store, steps, protocol=protocol))
+    assert_partial(final, answers, titles=("健康检查独有资料", "切换后对象独有资料"))
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("schema", [False, True], ids=["handler", "schema"])
+def test_immediate_empty_to_explicit_repair_keeps_success(store, protocol, schema):
+    steps = [(A, {}, "schema" if schema else "invalid_arguments"), (A, X, "原对象修参独有资料")]
+    final, _ = asyncio.run(observe(store, steps, protocol=protocol, schema=schema))
+    assert final["status"] == "success"
+    assert final["answer"] == FINAL
+    assert final["finish_reason"] == ("end_turn" if protocol == "anthropic_messages" else "stop")
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("schema", [False, True], ids=["handler", "schema"])
+def test_explicit_repair_cannot_clear_old_empty_context(store, protocol, schema):
+    steps = [(A, {}, "schema" if schema else "invalid_arguments"),
+             (B, {}, "中间健康检查资料"), (A, X, "新上下文显式对象资料")]
+    final, answers = asyncio.run(observe(store, steps, protocol=protocol, schema=schema))
+    assert_partial(final, answers, titles=("中间健康检查资料", "新上下文显式对象资料"))
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("case", ["empty-retry", "explicit-across-switch", "new-failure-after-switch", "discovery"])
+def test_existing_context_and_explicit_identity_controls(store, protocol, case):
+    steps = [(A, {}, "invalid_arguments"), (A, {}, "当前对象重试资料")]
+    if case == "explicit-across-switch":
+        steps = [(A, X, "invalid_arguments"), (B, {}, "独立健康资料"), (A, X, "原显式对象资料")]
+    elif case == "new-failure-after-switch":
+        steps = [(B, {}, "先前健康资料"), (A, {}, "invalid_arguments"), (A, {}, "新上下文重试资料")]
+    elif case == "discovery":
+        steps.insert(1, (DISCOVERY_TOOL, {}, "discovery"))
+    final, _ = asyncio.run(observe(store, steps, protocol=protocol))
+    assert final["status"] == "success"
+    assert final["answer"] == FINAL
+
+
+@pytest.mark.parametrize("schema", [False, True], ids=["handler", "schema"])
+@pytest.mark.parametrize("case", ["new-failure-after-switch", "discovery", "repeated-failure"])
+def test_empty_to_explicit_repair_uses_current_business_context(store, schema, case):
+    bad = (A, {}, "schema" if schema else "invalid_arguments")
+    steps = [bad, (A, X, "立即修参对象资料")]
+    if case == "new-failure-after-switch":
+        steps.insert(0, (B, {}, "先前健康检查资料"))
+    elif case == "discovery":
+        steps.insert(1, (DISCOVERY_TOOL, {}, "discovery"))
+    else:
+        steps.insert(1, bad)
+    final, _ = asyncio.run(observe(store, steps, schema=schema))
+    assert final["status"] == "success"
+    assert final["answer"] == FINAL
+
+
+@pytest.mark.parametrize("case", ["old-and-current-failures", "two-failed-tools", "multiple-switches"])
+def test_multiple_empty_failures_do_not_lose_old_context(store, case):
+    steps = [(A, {}, "invalid_arguments"), (B, {}, "独立健康检查资料")]
+    titles = ("独立健康检查资料", "最近对象资料")
+    if case == "old-and-current-failures":
+        steps.append((A, {}, "invalid_arguments"))
+    elif case == "two-failed-tools":
+        steps = [(A, {}, "invalid_arguments"), (B, {}, "invalid_arguments"), (C, {}, "第三项独有资料")]
+        titles = ("第三项独有资料", "最近对象资料", "后来健康资料")
+    else:
+        steps += [(C, {}, "第三项核验资料"), (B, {}, "再次健康资料")]
+        titles += ("第三项核验资料", "再次健康资料")
+    steps.append((A, {}, "最近对象资料"))
+    if case == "two-failed-tools":
+        steps.append((B, {}, "后来健康资料"))
+    final, answers = asyncio.run(observe(store, steps))
+    assert_partial(final, answers, titles=titles)
+
+
+@pytest.mark.parametrize("ending,reason", [
+    ("answer", "invalid_arguments"), ("model-fault", "model_provider_error"),
+    ("round-empty", "model_round_budget_exceeded"), ("tool-empty", "tool_budget_exceeded"),
+])
+@pytest.mark.parametrize("mixed", [False, True], ids=["only-old-context", "unrecovered-z"])
+def test_context_failure_and_independent_success_survive_terminal_paths(store, ending, reason, mixed):
+    steps = [(A, {}, "invalid_arguments")]
+    if mixed:
+        steps.append((C, {"ref": "object-z"}, "provider_timeout"))
+    steps += [(B, {}, "独立健康结果"), (A, X, "切换后显式成功结果")]
+    final, answers = asyncio.run(observe(store, steps, ending=ending))
+    assert_partial(final, answers, reason=reason, titles=("独立健康结果", "切换后显式成功结果"))
+    for answer in answers:
+        assert "缺少当前对象参数" in answer
+        assert ("对象z仍未完成" in answer) is mixed

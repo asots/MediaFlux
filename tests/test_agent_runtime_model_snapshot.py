@@ -1,0 +1,434 @@
+"""Positive supported-route contracts; no proposed budget configuration."""
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
+import threading
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pytest
+import telebot
+
+from app import config, database as db
+from app.agent.kernel import bootstrap
+from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
+from app.agent.kernel.state import AgentInput
+from app.bot import agent_adapter
+from app.modules import telegram_model_preferences as prefs
+
+from tests import test_agent_generation_profiles as profile_support
+
+# Reuse the real config publisher, isolated API and offline transport fixtures.
+local_config = profile_support.local_config
+config_api = profile_support.config_api
+no_external_io = profile_support.no_external_io
+Wire = profile_support.Wire
+BASE = profile_support.BASE
+
+MODEL = 'tenant/opaque-alias'
+
+
+@pytest.fixture
+def harness(local_config):
+    wire = Wire('Topic')
+    original = wire.handler
+    async def capture(request):
+        response = await original(request)
+        wire.requests[-1]['host'] = request.headers['host']
+        credential = request.headers.get('authorization') or request.headers.get('x-api-key', '')
+        wire.requests[-1]['auth_sha256'] = hashlib.sha256(credential.encode()).hexdigest()
+        return response
+    wire.handler = capture
+    config.set_and_save({'TG_AGENT_ENABLED': '1', 'TG_CHAT_ID': '-100123', 'TG_AGENT_ALLOWED_USER_IDS': '7'})
+    with patch.dict(OpenAICompatibleModelAdapter.__init__.__kwdefaults__, client_factory=wire.factory):
+        yield wire
+    assert all(c._client.is_closed for c in wire.clients)
+
+
+def source(number=1):
+    return SimpleNamespace(chat=SimpleNamespace(id=-100123, type='supergroup'),
+        from_user=SimpleNamespace(id=7), message_id=number, message_thread_id=41,
+        text='hello ' + str(number), reply_to_message=None, quote=None)
+
+
+def scope():
+    return agent_adapter._session_for_source('-100123', '7', source())[:2]
+
+
+def select(model):
+    owner, session_id = scope()
+    token = prefs.create_model_callback(owner, session_id, 41, action='select', model_id=model)
+    call = SimpleNamespace(id='callback', data='tgm:' + token, from_user=SimpleNamespace(id=7), message=source())
+    bot = Mock()
+    bot.edit_message_text.return_value = True
+    agent_adapter.handle_agent_model_callback(bot, call, telebot)
+    assert prefs.get_telegram_model_preference(owner, session_id) == model
+    stored = json.loads(db.kv_get(prefs._key(owner, session_id)))
+    assert stored == {'channel': prefs._channel_fingerprint(), 'model_id': model}
+    assert 'synthetic' not in json.dumps(stored)
+
+
+class Bot:
+    def __init__(self, ready=None, release=None):
+        self.ready, self.release = ready, release
+        self.blocked = False
+        self.retained_runtime = None
+        self.call_path = []
+
+    def send_chat_action(self, *args, **kwargs):
+        if self.ready is not None and not self.blocked:
+            import inspect
+            frame = inspect.currentframe().f_back
+            while frame is not None:
+                self.call_path.append(frame.f_code.co_name)
+                if frame.f_code.co_name == '_execute_query':
+                    self.retained_runtime = frame.f_locals['runtime']
+                    break
+                frame = frame.f_back
+            assert self.retained_runtime is not None
+            self.blocked = True
+            self.ready.set()
+            assert self.release.wait(10), 'handshake release timeout'
+        return True
+
+    def send_message(self, *args, **kwargs):
+        return SimpleNamespace(message_id=500)
+
+    def edit_message_text(self, *args, **kwargs):
+        return True
+
+    def edit_message_reply_markup(self, *args, **kwargs):
+        return True
+
+    def reply_to(self, *args, **kwargs):
+        return SimpleNamespace(message_id=501)
+
+
+def entry(bot, number):
+    assert agent_adapter.handle_agent_message(bot, telebot, source(number)) is True
+
+
+def turn(session, channel='telegram', number=50):
+    owner, session_id = scope()
+    async def run():
+        return [e async for e in session.run(AgentInput(message='hello', owner=owner,
+            session_id=session_id, request_id='probe-' + str(number), channel=channel))]
+    events = asyncio.run(run())
+    assert events[-1].type.value == 'turn.completed', [(e.type.value, e.payload) for e in events]
+
+
+def output(body):
+    fields = [k for k in ('max_tokens', 'max_output_tokens', 'max_completion_tokens') if k in body]
+    assert len(fields) == 1
+    return body[fields[0]]
+
+
+@pytest.mark.parametrize('changed', [
+    {'AGENT_LLM_API_URL': 'https://other.example.com/v1'},
+    {'AGENT_LLM_API_KEY': 'synthetic-replacement-key'},
+    {'AGENT_LLM_PROTOCOL': 'responses'},
+], ids=['url', 'key', 'protocol'])
+def test_official_entry_retained_runtime_uses_own_channel(harness, config_api, changed):
+    """Real handler retains A while its bot IO waits; official API invalidates A."""
+    wire = harness
+    ready, release = threading.Event(), threading.Event()
+    old_runtime = bootstrap.get_agent_kernel_runtime()
+    bot = Bot(ready, release)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(entry, bot, 1)
+        try:
+            assert ready.wait(10), 'handler never reached post-runtime bot IO'
+            assert bot.retained_runtime is old_runtime
+            assert bot.call_path == ["send_typing", "begin", "_execute_query"]
+            assert not wire.requests
+            assert bootstrap.get_agent_kernel_runtime() is old_runtime
+            from app.agent.feature_gate import current_agent_runtime_generation
+            old_generation = current_agent_runtime_generation()
+            reply = config_api.post('/api/config', json=changed)
+            assert reply.status_code == 200, reply.text
+            assert current_agent_runtime_generation() > old_generation
+            assert bootstrap._runtime is None
+            select('route-b')
+        finally:
+            release.set()
+            pending.result(timeout=15)
+    entry(Bot(), 2)
+    assert bootstrap.get_agent_kernel_runtime() is not old_runtime
+    assert len(wire.requests) == 2, wire.requests
+    assert [output(r['body']) for r in wire.requests] == [6000, 6000]
+    expected_host = 'other.example.com' if 'AGENT_LLM_API_URL' in changed else 'api.example.com'
+    assert [r['host'] for r in wire.requests] == ['api.example.com', expected_host]
+    expected_protocol = 'responses' if 'AGENT_LLM_PROTOCOL' in changed else 'chat_completions'
+    assert [r['protocol'] for r in wire.requests] == ['chat_completions', expected_protocol]
+    assert (wire.requests[0]['auth_sha256'] != wire.requests[1]['auth_sha256']) == ('AGENT_LLM_API_KEY' in changed)
+    assert [r['body']['model'] for r in wire.requests] == [MODEL, 'route-b']
+
+
+def test_retained_runtime_can_still_use_its_own_saved_preference(harness, config_api):
+    select('old-route-preference')
+    ready, release = threading.Event(), threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(entry, Bot(ready, release), 1)
+        try:
+            assert ready.wait(10)
+            result = config_api.post('/api/config', json={'AGENT_LLM_API_URL': 'https://other.example.com/v1'})
+            assert result.status_code == 200, result.text
+        finally:
+            release.set()
+            pending.result(timeout=15)
+    entry(Bot(), 2)
+    assert [(r['host'], r['body']['model']) for r in harness.requests] == [
+        ('api.example.com', 'old-route-preference'), ('other.example.com', MODEL)]
+    assert all(output(r['body']) == 6000 for r in harness.requests)
+
+
+def test_same_channel_next_turn_and_web_ignores_preference(harness):
+    session = bootstrap.get_agent_kernel_runtime().session
+    turn(session)
+    select('opaque/unknown-but-valid')
+    turn(session, number=51)
+    select('second')
+    turn(session, number=52)
+    turn(session, 'api', number=53)
+    assert [r['body']['model'] for r in harness.requests] == [MODEL, 'opaque/unknown-but-valid', 'second', MODEL]
+    assert all(output(r['body']) == 6000 for r in harness.requests)
+
+
+def test_already_selected_model_survives_same_channel_callback(harness):
+    select('first')
+    original = harness.handler
+    async def switch(request):
+        response = await original(request)
+        if len(harness.requests) == 1:
+            select('second')
+        return response
+    harness.handler = switch
+    entry(Bot(), 1)
+    entry(Bot(), 2)
+    assert [r['body']['model'] for r in harness.requests] == ['first', 'second']
+    assert all(output(r['body']) == 6000 for r in harness.requests)
+
+
+def test_inflight_request_keeps_selected_model_after_route_change(harness, config_api):
+    select('old-selected')
+    original = harness.handler
+    async def switch(request):
+        response = await original(request)
+        if len(harness.requests) == 1:
+            result = config_api.post('/api/config', json={'AGENT_LLM_API_URL': 'https://other.example.com/v1'})
+            assert result.status_code == 200, result.text
+            select('new-selected')
+        return response
+    harness.handler = switch
+    entry(Bot(), 1)
+    entry(Bot(), 2)
+    assert [(r['host'], r['body']['model']) for r in harness.requests] == [
+        ('api.example.com', 'old-selected'), ('other.example.com', 'new-selected')]
+    assert all(output(r['body']) == 6000 for r in harness.requests)
+
+
+def test_default_model_change_keeps_same_channel_preference(harness, config_api):
+    ready, release = threading.Event(), threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(entry, Bot(ready, release), 1)
+        try:
+            assert ready.wait(10)
+            result = config_api.post('/api/config', json={'AGENT_LLM_MODEL': 'new-default'})
+            assert result.status_code == 200, result.text
+            select('still-valid-same-channel')
+        finally:
+            release.set()
+            pending.result(timeout=15)
+    entry(Bot(), 2)
+    assert [r['body']['model'] for r in harness.requests] == ['still-valid-same-channel'] * 2
+
+
+@pytest.mark.parametrize('raw,context,cap', [('', 128000, 6000), ('bad', 128000, 6000),
+    ('0', 16384, 4096), ('16384', 16384, 4096), ('2000001', 2000000, 6000)])
+def test_existing_global_limits_unchanged(harness, raw, context, cap):
+    config.set_and_save({'AGENT_LLM_CONTEXT_WINDOW_TOKENS': raw})
+    runtime = bootstrap.get_agent_kernel_runtime()
+    assert runtime.session.limits.context_window_tokens == context
+    turn(runtime.session)
+    assert output(harness.requests[0]['body']) == cap
+
+
+@pytest.mark.parametrize('raw,expected', [('', 30), ('bad', 30), ('0', 2), ('1', 2), ('2', 2),
+    ('30', 30), ('120', 120), ('121', 120), (' 60 ', 60)])
+def test_timeout_semantics_unchanged(harness, raw, expected):
+    config.set_and_save({'AGENT_LLM_TIMEOUT_SECONDS': raw})
+    assert ProviderSettings.from_config().timeout_seconds == expected
+
+
+@pytest.mark.parametrize('raw,error', [(object(), TypeError), (float('inf'), OverflowError)])
+def test_timeout_type_errors_not_silently_swallowed(harness, raw, error, monkeypatch):
+    original = config.get
+    monkeypatch.setattr(config, 'get', lambda key, default='': raw if key == 'AGENT_LLM_TIMEOUT_SECONDS' else original(key, default))
+    with pytest.raises(error):
+        ProviderSettings.from_config()
+
+
+def test_provider_settings_is_one_real_config_snapshot(harness, monkeypatch):
+    ready, attempted, published = threading.Event(), threading.Event(), threading.Event()
+    lock = config._lock
+    changes = {'AGENT_LLM_API_URL': 'https://other.example.com/v1',
+               'AGENT_LLM_API_KEY': 'synthetic-replacement-key', 'AGENT_LLM_MODEL': 'new-default',
+               'AGENT_LLM_PROTOCOL': 'responses', 'AGENT_LLM_TIMEOUT_SECONDS': '91',
+               'AGENT_LLM_GENERATION_PROFILES': '[]'}
+    # Observe the real publisher's lock acquisition; do not replace config/storage.
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == 'snapshot-publisher':
+                attempted.set()
+            lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            lock.release()
+
+    monkeypatch.setattr(config, '_lock', ObservedLock())
+    original = config.get
+    first = True
+    def observe_get(key, default=''):
+        nonlocal first
+        value = original(key, default)
+        if key == 'AGENT_LLM_API_URL' and first and threading.current_thread().name != 'snapshot-publisher':
+            first = False
+            owned = lock._is_owned()
+            ready.set()
+            assert attempted.wait(10)
+            if not owned:
+                assert published.wait(10)
+        return value
+    monkeypatch.setattr(config, 'get', observe_get)
+    errors = []
+    def publish():
+        try:
+            assert ready.wait(10)
+            config.set_and_save(changes)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            published.set()
+    writer = threading.Thread(target=publish, name='snapshot-publisher')
+    writer.start()
+    try:
+        result = ProviderSettings.from_config()
+    finally:
+        writer.join(12)
+    assert not writer.is_alive() and not errors
+    assert published.is_set()
+    assert (result.api_url, result.model, result.protocol, result.timeout_seconds, result.generation_profiles_json) == (
+        BASE + '/chat/completions', MODEL, 'chat_completions', 30, '')
+
+
+def test_direct_provider_settings_never_read_live_channel(harness):
+    settings = ProviderSettings(api_url=config.get('AGENT_LLM_API_URL'), model=MODEL,
+        api_key=config.get('AGENT_LLM_API_KEY'), protocol='chat_completions')
+    runtime = bootstrap.build_agent_kernel_runtime(model=OpenAICompatibleModelAdapter(settings))
+    config.set_and_save({'AGENT_LLM_API_URL': 'https://other.example.com/v1'})
+    select('new-route-model')
+    turn(runtime.session)
+    assert harness.requests[0]['host'] == 'api.example.com'
+    assert harness.requests[0]['body']['model'] == MODEL
+
+
+def test_legacy_fingerprint_preserves_raw_key_and_url(harness):
+    config.set_and_save({'AGENT_LLM_API_KEY': ' synthetic-spaced-key ',
+                         'AGENT_LLM_API_URL': BASE + '/responses/responses/'})
+    # No HTTP here: repeated endpoint suffix is part of the historical KV identity.
+    select('same-route')
+    settings = ProviderSettings.from_config()
+    owner, session_id = scope()
+    import inspect
+    kwargs = {'settings': settings} if 'settings' in inspect.signature(prefs.get_telegram_model_preference).parameters else {}
+    assert prefs.get_telegram_model_preference(owner, session_id, **kwargs) == 'same-route'
+    raw = json.loads(db.kv_get(prefs._key(owner, session_id)))
+    material = b'\0'.join((b'mediaflux-telegram-model-channel:v1',
+        (BASE + '/responses/responses').encode(), b'chat_completions',
+        hashlib.sha256(b' synthetic-spaced-key ').digest()))
+    assert raw['channel'] == hashlib.sha256(material).hexdigest()
+
+
+def test_script_adapter_without_settings_keeps_supported_selection(harness):
+    from app.agent.kernel.model import ModelEvent, ModelEventType
+    class Script:
+        def __init__(self):
+            self.requests = []
+
+        async def stream(self, request, *, cancellation):
+            self.requests.append(request)
+            yield ModelEvent(ModelEventType.TEXT_DELTA, text='Topic')
+            yield ModelEvent(ModelEventType.FINISH, finish_reason='stop')
+    model = Script()
+    runtime = bootstrap.build_agent_kernel_runtime(model=model)
+    select('script-choice')
+    turn(runtime.session)
+    assert model.requests[0].model == 'script-choice'
+    assert model.requests[0].max_output_tokens == 6000
+    assert not harness.requests
+
+
+def test_title_snapshot_is_not_live_config(harness, config_api):
+    import sys
+    from app.modules.telegram_topic_routing import _generate_private_topic_title
+    owner, session_id = scope()
+    previous = sys.getprofile()
+    fired = False
+    def profile(frame, event, arg):
+        nonlocal fired
+        if not fired and event == 'return' and frame.f_code is ProviderSettings.from_config.__func__.__code__:
+            fired = True
+            assert config_api.post('/api/config', json={'AGENT_LLM_API_URL': 'https://other.example.com/v1'}).status_code == 200
+            select('new-title-route')
+    sys.setprofile(profile)
+    try:
+        title = asyncio.run(_generate_private_topic_title(owner=owner, session_id=session_id, first_user_message='hello'))
+    finally:
+        sys.setprofile(previous)
+    assert fired and title == 'Topic'
+    assert harness.requests[0]['host'] == 'api.example.com'
+    assert output(harness.requests[0]['body']) == 96
+    assert harness.requests[0]['body']['model'] == MODEL
+
+
+def test_model_menu_current_model_uses_captured_settings(harness, config_api):
+    """The displayed selection belongs to the settings used to fetch the list.
+
+    Callback issuance after this fetch is a separate, intentionally unclaimed
+    configuration-transaction boundary.
+    """
+    import httpx
+
+    async def models(request):
+        assert request.method == 'GET'
+        assert request.url.path == '/v1/models'
+        assert request.headers['host'] == 'api.example.com'
+        response = config_api.post('/api/config', json={'AGENT_LLM_API_URL': 'https://other.example.com/v1'})
+        assert response.status_code == 200, response.text
+        select('new-menu-route')
+        return httpx.Response(200, json={'data': [{'id': MODEL}, {'id': 'new-menu-route'}]})
+
+    harness.handler = models
+    bot = Mock()
+    with patch('app.indexers.http.FixedHostHttpClient', harness.factory):
+        agent_adapter.handle_agent_model_command(bot, source(), telebot)
+    bot.reply_to.assert_called_once()
+    body = bot.reply_to.call_args.args[1]
+    assert f'当前模型：<code>{MODEL}</code>' in body
+    markup = bot.reply_to.call_args.kwargs['reply_markup']
+    labels = [button.text for row in markup.keyboard for button in row]
+    assert '✓ ' + MODEL in labels
+    assert '✓ new-menu-route' not in labels
+    assert harness.clients and all(client._client.is_closed for client in harness.clients)
+
+
+def test_title_uses_selected_model_and_own_cap(harness):
+    from app.modules.telegram_topic_routing import _generate_private_topic_title
+    select('title-choice')
+    owner, session_id = scope()
+    title = asyncio.run(_generate_private_topic_title(owner=owner, session_id=session_id, first_user_message='hello'))
+    assert title == 'Topic'
+    assert harness.requests[0]['body']['model'] == 'title-choice'
+    assert output(harness.requests[0]['body']) == 96

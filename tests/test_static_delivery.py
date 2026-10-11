@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.support import initialized_web_runtime
 
 
 class StaticDeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(initialized_web_runtime())
         self.client = TestClient(create_app(start_background=False), raise_server_exceptions=False)
-
-    def tearDown(self) -> None:
-        self.client.close()
+        stack.callback(self.client.close)
 
     def test_text_static_assets_are_cached_and_gzipped(self) -> None:
         response = self.client.get(

@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 
 _TOOL_RATE_LIMIT_SCOPES = {
     "agent.action_history": "agent-action-history",
@@ -253,6 +254,23 @@ _TOOL_RATE_LIMITS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class RateLimitDecision:
+    """Atomic permit snapshot, not a reservation for a future retry.
+
+    Remaining units are measured after consumption (or at rejection). Memory
+    deadlines have no epoch representation; shared deadlines use wall time.
+    """
+
+    allowed: bool
+    limit: int
+    cost: int
+    remaining: int
+    retry_after_seconds: float | None
+    retry_at_epoch: float | None
+    reason: str
+
+
 class AgentRateLimiter:
     """线程安全的滑动窗口限流器，并对身份状态做有界回收。"""
 
@@ -263,6 +281,7 @@ class AgentRateLimiter:
         cleanup_interval: int = 128,
         clock: Callable[[], float] = time.monotonic,
         shared: bool = False,
+        wall_clock: Callable[[], float] | None = None,
     ) -> None:
         if max_keys < 1:
             raise ValueError("max_keys 必须大于 0")
@@ -274,10 +293,18 @@ class AgentRateLimiter:
         self._max_keys = max_keys
         self._cleanup_interval = cleanup_interval
         self._clock = clock
+        self._wall_clock = wall_clock
         self._operations = 0
         self._shared = bool(shared)
 
     def allow(self, key: str, *, limit: int, window_seconds: int, cost: int = 1) -> bool:
+        return self.consume(
+            key, limit=limit, window_seconds=window_seconds, cost=cost
+        ).allowed
+
+    def consume(
+        self, key: str, *, limit: int, window_seconds: int, cost: int = 1
+    ) -> RateLimitDecision:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
         if (
@@ -291,7 +318,7 @@ class AgentRateLimiter:
 
         normalized_key = str(key)
         if self._shared:
-            return self._allow_shared(
+            return self._consume_shared(
                 normalized_key, limit=limit,
                 window_seconds=window_seconds, cost=cost,
             )
@@ -315,21 +342,34 @@ class AgentRateLimiter:
                     self._prune_expired_locked(now)
                 if len(self._events) >= self._max_keys:
                     # 身份空间已满时保守拒绝新 key，避免攻击者通过轮换 key 淘汰活跃预算。
-                    return False
+                    retry = min(self._expires_at.values()) - now
+                    return RateLimitDecision(
+                        False, limit, cost, limit, retry, None, "capacity"
+                    )
                 events = deque()
                 self._events[normalized_key] = events
 
             if len(events) + cost > limit:
-                return False
+                gap = len(events) + cost - limit
+                retry = events[gap - 1] + window_seconds - now
+                return RateLimitDecision(
+                    False, limit, cost, max(0, limit - len(events)),
+                    retry, None, "quota",
+                )
             events.extend([now] * cost)
             self._expires_at[normalized_key] = now + window_seconds
-            return True
+            return RateLimitDecision(
+                True, limit, cost, limit - len(events), 0.0, None, "allowed"
+            )
+
+    def _wall_now(self) -> float:
+        return time.time() if self._wall_clock is None else self._wall_clock()
 
     def tracked_keys(self) -> int:
         """返回清理过期状态后的当前身份数量，供诊断与测试使用。"""
         if self._shared:
             from app import database as db
-            now_epoch = int(time.time())
+            now_epoch = int(self._wall_now())
             with db.get_conn() as conn:
                 conn.execute(
                     "DELETE FROM agent_rate_limit_buckets WHERE expires_at<=?",
@@ -353,19 +393,20 @@ class AgentRateLimiter:
             self._expires_at.clear()
             self._operations = 0
 
-    def _allow_shared(
+    def _consume_shared(
         self, key: str, *, limit: int, window_seconds: int, cost: int
-    ) -> bool:
+    ) -> RateLimitDecision:
         """单行双窗口计数；只衰减上一个窗口原始计数，不重复结转历史权重。"""
         from app import database as db
 
         digest = hashlib.sha256(
             b"mediaflux-agent-rate:v1\0" + key.encode("utf-8", errors="replace")
         ).hexdigest()
-        now_epoch = int(time.time())
-        window_start = (now_epoch // window_seconds) * window_seconds
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            wall_now = self._wall_now()
+            now_epoch = int(wall_now)
+            window_start = (now_epoch // window_seconds) * window_seconds
             conn.execute(
                 "DELETE FROM agent_rate_limit_buckets WHERE expires_at<=?",
                 (now_epoch,),
@@ -382,10 +423,24 @@ class AgentRateLimiter:
                 if int(total["total"] or 0) >= self._max_keys:
                     # 共享身份空间已满时同样保守拒绝新 key，避免轮换身份
                     # 挤掉仍在生效的其他调用方预算。
-                    return False
+                    expiry = conn.execute(
+                        "SELECT MIN(expires_at) AS earliest FROM agent_rate_limit_buckets"
+                    ).fetchone()["earliest"]
+                    return RateLimitDecision(
+                        False, limit, cost, limit,
+                        float(expiry) - wall_now, float(expiry), "capacity",
+                    )
             current_count = previous_count = 0
             if row is not None:
                 previous_start = int(row["window_start"])
+                if now_epoch < previous_start:
+                    # A future bucket is not empty. Preserve its counters and
+                    # do not promise an exact retry on wall-clock rollback.
+                    return RateLimitDecision(
+                        False, limit, cost,
+                        max(0, limit - int(row["count"]) - int(row["previous_count"])),
+                        None, None, "clock_anomaly",
+                    )
                 if previous_start == window_start:
                     current_count = int(row["count"])
                     previous_count = int(row["previous_count"])
@@ -395,7 +450,14 @@ class AgentRateLimiter:
             carried = (previous_count * remaining + window_seconds - 1) // window_seconds
             new_count = current_count + cost
             if new_count + carried > limit:
-                return False
+                retry_at = self._shared_retry_at(
+                    window_start, window_seconds, current_count, previous_count,
+                    limit - cost,
+                )
+                return RateLimitDecision(
+                    False, limit, cost, max(0, limit - current_count - carried),
+                    retry_at - wall_now, float(retry_at), "quota",
+                )
             conn.execute(
                 "INSERT INTO agent_rate_limit_buckets"
                 "(limiter_key,window_start,count,previous_count,expires_at,updated_at) "
@@ -413,7 +475,28 @@ class AgentRateLimiter:
                     db.now(),
                 ),
             )
-            return True
+            return RateLimitDecision(
+                True, limit, cost, limit - new_count - carried,
+                0.0, None, "allowed",
+            )
+
+    @staticmethod
+    def _shared_retry_at(
+        start: int, window: int, current: int, previous: int, available: int
+    ) -> int:
+        """Solve the unchanged ceil-weighted rule, without looping over time.
+
+        ceil(previous * (W-offset) / W) <= allowance iff the numerator
+        is <= allowance*W. If this window cannot fit, current becomes
+        previous next window; its first feasible integer epoch is <=2W.
+        """
+        allowance = available - current
+        if allowance >= 0 and previous:
+            offset = max(0, window - allowance * window // previous)
+            if offset < window:
+                return start + offset
+        offset = max(0, window - available * window // current) if current else 0
+        return start + window + offset
 
     def _prune_expired_locked(self, now: float) -> None:
         expired = [
@@ -436,15 +519,21 @@ def tool_rate_limit_policy(tool_name: str) -> tuple[str, int, int]:
     return scope, limit, cost
 
 
-def allow_agent_tool(identity: str, tool_name: str, *, scope_suffix: str = "") -> bool:
+def consume_agent_tool(
+    identity: str, tool_name: str, *, scope_suffix: str = ""
+) -> RateLimitDecision:
     """按调用身份和真实工具执行预算限流。"""
     owner = str(identity or "unknown").strip() or "unknown"
     scope, limit, cost = tool_rate_limit_policy(tool_name)
     if scope_suffix:
         scope = f"{scope}:{scope_suffix}"
-    return agent_rate_limiter.allow(
+    return agent_rate_limiter.consume(
         f"{owner}:{scope}", limit=limit, window_seconds=60, cost=cost
     )
+
+
+def allow_agent_tool(identity: str, tool_name: str, *, scope_suffix: str = "") -> bool:
+    return consume_agent_tool(identity, tool_name, scope_suffix=scope_suffix).allowed
 
 
 agent_rate_limiter = AgentRateLimiter(shared=True)

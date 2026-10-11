@@ -1,6 +1,7 @@
 """API 路由：看板数据、配置读写。日志查询已迁移到 logs_api 蓝图。"""
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -94,6 +95,8 @@ _AGENT_LLM_KEYS = {
     "AGENT_LLM_MODEL",
     "AGENT_LLM_TIMEOUT_SECONDS",
     "AGENT_LLM_CONTEXT_WINDOW_TOKENS",
+    "AGENT_LLM_GENERATION_PROFILES",
+    "AGENT_LLM_BUDGET_PROFILES",
 }
 
 _AGENT_LIBRARY_PATROL_KEYS = {
@@ -127,6 +130,8 @@ _AGENT_SETTINGS_DEFAULTS = {
     "AGENT_LLM_PROTOCOL": "auto",
     "AGENT_LLM_TIMEOUT_SECONDS": "12",
     "AGENT_LLM_CONTEXT_WINDOW_TOKENS": "128000",
+    "AGENT_LLM_GENERATION_PROFILES": "[]",
+    "AGENT_LLM_BUDGET_PROFILES": "[]",
     "WEB_SEARCH_ENABLED": "0",
     "TAVILY_SEARCH_DEPTH": "basic",
     "TAVILY_MAX_RESULTS": "5",
@@ -534,6 +539,27 @@ def _validate_agent_llm_updates(data: dict[str, Any]) -> dict[str, str]:
         if "\r" in raw_key or "\n" in raw_key or len(api_key) > 512:
             raise ValueError("AGENT_LLM_API_KEY 格式无效")
         normalized["AGENT_LLM_API_KEY"] = api_key
+
+    if "AGENT_LLM_BUDGET_PROFILES" in data:
+        from app.agent.kernel.model_budget import serialize_budget_profiles
+
+        normalized["AGENT_LLM_BUDGET_PROFILES"] = serialize_budget_profiles(
+            data["AGENT_LLM_BUDGET_PROFILES"]
+        )
+
+    if "AGENT_LLM_GENERATION_PROFILES" in data:
+        from app.clients.openai_compatible import parse_generation_profiles
+
+        raw = data["AGENT_LLM_GENERATION_PROFILES"]
+        parse_generation_profiles(raw)
+        # Persist validated raw URLs, not non-idempotent normalized route identities.
+        rows = json.loads(raw) if raw.strip() else []
+        serialized = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        # Keep UTF-8 bounded while escaping dotenv's non-ASCII line separators.
+        for separator in "\x85\u2028\u2029":
+            serialized = serialized.replace(separator, f"\\u{ord(separator):04x}")
+        parse_generation_profiles(serialized)
+        normalized["AGENT_LLM_GENERATION_PROFILES"] = serialized
 
     if "AGENT_LLM_MODEL" in data:
         raw_model = str(data["AGENT_LLM_MODEL"] or "")
@@ -1023,6 +1049,14 @@ def get_config(request: Request):
         "AGENT_STREAM_DISPLAY_ENABLED",
         _AGENT_SETTINGS_DEFAULTS["AGENT_STREAM_DISPLAY_ENABLED"],
     )
+    items.setdefault(
+        "AGENT_LLM_GENERATION_PROFILES",
+        _AGENT_SETTINGS_DEFAULTS["AGENT_LLM_GENERATION_PROFILES"],
+    )
+    items.setdefault(
+        "AGENT_LLM_BUDGET_PROFILES",
+        _AGENT_SETTINGS_DEFAULTS["AGENT_LLM_BUDGET_PROFILES"],
+    )
     # 运行目录只作为缺省值展示；用户保存的 STRM_ROOT（包括显式空值）仍优先。
     items.setdefault("STRM_ROOT", config.get("STRM_ROOT", ""))
     retention_key = "DOWNLOAD_TORRENT_RETENTION_DAYS"
@@ -1419,7 +1453,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
         text = special_updates.get(key, str(value))
         if _is_config_mask(text):
             continue
-        if len(text) > 10_000:
+        if key not in {"AGENT_LLM_GENERATION_PROFILES", "AGENT_LLM_BUDGET_PROFILES"} and len(text) > 10_000:
             return api_error(f"配置项 {key} 过长", 400)
         normalized = text.replace("\r\n", ",").replace("\r", ",").replace("\n", ",")
         updates[key] = normalized
@@ -1470,16 +1504,25 @@ def save_config(request: Request, data: Any = Body(default=None)):
                 for source in old_strm_sources
                 if str(source["id"]) not in new_ids
             ]
-            with db.reconcile_strm_retired_sources_transaction(
-                sorted(new_ids),
-                retired_sources,
-                configured_sources=new_strm_sources or [],
-                configured_strm_root=str(
-                    persisted_updates.get("STRM_ROOT", old_strm_root) or ""
-                ),
-            ) as reconciled_ids:
-                config.set_and_save(persisted_updates)
-                config_persisted = True
+            with config.runtime_config_publication(persisted_updates):
+                try:
+                    with db.reconcile_strm_retired_sources_transaction(
+                        sorted(new_ids),
+                        retired_sources,
+                        configured_sources=new_strm_sources or [],
+                        configured_strm_root=str(
+                            persisted_updates.get("STRM_ROOT", old_strm_root) or ""
+                        ),
+                    ) as reconciled_ids:
+                        config.set_and_save(persisted_updates)
+                        config_persisted = True
+                except Exception:
+                    if config_persisted:
+                        # Compensate inside the same revocation; never stabilize a
+                        # failed DB/file transaction by publishing a fresh epoch.
+                        config.set_and_save(previous_values)
+                        config_persisted = False
+                    raise
             return list(reconciled_ids)
         config.set_and_save(persisted_updates)
         config_persisted = True

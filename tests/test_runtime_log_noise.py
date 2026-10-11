@@ -30,6 +30,7 @@ class PrivateFileRaceTests(unittest.TestCase):
         with TemporaryDirectory() as root:
             target = Path(root) / "mediaflux.db-wal"
             target.write_text("wal", encoding="utf-8")
+            target.chmod(0o644)  # Explicitly exercise permission tightening under any umask.
 
             real_open = os.open
 
@@ -45,6 +46,7 @@ class PrivateFileRaceTests(unittest.TestCase):
         with TemporaryDirectory() as root:
             target = Path(root) / "mediaflux.db"
             target.write_text("db", encoding="utf-8")
+            target.chmod(0o644)  # Otherwise umask 077 takes the already-private fast path.
 
             with patch.object(
                 private_files.os, "open", side_effect=PermissionError(13, "denied")

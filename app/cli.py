@@ -28,6 +28,18 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--port", type=int, default=None)
     start.add_argument("--data-dir", default=None)
 
+    initialize = sub.add_parser("initialize", help="显式首次安装（Linux/local storage）；成功后退出并重启登录")
+    initialize.add_argument("--data-dir", required=True)
+    initialize.add_argument("--confirm-new-installation", action="store_true", required=True)
+    initialize.add_argument("--expect-env-sha256", required=True)
+    modes = initialize.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--settings-fd", type=int)
+    modes.add_argument("--web", action="store_true")
+    initialize.add_argument("--grant-file", type=Path)
+    initialize.add_argument("--host")
+    initialize.add_argument("--port", type=int, default=DEFAULT_WEB_PORT)
+    initialize.add_argument("--setup-origin")
+
     migrate = sub.add_parser("runtime-migrate", help="停服后收纳旧运行锁和 PID 文件")
     migrate.add_argument("--data-dir", default=None)
 
@@ -108,6 +120,15 @@ def _start(host: str | None, port: int | None, data_dir: str | None) -> int:
     paths = get_runtime_paths()
     with runtime_lifecycle_guard(paths):
         recovered = recover_pending_restore(paths, lifecycle_lock_held=True)
+
+        from app.modules.setup_bootstrap import needs_guidance, guidance_app, setup_host, BootstrapError
+        if needs_guidance(paths):
+            try:
+                effective_host = setup_host(host or os.getenv("WEB_HOST"))
+            except BootstrapError:
+                return 2
+            uvicorn.run(guidance_app(paths), host=effective_host, port=port or DEFAULT_WEB_PORT, workers=1, reload=False, access_log=False)
+            return 0
 
         # 仅在运行目录配置和恢复完成后导入路径/配置消费者。
         from app import config
@@ -471,6 +492,21 @@ def _update_command(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """运行 MediaFlux CLI 并返回适合进程退出的状态码。"""
     args = build_parser().parse_args(argv)
+    if args.command == "initialize":
+        try:
+            if args.web != bool(args.grant_file):
+                raise ValueError("grant_file_requires_web")
+            _enforce_packaged_production_mode()
+            _configure_start_paths(args.data_dir)
+            from app.modules.setup_bootstrap import run_new_installation
+            receipt = run_new_installation(get_runtime_paths(), args.expect_env_sha256, settings_fd=args.settings_fd, web=args.web, grant_file=args.grant_file, host=args.host, port=args.port, origin=args.setup_origin)
+            print(receipt)
+            return 0
+        except Exception as exc:
+            from app.modules.setup_bootstrap import BootstrapError
+            category = str(exc) if isinstance(exc, BootstrapError) else type(exc).__name__
+            print("MediaFlux initialize refused: " + category, file=sys.stderr)
+            return 2
     if args.command in {"start", "runtime-migrate"}:
         from app.runtime_paths import RuntimeLayoutError
 

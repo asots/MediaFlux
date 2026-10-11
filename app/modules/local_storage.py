@@ -8,6 +8,7 @@ import shutil
 import stat as stat_module
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -173,7 +174,24 @@ class LocalFilesystemAdapter:
         self.item_limit = max(1, int(item_limit))
         self.depth_limit = max(1, int(depth_limit))
         self.min_video_size = max(0, int(min_video_size))
-        self._directory_names: dict | None = {} if cache_directory_names else None
+        self._cache_directory_names = cache_directory_names
+        self._directory_names: dict | None = None
+
+    @contextmanager
+    def directory_name_scope(self) -> Iterator[None]:
+        """显式限定一次发现操作的名称缓存；退出（含异常）后不得跨操作复用。
+
+        目录时间戳可能在增删名称后保持不变，不能用作跨操作失效凭据。
+        嵌套作用域共享当前索引；文件类型、大小和身份仍由消费者现读。
+        """
+        if not self._cache_directory_names or self._directory_names is not None:
+            yield
+            return
+        self._directory_names = {}
+        try:
+            yield
+        finally:
+            self._directory_names = None
 
     @staticmethod
     def role_for(path: Path) -> str:
@@ -278,7 +296,7 @@ class LocalFilesystemAdapter:
         return any(is_video(candidate) for candidate in self._walk_files(start, strict=False))
 
     def directory_entries(self, path: Path) -> tuple[Path, ...]:
-        """可选的请求内名称缓存；目录变化即失效，文件身份始终由消费者现读。"""
+        """默认现读名称；仅显式发现作用域内复用，并复核可观察的目录变化。"""
         info = path.lstat()
         identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
         cached = self._directory_names.get(path) if self._directory_names is not None else None

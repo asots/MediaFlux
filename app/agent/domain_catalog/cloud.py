@@ -422,6 +422,29 @@ def register_specs(
                     },
                 },
                 "additionalProperties": False,
+                "anyOf": [
+                    {"required": ["observation_ref"]},
+                    {"required": ["path"]},
+                    {"required": ["paths"]},
+                ],
+                "not": {"anyOf": [
+                    {"required": ["path", "paths"]},
+                    {"required": ["observation_ref"], "anyOf": [
+                        {"required": [field]} for field in (
+                            "operation", "path", "paths", "query", "kinds", "max_depth", "max_items"
+                        )
+                    ]},
+                    {"required": ["operation"],
+                     "properties": {"operation": {"enum": ["stat"]}},
+                     "anyOf": [
+                         *({"required": [field]} for field in ("paths", "query", "max_depth", "max_items")),
+                         {"required": ["kinds"], "properties": {"kinds": {"minItems": 1}}},
+                         {"required": ["path"], "properties": {"path": {"enum": ["/"]}}},
+                     ]},
+                    {"required": ["operation"],
+                     "properties": {"operation": {"enum": ["search"]}},
+                     "not": {"required": ["query"]}},
+                ]},
             },
             context_handler=query_guangya_filesystem,
             validator=guangya_fs_query_arguments,
@@ -945,6 +968,13 @@ def register_specs(
                     "find": {"type": "string", "minLength": 1, "maxLength": 120},
                     "replace": {"type": "string", "maxLength": 120},
                 },
+                "not": {"anyOf": [
+                    {"properties": {"mode": {"enum": ["replace_text"]}},
+                     "required": ["mode"], "not": {"required": ["find"]}},
+                    {"properties": {"mode": {"enum": ["remove_bitrate"]}},
+                     "required": ["mode"],
+                     "anyOf": [{"required": ["find"]}, {"required": ["replace"]}]},
+                ]},
                 "additionalProperties": False,
             },
             context_handler=preview_guangya_rename,

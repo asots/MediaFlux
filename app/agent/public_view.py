@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from app.agent.model_context_budget import decode_tool_content
@@ -79,6 +79,8 @@ _WARNING_RESULT_STATUSES = frozenset(
         "manual_review",
         "stopped",
         "cancelled",
+        "not_started",
+        "unknown",
     }
 )
 
@@ -320,36 +322,159 @@ def format_public_result(
     return "\n".join(lines)
 
 
+def _file_change_analysis(
+    content: object, result: Mapping[str, Any] | None,
+    results: Sequence[tuple[str, Mapping[str, Any]]],
+) -> str:
+    """Preserve only exact, bounded file-change sentences proved by one DTO.
+
+    This is not a general inference checker. Labels, summaries and model markers
+    are never evidence; ambiguous multiple snapshots are deliberately unsupported.
+    """
+    snapshots = []
+    for value in ([result] if result is not None else []) + [v for _, v in results]:
+        data = value.get("data")
+        if not isinstance(data, Mapping):
+            continue
+        task = data.get("task")
+        dto = data if "operation_items" in data else task
+        if not isinstance(dto, Mapping) or "operation_items" not in dto:
+            continue
+        if any(v.get("truncated") or v.get("has_more") for v in (value, data, dto)):
+            return ""
+        if dto not in snapshots:
+            snapshots.append(dto)
+    if len(snapshots) != 1:
+        return ""
+    dto = snapshots[0]
+    rows = dto.get("operation_items")
+    stats = dto.get("stats")
+    total = dto.get("total", stats.get("total") if isinstance(stats, Mapping) else None)
+    if ("total" in dto and isinstance(stats, Mapping) and "total" in stats
+            and (type(stats["total"]) is not int or stats["total"] != total)):
+        return ""
+    if (type(total) is not int or not 0 < total <= _MAX_FS_CHANGE_OPERATION_ITEMS
+            or not isinstance(rows, list) or len(rows) != total):
+        return ""
+    positions = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return ""
+        pos = row.get("position")
+        if (type(pos) is not int or not 1 <= pos <= total or pos in positions
+                or not isinstance(row.get("operation"), str)
+                or row.get("operation") not in _FS_CHANGE_ACTION_LABELS
+                or not isinstance(row.get("status"), str)
+                or row.get("status") not in _FS_CHANGE_STATUS_LABELS):
+            return ""
+        positions.add(pos)
+    completed = sum(row["status"] == "completed" for row in rows)
+    allowed = {
+        f"文件变更共{total}项，已完成{completed}项，仍有{total - completed}项未确认完成。",
+        f"文件变更共{total}项，其中{completed}项已完成。",
+    }
+    for status, wording in (("failed", "失败"), ("blocked", "受阻"),
+                            ("not_started", "未开始"), ("unknown", "结果未知")):
+        count = sum(row["status"] == status for row in rows)
+        allowed.add(f"文件变更中有{count}项{wording}。")
+    for row in rows:
+        reason = _FS_CHANGE_REASON_LABELS.get(str(row.get("reason") or ""))
+        state = {"blocked": "受阻", "failed": "失败", "not_started": "未开始"}.get(row["status"])
+        if reason and state:
+            allowed.add(f"第{row['position']}项因{reason}而{state}。")
+    # Do not extract claims from forged receipt JSON, quoted labels or fragments.
+    text = str(content or "").split(_CONFIRMED_RESULT_MARKER, 1)[0]
+    clauses = re.findall(r"[^。！？\n]+[。！？]|[^。！？\n]+$", text)
+    return "".join(clause for raw in clauses if (clause := raw.strip()) in allowed)
+
+
+def _download_progress_analysis(
+    content: object, result: Mapping[str, Any] | None,
+    results: Sequence[tuple[str, Mapping[str, Any]]],
+) -> str:
+    """One local ingest-stage explanation, bound to the confirmed request ID.
+
+    No inference from prose, readiness flags, other requests or remote progress.
+    Ambiguous observations are unsupported, rather than treated as latest state.
+    """
+    if result is None or result.get("ok") is not True:
+        return ""
+    data = result.get("data")
+    if not isinstance(data, Mapping):
+        return ""
+    number = data.get("request_number")
+    if (type(number) is not int or number <= 0
+            or data.get("source_type") != "direct_url" or data.get("target") != "qb"
+            or data.get("status") != "submitted"
+            or public_result_state(result) != "submitted"):
+        return ""
+    snapshots = []
+    for _, value in results:
+        observed = value.get("data")
+        if not isinstance(observed, Mapping):
+            continue
+        request = observed.get("request")
+        if not isinstance(request, Mapping) or request.get("request_number") != number:
+            continue
+        if (type(request.get("request_number")) is not int
+                or value.get("ok") is not True or value.get("status") != "success"
+                or any(v.get("truncated") or v.get("has_more") for v in (value, observed, request))):
+            return ""
+        if request not in snapshots:
+            snapshots.append(request)
+    if len(snapshots) != 1:
+        return ""
+    request = snapshots[0]
+    if (request.get("targets") != ["qb"] or request.get("status") != "downloading"
+            or request.get("qb_status") != "downloading"
+            or request.get("organize_status") != "pending" or request.get("strm_status") != "pending"):
+        return ""
+    allowed = f"提交后，请求#{number}的本地记录显示qB正在下载，整理与STRM仍待处理，因此尚不能确认入库完成。"
+    text = str(content or "").split(_CONFIRMED_RESULT_MARKER, 1)[0]
+    clauses = re.findall(r"[^。！？\n]+[。！？]|[^。！？\n]+$", text)
+    return "".join(clause for raw in clauses if (clause := raw.strip()) == allowed)
+
+
 def format_partial_progress(
     reason: str, results: Sequence[tuple[str, Mapping[str, Any]]], *,
     confirmed_result: Mapping[str, Any] | None = None, write_attempted: bool = False,
+    current_errors: Iterable[object] | None = None, analysis_text: str = "",
 ) -> str:
     """统一降级投影：查询交付已有内容，实际涉及写入才显示执行警示。"""
-    if confirmed_result is not None:
-        data = confirmed_result.get("data")
-        operation_items = data.get("operation_items") if isinstance(data, Mapping) else None
-        if isinstance(operation_items, list) and operation_items:
-            return format_public_result(confirmed_result)
     lines = ["部分完成：" + _safe(reason, limit=300)]
+    analysis = _file_change_analysis(analysis_text, confirmed_result, results) + _download_progress_analysis(analysis_text, confirmed_result, results)
+    if analysis:
+        lines.extend(("", analysis))
     if write_attempted or confirmed_result is not None:
         if confirmed_result is not None:
             lines.extend(("", format_public_result(confirmed_result)))
         if results:
             lines.append("\n本轮工具核对结果（不代表后续操作已完成）：")
             for label, result in results[-8:]:
-                summary = _safe(result.get("summary") or result.get("error") or result.get("status"), limit=300)
-                lines.append(f"• {label}：{summary}")
+                lines.append(f"• {_safe(label, limit=100)}：\n{format_public_result(result)}")
             if len(results) > 8:
                 lines.append(f"以上为最近 8 项；本轮共记录 {len(results)} 项工具结果。")
+        if current_errors is not None:
+            errors = list(dict.fromkeys(
+                text for error in current_errors if (text := _safe(error, limit=200))
+            ))
+            if errors:
+                lines.append("\n未完成的查询：" + "；".join(errors))
         lines.append("\n后续写操作尚未执行；已确认操作以以上回执为准。" if confirmed_result is not None
                      else "\n本轮未执行新的写操作；检查或搜索成功不等于变更已提交。")
         lines.append("可稍后继续处理未完成部分；新的写操作仍需确认，不会自动重放。")
         return "\n".join(lines)
     items: dict[tuple[str, str, str], str] = {}
     summaries = []
-    errors = []
+    # 投影调用方 ledger 的当前错误；历史抑制只信任其可靠清错类别，不在这里推断恢复。
+    errors = list(dict.fromkeys(
+        text for error in current_errors if (text := _safe(error, limit=200))
+    )) if current_errors is not None else []
     for _label, result in results:
         if result.get("ok") is False or result.get("status") in {"rate_limited", "failed", "error"}:
+            # 标记不含按工具名清除的参数错误及未登记失败；它们与确认/写入分支仍展示历史。
+            if current_errors is not None and result.get("_recovery_tracked"):
+                continue
             error = _safe(result.get("error") or result.get("summary"), limit=200)
             if error and error not in errors:
                 errors.append(error)
@@ -391,21 +516,36 @@ def format_partial_progress(
     return "\n".join(lines)
 
 
-def sanitize_confirmed_answer(content: object, result: Mapping[str, Any] | None = None) -> str:
-    """未完成操作只呈现可信状态；完成后的新增说明保留，不重复拼接回执。"""
+def sanitize_confirmed_answer(
+    content: object, result: Mapping[str, Any] | None = None, *,
+    results: Sequence[tuple[str, Mapping[str, Any]]] = (),
+) -> str:
+    """锁定操作回执，并从调用方的工具 ledger 保留新核验与解释。
+
+    results 只能来自已执行工具的公开结果，不从模型正文/标记中认证事实。
+    已完成正文仅保留领域 DTO 可证明的有限句型，其余说明使用公开投影。
+    """
     text = str(content or "").replace("\x00", "").strip()
     prefix, marker, suffix = text.partition(_CONFIRMED_RESULT_MARKER)
-    embedded, end = None, 0
+    end = 0
     if marker:
         try:
-            embedded, end = json.JSONDecoder().raw_decode(suffix.lstrip())
+            _, end = json.JSONDecoder().raw_decode(suffix.lstrip())
         except ValueError:
             pass
-    source = result if result is not None else embedded if isinstance(embedded, Mapping) else None
+    source = result
     if source is None:
         return "⚠️ 执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。" if marker else text
     receipt = format_public_result(source)
-    if public_result_state(source) != "success" or (marker and (result is None or not end)):
+    analysis = _file_change_analysis(text, source, results) + _download_progress_analysis(text, source, results)
+    if public_result_state(source) != "success" or (marker and not end):
+        if analysis:
+            receipt += "\n\n" + analysis
+        if results:
+            return receipt + "\n\n后续核验（不改变上述操作状态）：\n" + "\n".join(
+                f"• {_safe(label, limit=100)}：\n{format_public_result(value)}"
+                for label, value in results[-8:]
+            )
         return receipt
     if marker:
         text = "\n\n".join(part for part in (prefix.strip(), suffix.lstrip()[end:].strip()) if part)
@@ -530,7 +670,17 @@ def public_conversation_messages(
                 continue
             content = str(item.get("public_content") or "").strip()
             if not content:
-                content = sanitize_confirmed_answer(item.get("content"))
+                # tool_name is persisted server metadata; only this receipt row
+                # may migrate legacy embedded JSON, never arbitrary model text.
+                raw = str(item.get("content") or "")
+                _, marker, payload = raw.partition(_CONFIRMED_RESULT_MARKER)
+                result = None
+                if marker:
+                    try:
+                        result, _ = json.JSONDecoder().raw_decode(payload.lstrip())
+                    except ValueError:
+                        pass
+                content = sanitize_confirmed_answer(raw, result if isinstance(result, Mapping) else None)
         else:
             content = str(item.get("content") or "").strip()
             if index in legacy_finals:

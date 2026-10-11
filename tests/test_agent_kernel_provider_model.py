@@ -36,6 +36,38 @@ async def collect(stream):
 
 
 class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sse_decoding_contract_is_shared_without_weakening_limits(self):
+        async def raw_chunks(payload):
+            for offset in range(0, len(payload), 13):
+                yield payload[offset:offset + 13]
+
+        for parser, error, limit in (
+            (iter_protocol_model_events, ModelProviderError, 128 * 1024),
+            (iter_provider_text_deltas, ProviderStreamError, 64 * 1024),
+        ):
+            for payload, reason in (
+                (b"data: \xff\n\n", "无效 UTF-8"),
+                (b"data: \xe5\xad", "无效 UTF-8"),
+                (b"data: {\n\n", "不是有效 JSON"),
+                (b"data: []\n\n", "格式无效"),
+                (b'data: {"error": {}}\n\n', "流式错误"),
+                (b'data: "' + b"x" * limit + b'"\n\n', "事件过大"),
+            ):
+                with self.subTest(parser=parser.__name__, reason=reason):
+                    with self.assertRaisesRegex(error, reason):
+                        await collect(parser(raw_chunks(payload), protocol="chat_completions"))
+            # Comments, CRLF, multi-line data, a split UTF-8 character and EOF
+            # after the final data line all retain the existing SSE semantics.
+            payload = (
+                ': comment\r\nevent: ignored\r\ndata: {"choices": [\r\n'
+                'data: {"delta": {"content": "字符"}, "finish_reason": "stop"}]}\r\n'
+                '\r\ndata: [DONE]'
+            ).encode()
+            with self.subTest(parser=parser.__name__, valid=True):
+                result = await collect(parser(raw_chunks(payload), protocol="chat_completions"))
+                visible = "".join(item if isinstance(item, str) else item.text for item in result)
+                self.assertEqual(visible, "字符")
+
     async def test_responses_empty_completion_fields_do_not_erase_streamed_arguments(self):
         arguments = '{"profile_ref":"configured:jellyfin","item_ref":"ref_test"}'
         for final_type in ("response.function_call_arguments.done", "response.output_item.done"):
@@ -65,8 +97,15 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
             ]
             stream = iter_protocol_model_events(chunks(frames), protocol="responses")
             if expected is None:
-                with self.assertRaises(ModelProviderError):
-                    await collect(stream)
+                events = await collect(stream)
+                calls = [e.tool_call for e in events if e.type is ModelEventType.TOOL_CALL_COMPLETED]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual((calls[0].call_id, calls[0].name), ("c", "inspect"))
+                self.assertIsNone(calls[0].arguments)
+                self.assertEqual(calls[0].argument_error, "invalid_json")
+                self.assertEqual(calls[0].raw_arguments, delta)
+                self.assertEqual(events[-1].type, ModelEventType.FINISH)
+                self.assertIsNotNone(events[-1].provider_state)
             else:
                 events = await collect(stream)
                 calls = [e.tool_call for e in events if e.type is ModelEventType.TOOL_CALL_COMPLETED]
@@ -576,8 +615,20 @@ class ToolArgumentDecoderParityTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(
                 message=message,
                 argument_type=type(arguments).__name__,
-            ), self.assertRaisesRegex(ModelProviderError, message):
-                await self.stream_tool_arguments(arguments)
+            ):
+                if arguments == "{broken":
+                    events = await self.stream_tool_arguments(arguments)
+                    calls = [event.tool_call for event in events if event.tool_call]
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual((calls[0].call_id, calls[0].name), ("call_args", "inspect"))
+                    self.assertIsNone(calls[0].arguments)
+                    self.assertEqual(calls[0].argument_error, "invalid_json")
+                    self.assertEqual(calls[0].raw_arguments, arguments)
+                    self.assertEqual(events[-1].type, ModelEventType.FINISH)
+                    self.assertIsNotNone(events[-1].provider_state)
+                else:
+                    with self.assertRaisesRegex(ModelProviderError, message):
+                        await self.stream_tool_arguments(arguments)
 
 
 class CompleteTurnContractTests(unittest.IsolatedAsyncioTestCase):

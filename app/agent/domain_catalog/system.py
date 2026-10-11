@@ -757,6 +757,7 @@ def register_specs(
                 "回答 MediaFlux Media Agent 是谁、能做什么，并列出当前可以读取或经确认执行的项目能力；"
                 "传query可从全项目发现需要的原子工具，或传tool_names核实可用状态，"
                 "并在下一次模型调用加载Schema。当前工具不足时先查询，不可直接声称未挂载。"
+                "跨阶段仍需使用的已加载工具用window.retain保留，window.release释放；仅本轮有效且受容量与当前权限限制。"
             ),
             risk=RiskLevel.READ,
             parameters=CAPABILITY_PARAMETERS,

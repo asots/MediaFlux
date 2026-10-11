@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,12 +9,17 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.modules.update_check import UpdateInfo
+from tests.support import initialized_web_runtime
 
 
 class SettingsUpdateCheckTests(unittest.TestCase):
     def setUp(self) -> None:
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(initialized_web_runtime())
         self.app = create_app(start_background=False)
         self.client = TestClient(self.app)
+        stack.callback(self.client.close)
 
     def test_update_check_api_requires_login(self) -> None:
         response = self.client.get("/api/update/check")

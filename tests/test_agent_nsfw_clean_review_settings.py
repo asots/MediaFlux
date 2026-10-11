@@ -34,6 +34,11 @@ class NsfwCleanReviewSettingsTests(unittest.TestCase):
         self.invalidate = self.stack.enter_context(patch("app.agent.feature_gate.invalidate_agent_runtime_generation"))
         self.wake = self.stack.enter_context(patch(WAKE))
         config.write_env_file(self.env_file, {}, replace=False)
+        from tests.support import isolated_test_database
+        from app.agent.feature_gate import initialize_runtime_fence
+
+        self.stack.enter_context(isolated_test_database())
+        initialize_runtime_fence()
         self.request = SimpleNamespace(
             session={"logged_in": True},
             app=SimpleNamespace(state=SimpleNamespace(

@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .events import TERMINAL_EVENT_TYPES, AgentEvent, AgentEventType
+from .task_state import classify_public_task
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,9 +23,10 @@ class TurnMeasurement:
     total_ms: int
     model_calls: int
     tool_calls: int
+    task_status: str = "unknown"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "turn_status": self.status}
 
 
 class KernelMetrics:
@@ -34,6 +36,7 @@ class KernelMetrics:
         self._lock = threading.Lock()
         self._history: deque[TurnMeasurement] = deque(maxlen=max(20, int(history_size)))
         self._status_counts: Counter[str] = Counter()
+        self._task_status_counts: Counter[str] = Counter()
 
     async def track(
         self,
@@ -48,6 +51,8 @@ class KernelMetrics:
         tool_calls = 0
         request_id = ""
         status = "interrupted"
+        task_status = "unknown"
+        saw_terminal = False
         async for event in events:
             now = time.monotonic()
             request_id = request_id or event.request_id
@@ -61,6 +66,8 @@ class KernelMetrics:
                 tool_calls += 1
             if event.type in TERMINAL_EVENT_TYPES:
                 status = _terminal_status(event)
+                task_status = classify_public_task(event.payload.get("task"))
+                saw_terminal = True
             yield event
         ended = time.monotonic()
         measurement = TurnMeasurement(
@@ -76,18 +83,26 @@ class KernelMetrics:
             total_ms=max(0, int((ended - started) * 1000)),
             model_calls=model_calls,
             tool_calls=tool_calls,
+            task_status=task_status,
         )
         with self._lock:
             self._history.append(measurement)
             self._status_counts[status] += 1
+            if saw_terminal:
+                self._task_status_counts[task_status] += 1
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             history = list(self._history)
             statuses = dict(self._status_counts)
+            task_statuses = dict(self._task_status_counts)
         return {
             "turns": sum(statuses.values()),
             "statuses": statuses,
+            # Last terminal snapshot per normally exhausted, recorded turn;
+            # not distinct tasks, and not a task success rate.
+            "task_statuses_by_turn": task_statuses,
+            "task_statuses_by_turn_unit": "正常耗尽并已记录的回合中最后终态携带的会话任务快照分类次数",
             "latency_ms": {
                 "ttfe_p50": _percentile([item.ttfe_ms for item in history], 0.50),
                 "ttfe_p95": _percentile([item.ttfe_ms for item in history], 0.95),

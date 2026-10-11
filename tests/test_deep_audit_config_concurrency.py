@@ -52,6 +52,11 @@ def simultaneous_configuration_writers(directory, output):
         os.environ.pop("SIMPLE_KEY", None)
         os.environ.pop("POLICY_KEY", None)
         config.write_env_file(target, {"HISTORICAL_KEY": "preserved"}, replace=False)
+        from app import database as db
+        from app.agent.feature_gate import initialize_runtime_fence
+        db.configure_database(Path(directory) / "test.db", test_mode=True)
+        db.init_db()
+        initialize_runtime_fence()
         expected, _ = config.read_env_snapshot(target)
 
         def simple_writer():

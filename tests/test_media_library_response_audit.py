@@ -130,6 +130,8 @@ class MediaLibraryResponseAuditTests(TestCase):
 
 class MediaLibraryHttpResponseAuditTests(IsolatedDatabaseTestCase):
     def test_bad_library_response_is_http_error_and_recovery_returns_real_match(self):
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         def csrf(html):
             match = re.search(
                 r'name="csrf[-_]token"\s+(?:value|content)="([^"]+)"', html

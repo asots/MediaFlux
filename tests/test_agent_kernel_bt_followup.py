@@ -65,7 +65,8 @@ class AgentKernelBtFollowupTests(unittest.IsolatedAsyncioTestCase):
                 names = [tool.name for tool in window]
                 self.assertEqual(names[0], "agent.capabilities")
                 self.assertIn("ingest.submit", names)
-                self.assertLessEqual(len(names), session.retriever.maximum)
+                self.assertEqual([n for n in names if n in {"agent.capabilities", "agent.task", "agent.read_result"}], ["agent.capabilities"])
+                self.assertLessEqual(len([n for n in names if n != "agent.capabilities"]), session.retriever.maximum)
 
     def test_short_cloud_followup_after_explicit_candidate_selection_keeps_submission(self):
         session = build_agent_kernel(model=NoModel())
@@ -78,7 +79,8 @@ class AgentKernelBtFollowupTests(unittest.IsolatedAsyncioTestCase):
         selected = session.retriever.retrieve("把第2个推送到光鸭", session.catalog, context=context)
         window = CapabilityDiscovery(session.catalog, context=context, maximum=session.retriever.maximum).window(selected.tools)
         self.assertIn("ingest.submit", [tool.name for tool in window])
-        self.assertLessEqual(len(window), session.retriever.maximum)
+        self.assertEqual([t.name for t in window if t.name in {"agent.capabilities", "agent.task", "agent.read_result"}], ["agent.capabilities"])
+        self.assertLessEqual(len([t for t in window if t.name != "agent.capabilities"]), session.retriever.maximum)
 
     async def test_real_catalog_followup_builds_batch_plan_and_only_executes_after_confirmation(self):
         result = _search_result()

@@ -14,6 +14,22 @@ class DockerWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.text = Path(".github/workflows/docker.yml").read_text(encoding="utf-8")
 
+    def test_test_jobs_prepare_private_tmp_before_execution(self) -> None:
+        jobs = yaml.safe_load(self.text)["jobs"]
+        for name, runner in (("test", "Run tests"), ("browser", "Run real browser regression tests without skips")):
+            steps = jobs[name]["steps"]
+            index = next(i for i, step in enumerate(steps) if step.get("name") == runner)
+            self.assertTrue(steps[index]["run"].startswith("umask 077\n"))
+            setup = steps[index - 1]
+            self.assertEqual(setup["name"], "Prepare private test temporary directory")
+            with tempfile.TemporaryDirectory() as home:
+                exported = Path(home) / "github-env"
+                subprocess.run(["bash", "-eu", "-c", setup["run"]], check=True,
+                               env={**os.environ, "HOME": home, "GITHUB_ENV": str(exported)})
+                temporary = Path(exported.read_text().strip().removeprefix("TMPDIR="))
+                self.assertEqual(temporary.parent, Path(home))
+                self.assertEqual(temporary.stat().st_mode & 0o777, 0o700)
+
     def test_main_and_pull_request_and_tags_trigger_workflow(self) -> None:
         push_trigger = self.text.split("  push:", 1)[1].split("  pull_request:", 1)[0]
         self.assertIn("branches: [main]", push_trigger)
@@ -213,8 +229,13 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn(".arch == $arch", self.text)
         self.assertIn("platform_digest=$(jq -r", self.text)
         self.assertIn("$IMAGE_REPOSITORY@$platform_digest", self.text)
-        self.assertIn('container="mediaflux-${safe_platform}-startup"', self.text)
-        self.assertIn('docker run --detach --platform "$platform"', self.text)
+        self.assertIn('container="mediaflux-${safe_platform}-${smoke_dir##*.}"', self.text)
+        self.assertIn('volume=$(docker volume create)', self.text)
+        self.assertIn('--confirm-new-installation --expect-env-sha256 absent --settings-fd 0', self.text)
+        self.assertIn('trap cleanup EXIT', self.text)
+        self.assertIn('runtime_args=(--platform "$platform" --user 0:0', self.text)
+        self.assertIn('docker run --rm -i "${runtime_args[@]}"', self.text)
+        self.assertIn('docker run --detach "${runtime_args[@]}"', self.text)
         self.assertIn("http://127.0.0.1:1258/readyz", self.text)
         self.assertIn('docker pull --quiet --platform "$platform"', self.text)
         self.assertIn("candidate exited before readiness", self.text)

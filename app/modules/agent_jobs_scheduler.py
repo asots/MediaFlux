@@ -39,10 +39,12 @@ class AgentJobsScheduler:
         audit_executor: Callable[[dict[str, Any]], ToolResult] | None = None,
         interval: float = 2.0,
         clock: Callable[[], datetime] | None = None,
+        read_wait_runtime_factory: Callable | None = None,
     ) -> None:
         self._audit_executor = audit_executor or self._default_audit_executor
         self.interval = max(0.1, float(interval))
         self._clock = clock or datetime.now
+        self._read_wait_runtime_factory = read_wait_runtime_factory
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._lifecycle_lock = threading.Lock()
@@ -436,6 +438,51 @@ class AgentJobsScheduler:
     def _after(self, seconds: float) -> str:
         return self._format(self._clock() + timedelta(seconds=max(0.0, seconds)))
 
+    def _run_due_read_wait_once(self) -> int:
+        """One bounded READ continuation, separate from receipt-only polling."""
+        from app import config
+        from app.agent.feature_gate import is_agent_enabled
+        from app.agent.kernel.bootstrap import (
+            _capture_creation_binding, _recheck_creation_binding, build_agent_kernel_runtime,
+        )
+        from app.agent.kernel.persistence import SQLiteKernelStore
+        from app.agent.kernel.ports.mediaflux_policy import MediaFluxTurnAdmission
+        from app.agent.kernel.state import AgentInput
+        from dataclasses import asdict
+        if self._stop_event.is_set() or not is_agent_enabled():
+            return 0
+
+        async def run():
+            store = SQLiteKernelStore(clock=lambda: self._clock().timestamp())
+            for candidate in await store.due_read_waits(limit=16):
+                if self._stop_event.is_set():
+                    return 0
+                with config.runtime_config_read_guard():
+                    binding = _capture_creation_binding()
+                if (candidate['admission_fence'] != asdict(binding.fence)
+                        or candidate['effective_digest'] != binding.effective_digest):
+                    # The same claim transaction retires only this exact old wait.
+                    await store.claim_read_wait(candidate, binding)
+                    continue
+                await MediaFluxTurnAdmission().begin(AgentInput(
+                    message="恢复已保存的只读查询", owner=candidate['owner'], session_id=candidate['session_id'],
+                    request_id=candidate['source_request_id'], channel=candidate['channel']))
+                with config.use_runtime_config_snapshot(binding.snapshot):
+                    # Explicit factory is a trusted embedding/test dependency, never model metadata.
+                    if self._read_wait_runtime_factory is None:
+                        if not config.get_bool('AGENT_LLM_ENABLED', False):
+                            return 0
+                        runtime = build_agent_kernel_runtime(store=store)
+                    else:
+                        runtime = self._read_wait_runtime_factory(candidate, binding, store)
+                with config.runtime_config_read_guard():
+                    _recheck_creation_binding(binding)
+                if runtime.creation_binding != binding or runtime.session.read_wait_binding != binding:
+                    return 0
+                return int(await runtime.session.resume_wait(candidate=candidate, cancelled=self._stop_event.is_set))
+            return 0
+        return asyncio.run(run())
+
     def _loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -448,11 +495,18 @@ class AgentJobsScheduler:
                     asyncio.run(poll_effect_receipts(SQLiteKernelStore(), cancelled=lambda: (
                         self._stop_event.is_set() or not agent_runtime_generation_is_current(generation)
                     )))
+            except Exception as exc:
+                logger.warning("Agent 回执轮询失败 type=%s", type(exc).__name__)
+            try:
                 for _index in range(3):
                     if self.run_once() == 0:
                         break
             except Exception as exc:
                 logger.warning("Agent 长任务轮询失败 type=%s", type(exc).__name__)
+            try:
+                self._run_due_read_wait_once()
+            except Exception as exc:
+                logger.warning("Agent READ 等待续行失败 type=%s", type(exc).__name__)
             self._wake_event.wait(timeout=self.interval)
             self._wake_event.clear()
 

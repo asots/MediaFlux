@@ -74,7 +74,8 @@
                         </div>
                     </div>
 
-                    <button type="submit" class="btn btn-primary">完成部署并登录<i data-lucide="arrow-right"></i></button>
+                    {% if bootstrap_grant %}<label for="setup-code">本地一次性初始化码</label><input id="setup-code" type="password" name="setup_code" autocomplete="off" required>{% endif %}
+                    <button type="submit" class="btn btn-primary">完成初始化，然后重启登录<i data-lucide="arrow-right"></i></button>
                 </form>
                 {% else %}
                 <form class="login-form" method="post" action="{{ url_for('auth.login_submit') }}">

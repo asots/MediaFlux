@@ -18,8 +18,13 @@ _WINDOWS_PATH_RE = re.compile(
     r"(?<!\w)(?:[a-z]:(?:[\\/])?|\\{1,2})[^\s]+", re.IGNORECASE
 )
 _UNIX_PATH_RE = re.compile(r"(?<!\w)(?:(?:\.\.?/)+|~/|/(?!/))[^\s/][^\s]*")
+# Try each maximal ASCII path-component run once, not every punctuation suffix.
+# After a Unicode word boundary, the first eligible suffix starts immediately
+# after the run's first non-word character; it must still contain a non-digit.
+# Disjoint prefix classes and a run-start guard keep failed scans linear.
 _RELATIVE_PATH_RE = re.compile(
-    r"(?<!\w)(?=[A-Za-z0-9._~:-]*[A-Za-z._~:-])[A-Za-z0-9._~:-]+[\\/][^\s]+"
+    r"(?<![A-Za-z0-9._~:-])(?:(?<!\w)|[A-Za-z0-9_]*[.~:-])"
+    r"(?=[0-9]*[A-Za-z._~:-])[A-Za-z0-9._~:-]+[\\/][^\s]+"
 )
 _CONTEXTUAL_PATH_RE = re.compile(
     r"(?:路径|目录|位于|保存(?:到|在)|存储(?:到|在)|文件(?:在|位于)|"
@@ -325,14 +330,31 @@ def public_followup_prompt(source: object) -> str:
     return _PUBLIC_FOLLOWUP_PROMPTS.get(normalized, "继续检查需要关注的区域")
 
 
+_MAX_PUBLIC_TEXT_CHARS = 65536
+_MAX_PUBLIC_DECODE_ROUNDS = 8
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
+
+
 def _decode_text(value: object) -> str:
-    text = unicodedata.normalize("NFKC", str(value or ""))
-    for _ in range(2):
-        decoded = unquote(text)
-        if decoded == text:
-            break
-        text = decoded
-    return " ".join(text.replace("\x00", " ").split()).strip()
+    # Bound both work and expansion; never publish a partially decoded prefix.
+    text = str(value or "")
+    for round_index in range(_MAX_PUBLIC_DECODE_ROUNDS + 1):
+        if len(text) > _MAX_PUBLIC_TEXT_CHARS:
+            return ""
+        text = unicodedata.normalize("NFKC", text)
+        if len(text) > _MAX_PUBLIC_TEXT_CHARS:
+            return ""
+        # NFKC can create escapes; unquote can create compatibility characters.
+        # Only a normalized value with no remaining escape is safe to inspect.
+        if not _PERCENT_ESCAPE_RE.search(text):
+            return " ".join(text.replace("\x00", " ").split()).strip()
+        if round_index == _MAX_PUBLIC_DECODE_ROUNDS:
+            return ""
+        try:
+            text = unquote(text, errors="strict")
+        except UnicodeDecodeError:
+            return ""
+    return ""
 
 
 def _remove_internal_tool_guidance(text: str) -> str:
@@ -402,5 +424,7 @@ def sanitize_resource_title(value: object, *, limit: int = 300) -> str:
     """文件名可含点号/下划线，不能被当成工具名；其余凭据、URL、路径守卫不变。"""
     text = re.sub(r"<[^>]*>", "", _decode_text(value))
     text = "".join(char for char in text if char.isspace() or not unicodedata.category(char).startswith("C"))
-    text = sanitize_untrusted_filename(text, limit=limit)
-    return text if sanitize_public_text(text, limit=limit) else ""
+    # Preserve filename punctuation and URL masking, but inspect the full title
+    # before applying the display limit so a private suffix cannot be hidden.
+    text = sanitize_untrusted_filename(text, limit=max(1, len(text)))
+    return text[: max(1, int(limit))].rstrip() if sanitize_public_text(text, limit=limit) else ""

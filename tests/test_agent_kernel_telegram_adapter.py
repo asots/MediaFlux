@@ -585,7 +585,7 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         markup = bot.edits[-1][3]["reply_markup"]
         self.assertEqual(
             [button.callback_data for button in markup.buttons],
-            ["agk:c:plan_1234567890abcdef", "agk:x:plan_1234567890abcdef"],
+            ["agk:c:plan_1234567890abcdef", "agk:x:plan_1234567890abcdef", "agk:e:plan_1234567890abcdef"],
         )
         self.assertIn("等待确认", bot.edits[-1][0])
         self.assertIn("创建 RSS 订阅", bot.edits[-1][0])

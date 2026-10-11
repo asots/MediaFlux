@@ -93,6 +93,19 @@ class OrganizeSourceParserTests(unittest.TestCase):
 
 
 class MediaConfigSaveTests(unittest.TestCase):
+    def initialize_publisher(self):
+        import tempfile
+        from pathlib import Path
+        from app import config
+        from app.agent.feature_gate import initialize_runtime_fence
+        from tests.support import isolated_test_database
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / 'user.env'
+        config.write_env_file(path, {}, replace=False)
+        self.enterContext(patch.object(config, 'ENV_FILE', path))
+        self.enterContext(isolated_test_database())
+        initialize_runtime_fence()
+
     def setUp(self):
         from app.routes import api
 
@@ -121,6 +134,7 @@ class MediaConfigSaveTests(unittest.TestCase):
         return result, save, strm_scheduler, organize_scheduler
 
     def test_source_arrays_are_normalized(self):
+        self.initialize_publisher()
         result, save, strm_scheduler, organize_scheduler = self._save({
             "GY_ORGANIZE_SOURCE_DIRS": '[{"id":"11","name":"源一"},"22"]',
             "GY_STRM_SOURCE_DIRS": '[{"id":"33","name":"STRM"}]',
@@ -173,6 +187,7 @@ class MediaConfigSaveTests(unittest.TestCase):
         organize_scheduler.reload.assert_called_once_with()
 
     def test_retirement_commit_failure_restores_previous_config(self):
+        self.initialize_publisher()
         old_sources = '[{"id":"11","name":"旧来源"}]'
 
         @contextmanager

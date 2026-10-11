@@ -3,7 +3,8 @@ from __future__ import annotations
 from app.agent import media_links
 from app.agent.domain_catalog import library_search
 from app.agent.kernel.projection import DefaultProjector
-from app.agent.kernel.session import DEFAULT_SYSTEM_PROMPT
+from tests.test_agent_prompt_policy_window import capture_policy_windows
+from tests.test_agent_task_entry import isolated_db as isolated_db
 from app.agent.models import ToolResult
 from app.agent.provider_artifacts import ProviderArtifactStore
 from app.agent.workspace_actions import _library_section
@@ -276,9 +277,15 @@ def test_workspace_library_result_includes_verified_open_url(monkeypatch):
     assert section["items"][0]["open_url"] == direct
 
 
-def test_agent_prompt_requires_exact_verified_media_link():
-    assert "`open_url`" in DEFAULT_SYSTEM_PROMPT
-    assert "[打开媒体库](原样 open_url)" in DEFAULT_SYSTEM_PROMPT
+def test_agent_prompt_requires_exact_verified_media_link(isolated_db, tmp_path):
+    windows = capture_policy_windows(
+        [["media.recently_added", "library.search"],
+         ["provider.capabilities", "provider.query"]], tmp_path
+    )
+    for wire in windows:
+        system = wire["messages"][0]["content"]
+        assert "`open_url`" in system
+        assert "[打开媒体库](原样 open_url)" in system
 
 
 def test_verified_media_link_survives_kernel_and_telegram_projection():

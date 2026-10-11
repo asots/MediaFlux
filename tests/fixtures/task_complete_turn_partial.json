@@ -1,0 +1,86 @@
+{
+  "type": "turn.completed",
+  "payload": {
+    "status": "partial",
+    "answer": "部分完成：本轮预算已用完,已保留已取得的结果;可回复继续。\n\n已完成的查询：\n• qBittorrent:未配置\n• Task proposal\n\n以上仅代表已成功取得的结果；未完成的查询不能据此判断没有内容。",
+    "finish_reason": "tool_budget_exceeded",
+    "usage": {},
+    "model_calls": 4,
+    "tool_calls": 3,
+    "turn_status": "partial",
+    "task": {
+      "blockers": [],
+      "constraints": [
+        "仅观察、不修改"
+      ],
+      "epoch": 1,
+      "obligations": [
+        {
+          "acceptance": {
+            "component": "tmdb",
+            "kind": "observed_component"
+          },
+          "description": "观察配置 tmdb",
+          "evidence_ids": [
+            "_CwoZM7AxgAjDxdlYCdU5DbO"
+          ],
+          "id": "tmdb",
+          "required": true,
+          "state": "verified"
+        },
+        {
+          "acceptance": {
+            "component": "qbittorrent",
+            "kind": "observed_component"
+          },
+          "description": "观察配置 qbittorrent",
+          "evidence_ids": [
+            "cejeyrlDCy_QG3GQG4HG00oU"
+          ],
+          "id": "qbittorrent",
+          "required": true,
+          "state": "verified"
+        }
+      ],
+      "revision": 5,
+      "root_goal": "观察 TMDB 和 qBittorrent 当前配置状态，仅观察、不修改。",
+      "source_request_id": "E6Iz0M8ilI5ISorO",
+      "status": "complete",
+      "task_id": "APqu7hdxW79XS4b0nAcyuQwh",
+      "v": 1,
+      "verified_facts": [
+        {
+          "call_id": "call-observe",
+          "component": "tmdb",
+          "enabled": false,
+          "epoch": 1,
+          "evidence_id": "_CwoZM7AxgAjDxdlYCdU5DbO",
+          "network_accessed": false,
+          "observed_at": 1791647317.4686105,
+          "probe_mode": "configuration_only",
+          "status": "not_configured",
+          "task_id": "APqu7hdxW79XS4b0nAcyuQwh",
+          "tool": "config.explain_component",
+          "verifier_version": "configuration-v1"
+        },
+        {
+          "call_id": "call-observe",
+          "component": "qbittorrent",
+          "enabled": false,
+          "epoch": 1,
+          "evidence_id": "cejeyrlDCy_QG3GQG4HG00oU",
+          "network_accessed": false,
+          "observed_at": 1791647317.8406575,
+          "probe_mode": "configuration_only",
+          "status": "not_configured",
+          "task_id": "APqu7hdxW79XS4b0nAcyuQwh",
+          "tool": "config.explain_component",
+          "verifier_version": "configuration-v1"
+        }
+      ],
+      "acceptance_scope": "declared_obligations",
+      "remaining_obligation_ids": [],
+      "unassociated_evidence_ids": []
+    }
+  }
+}

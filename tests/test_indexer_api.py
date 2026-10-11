@@ -195,12 +195,16 @@ class IndexerAPITests(unittest.TestCase):
             return_value=None,
         )
         self.request_alias_lookup_patch.start()
+        from tests.support import initialized_web_runtime
+        self._installed_runtime = initialized_web_runtime()
+        self.enterContext(self._installed_runtime)
         from app import database as db
         db.init_db()
         self.client = TestClient(create_app(), raise_server_exceptions=False)
 
     def tearDown(self):
         self.client.close()
+        self._installed_runtime.__exit__(None, None, None)
         self.request_alias_lookup_patch.stop()
         self.request_lookup_patch.stop()
         self.os_patch.stop()

@@ -18,6 +18,28 @@ class FakeRegistry:
 
 
 class IndexerRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def _initialize_lifespan_fixture(self):
+        from contextlib import ExitStack
+        from tests.support import initialized_web_runtime
+
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(initialized_web_runtime())
+        # A first import also constructs main.app. It owns a startup guard even
+        # though these tests only enter the separately-created app's lifespan.
+        import sys
+        if "app.main" not in sys.modules:
+            import app.main as main
+
+            def cleanup_import():
+                import app
+                try:
+                    main.app.state.release_startup_lifecycle_guard()
+                finally:
+                    sys.modules.pop("app.main", None)
+                    app.__dict__.pop("main", None)
+            stack.callback(cleanup_import)
+
     def tearDown(self):
         runtime.unbind_indexer_event_loop()
         runtime._service = None
@@ -469,6 +491,7 @@ class IndexerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(observed, owner_loop)
 
     async def test_lifespan_restores_exception_handler_when_indexer_bind_fails(self):
+        self._initialize_lifespan_fixture()
         from app.main import create_app
 
         owner_loop = asyncio.get_running_loop()
@@ -535,6 +558,7 @@ class IndexerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             owner_loop.set_exception_handler(previous)
 
     async def test_application_lifespan_offloads_background_shutdown(self):
+        self._initialize_lifespan_fixture()
         from app.main import create_app
 
         owner_loop = asyncio.get_running_loop()
@@ -596,6 +620,7 @@ class IndexerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         stop_probe_runtime.assert_called_once_with(5.0)
 
     async def test_application_lifespan_keeps_shutdown_gate_when_workers_do_not_stop(self):
+        self._initialize_lifespan_fixture()
         from app.main import create_app
 
         proxy = Mock()

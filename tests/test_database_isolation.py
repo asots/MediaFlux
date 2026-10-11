@@ -74,8 +74,23 @@ class DatabaseIsolationTests(unittest.TestCase):
                 """
                 import json
                 import os
+                import socket
+                import sys
+                from pathlib import Path
+
+                def offline_audit(event, args):
+                    if event in ('socket.connect', 'socket.bind', 'socket.sendto', 'socket.sendmsg') and args[0].family != socket.AF_UNIX:
+                        raise AssertionError('fixture forbids real INET')
+                    if event in ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo'):
+                        raise AssertionError('fixture forbids real DNS')
+
+                sys.addaudithook(offline_audit)
+                assert sys.dont_write_bytecode
                 import tests
                 from app import config, database
+                assert Path(tests.__file__).resolve() == Path.cwd() / 'tests/__init__.py'
+                assert Path(config.__file__).resolve() == Path.cwd() / 'app/config.py'
+                assert Path(database.__file__).resolve() == Path.cwd() / 'app/database.py'
 
                 print(json.dumps({
                     "test_mode": os.environ.get("MEDIAFLUX_TEST_MODE"),
@@ -90,12 +105,13 @@ class DatabaseIsolationTests(unittest.TestCase):
                 """
             )
             completed = subprocess.run(
-                [sys.executable, "-c", probe],
+                [sys.executable, "-B", "-c", probe],
                 cwd=project_root,
                 env=environment,
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=30,
             )
             observed = json.loads(completed.stdout.strip().splitlines()[-1])
 
@@ -413,8 +429,17 @@ class SQLiteConnectionHotPathTests(unittest.TestCase):
         second = self._Connection()
         with patch("app.database.sqlite3.connect", side_effect=[first, second]):
             db._connect().close()
-            self.db_path.unlink()
+            before = self.db_path.stat()
+            # Keep the old inode alive: unlink/touch may recycle both inode and ctime.
+            previous = self.db_path.with_suffix(".previous")
+            self.db_path.rename(previous)
             self.db_path.touch()
+            after = self.db_path.stat()
+            self.assertNotEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino))
+            self.assertNotEqual(
+                (before.st_dev, before.st_ino, before.st_ctime_ns),
+                (after.st_dev, after.st_ino, after.st_ctime_ns),
+            )
             db._connect().close()
 
         wal = "PRAGMA journal_mode=WAL;"

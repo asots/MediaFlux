@@ -147,6 +147,12 @@ def next_model_round(dto, *, kind="search", maximum=24_000):
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         suffix = json.dumps(auxiliary, ensure_ascii=False, separators=(",", ":")) if auxiliary else ""
         public = next(event.payload["result"] for event in events if event.type is AgentEventType.TOOL_COMPLETED)
+        if kind in {"empty", "not_missing"}:
+            from tests.test_agent_public_text_decoding import assert_scoped_snapshot
+            expected = json.loads(DefaultProjector().project(dto).model_content)
+            assert auxiliary == {"result_handle": public["result_handle"], "read_tool": "agent.read_result"}
+            await assert_scoped_snapshot(pipeline, auxiliary["result_handle"], expected,
+                                         owner="ux-model-owner", session_id="ux-model-session")
         return json.loads(encoded), encoded, suffix, message.content, public, model.requests[1]
     return asyncio.run(exercise())
 
@@ -207,7 +213,8 @@ def test_no_reference_branch_preserves_search_and_verification_in_next_request(k
     expected = json.loads(DefaultProjector().project(dto).model_content)
     actual, _, suffix, content, public, _ = next_model_round(dto, kind=kind)
     assert actual == expected
-    assert suffix == "" and public["candidate_view"] is None
+    assert json.loads(suffix) == {"result_handle": public["result_handle"], "read_tool": "agent.read_result"}
+    assert public["candidate_view"] is None and public["refs"] == []
     assert_private_absent(content)
     if kind == "empty":
         assert actual["data"]["page"] == 2 and actual["data"]["has_more"] is True

@@ -1,0 +1,80 @@
+"""Established storage must be recognizable before startup can migrate it."""
+import os
+import sqlite3
+from contextlib import closing
+from unittest.mock import patch
+
+import pytest
+from app.agent import feature_gate as gate
+from tests import test_first_run as support
+
+
+@pytest.mark.parametrize('secret', [True, False], ids=['lifespan', 'pre-secret'])
+@pytest.mark.parametrize('schema', ['zero-byte', 'empty-sqlite', 'unrelated', 'settings-only', 'name-only', 'legacy'])
+def test_startup_recognizes_legacy_storage_before_migration(secret, schema):
+    with patch.dict(os.environ):
+        case = support.FirstRunTests()
+        case.setUp()
+        try:
+            case.paths.ensure_writable_dirs()
+            case.paths.env_file.write_text(
+                'MEDIAFLUX_INITIALIZED=1\nENV_WEB_PASSPORT=admin\n'
+                'ENV_WEB_PASSWORD=synthetic-password\n'
+                + ('WEB_SECRET_KEY=synthetic-secret\n' if secret else '')
+            )
+            case._reload_runtime_modules()
+            assert not case.first_run.needs_initialization()
+            path = case.paths.database_path
+            if schema not in ('zero-byte', 'empty-sqlite'):
+                # Isolated migration mode omits backup I/O, not startup/schema
+                # or fence checks. Empty DB regressions use the ordinary path.
+                path = path.with_name('isolated-migration.db')
+                case.database.configure_database(path, test_mode=True)
+            path.touch()
+            with closing(sqlite3.connect(path)) as conn:
+                if schema == 'empty-sqlite':
+                    conn.execute('VACUUM')
+                elif schema == 'unrelated':
+                    conn.execute('CREATE TABLE unrelated (id INTEGER PRIMARY KEY)')
+                elif schema == 'settings-only':
+                    conn.execute('CREATE TABLE settings_kv (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)')
+                elif schema == 'name-only':
+                    conn.execute('CREATE TABLE organize_log (id INTEGER PRIMARY KEY)')
+                elif schema == 'legacy':
+                    # Unversioned early application schema, without settings_kv,
+                    # newer organize columns, or any of the later feature tables.
+                    conn.execute('CREATE TABLE organize_log (id INTEGER PRIMARY KEY, source TEXT NOT NULL, original_path TEXT NOT NULL, new_path TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)')
+                    conn.execute("INSERT INTO organize_log VALUES (1, 'guangya', 'old', 'new', 'success', '2020-01-01')")
+                conn.commit()
+            if schema == 'zero-byte':
+                assert path.stat().st_size == 0
+            else:
+                assert path.stat().st_size > 0
+            before_db = path.read_bytes()
+            before_config = case.paths.env_file.read_bytes()
+            original = case.database.init_db
+            with patch.object(case.database, 'init_db', wraps=original) as init:
+                if schema == 'legacy':
+                    with case._new_client():
+                        with case.database.get_conn() as conn:
+                            fence = gate.read_runtime_fence(conn)
+                            assert fence.phase == 'stable'
+                            assert tuple(conn.execute('SELECT original_path, new_path FROM organize_log WHERE id=1').fetchone()) == ('old', 'new')
+                    with case._new_client():
+                        with case.database.get_conn() as conn:
+                            assert gate.read_runtime_fence(conn) == fence
+                    assert init.call_count >= 2
+                else:
+                    with pytest.raises(gate.RuntimeFenceError, match='^runtime_database_schema_unrecognized$'):
+                        with case._new_client():
+                            pass
+                    assert init.call_count == 0
+                    assert path.read_bytes() == before_db
+                    assert case.paths.env_file.read_bytes() == before_config
+                    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
+                        has_kv = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings_kv'").fetchone()
+                        if has_kv:
+                            assert conn.execute('SELECT 1 FROM settings_kv WHERE key=?', (gate.RUNTIME_FENCE_KEY,)).fetchone() is None
+                    assert path.read_bytes() == before_db
+        finally:
+            case.tearDown()

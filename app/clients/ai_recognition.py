@@ -19,6 +19,8 @@ from app.clients.openai_compatible import (
     provider_headers,
     resolve_protocol,
     structured_request_body,
+    parse_generation_profiles,
+    resolve_generation_profile,
 )
 from app.agent.async_bridge import (
     AsyncBridgeUnavailable,
@@ -408,6 +410,10 @@ class AIRecognitionClient:
         schema: dict[str, Any],
     ) -> object:
         _assert_external_payload_safe(payload)
+        from app import config
+
+        profiles_json = config.get("AGENT_LLM_GENERATION_PROFILES", "")
+        parse_generation_profiles(profiles_json)
         protocols = protocol_attempts(self.protocol)
         for index, protocol in enumerate(protocols):
             body = structured_request_body(
@@ -418,6 +424,9 @@ class AIRecognitionClient:
                 schema_name=schema_name,
                 schema=schema,
                 max_tokens=800,
+                generation_profile=resolve_generation_profile(
+                    profiles_json, self.base_url, self.model, protocol,
+                ),
             )
             api_url = self.location.endpoint(protocol)
             lease = None

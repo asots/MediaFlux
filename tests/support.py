@@ -45,6 +45,63 @@ def isolated_test_database(filename: str = "test.db") -> Iterator[Path]:
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 
 
+@contextmanager
+def initialized_web_runtime(paths=None):
+    """Opt-in real installation for ordinary, already-installed Web controls.
+
+    Never use for fresh-installation, recovery, or changing-fence tests. The
+    operation creates physical storage through the normal operator entry, not
+    through test-mode schema/fence shortcuts.
+    """
+    from contextlib import ExitStack
+    from app import config, runtime_paths
+    from app.modules import first_run
+    from tests.test_setup_bootstrap_support import initialize_paths
+
+    previous_db = db.DB_PATH
+    previous_mode = db._configured_test_mode
+    previous_paths = runtime_paths._configured_paths
+    with ExitStack() as stack:
+        if paths is None:
+            root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="installed-web-")))
+            paths = runtime_paths.RuntimePaths(
+                program_dir=config.PATHS.program_dir,
+                data_dir=root / "data", config_dir=root / "config",
+                cache_dir=root / "cache", log_dir=root / "logs",
+                strm_dir=root / "strm", trash_dir=root / "trash",
+            )
+        stack.callback(db.configure_database, previous_db, test_mode=previous_mode)
+        stack.callback(runtime_paths.configure_runtime_paths, previous_paths)
+        stack.enter_context(patch.object(config, "PATHS", paths))
+        stack.enter_context(patch.object(config, "ENV_FILE", paths.env_file))
+        stack.enter_context(patch.object(config, "_cache", None))
+        stack.enter_context(patch.dict(os.environ, {"MEDIAFLUX_TEST_MODE": "0", "MEDIAFLUX_TEST_DB_PATH": ""}))
+        stack.enter_context(patch.object(first_run, "_startup_state", None))
+        runtime_paths.configure_runtime_paths(paths)
+        credentials = {
+            "ENV_WEB_PASSPORT": os.environ.get("ENV_WEB_PASSPORT", "admin"),
+            "ENV_WEB_PASSWORD": os.environ.get("ENV_WEB_PASSWORD", "123456"),
+            "WEB_SECRET_KEY": os.environ.get("WEB_SECRET_KEY", "test-secret"),
+        }
+        with patch.dict(os.environ):
+            for key in credentials:
+                os.environ.pop(key, None)
+            os.environ["MEDIAFLUX_TEST_MODE"] = "0"
+            os.environ.pop("MEDIAFLUX_TEST_DB_PATH", None)
+            settings = dict(credentials, ENV_WEB_PASSWORD="fixture-install-password", AGENT_ENABLED="1")
+            initialize_paths(paths, settings)
+            first_run._reset_startup_state_for_tests()
+            # Preserve legacy login credentials using the real controlled
+            # config publisher after the explicit installation has completed.
+            config.set_and_save(credentials)
+        db.configure_database(paths.database_path, test_mode=False)
+        first_run._reset_startup_state_for_tests()
+        try:
+            yield paths
+        finally:
+            first_run._startup_state = None
+
+
 class InitializedWebTestCase(unittest.TestCase):
     """显式提供已初始化 Web 测试环境，不依赖 tests 包导入副作用。"""
 

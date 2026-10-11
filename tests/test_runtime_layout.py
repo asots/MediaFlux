@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import io
-import multiprocessing
+import json
 import os
+import time
 import subprocess
 import sys
 import tempfile
@@ -33,11 +34,83 @@ def make_paths(root: Path, *, split: bool = False) -> RuntimePaths:
     )
 
 
-def _hold_legacy_file(path: str, ready, stop):
-    with Path(path).open("a+b") as handle:
-        CrossProcessLock._acquire_file_lock(handle, blocking=False)
-        ready.set()
-        stop.wait(15)
+# Fresh -c interpreter: no tests/app import may precede this guard.
+_LEGACY_HOLDER = r'''
+import sys, os, socket, json, time, tempfile
+from pathlib import Path
+source, lock, ready, stop, temporary = map(Path, sys.argv[1:])
+assert sys.dont_write_bytecode
+assert not any(n == 'tests' or n.startswith(('tests.', 'app.')) or n == 'app' for n in sys.modules)
+def audit(event, args):
+    if event in ('socket.connect', 'socket.bind', 'socket.sendto', 'socket.sendmsg') and args[0].family != socket.AF_UNIX:
+        raise AssertionError('holder denies INET')
+    if event in ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo'):
+        raise AssertionError('holder denies DNS')
+    if event in ('subprocess.Popen', 'os.fork', 'os.forkpty', 'os.posix_spawn', 'os.exec'):
+        raise AssertionError('holder denies descendants')
+sys.addaudithook(audit)
+# Synthetic audit events prove the hook without attempting any network syscall.
+checks = []
+with socket.socket() as sock:
+    for event, args in (
+        ('socket.connect', (sock, ('203.0.113.10', 443))),
+        ('socket.bind', (sock, ('127.0.0.1', 0))),
+        ('socket.sendto', (sock, ('203.0.113.10', 53))),
+        ('socket.sendmsg', (sock, ('203.0.113.10', 53))),
+        ('socket.getaddrinfo', ('unlisted.invalid', 443)),
+        ('socket.gethostbyname', ('unlisted.invalid',)),
+        ('socket.gethostbyaddr', ('203.0.113.10',)),
+        ('socket.getnameinfo', (('203.0.113.10', 443), 0)),
+        ('subprocess.Popen', ('forbidden',)),
+        ('os.fork', ()),
+    ):
+        try:
+            sys.audit(event, *args)
+        except AssertionError:
+            checks.append(event)
+        else:
+            raise AssertionError('missing preimport denial: ' + event)
+tempfile.tempdir = str(temporary)
+os.environ['TMPDIR'] = str(temporary)
+os.environ['AGENT_LLM_ENABLED'] = '0'
+sys.path.insert(0, str(source))
+import tests
+from app import config, database
+from app.modules.process_lock import CrossProcessLock
+imports = {n: m.__file__ for n, m in sys.modules.items()
+           if (n in ('tests', 'app') or n.startswith(('tests.', 'app.')))
+           and getattr(m, '__file__', None)}
+assert imports and all(Path(p).resolve().is_relative_to(source) for p in imports.values())
+assert Path(tests.__file__).resolve() == source / 'tests/__init__.py'
+assert config.ENV_FILE.is_relative_to(temporary)
+assert database.resolve_db_path().is_relative_to(temporary)
+with lock.open('a+b') as handle:
+    CrossProcessLock._acquire_file_lock(handle, blocking=False)
+    receipt = {'pid': os.getpid(), 'preimport_denied': checks, 'imports': imports,
+               'db': str(database.resolve_db_path()), 'config': str(config.ENV_FILE),
+               'temporary': str(temporary), 'bytecode_disabled': sys.dont_write_bytecode}
+    pending = ready.with_suffix('.pending')
+    pending.write_text(json.dumps(receipt))
+    pending.replace(ready)
+    deadline = time.monotonic() + 15
+    while not stop.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError('holder stop handshake timed out')
+        time.sleep(.01)
+'''
+
+
+def _reap_legacy_holder(process, stop):
+    stop.touch()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
 
 
 class RuntimeLayoutTests(unittest.TestCase):
@@ -182,23 +255,41 @@ class RuntimeLayoutTests(unittest.TestCase):
         for filename in (LIFECYCLE_LOCK_NAME, ".mediaflux-config-snapshot.lock"):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                ctx = multiprocessing.get_context("spawn")
-                ready, stop = ctx.Event(), ctx.Event()
-                process = ctx.Process(target=_hold_legacy_file, args=(str(root / filename), ready, stop))
-                process.start()
-                try:
-                    self.assertTrue(ready.wait(10))
-                    with self.assertRaises(RuntimeLayoutError):
-                        migrate_runtime_layout(make_paths(root))
-                    self.assertTrue((root / filename).exists())
-                finally:
-                    stop.set()
-                    process.join(10)
-                    if process.is_alive():
-                        process.terminate()
-                        process.join(5)
-                self.assertEqual(process.exitcode, 0)
+                source = Path(__file__).resolve().parents[1]
+                ready, stop = root / 'ready.json', root / 'stop'
+                temporary = root / 'child-temp'
+                temporary.mkdir()
+                env = os.environ.copy()
+                for key in ('PYTHONPATH', 'PYTHONHOME'):
+                    env.pop(key, None)
+                env.update(TMPDIR=str(temporary), PYTHONDONTWRITEBYTECODE='1', AGENT_LLM_ENABLED='0')
+                with tempfile.TemporaryFile(mode='w+') as output:
+                    process = subprocess.Popen(
+                        [sys.executable, '-B', '-c', _LEGACY_HOLDER, str(source),
+                         str(root / filename), str(ready), str(stop), str(temporary)],
+                        cwd=source, env=env, stdout=output, stderr=subprocess.STDOUT,
+                    )
+                    try:
+                        deadline = time.monotonic() + 10
+                        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                            time.sleep(.01)
+                        output.seek(0)
+                        self.assertTrue(ready.exists(), output.read())
+                        receipt = json.loads(ready.read_text())
+                        self.assertEqual(receipt['pid'], process.pid)
+                        self.assertTrue(receipt['bytecode_disabled'])
+                        self.assertEqual(len(receipt['preimport_denied']), 10)
+                        self.assertTrue(all(Path(p).is_relative_to(source) for p in receipt['imports'].values()))
+                        with self.assertRaises(RuntimeLayoutError):
+                            migrate_runtime_layout(make_paths(root))
+                        self.assertTrue((root / filename).exists())
+                        self.assertFalse((root / 'runtime/locks' / filename).exists())
+                    finally:
+                        _reap_legacy_holder(process, stop)
+                    output.seek(0)
+                    self.assertEqual(process.returncode, 0, output.read())
                 migrate_runtime_layout(make_paths(root))
+                require_runtime_layout(make_paths(root))
 
     def test_cli_pid_written_only_to_runtime_and_removed_even_on_server_error(self):
         import app.main
@@ -206,6 +297,16 @@ class RuntimeLayoutTests(unittest.TestCase):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
                 paths = make_paths(Path(directory))
+                from tests.test_setup_bootstrap import cold_run
+                def initialize():
+                    import json
+                    from app.cli import main as cli_main
+                    with tempfile.TemporaryFile() as payload:
+                        payload.write(json.dumps({'ENV_WEB_PASSPORT': 'operator', 'ENV_WEB_PASSWORD': 'test-bootstrap-password'}).encode())
+                        payload.seek(0)
+                        os.environ['MEDIAFLUX_CONFIG_DIR'] = str(paths.config_dir)
+                        return cli_main(['initialize', '--data-dir', str(paths.data_dir), '--confirm-new-installation', '--expect-env-sha256', 'absent', '--settings-fd', str(payload.fileno())])
+                self.assertEqual(cold_run(paths.data_dir, initialize), {'result': 0})
 
                 def serve(*_args, paths=paths, fail=fail, **_kwargs):
                     self.assertEqual(paths.pid_file.read_text(), str(os.getpid()))
@@ -239,8 +340,15 @@ class RuntimeLayoutTests(unittest.TestCase):
                            if not key.startswith("MEDIAFLUX_")}
             environment["MEDIAFLUX_DATA_DIR"] = str(root / "not-selected")
             script = """
-import sys
+import sys, socket
 from pathlib import Path
+assert not any(n == 'app' or n.startswith('app.') for n in sys.modules)
+def audit(event, args):
+    if event in ('socket.connect', 'socket.bind', 'socket.sendto', 'socket.sendmsg') and args[0].family != socket.AF_UNIX:
+        raise AssertionError('exec inet denied')
+    if event in ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo'):
+        raise AssertionError('exec DNS denied')
+sys.addaudithook(audit)
 from app.cli import main
 assert 'app.config' not in sys.modules
 assert main(['runtime-migrate', '--data-dir', sys.argv[1]]) == 0
@@ -248,7 +356,7 @@ from app import config
 assert config.PATHS.data_dir == Path(sys.argv[1])
 assert config.PATHS.config_dir == Path(sys.argv[1]) / 'config'
 """
-            result = subprocess.run([sys.executable, "-c", script, str(destination)],
+            result = subprocess.run([sys.executable, "-B", "-c", script, str(destination)],
                                     env=environment, capture_output=True, text=True, timeout=20, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((destination / ".mediaflux-shared.lock").exists())

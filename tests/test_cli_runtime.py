@@ -81,13 +81,23 @@ class CliRuntimeTests(unittest.TestCase):
                     ),
                 }
             )
+            prelude = '''import socket, sys
+assert not any(n == 'app' or n.startswith('app.') for n in sys.modules)
+def audit(event, args):
+    if event in ('socket.connect', 'socket.bind', 'socket.sendto', 'socket.sendmsg') and args[0].family != socket.AF_UNIX:
+        raise AssertionError('exec inet denied')
+    if event in ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo'):
+        raise AssertionError('exec DNS denied')
+sys.addaudithook(audit)
+'''
             result = subprocess.run(
-                [sys.executable, "-c", textwrap.dedent(script)],
+                [sys.executable, "-B", "-c", prelude + textwrap.dedent(script) + "\nfrom pathlib import Path\nassert all(Path(m.__file__).resolve().is_relative_to(Path.cwd()) for n,m in sys.modules.items() if (n == 'app' or n.startswith('app.')) and getattr(m, '__file__', None))\n"],
                 cwd=source_root,
                 env=environment,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=30,
             )
             self.assertFalse(
                 (source_root / "db").exists(),
@@ -110,7 +120,23 @@ class CliRuntimeTests(unittest.TestCase):
         web_host: str | None,
         web_port: int,
         user_env: str | None = None,
+        initialized: bool = True,
     ) -> dict[str, object]:
+        if initialized:
+            settings = {"ENV_WEB_PASSPORT": "admin", "ENV_WEB_PASSWORD": "correct-horse"}
+            settings.update(dict(line.split("=", 1) for line in (user_env or "").splitlines() if "=" in line))
+            result = self._run_probe(
+                """
+                import json, os, tempfile
+                from app.cli import main
+                with tempfile.TemporaryFile() as payload:
+                    payload.write(os.environ["PROBE_SETTINGS"].encode())
+                    payload.seek(0)
+                    code = main(["initialize", "--data-dir", os.environ["MEDIAFLUX_DATA_DIR"], "--confirm-new-installation", "--expect-env-sha256", "absent", "--settings-fd", str(payload.fileno())])
+                print("TASK3_RESULT=" + json.dumps({"exit_code": code}))
+                """, env={"PROBE_SETTINGS": json.dumps(settings)}, runtime_root=runtime_root,
+            )
+            self.assertEqual(result["exit_code"], 0)
         return self._run_probe(
             """
             import json
@@ -120,13 +146,6 @@ class CliRuntimeTests(unittest.TestCase):
 
             import app.cli as cli
 
-            user_env = os.environ.get("TASK3_USER_ENV", "")
-            if user_env:
-                from pathlib import Path
-                config_dir = Path(os.environ["MEDIAFLUX_CONFIG_DIR"])
-                config_dir.mkdir(parents=True, exist_ok=True)
-                (config_dir / "user.env").write_text(user_env, encoding="utf-8")
-
             app_main_before_start = "app.main" in sys.modules
             with patch("app.cli.uvicorn.run") as uvicorn_run:
                 exit_code = cli.main(json.loads(os.environ["TASK3_ARGS"]))
@@ -134,6 +153,13 @@ class CliRuntimeTests(unittest.TestCase):
             from app import config, database, logger
 
             call = uvicorn_run.call_args.kwargs
+            guidance = os.environ["PROBE_INITIALIZED"] == "0"
+            if guidance:
+                from fastapi.testclient import TestClient
+                with TestClient(uvicorn_run.call_args.args[0]) as client:
+                    assert client.get('/readyz').status_code == 503
+                    assert client.post('/setup', data={}).status_code == 403
+                assert not database.resolve_db_path().exists()
             result = {
                 "exit_code": exit_code,
                 "app_main_before_start": app_main_before_start,
@@ -141,7 +167,7 @@ class CliRuntimeTests(unittest.TestCase):
                 "host": call["host"],
                 "port": call["port"],
                 "workers": call["workers"],
-                "log_config_is_none": call["log_config"] is None,
+                "log_config_is_none": None if guidance else call["log_config"] is None,
                 "access_log": call["access_log"],
                 "data_dir": str(config.PATHS.data_dir),
                 "config_dir": str(config.PATHS.config_dir),
@@ -155,8 +181,8 @@ class CliRuntimeTests(unittest.TestCase):
             env={
                 **({"WEB_HOST": web_host} if web_host is not None else {}),
                 "TASK3_ARGS": json.dumps(args),
-                **({"TASK3_USER_ENV": user_env} if user_env is not None else {}),
                 "WEB_PORT": str(web_port),
+                "PROBE_INITIALIZED": "1" if initialized else "0",
                 "WEB_SECRET_KEY": "task3-cli-runtime-secret",
             },
             runtime_root=runtime_root,
@@ -204,6 +230,7 @@ class CliRuntimeTests(unittest.TestCase):
                 runtime_root=data_dir,
                 web_host=None,
                 web_port=23456,
+                initialized=False,
             )
 
         self.assertEqual(result["host"], "127.0.0.1")
@@ -225,21 +252,29 @@ class CliRuntimeTests(unittest.TestCase):
         from app.modules import first_run
 
         events: list[str] = []
+        from tests.test_setup_bootstrap import initialize
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        self.assertEqual(initialize(root), {"result": 0})
+        paths = RuntimePaths.from_environment({"MEDIAFLUX_DATA_DIR": str(root), "MEDIAFLUX_CONFIG_DIR": str(root / "config")})
+        from app.modules.backup import runtime_lifecycle_guard as real_lifecycle_guard
 
         @contextmanager
         def lifecycle_guard(_paths):
-            events.append("lock-enter")
-            try:
-                yield
-            finally:
-                events.append("lock-exit")
+            with real_lifecycle_guard(_paths):
+                events.append("lock-enter")
+                try:
+                    yield
+                finally:
+                    events.append("lock-exit")
 
         web_app = SimpleNamespace(
             state=SimpleNamespace(
                 release_startup_lifecycle_guard=lambda: events.append("app-release")
             )
         )
-        with patch(
+        with patch("app.cli.get_runtime_paths", return_value=paths), patch(
             "app.modules.backup.runtime_lifecycle_guard",
             side_effect=lifecycle_guard,
         ), patch(
@@ -827,7 +862,7 @@ class CliRuntimeTests(unittest.TestCase):
                     cli_main.assert_called_once_with(expected_args)
 
 
-    def test_container_fresh_start_opens_web_setup_without_credentials(self) -> None:
+    def test_container_fresh_start_is_guidance_without_setup_authority(self) -> None:
         from app import cli
 
         web_app = SimpleNamespace(state=SimpleNamespace())
@@ -847,17 +882,21 @@ class CliRuntimeTests(unittest.TestCase):
                 os.environ,
                 {"MEDIAFLUX_CONTAINER": "1"},
                 clear=True,
-            ), patch("app.cli.get_runtime_paths", return_value=paths), patch(
-                "app.modules.first_run.needs_initialization", return_value=True
-            ), patch("app.main.app", web_app), patch("app.cli.uvicorn.run") as run:
+            ), patch("app.cli.get_runtime_paths", return_value=paths), patch("app.cli.uvicorn.run") as run:
                 exit_code = cli._start(None, None, None)
+                from fastapi.testclient import TestClient
+                with TestClient(run.call_args.args[0]) as client:
+                    self.assertEqual(client.get('/readyz').status_code, 503)
+                    self.assertEqual(client.post('/setup', data={}).status_code, 403)
+                self.assertFalse(paths.database_path.exists())
+                self.assertFalse(paths.env_file.exists())
 
         self.assertEqual(exit_code, 0)
-        self.assertIs(run.call_args.args[0], web_app)
+        self.assertIsNot(run.call_args.args[0], web_app)
         self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
         self.assertEqual(run.call_args.kwargs["workers"], 1)
 
-    def test_container_preseeded_credentials_can_start_without_manual_secret(self) -> None:
+    def test_container_preseeded_credentials_do_not_grant_initialization(self) -> None:
         from app import cli
 
         web_app = SimpleNamespace(state=SimpleNamespace())
@@ -881,13 +920,17 @@ class CliRuntimeTests(unittest.TestCase):
                     "ENV_WEB_PASSWORD": "correct-horse",
                 },
                 clear=True,
-            ), patch("app.cli.get_runtime_paths", return_value=paths), patch(
-                "app.modules.first_run.needs_initialization", return_value=False
-            ), patch("app.main.app", web_app), patch("app.cli.uvicorn.run") as run:
+            ), patch("app.cli.get_runtime_paths", return_value=paths), patch("app.cli.uvicorn.run") as run:
                 exit_code = cli._start(None, None, None)
+                from fastapi.testclient import TestClient
+                with TestClient(run.call_args.args[0]) as client:
+                    self.assertEqual(client.get('/readyz').status_code, 503)
+                    self.assertEqual(client.post('/setup', data={}).status_code, 403)
+                self.assertFalse(paths.database_path.exists())
+                self.assertFalse(paths.env_file.exists())
 
         self.assertEqual(exit_code, 0)
-        self.assertIs(run.call_args.args[0], web_app)
+        self.assertIsNot(run.call_args.args[0], web_app)
         run.assert_called_once()
 
     def test_dockerfile_marks_container_and_uses_fixed_internal_healthcheck(self) -> None:

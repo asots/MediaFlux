@@ -11,6 +11,8 @@ from tests.support import IsolatedDatabaseTestCase
 
 class LocalMediaBrowserTests(IsolatedDatabaseTestCase):
     def test_page_has_four_stable_work_areas_and_navigation(self):
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         with TestClient(create_app(start_background=False)) as client:
             login = client.get("/login")
             token = re.search(r'name="csrf_token"\s+value="([^"]+)"', login.text).group(1)

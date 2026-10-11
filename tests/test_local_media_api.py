@@ -18,6 +18,8 @@ from tests.support import IsolatedDatabaseTestCase
 
 class LocalMediaAPITests(IsolatedDatabaseTestCase):
     def setUp(self):
+        from tests.support import initialized_web_runtime
+        self.enterContext(initialized_web_runtime())
         with db.get_conn() as conn:
             conn.execute("DELETE FROM local_media_tasks")
             conn.execute("DELETE FROM local_media_sources")
@@ -253,33 +255,52 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
     def test_root_container_default_browser_exposes_mounts_not_container_root(self):
         from app.modules.local_directory_browser import _configured_roots
 
-        with (
-            tempfile.TemporaryDirectory() as first_raw,
-            tempfile.TemporaryDirectory() as second_raw,
-            tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as mountinfo,
-        ):
-            first = Path(first_raw).resolve()
-            second = Path(second_raw).resolve()
+        # Logical mount paths must not inherit the host TMPDIR's /root ancestry.
+        first = Path("/mnt/mediaflux-test-a")
+        second = Path("/mnt/mediaflux-test-b")
+        denied = [Path(value) for value in ("/", "/root", "/root/media", "/proc", "/proc/media")]
+        logical_directories = {first, second, *denied, Path("/tmp")}
+        original_is_dir, original_resolve, original_exists = Path.is_dir, Path.resolve, Path.exists
+
+        def is_dir(path):
+            return True if path in logical_directories else original_is_dir(path)
+
+        def resolve(path, *args, **kwargs):
+            return path if path in logical_directories else original_resolve(path, *args, **kwargs)
+
+        def exists(path):
+            return True if path in logical_directories else original_exists(path)
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as mountinfo:
             mountinfo.write(
-                "20 1 0:1 / / rw - overlay overlay rw\n"
+                # Use a business filesystem for denied paths too, so the path gate
+                # (not the filesystem blacklist or missing dirs) must reject them.
+                "20 1 0:1 / / rw - ext4 /dev/root rw\n"
                 f"21 20 0:2 / {first} rw - ext4 /dev/a rw\n"
                 f"22 20 0:3 / {second} rw - ext4 /dev/b rw\n"
-                "23 20 0:4 / /proc rw - proc proc rw\n"
+                "23 20 0:4 / /proc rw - ext4 /dev/c rw\n"
                 "24 20 0:5 / /tmp rw - tmpfs tmpfs rw\n"
+                "25 20 0:6 / /root rw - ext4 /dev/d rw\n"
+                "26 20 0:7 / /root/media rw - ext4 /dev/e rw\n"
+                "27 20 0:8 / /proc/media rw - ext4 /dev/f rw\n"
             )
             mountinfo.flush()
             with patch.dict("os.environ", {"MEDIAFLUX_CONTAINER": "1"}), patch(
                 "app.modules.local_directory_browser.get", return_value=""
             ), patch(
                 "app.modules.local_directory_browser._MOUNTINFO_PATH", Path(mountinfo.name)
-            ):
+            ), patch.object(Path, "is_dir", new=is_dir), patch.object(
+                Path, "resolve", new=resolve
+            ), patch.object(Path, "exists", new=exists):
                 roots = _configured_roots()
 
         self.assertEqual(
             roots,
             sorted([first, second], key=lambda item: str(item).casefold()),
         )
-        self.assertNotIn(Path("/"), roots)
+        for path in [*denied, Path("/tmp")]:
+            with self.subTest(denied=path):
+                self.assertNotIn(path, roots)
 
     def test_legacy_source_edit_requires_container_path_migration(self):
         token = self.login()

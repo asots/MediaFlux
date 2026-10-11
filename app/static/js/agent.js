@@ -123,6 +123,76 @@
         return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;
     }
 
+    function classifyPublicTask(task) {
+        if (task === null || task === undefined) return 'untracked';
+        const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+        const text = value => typeof value === 'string' && value.length > 0;
+        if (!object(task) || !Number.isInteger(task.v) || task.v !== 1
+            || !text(task.task_id) || !Number.isInteger(task.epoch) || task.epoch <= 0
+            || !Number.isInteger(task.revision) || task.revision <= 0
+            || task.acceptance_scope !== 'declared_obligations'
+            || !['partial', 'blocked', 'complete', 'cancelled'].includes(task.status)
+            || !text(task.root_goal) || !Array.isArray(task.obligations) || !task.obligations.length) return 'unknown';
+        const ids = new Set(), pending = new Set();
+        for (const item of task.obligations) {
+            if (!object(item) || !text(item.id) || ids.has(item.id) || !text(item.description)
+                || item.required !== true || !['pending', 'blocked', 'verified'].includes(item.state)) return 'unknown';
+            ids.add(item.id);
+            if (item.state !== 'verified') pending.add(item.id);
+        }
+        const remaining = task.remaining_obligation_ids;
+        if (!Array.isArray(remaining) || !remaining.every(value => typeof value === 'string')
+            || new Set(remaining).size !== remaining.length || remaining.length !== pending.size
+            || !remaining.every(id => pending.has(id)) || !Array.isArray(task.blockers)
+            || !task.blockers.every(item => object(item) && text(item.text))) return 'unknown';
+        if (task.status === 'complete' && (remaining.length || task.blockers.length)) return 'unknown';
+        return task.status;
+    }
+
+    function clearTaskSnapshot() {
+        document.getElementById('agentTaskSnapshot')?.remove();
+    }
+
+    function placeTaskSnapshot(panel = document.getElementById('agentTaskSnapshot')) {
+        if (!panel) return;
+        if (consoleNode?.classList.contains('is-empty')) {
+            const startPanel = consoleNode.querySelector('.agent-start-panel');
+            if (startPanel && panel.parentElement !== startPanel) startPanel.prepend(panel);
+        } else if (composer && panel.nextElementSibling !== composer) {
+            composer.before(panel);
+        }
+    }
+
+    function renderTaskSnapshot(task) {
+        const status = classifyPublicTask(task);
+        const labels = {
+            complete: '已声明检查项已核验', partial: '已声明检查项尚未全部核验',
+            blocked: '存在阻塞', cancelled: '会话声明任务已取消',
+            untracked: '未建立任务验收清单', unknown: '任务验收状态未知',
+        };
+        let panel = document.getElementById('agentTaskSnapshot');
+        if (!panel) {
+            panel = element('section', 'text-muted');
+            panel.id = 'agentTaskSnapshot';
+            // Independent of answer cards and the transcript's replacement lifecycle.
+            panel.style.cssText = 'flex:0 1 auto;min-height:0;max-height:24vh;overflow:auto;overflow-wrap:anywhere;margin:0 20px 8px';
+        }
+        panel.dataset.taskStatus = status;
+        panel.replaceChildren(element('div', '', `会话声明任务快照：${labels[status]}`));
+        placeTaskSnapshot(panel);
+        if (status === 'untracked' || status === 'unknown') return;
+        panel.append(element('div', '', `目标：${clipText(task.root_goal, 240)}`));
+        const remaining = new Set(task.remaining_obligation_ids);
+        const descriptions = task.obligations.filter(item => remaining.has(item.id));
+        descriptions.slice(0, 4).forEach(item => panel.append(element('div', '', `待核验：${clipText(item.description, 240)}`)));
+        task.blockers.slice(0, 3).forEach(item => panel.append(element('div', '', `阻塞：${clipText(item.text, 240)}`)));
+        if (descriptions.length > 4 || task.blockers.length > 3) panel.append(element('div', '', '仅显示部分检查项与阻塞。'));
+    }
+
+    function consumeTerminalTask(event) {
+        if (['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)) renderTaskSnapshot(event.payload?.task);
+    }
+
     function readDrafts() {
         if (!draftScope) return {};
         try {
@@ -172,6 +242,7 @@
         let typed = String(promptInput?.value || '');
         const accountChanged = Boolean(draftScope);
         if (accountChanged) {
+            clearTaskSnapshot();
             stopInitialRestore();
             // 同一页面的登录主体改变时，不把旧主体的请求、内存或输入传给新主体。
             ++sessionLoadGeneration;
@@ -234,6 +305,7 @@
 
     function setConsoleEmpty(empty) {
         consoleNode?.classList.toggle('is-empty', Boolean(empty));
+        placeTaskSnapshot();
         if (!initialRestore) {
             try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({session_id: sessionId, mode: empty ? 'empty' : 'conversation'})); } catch (_) { /* 可选布局提示。 */ }
         }
@@ -898,7 +970,7 @@
         const protectedWriteStop = cancelled && turn.confirmationRequested === true;
         const finalMessage = protectedWriteStop
             ? CONFIRMATION_STOP_NOTICE
-            : message || (cancelled ? '本次任务已停止。' : 'Agent 暂时无法完成该请求。');
+            : message || (cancelled ? '本轮处理已停止。' : 'Agent 暂时无法完成该请求。');
         promoteTurnCard(turn);
         if (trustedReceipt) {
             turn.followupFailed = true;
@@ -1080,7 +1152,11 @@
         const confirm = element('button', 'agent-confirmation-submit', '确认执行');
         confirm.type = 'button';
         confirm.dataset.effectConfirm = approval.plan_id || '';
-        actions.append(cancel, confirm);
+        const explain = element('button', 'agent-confirmation-explain', '只解释');
+        explain.type = 'button';
+        explain.dataset.effectExplain = approval.plan_id || '';
+        actions.append(cancel, explain, confirm);
+        status.append(element('p', 'agent-confirmation-copy', '只解释会保留本卡；直接发送普通消息将替换待确认计划。'));
         card.append(head, intro);
         if (facts.childElementCount) card.append(facts);
         if (scope) card.append(scope);
@@ -1240,6 +1316,7 @@
 
     function applyEvent(turn, event) {
         const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
+        consumeTerminalTask(event);
         switch (event?.type) {
         case 'turn.started':
             turn.confirmationRequested = payload.kind === 'confirmation';
@@ -1353,7 +1430,7 @@
             finalizeError(turn, turn.effectError || payload.message || 'Agent 暂时无法完成该请求。');
             break;
         case 'turn.cancelled':
-            finalizeError(turn, '本次任务已停止。', {cancelled: true});
+            finalizeError(turn, '本轮处理已停止。', {cancelled: true});
             break;
         default:
             break;
@@ -1604,7 +1681,7 @@
         resizePrompt();
         announce(responseStatus, lastTurn.status === 'cancelled' ? '请求已停止'
             : lastTurn.status === 'failed' || lastTurn.status === 'interrupted' ? '请求未能完成，状态已同步'
-                : 'Media Agent 已完成');
+                : '本轮回复已结束');
         refreshSessions({quiet: true});
         if (Number(payload.pending_effect_count) > 0) {
             startReceiptObservation(active, payload);
@@ -1654,6 +1731,7 @@
             if (!isCurrentActiveRequest(active)) return;
             if (configureDraftScope(payload.draft_scope) || !isCurrentActiveRequest(active)) return;
             if (payload?.session_id !== active.sessionId || !Array.isArray(payload?.messages)) throw new Error('会话状态响应无效');
+            renderTaskSnapshot(payload.task);
             if (active.receiptOnly) {
                 if (payload.active_turn) {
                     finishReceiptObservation(active);
@@ -1814,7 +1892,7 @@
                 startActiveObservation(active);
                 return;
             }
-            announce(responseStatus, turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : 'Media Agent 已完成');
+            announce(responseStatus, turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : '本轮回复已结束');
             startReceiptObservation(active);
             refreshSessions({quiet: true});
         } catch (error) {
@@ -1880,6 +1958,57 @@
         }
     }
 
+    async function explainEffect(button) {
+        if (busy) return;
+        const card = button.closest('.agent-confirmation-card');
+        const planId = button.dataset.effectExplain || '';
+        if (!card || !planId) return;
+        if (card.querySelector('[data-explanation-input]')) {
+            card.querySelector('[data-explanation-input]').focus();
+            return;
+        }
+        const form = element('div', 'agent-explanation-form');
+        const input = element('textarea', 'agent-explanation-input');
+        input.dataset.explanationInput = '';
+        input.maxLength = 12000;
+        input.placeholder = '只解释本计划，不执行或修改。请输入问题';
+        input.setAttribute('aria-label', '解释问题');
+        const send = element('button', '', '发送解释问题');
+        const stop = element('button', '', '停止这次解释（不取消计划）');
+        send.type = stop.type = 'button';
+        stop.hidden = true;
+        form.append(input, send, stop);
+        card.append(form);
+        input.focus();
+        send.addEventListener('click', async () => {
+            const message = input.value.trim();
+            if (!message || busy) return;
+            const target = sessionId;
+            const generation = sessionLoadGeneration;
+            const requestId = createId('explain');
+            card.querySelectorAll('button').forEach(item => { item.disabled = true; });
+            stop.hidden = false;
+            stop.disabled = false;
+            setBusy(true, {stoppable: false});
+            stop.onclick = async () => {
+                stop.disabled = true;
+                await fetchJSON('/api/agent/query/cancel', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: target, request_id: requestId})});
+            };
+            try {
+                await fetchJSON('/api/agent/actions/explain', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: target, plan_id: planId, message, request_id: requestId, stream: false})});
+            } catch (error) {
+                announce(responseStatus, error.message || '解释连接中断；正在恢复原计划');
+            } finally {
+                if (sessionId === target && sessionLoadGeneration === generation) {
+                    setBusy(false);
+                    await loadSession(target, {closeHistory: false, preserveScroll: true});
+                }
+            }
+        });
+    }
+
     async function confirmEffect(button) {
         if (busy) return;
         const card = button.closest('.agent-confirmation-card');
@@ -1928,7 +2057,7 @@
             }
             const status = String(terminalEvent.payload?.status || '').toLowerCase();
             announce(responseStatus, status === 'approval_required' ? '等待下一项确认'
-                : turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : 'Media Agent 已完成');
+                : turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : '本轮回复已结束');
             startReceiptObservation(active);
             refreshSessions({quiet: true});
         } catch (error) {
@@ -2186,6 +2315,7 @@
     }
 
     function renderSessionSnapshot(payload, {active = null, terminalTurn = null, preserveScroll = false} = {}) {
+        renderTaskSnapshot(payload.task);
         const previousFollow = followOutput;
         const previousScrollTop = transcript?.scrollTop || 0;
         expireCandidateCards();
@@ -2249,7 +2379,7 @@
         if (terminalTurn && terminalTurn.status !== 'completed') {
             const existingAnswer = [...(payload.messages || [])].reverse().find(message => message.role === 'assistant')?.content;
             const message = String(terminalTurn.message || (terminalTurn.status === 'cancelled'
-                ? '本次任务已停止。' : '任务未能完成，请核对会话状态。'));
+                ? '本轮处理已停止。' : '任务未能完成，请核对会话状态。'));
             if (!existingAnswer || String(existingAnswer).trim() !== message.trim()) {
                 const turn = createAssistantTurn({recovered: true, scroll: !preserveScroll});
                 turn.boundSelection = active?.kind === 'candidate_preview';
@@ -2278,6 +2408,7 @@
         const restoreResumeFocus = switching && document.activeElement === resumeButton;
         const previousSessionId = sessionId;
         if (switching) {
+            clearTaskSnapshot();
             saveDraft();
             ++sessionLoadGeneration;
             invalidateActiveRequest();
@@ -2297,6 +2428,7 @@
                 || (active && !isCurrentActiveRequest(active))) return false;
             if (!(Number(payload.pending_effect_count) > 0)) receiptObservationWindows.delete(targetId);
             if (active) {
+                renderTaskSnapshot(payload.task);
                 const lastTurn = payload.last_turn;
                 if (sameActiveTurn(lastTurn, active)
                     && TERMINAL_LAST_TURN_STATUSES.includes(String(lastTurn.status || ''))) {
@@ -2377,6 +2509,7 @@
     }
 
     function startNewSession() {
+        clearTaskSnapshot();
         stopInitialRestore();
         saveDraft();
         ++sessionLoadGeneration;
@@ -2629,6 +2762,7 @@
                 active.turnId = active.turnId || String(event.turn_id || '');
                 if (active.cancelAccepted && isTerminalEvent(event)) return;
                 const payload = event.payload || {};
+                consumeTerminalTask(event);
                 if (event.type === 'turn.started') expireVisibleApprovals();
                 if (event.type === 'effect.approval_required' && payload.plan) {
                     const plan = payload.plan;
@@ -2816,6 +2950,8 @@
         if (candidate) selectCandidate(candidate);
         const confirm = event.target.closest('[data-effect-confirm]');
         const cancel = event.target.closest('[data-effect-cancel]');
+        const explain = event.target.closest('[data-effect-explain]');
+        if (explain) explainEffect(explain);
         if (confirm) confirmEffect(confirm);
         if (cancel) cancelEffect(cancel);
     });

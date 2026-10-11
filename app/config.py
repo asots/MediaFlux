@@ -12,8 +12,13 @@ import stat
 import subprocess
 import sys
 import threading
+import hashlib
+import json
+from contextlib import contextmanager
+from contextvars import ContextVar
+from types import MappingProxyType
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.env_file import read_env_bytes as _read_env_bytes
@@ -137,10 +142,17 @@ def _ensure_loaded() -> dict[str, str]:
 
 def get(key: str, default: str = "") -> str:
     """取配置项：外部环境变量优先，其次 user.env，最后运行时默认值。"""
-    val = os.getenv(key)
+    snapshot = _runtime_snapshot.get()
+    if snapshot is not None:
+        val = snapshot.startup_overrides.get(key)
+        loaded = snapshot.file_values
+    else:
+        val = os.getenv(key)
+        loaded = None
     if val:
         return val
-    loaded = _ensure_loaded()
+    if loaded is None:
+        loaded = _ensure_loaded()
     if key in loaded:
         return loaded[key]
     if key == "STRM_ROOT" and default == "":
@@ -177,6 +189,112 @@ def get_bool(key: str, default: bool | None = None) -> bool:
 
 
 _SYSTEM_ENV_SNAPSHOT = dict(os.environ)
+_runtime_snapshot: ContextVar[RuntimeConfigSnapshot | None] = ContextVar("runtime_config_snapshot", default=None)
+_runtime_guard = threading.local()
+_DISPLAY_ONLY_KEY = "AGENT_STREAM_DISPLAY_ENABLED"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeConfigSnapshot:
+    file_values: Mapping[str, str] = field(repr=False)
+    startup_overrides: Mapping[str, str] = field(repr=False)
+    config_digest: str
+    effective_digest: str
+
+
+def _runtime_digest(values: Mapping[str, str]) -> str:
+    canonical = {key: value for key, value in values.items() if key != _DISPLAY_ONLY_KEY}
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@contextmanager
+def runtime_config_read_guard():
+    """Enter the shared lock before selecting this path's publication scope."""
+    from app.modules.backup import config_snapshot_guard
+    from app.modules.process_lock import CrossProcessLock
+    identity = (os.getpid(), threading.get_ident(), CrossProcessLock("config-snapshot", directory=PATHS.data_dir).path.resolve())
+    with config_snapshot_guard(PATHS):
+        scopes = getattr(_runtime_guard, "scopes", None)
+        if scopes is None:
+            scopes = _runtime_guard.scopes = {}
+        outermost = identity not in scopes
+        previous = getattr(_runtime_guard, "scope", None)
+        _runtime_guard.scope = scopes.setdefault(identity, {"publication": None})
+        try:
+            yield
+        finally:
+            _runtime_guard.scope = previous
+            if outermost:
+                scopes.pop(identity, None)
+
+
+def capture_runtime_config_snapshot() -> RuntimeConfigSnapshot:
+    with runtime_config_read_guard():
+        payload, values = read_env_snapshot(ENV_FILE)
+        if payload is None:
+            from app.agent.feature_gate import RuntimeFenceError
+            raise RuntimeFenceError("runtime_configuration_unavailable")
+        overrides = {key: value for key, value in _SYSTEM_ENV_SNAPSHOT.items() if value}
+        effective = dict(values)
+        effective.update(overrides)
+        return RuntimeConfigSnapshot(MappingProxyType(dict(values)), MappingProxyType(overrides), _runtime_digest(values), _runtime_digest(effective))
+
+
+@contextmanager
+def use_runtime_config_snapshot(snapshot: RuntimeConfigSnapshot):
+    token = _runtime_snapshot.set(snapshot)
+    try:
+        yield
+    finally:
+        _runtime_snapshot.reset(token)
+
+
+@contextmanager
+def runtime_config_publication(updates: Mapping[str, str]):
+    """Revoke before file publication; only the outer successful owner stabilizes."""
+    from app import database as db
+    from app.agent.feature_gate import (
+        RuntimeFenceError, begin_runtime_change, finish_runtime_change,
+        read_runtime_fence,
+    )
+    with runtime_config_read_guard():
+        active = _runtime_guard.scope["publication"]
+        if active is not None:
+            if not active["authorizing"] and set(updates) - {_DISPLAY_ONLY_KEY}:
+                raise RuntimeFenceError("runtime_publication_scope_changed")
+            try:
+                yield
+            except BaseException:
+                active["failed"] = True
+                raise
+            return
+        authorizing = bool(set(updates) - {_DISPLAY_ONLY_KEY})
+        changing = None
+        if authorizing:
+            snapshot = capture_runtime_config_snapshot()
+            if not db.resolve_db_path().is_file():
+                import sqlite3
+                raise sqlite3.OperationalError("runtime_database_unavailable")
+            with db.get_conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current = read_runtime_fence(conn)
+                if current.config_digest != snapshot.config_digest:
+                    raise RuntimeFenceError("runtime_snapshot_mismatch")
+                changing = begin_runtime_change(conn, current)
+        state = {"authorizing": authorizing, "failed": False}
+        _runtime_guard.scope["publication"] = state
+        try:
+            yield
+            if state["failed"]:
+                raise RuntimeFenceError("runtime_publication_failed")
+            if changing is not None:
+                snapshot = capture_runtime_config_snapshot()
+                with db.get_conn() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    finish_runtime_change(conn, changing, snapshot.config_digest)
+        finally:
+            _runtime_guard.scope["publication"] = None
+
 
 
 def _is_windows() -> bool:
@@ -484,6 +602,15 @@ def _recover_missing_env_target(target: Path) -> bool:
     _fsync_directory(target.parent)
     _logger.warning("已自动恢复异常中断前的配置文件: %s", target)
     return True
+
+
+def read_env_snapshot_no_recovery(path: Path, *, max_bytes: int | None = None):
+    """Inspect only: never promote a pending recovery artifact."""
+    try:
+        payload = _read_verified_file_bytes(Path(path), max_bytes=max_bytes)
+    except FileNotFoundError:
+        return None, {}
+    return payload, _read_env_bytes(payload)
 
 
 def read_env_snapshot(
@@ -881,10 +1008,17 @@ def update_runtime_env_file(
 
     if target != Path(ENV_FILE):
         return publish()
-    from app.modules.backup import config_snapshot_guard
-
-    with config_snapshot_guard(PATHS):
-        return publish()
+    from app.agent.feature_gate import RuntimeFenceError
+    with runtime_config_read_guard():
+        try:
+            with runtime_config_publication(normalized):
+                return publish()
+        except RuntimeFenceError as exc:
+            # Preserve the public CAS category when an external file writer
+            # also invalidated the durable snapshot. Never grant authority.
+            if str(exc) == "runtime_snapshot_mismatch" and read_env_snapshot(target)[0] != expected:
+                raise ConcurrentConfigUpdateError("配置已被其他写入修改") from exc
+            raise
 
 
 def reload_after_restore() -> None:
@@ -913,7 +1047,8 @@ def set_and_save(updates: dict[str, str]) -> None:
 
 def all_items() -> dict[str, str]:
     """返回全部 user.env 实际值。"""
-    return dict(_ensure_loaded())
+    snapshot = _runtime_snapshot.get()
+    return dict(snapshot.file_values if snapshot is not None else _ensure_loaded())
 
 
 # ===== 常用配置便捷访问 =====

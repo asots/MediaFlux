@@ -87,6 +87,26 @@ class EffectEnvelope:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ExplainEnvelope:
+    owner: str
+    session_id: str
+    plan_id: str
+    message: str
+    request_id: str = ""
+    channel: str = "api"
+
+    def normalized(self) -> ExplainEnvelope:
+        effect = EffectEnvelope(self.owner, self.session_id, self.plan_id, self.request_id, self.channel).normalized()
+        if not isinstance(self.message, str):
+            raise TransportInputError("message 无效")
+        try:
+            message = AgentInput(message=self.message, owner=effect.owner, session_id=effect.session_id).message
+        except ValueError as exc:
+            raise TransportInputError(str(exc)) from exc
+        return ExplainEnvelope(**asdict(effect), message=message)
+
+
 class _KernelTransport:
     """共享会话依赖与确认取消；具体通道仅适配各自的事件协议。"""
 
@@ -106,6 +126,17 @@ class _KernelTransport:
 
 class WebKernelTransport(_KernelTransport):
     """Web 只取得真实 NDJSON 事件并转发控制命令。"""
+
+    async def explain(self, request: ExplainEnvelope) -> AsyncIterator[bytes]:
+        events = self.session.explain(**asdict(replace(request, channel="web").normalized()))
+        async with aclosing(events):
+            async for chunk in iter_ndjson(self.metrics.track(events, channel="web")):
+                yield chunk
+
+    async def explain_view(self, request: ExplainEnvelope) -> TurnView:
+        events = self.session.explain(**asdict(replace(request, channel="web").normalized()))
+        async with aclosing(events):
+            return await consume_events(self.metrics.track(events, channel="web"))
 
     async def query(self, request: QueryEnvelope) -> AsyncIterator[bytes]:
         async with aclosing(self.session.run(replace(request, channel="web").to_agent_input())) as events:
@@ -142,6 +173,11 @@ class WebKernelTransport(_KernelTransport):
 
 class TelegramKernelTransport(_KernelTransport):
     """Telegram 消费与 Web 相同的事件，不自行实现 Agent 状态机。"""
+
+    async def explain(self, request: ExplainEnvelope) -> TurnView:
+        events = self.session.explain(**asdict(replace(request, channel="telegram").normalized()))
+        async with aclosing(events):
+            return await consume_events(self.metrics.track(events, channel="telegram"))
 
     async def query(
         self,

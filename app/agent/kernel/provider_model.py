@@ -3,28 +3,41 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
 
 from app.clients.openai_compatible import (
+    PROTOCOL_FALLBACK_MAX_BYTES,
+    PROTOCOL_FALLBACK_STATUS_CODES,
     ProviderStreamError,
     ReasoningDeltaFilter,
     ToolArgumentsDecodeError,
+    anthropic_private_layout,
     extract_provider_usage,
+    is_protocol_fallback_error,
+    iter_provider_sse_events,
+    native_reasoning_item,
+    native_text_message,
+    native_tool_call,
     native_tool_definitions,
     native_tool_request_body,
+    native_tool_result,
     normalize_provider_location,
     parse_native_tool_turn,
-    parse_tool_arguments,
+    parse_native_call,
+    validate_repair_batch,
+    validate_repair_layout,
+    parse_generation_profiles,
+    resolve_generation_profile,
     protocol_attempts,
     provider_finish_reason,
     provider_headers,
     resolve_protocol,
+    responses_private_layout,
 )
 from app.indexers.http import FixedHostHttpClient
 
@@ -35,8 +48,11 @@ from .model import (
     ModelMessage,
     ModelRequest,
     ModelToolCall,
+    ProviderState,
 )
 from .state import CancellationToken
+from .model_budget import is_window_feedback, parse_budget_profiles, reduced_output_body
+from app.agent.model_context_budget import conservative_tokens
 
 
 class ModelProviderError(RuntimeError):
@@ -45,6 +61,13 @@ class ModelProviderError(RuntimeError):
 
 class IncompleteModelAnswer(ModelProviderError):
     """Provider 原生协议缺少成功终态；可有界重新汇总，不代表业务工具失败。"""
+
+
+def _provider_state(protocol: str, model: str, endpoint: str, layout: str) -> ProviderState:
+    try:
+        return ProviderState(protocol, model, endpoint, layout)
+    except ValueError:
+        raise ModelProviderError("Provider 私有状态超过安全上限") from None
 
 
 _MODEL_IDLE_TIMEOUT_FLOOR_SECONDS = 30
@@ -88,8 +111,14 @@ class ProviderSettings:
     protocol: str = "auto"
     timeout_seconds: int = 30
     max_response_bytes: int = 2 * 1024 * 1024
+    generation_profiles_json: str = ""
+    telegram_channel: str = ""
+    context_window_tokens: int = 128_000
+    budget_profiles_json: str = ""
 
     def __post_init__(self) -> None:
+        parse_generation_profiles(self.generation_profiles_json)
+        parse_budget_profiles(self.budget_profiles_json)
         if not str(self.api_url or "").strip():
             raise ValueError("api_url is required")
         if not str(self.model or "").strip() or len(str(self.model)) > 200:
@@ -100,93 +129,58 @@ class ProviderSettings:
     @classmethod
     def from_config(cls) -> ProviderSettings:
         from app import config
+        from app.modules.telegram_model_preferences import _channel_fingerprint
 
+        values = config.get_many((
+            "AGENT_LLM_API_URL", "AGENT_LLM_MODEL", "AGENT_LLM_API_KEY",
+            "AGENT_LLM_PROTOCOL", "AGENT_LLM_TIMEOUT_SECONDS", "AGENT_LLM_GENERATION_PROFILES",
+            "AGENT_LLM_CONTEXT_WINDOW_TOKENS", "AGENT_LLM_BUDGET_PROFILES",
+        ))
+        try:
+            timeout = int(values["AGENT_LLM_TIMEOUT_SECONDS"] or 30)
+        except ValueError:
+            timeout = 30
+        try:
+            context = int(values["AGENT_LLM_CONTEXT_WINDOW_TOKENS"] or 128_000)
+        except ValueError:
+            context = 128_000
         return cls(
-            api_url=str(config.get("AGENT_LLM_API_URL", "") or "").strip(),
-            model=str(config.get("AGENT_LLM_MODEL", "") or "").strip(),
-            api_key=str(config.get("AGENT_LLM_API_KEY", "") or "").strip(),
-            protocol=str(config.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip(),
-            timeout_seconds=max(
-                2,
-                min(120, config.get_int("AGENT_LLM_TIMEOUT_SECONDS", 30)),
-            ),
+            api_url=str(values.get("AGENT_LLM_API_URL", "") or "").strip(),
+            generation_profiles_json=values.get("AGENT_LLM_GENERATION_PROFILES", ""),
+            model=str(values.get("AGENT_LLM_MODEL", "") or "").strip(),
+            api_key=str(values.get("AGENT_LLM_API_KEY", "") or "").strip(),
+            protocol=str(values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip(),
+            timeout_seconds=max(2, min(120, timeout)),
+            telegram_channel=_channel_fingerprint(values),
+            context_window_tokens=max(16_384, min(2_000_000, context)),
+            budget_profiles_json=values["AGENT_LLM_BUDGET_PROFILES"],
         )
 
 
-async def _iter_sse_data(
-    chunks: AsyncIterator[bytes], *, max_event_bytes: int = 128 * 1024
-) -> AsyncIterator[str]:
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
-    pending = ""
-    lines: list[str] = []
-    size = 0
-
-    async def decoded_lines() -> AsyncIterator[str]:
-        nonlocal pending
-        async for chunk in chunks:
-            try:
-                pending += decoder.decode(chunk, final=False)
-            except UnicodeDecodeError as exc:
-                raise ModelProviderError("Provider 流包含无效 UTF-8") from exc
-            while "\n" in pending:
-                line, pending = pending.split("\n", 1)
-                yield line.removesuffix("\r")
-        try:
-            pending += decoder.decode(b"", final=True)
-        except UnicodeDecodeError as exc:
-            raise ModelProviderError("Provider 流包含无效 UTF-8") from exc
-        if pending:
-            yield pending.removesuffix("\r")
-            pending = ""
-
-    async for line in decoded_lines():
-        if not line:
-            if lines:
-                yield "\n".join(lines)
-                lines = []
-                size = 0
-            continue
-        if line.startswith(":"):
-            continue
-        field, separator, value = line.partition(":")
-        if field != "data":
-            continue
-        if separator and value.startswith(" "):
-            value = value[1:]
-        size += len(value.encode("utf-8"))
-        if size > max_event_bytes:
-            raise ModelProviderError("Provider SSE 事件过大")
-        lines.append(value)
-    if lines:
-        yield "\n".join(lines)
+async def _bounded_response_bytes(chunks: AsyncIterator[bytes], maximum: int) -> AsyncIterator[bytes]:
+    total = 0
+    async for chunk in chunks:
+        total += len(chunk)
+        if total > maximum:
+            raise ModelProviderError("Provider 响应超过安全上限")
+        yield chunk
 
 
 async def _iter_sse_json(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
-    async for data in _iter_sse_data(chunks):
-        if data.strip() == "[DONE]":
-            yield {"__done__": True}
-            return
-        try:
-            value = json.loads(data)
-        except json.JSONDecodeError as exc:
-            raise ModelProviderError("Provider SSE 数据不是有效 JSON") from exc
-        if not isinstance(value, dict):
-            raise ModelProviderError("Provider SSE 数据格式无效")
-        if value.get("type") == "error" or isinstance(value.get("error"), dict):
-            raise ModelProviderError("Provider 返回流式错误")
-        yield value
-
-
-def _model_tool_arguments(value: Any) -> dict[str, Any]:
     try:
-        return parse_tool_arguments(value)
-    except ToolArgumentsDecodeError as exc:
-        message = {
-            "too_large": "模型工具参数过大",
-            "invalid_json": "模型工具参数不是有效 JSON",
-            "not_object": "模型工具参数必须是对象",
-        }[exc.reason]
-        raise ModelProviderError(message) from exc
+        async for event in iter_provider_sse_events(chunks, max_event_bytes=128 * 1024):
+            yield {"__done__": True} if event is None else event
+    except ProviderStreamError as exc:
+        raise ModelProviderError(str(exc)) from exc
+
+
+def _append_tool_arguments(previous: Any, delta: Any) -> Any:
+    """Keep invalid increments as False until validation or full done replacement."""
+    if delta is None or delta == {}:
+        return previous
+    if isinstance(previous, dict):
+        previous = json.dumps(previous, ensure_ascii=False, separators=(",", ":")) if previous else ""
+    return (previous or "") + delta if isinstance(previous, (str, type(None))) and isinstance(delta, str) else False
 
 
 def _usage_dict(value: Any, protocol: str) -> dict[str, int]:
@@ -195,7 +189,7 @@ def _usage_dict(value: Any, protocol: str) -> dict[str, int]:
 
 
 async def iter_protocol_model_events(
-    chunks: AsyncIterator[bytes], *, protocol: str
+    chunks: AsyncIterator[bytes], *, protocol: str, max_response_bytes: int = 2 * 1024 * 1024
 ) -> AsyncIterator[ModelEvent]:
     """把三个 Provider 的真实 SSE 统一为 Kernel ModelEvent。"""
     normalized = resolve_protocol(protocol)
@@ -204,11 +198,48 @@ async def iter_protocol_model_events(
     emitted_calls: set[str] = set()
     finish_reason = ""
     completed = False
+    native_blocks: dict[int, dict[str, Any]] = {}
+    chat_reasoning = ""
+    invalid_private = False
+    repair_calls = False
+    open_private_blocks: set[int] = set()
+    text_filters: dict[int, ReasoningDeltaFilter] = {}
+
+    def anthropic_text(index: int, text: str | None = None) -> str:
+        # Lookahead belongs to its native block, not the next text/tool block.
+        # Both public deltas and replay layout consume the same filtered bytes.
+        visible = (text_filters.pop(index).finalize() if text is None
+                   else text_filters.setdefault(index, ReasoningDeltaFilter()).feed(text))
+        block = native_blocks.setdefault(index, {"type": "text", "text": ""})
+        block["text"] += visible
+        return visible
+
+    def text_event(value: Any, index: int | None = None) -> ModelEvent | None:
+        if not isinstance(value, str) or not value:
+            return None
+        visible = reasoning.feed(value) if index is None else anthropic_text(index, value)
+        return ModelEvent(ModelEventType.TEXT_DELTA, text=visible) if visible else None
 
     def call_key(*, index: Any = None, item_id: Any = None) -> str:
         if item_id not in {None, ""}:
             return f"id:{item_id}"
         return f"index:{index if index is not None else 0}"
+
+    def decode_call(raw: dict[str, Any]):
+        try:
+            parsed = parse_native_call(raw.get("call_id"), raw.get("name"), raw.get("arguments"),
+                                       allow_argument_errors=normalized in {"responses", "chat_completions"},
+                                       require_identity=normalized == "anthropic_messages")
+        except ToolArgumentsDecodeError as exc:
+            failure = {"too_large": "模型工具参数过大", "invalid_json": "模型工具参数不是有效 JSON",
+                       "not_object": "模型工具参数必须是对象"}[exc.reason]
+        except ValueError:
+            failure = "模型工具参数或原生身份无效"
+        else:
+            failure = ""
+        if failure:
+            raise ModelProviderError(failure)
+        return parsed
 
     async def emit_call(key: str) -> AsyncIterator[ModelEvent]:
         if key in emitted_calls:
@@ -216,59 +247,70 @@ async def iter_protocol_model_events(
         raw = calls.get(key)
         if not raw:
             return
-        name = str(raw.get("name") or "").strip()
+        parsed = decode_call(raw)
+        if repair_calls or normalized == "anthropic_messages":
+            call_id, name = parsed.call_id, parsed.name
+        else:
+            name = str(raw.get("name") or "").strip()
+            call_id = str(raw.get("call_id") or raw.get("id") or key).strip()
         if not name:
             return
-        call_id = str(raw.get("call_id") or raw.get("id") or key).strip()
-        arguments = _model_tool_arguments(raw.get("arguments"))
+        if parsed.argument_error and not completed:
+            return
         emitted_calls.add(key)
         yield ModelEvent(
             ModelEventType.TOOL_CALL_COMPLETED,
-            tool_call=ModelToolCall(call_id=call_id, name=name, arguments=arguments),
+            tool_call=ModelToolCall(call_id=call_id, name=name, arguments=parsed.arguments,
+                                    argument_error=parsed.argument_error, raw_arguments=parsed.raw_arguments),
         )
 
-    async for event in _iter_sse_json(chunks):
+    async for event in _iter_sse_json(_bounded_response_bytes(chunks, max_response_bytes)):
         if event.get("__done__"):
             completed = normalized == "chat_completions"
             break
         if normalized == "responses":
             event_type = str(event.get("type") or "")
             if event_type == "response.output_text.delta":
-                delta = event.get("delta")
-                if isinstance(delta, str) and delta:
-                    visible = reasoning.feed(delta)
-                    if visible:
-                        yield ModelEvent(ModelEventType.TEXT_DELTA, text=visible)
+                if output := text_event(event.get("delta")):
+                    yield output
             elif event_type == "response.output_item.added":
                 item = event.get("item")
                 if isinstance(item, dict) and item.get("type") == "function_call":
                     key = call_key(
                         index=event.get("output_index"), item_id=item.get("id")
                     )
+                    conflict = key in calls
                     calls[key] = {
+                        "identity_conflict": conflict,
                         "id": item.get("id"),
                         "call_id": item.get("call_id"),
                         "name": item.get("name"),
-                        "arguments": str(item.get("arguments") or ""),
+                        "arguments": item.get("arguments"),
                     }
             elif event_type == "response.function_call_arguments.delta":
                 key = call_key(
                     index=event.get("output_index"), item_id=event.get("item_id")
                 )
                 raw = calls.setdefault(key, {})
-                raw["arguments"] = str(raw.get("arguments") or "") + str(
-                    event.get("delta") or ""
+                raw["arguments"] = _append_tool_arguments(
+                    raw.get("arguments"), event.get("delta")
                 )
             elif event_type in {"response.function_call_arguments.done", "response.output_item.done"}:
                 arguments_done = event_type == "response.function_call_arguments.done"
                 item = event if arguments_done else event.get("item")
+                if not arguments_done and isinstance(item, dict):
+                    native_blocks[int(event.get("output_index", 0))] = item
                 if isinstance(item, dict) and (arguments_done or item.get("type") == "function_call"):
                     key = call_key(
                         index=event.get("output_index"),
                         item_id=event.get("item_id") if arguments_done else item.get("id"),
                     )
                     raw = calls.setdefault(key, {})
+                    if arguments_done:
+                        native_blocks.setdefault(int(event.get("output_index", 0)), {"type": "function_call", **raw})
                     if not arguments_done:
+                        if any(raw.get(field) not in (None, "", item.get(field)) for field in ("id", "call_id", "name")):
+                            raw["identity_conflict"] = True
                         raw.update({field: item.get(field) for field in ("id", "call_id", "name")})
                     arguments = item.get("arguments")
                     # 兼容渠道的完成帧可能只含空占位，不能抹掉已经收到的参数增量。
@@ -299,33 +341,37 @@ async def iter_protocol_model_events(
             choices = event.get("choices")
             if not isinstance(choices, list):
                 continue
-            for choice in choices:
-                if not isinstance(choice, dict):
+            for choice_index, choice in enumerate(choices):
+                if not isinstance(choice, dict) or choice.get("index", choice_index) != 0:
                     continue
                 delta = choice.get("delta")
                 if isinstance(delta, dict):
-                    content = delta.get("content")
-                    if isinstance(content, str) and content:
-                        visible = reasoning.feed(content)
-                        if visible:
-                            yield ModelEvent(ModelEventType.TEXT_DELTA, text=visible)
+                    if "reasoning_content" in delta and not isinstance(delta["reasoning_content"], str):
+                        invalid_private = True
+                    if isinstance(delta.get("reasoning_content"), str):
+                        chat_reasoning += delta["reasoning_content"]
+                    if output := text_event(delta.get("content")):
+                        yield output
                     for tool_call in delta.get("tool_calls") or ():
                         if not isinstance(tool_call, dict):
                             continue
                         key = call_key(index=tool_call.get("index"))
                         raw = calls.setdefault(key, {})
                         if tool_call.get("id"):
+                            if raw.get("call_id") not in (None, "", tool_call["id"]):
+                                raw["identity_conflict"] = True
                             raw["call_id"] = tool_call["id"]
                         function = tool_call.get("function")
                         if isinstance(function, dict):
                             if function.get("name"):
+                                if not isinstance(function["name"], str):
+                                    raw["identity_conflict"] = True
                                 raw["name"] = str(raw.get("name") or "") + str(
                                     function["name"]
                                 )
-                            if function.get("arguments"):
-                                raw["arguments"] = str(
-                                    raw.get("arguments") or ""
-                                ) + str(function["arguments"])
+                            raw["arguments"] = _append_tool_arguments(
+                                raw.get("arguments"), function.get("arguments")
+                            )
                 reason = str(choice.get("finish_reason") or "")
                 if reason:
                     finish_reason = reason
@@ -345,43 +391,53 @@ async def iter_protocol_model_events(
             block = event.get("content_block")
             if not isinstance(block, dict):
                 continue
-            index = event.get("index")
+            index = int(event.get("index", 0))
+            if block.get("type") in {"thinking", "redacted_thinking"}:
+                open_private_blocks.add(index)
+                fields = ("type", "thinking", "signature") if block["type"] == "thinking" else ("type", "data")
+                native_blocks[index] = {field: block[field] for field in fields if field in block}
             if block.get("type") == "text":
-                text = block.get("text")
-                if isinstance(text, str) and text:
-                    visible = reasoning.feed(text)
-                    if visible:
-                        yield ModelEvent(ModelEventType.TEXT_DELTA, text=visible)
+                if output := text_event(block.get("text"), index):
+                    yield output
             elif block.get("type") == "tool_use":
+                native_blocks[index] = {"type": "tool_ref", "call_id": block.get("id")}
                 key = call_key(index=index)
+                if key in calls:
+                    raise ModelProviderError("模型工具原生身份冲突")
                 calls[key] = {
                     "call_id": block.get("id"),
                     "name": block.get("name"),
-                    "arguments": json.dumps(
-                        block.get("input") or {},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                    if block.get("input")
-                    else "",
+                    "arguments": block.get("input"),
                 }
         elif event_type == "content_block_delta":
             delta = event.get("delta")
             if not isinstance(delta, dict):
                 continue
+            index = int(event.get("index", 0))
+            if delta.get("type") in {"thinking_delta", "signature_delta"}:
+                field = "thinking" if delta["type"] == "thinking_delta" else "signature"
+                block = native_blocks.get(index)
+                if block is None or block.get("type") != "thinking" or index not in open_private_blocks or not isinstance(delta.get(field), str):
+                    raise ModelProviderError("Provider 私有状态增量无效")
+                if field in block and not isinstance(block[field], str):
+                    raise ModelProviderError("Provider 私有状态字段无效")
+                block[field] = block.get(field, "") + delta[field]
             if delta.get("type") == "text_delta":
-                text = delta.get("text")
-                if isinstance(text, str) and text:
-                    visible = reasoning.feed(text)
-                    if visible:
-                        yield ModelEvent(ModelEventType.TEXT_DELTA, text=visible)
+                if output := text_event(delta.get("text"), index):
+                    yield output
             elif delta.get("type") == "input_json_delta":
                 key = call_key(index=event.get("index"))
                 raw = calls.setdefault(key, {})
-                raw["arguments"] = str(raw.get("arguments") or "") + str(
-                    delta.get("partial_json") or ""
+                raw["arguments"] = _append_tool_arguments(
+                    raw.get("arguments"), delta.get("partial_json")
                 )
         elif event_type == "content_block_stop":
+            index = int(event.get("index", 0))
+            if index in text_filters:
+                tail = anthropic_text(index)
+                if tail:
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
+            open_private_blocks.discard(index)
             key = call_key(index=event.get("index"))
             async for output in emit_call(key):
                 yield output
@@ -402,128 +458,167 @@ async def iter_protocol_model_events(
         finish_reason = provider_finish_reason(normalized, finish_reason)
     except ProviderStreamError as exc:
         raise IncompleteModelAnswer(str(exc)) from exc
+    if normalized in {"responses", "chat_completions", "anthropic_messages"}:
+        # Validate the complete batch before emitting deferred calls. Checking
+        # only previously emitted calls makes identity depend on stream order.
+        parsed_calls = [decode_call(raw) for raw in calls.values()]
+        repair_calls = any(call.argument_error for call in parsed_calls)
+        try:
+            if normalized == "anthropic_messages":
+                validate_repair_batch(parsed_calls, [(raw.get("call_id"), raw.get("name"))
+                                                     for raw in calls.values()], require_identity=True)
+            if repair_calls:
+                validate_repair_batch(parsed_calls, [(raw.get("call_id"), raw.get("name"))
+                                                     for raw in calls.values()])
+                for key, raw in calls.items():
+                    for field in ("call_id", "name"):
+                        # Ordinary Responses calls can already be emitted. A
+                        # mixed turn cannot retroactively repair those events.
+                        if key in emitted_calls and raw[field] != raw[field].strip():
+                            raise ValueError("Previously normalized identity")
+                    if raw.get("identity_conflict"):
+                        raise ValueError("Conflicting native identity")
+        except ValueError:
+            raise ModelProviderError("模型工具参数或原生身份无效") from None
     for key in list(calls):
         async for output in emit_call(key):
             yield output
     tail = reasoning.finalize()
     if tail:
         yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
-    yield ModelEvent(ModelEventType.FINISH, finish_reason=finish_reason)
+    for index in list(text_filters):
+        tail = anthropic_text(index)
+        if tail:
+            yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
+    blocks = [native_blocks[index] for index in sorted(native_blocks)]
+    if repair_calls and invalid_private:
+        raise ModelProviderError("参数错误回合的私有状态无效")
+    layout = ""
+    if normalized == "anthropic_messages":
+        if open_private_blocks:
+            raise ModelProviderError("Provider 私有状态块未闭合")
+        try:
+            layout = anthropic_private_layout(blocks)
+        except ValueError:
+            raise ModelProviderError("Provider 私有状态格式无效") from None
+    elif normalized == "responses":
+        layout = responses_private_layout(blocks, required=repair_calls)
+        if repair_calls:
+            try:
+                validate_repair_layout(blocks)
+            except ValueError:
+                raise ModelProviderError("参数错误回合的私有状态无效") from None
+            refs = [block.get("call_id") for block in blocks if block.get("type") == "function_call"]
+            if sorted(refs) != sorted(raw.get("call_id") for raw in calls.values()):
+                raise ModelProviderError("参数错误回合缺少完整原生关联状态")
+    elif chat_reasoning:
+        layout = json.dumps([{"type": "reasoning_content", "text": chat_reasoning}], ensure_ascii=False)
+    elif repair_calls:
+        layout = "[]"
+    private_state = _provider_state(normalized, "", "", layout) if layout else None
+    yield ModelEvent(ModelEventType.FINISH, finish_reason=finish_reason, provider_state=private_state)
 
 
 def _history_for_protocol(
     protocol: str,
     system_prompt: str,
     messages: Sequence[ModelMessage],
+    *, model: str = "", endpoint: str = "",
 ) -> list[dict[str, Any]]:
-    if protocol == "responses":
-        history: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": system_prompt}],
-            }
-        ]
-        for message in messages:
-            if message.role == "tool":
-                history.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": message.tool_call_id,
-                        "output": message.content,
-                    }
-                )
-                continue
-            content_type = (
-                "output_text" if message.role == "assistant" else "input_text"
-            )
-            if message.content:
-                history.append(
-                    {
-                        "role": message.role,
-                        "content": [{"type": content_type, "text": message.content}],
-                    }
-                )
-            for call in message.tool_calls:
-                history.append(
-                    {
-                        "type": "function_call",
-                        "call_id": call.call_id,
-                        "name": call.name,
-                        "arguments": json.dumps(
-                            dict(call.arguments),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                    }
-                )
-        return history
+    def private_layout(message: ModelMessage) -> list[dict[str, Any]]:
+        state = message.provider_state
+        if (message.role != "assistant" or state is None
+                or (state.protocol, state.model, state.endpoint) != (protocol, model, endpoint)):
+            return []
+        layout = state.layout()
+        if protocol not in {"anthropic_messages", "responses"}:
+            return layout
+        # ModelMessage.content is the sole authority for ordinary text. Native
+        # text copies are only segmentation hints, including in old SQLite
+        # checkpoints. Receipt correction/redaction may have changed content
+        # after the adapter captured this layout; never replay that stale copy.
+        visible = "".join(block["text"] for block in layout if block.get("type") == "text")
+        # Session normalizes only the outer whitespace of accumulated deltas;
+        # this is not a factual correction and must not damage native ordering.
+        if visible == message.content or visible.strip() == message.content:
+            return layout
+        if message.tool_calls or any(block.get("type") == "tool_ref" for block in layout):
+            # Native tool turns may bind the entire assistant content. Do not
+            # invent a signature, change the bound group, or silently fall back
+            # to text-only history. Final non-tool answers can project ordinary
+            # text independently while keeping the private blocks unchanged.
+            raise ModelProviderError("原生工具回合正文已变更，无法安全续传；请新建会话重新核验")
+        projected = []
+        inserted = False
+        for block in layout:
+            if block.get("type") != "text":
+                projected.append(block)  # Opaque/signature/tool references stay intact.
+            elif not inserted:
+                if message.content:
+                    projected.append({"type": "text", "text": message.content})
+                inserted = True
+        if not inserted and message.content:
+            projected.append({"type": "text", "text": message.content})
+        return projected
 
-    if protocol == "chat_completions":
-        history = [{"role": "system", "content": system_prompt}]
-        for message in messages:
-            item: dict[str, Any] = {
-                "role": message.role,
-                "content": message.content or None,
-            }
-            if message.role == "tool":
-                item["tool_call_id"] = message.tool_call_id
-                item["content"] = message.content
-            if message.tool_calls:
-                item["tool_calls"] = [
-                    {
-                        "id": call.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": call.name,
-                            "arguments": json.dumps(
-                                dict(call.arguments),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ),
-                        },
-                    }
-                    for call in message.tool_calls
-                ]
-            history.append(item)
-        return history
-
-    history = []
+    history: list[dict[str, Any]] = []
+    if protocol != "anthropic_messages":
+        history.append(native_text_message(protocol, "system", system_prompt))
     for message in messages:
+        if any(call.argument_error for call in message.tool_calls):
+            state = message.provider_state
+            if state is None or (state.protocol, state.model, state.endpoint) != (protocol, model, endpoint):
+                raise ModelProviderError("参数错误回合的原生绑定不匹配，无法安全续传")
+        layout = private_layout(message)
+        calls = [native_tool_call(protocol, call.call_id, call.name, call.arguments, raw_arguments=call.raw_arguments)
+                 for call in message.tool_calls]
+        calls_by_id = dict(zip((call.call_id for call in message.tool_calls), calls))
         if message.role == "tool":
-            item = {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": message.tool_call_id,
-                        "content": message.content,
-                    }
-                ],
-            }
-        elif message.role == "assistant" and message.tool_calls:
-            blocks: list[dict[str, Any]] = []
-            if message.content:
-                blocks.append({"type": "text", "text": message.content})
-            blocks.extend(
-                {
-                    "type": "tool_use",
-                    "id": call.call_id,
-                    "name": call.name,
-                    "input": dict(call.arguments),
-                }
-                for call in message.tool_calls
-            )
+            result = native_tool_result(protocol, message.tool_call_id, message.content)
+            item = {"role": "user", "content": [result]} if protocol == "anthropic_messages" else result
+        elif protocol == "responses":
+            if not layout:
+                if message.content:
+                    history.append(native_text_message(protocol, message.role, message.content))
+                history.extend(calls)
+            for block in layout:
+                kind = block.get("type")
+                if kind == "reasoning":
+                    history.append(native_reasoning_item(block))
+                elif kind == "tool_ref":
+                    call = dict(calls_by_id[block["call_id"]])
+                    if "id" in block:
+                        call["id"] = block["id"]
+                    history.append(call)
+                elif kind == "text":
+                    history.append(native_text_message(protocol, "assistant", block["text"]))
+            continue
+        elif protocol == "chat_completions":
+            item = {"role": message.role, "content": message.content or None}
+            for block in layout:
+                if block.get("type") == "reasoning_content" and isinstance(block.get("text"), str):
+                    item["reasoning_content"] = block["text"]
+            if calls:
+                item["tool_calls"] = calls
+        elif layout:
+            blocks = [
+                calls_by_id[block["call_id"]] if block.get("type") == "tool_ref" else block
+                for block in layout
+                if block.get("type") in {"tool_ref", "thinking", "redacted_thinking", "text"}
+            ]
             item = {"role": "assistant", "content": blocks}
+        elif message.role == "assistant" and calls:
+            blocks = [{"type": "text", "text": message.content}] if message.content else []
+            item = {"role": "assistant", "content": blocks + calls}
         else:
             item = {"role": message.role, "content": message.content}
-        if history and history[-1].get("role") == item.get("role") == "user":
+        if (protocol == "anthropic_messages" and history
+                and history[-1].get("role") == item.get("role") == "user"):
             previous = history[-1]
             previous_content = previous.get("content")
             current_content = item.get("content")
             if not isinstance(previous_content, list):
-                previous_content = [
-                    {"type": "text", "text": str(previous_content or "")}
-                ]
+                previous_content = [{"type": "text", "text": str(previous_content or "")}]
             if not isinstance(current_content, list):
                 current_content = [{"type": "text", "text": str(current_content or "")}]
             previous["content"] = previous_content + current_content
@@ -544,6 +639,16 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
         self.settings = settings
         self.client_factory = client_factory
 
+    def budget_for_model(self, model: str, context: int, output: int) -> tuple[int, int, bool]:
+        profiles = parse_budget_profiles(self.settings.budget_profiles_json)
+        route = normalize_provider_location(self.settings.api_url).base_url
+        cap = profiles.get((route, model or self.settings.model))
+        if cap is None:
+            return context, output, False
+        context = min(context, cap[0])
+        # Explicit reserve is headroom, not a provider reasoning-mode switch.
+        return max(0, context - cap[2]), min(output, cap[1], context // 4), True
+
     async def stream(
         self,
         request: ModelRequest,
@@ -556,6 +661,21 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
             public_only=True,
         )
         configured = resolve_protocol(self.settings.protocol, self.settings.api_url)
+        if configured == "auto":
+            bound_protocols = {
+                state.protocol
+                for message in request.messages
+                if message.role == "assistant"
+                and (state := message.provider_state) is not None
+                and state.protocol in {"responses", "chat_completions", "anthropic_messages"}
+                and state.model == (request.model or self.settings.model)
+                and state.endpoint == location.endpoint(state.protocol)
+            }
+            if len(bound_protocols) > 1:
+                raise ModelProviderError("Provider 私有状态的协议绑定冲突")
+            if bound_protocols:
+                # 原生组只能由其原协议续传，不能剥离私有状态后重放工具历史。
+                configured = next(iter(bound_protocols))
         network_idle_timeout = _network_idle_timeout_seconds(
             self.settings.timeout_seconds
         )
@@ -572,17 +692,21 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
             pin_resolved_address=True,
         )
         emitted = False
+        feedback_used = False
         last_error: Exception | None = None
+        last_http_error: ModelProviderError | None = None
         try:
             # HTTP 客户端已经按配置限制连接/读写空闲时间；流式工具调用可能
             # 持续产生有效数据并超过该时长，不能再用同一个值把总响应硬切断。
             # 这里仅保留更宽松且有上限的整轮保险丝。
             async with asyncio.timeout(_stream_deadline_seconds(network_idle_timeout)):
                 for protocol in protocol_attempts(configured):
+                    can_fallback = False
                     cancellation.raise_if_cancelled()
                     definitions = native_tool_definitions(protocol, list(request.tools))
                     history = _history_for_protocol(
-                        protocol, request.system_prompt, request.messages
+                        protocol, request.system_prompt, request.messages,
+                        model=request.model or self.settings.model, endpoint=location.endpoint(protocol),
                     )
                     body = native_tool_request_body(
                         protocol=protocol,
@@ -591,9 +715,27 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                         history=history,
                         tools=definitions,
                         max_tokens=request.max_output_tokens,
+                        generation_profile=resolve_generation_profile(
+                            self.settings.generation_profiles_json, location.base_url,
+                            request.model or self.settings.model, protocol,
+                        ),
                         stream=True,
                     )
+                    context, output, bounded = self.budget_for_model(
+                        request.model, self.settings.context_window_tokens, request.max_output_tokens,
+                    )
+                    if bounded and (
+                        request.max_output_tokens > output
+                        or conservative_tokens(body) + request.max_output_tokens + 512 > context
+                    ):
+                        raise ModelProviderError("序列化请求超过模型上下文预算，未发送请求")
+                    read_failure: BaseException | None = None
                     for attempt in range(2):
+                        # 等待只发生在前次 response 清理和异常处理全部退出后；
+                        # 取消/总 deadline 不得被清理异常覆盖，也不继承原异常图。
+                        if attempt:
+                            await asyncio.sleep(_MODEL_RETRY_DELAY_SECONDS)
+                        cancellation.raise_if_cancelled()
                         try:
                             async with client.stream_post_json(
                                 location.endpoint(protocol),
@@ -605,89 +747,155 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                 ),
                                 max_redirects=0,
                             ) as response:
-                                if (
-                                    response.status_code < 200
-                                    or response.status_code >= 300
-                                ):
-                                    if emitted:
-                                        raise ModelProviderError(
-                                            "Provider 在输出后返回错误"
-                                        )
-                                    last_error = ModelProviderError(
-                                        f"Provider 请求失败（HTTP {response.status_code}）"
-                                    )
-                                    if (
-                                        response.status_code
-                                        in _RETRYABLE_MODEL_STATUS_CODES
-                                        and attempt == 0
-                                    ):
-                                        await asyncio.sleep(_MODEL_RETRY_DELAY_SECONDS)
-                                        continue
-                                    break
-                                content_type = str(
-                                    response.headers.get("content-type") or ""
-                                ).lower()
-                                if "text/event-stream" in content_type:
-                                    async for event in iter_protocol_model_events(
-                                        response.aiter_bytes(), protocol=protocol
-                                    ):
-                                        cancellation.raise_if_cancelled()
-                                        emitted = True
-                                        yield event
-                                    return
-                                raw = bytearray()
-                                async for chunk in response.aiter_bytes():
-                                    raw.extend(chunk)
                                 try:
-                                    envelope = json.loads(raw.decode("utf-8"))
-                                    turn = parse_native_tool_turn(envelope, protocol)
-                                except ProviderStreamError as exc:
-                                    raise IncompleteModelAnswer(str(exc)) from exc
-                                except (
-                                    UnicodeDecodeError,
-                                    json.JSONDecodeError,
-                                    ValueError,
-                                ) as exc:
-                                    last_error = ModelProviderError(
-                                        "Provider 返回格式无效"
+                                    if (
+                                        response.status_code < 200
+                                        or response.status_code >= 300
+                                    ):
+                                        if emitted:
+                                            raise ModelProviderError(
+                                                "Provider 在输出后返回错误"
+                                            )
+                                        last_error = ModelProviderError(
+                                            f"Provider 请求失败（HTTP {response.status_code}）"
+                                        )
+                                        last_error.__cause__ = last_http_error
+                                        last_http_error = last_error
+                                        if (
+                                            response.status_code
+                                            in _RETRYABLE_MODEL_STATUS_CODES
+                                            and attempt == 0
+                                        ):
+                                            continue
+                                        fallback_status = (
+                                            not feedback_used and configured == "auto" and protocol == "responses"
+                                            and response.status_code in PROTOCOL_FALLBACK_STATUS_CODES
+                                        )
+                                        if response.status_code in {400, 413, 422} or fallback_status:
+                                            cap = min(self.settings.max_response_bytes, PROTOCOL_FALLBACK_MAX_BYTES, 65_536)
+                                            raw_error = bytearray()
+                                            try:
+                                                declared = response.headers.get("content-length")
+                                                if declared is not None and int(declared) > cap:
+                                                    raise ModelProviderError("Provider 错误响应超过安全上限")
+                                                async for chunk in _bounded_response_bytes(response.aiter_bytes(), cap):
+                                                    raw_error.extend(chunk)
+                                                if is_window_feedback(response.status_code, bytes(raw_error)):
+                                                    # Share the existing two-attempt ceiling, never
+                                                    # add another loop or change protocol after rejection.
+                                                    can_fallback = False
+                                                    reduced = reduced_output_body(body, context, output) if attempt == 0 else None
+                                                    if reduced is not None:
+                                                        feedback_used = True
+                                                        body = reduced
+                                                        continue
+                                                    read_failure = ModelProviderError("Provider 上下文预算不足，无法安全重试")
+                                                    read_failure.__cause__ = last_error
+                                                elif fallback_status:
+                                                    can_fallback = is_protocol_fallback_error(
+                                                        response.status_code, raw_error.decode("utf-8"), protocol=protocol,
+                                                    )
+                                            except Exception:
+                                                # 延后终态到 context 退出后，清理失败不得覆盖它或重发。
+                                                can_fallback = False
+                                                read_failure = ModelProviderError("Provider 错误响应读取失败")
+                                                read_failure.__cause__ = last_error
+                                        break
+                                    content_type = str(
+                                        response.headers.get("content-type") or ""
+                                    ).lower()
+                                    if "text/event-stream" in content_type:
+                                        async for event in iter_protocol_model_events(
+                                            response.aiter_bytes(), protocol=protocol,
+                                            max_response_bytes=self.settings.max_response_bytes,
+                                        ):
+                                            cancellation.raise_if_cancelled()
+                                            if event.provider_state is not None:
+                                                event = replace(event, provider_state=replace(event.provider_state,
+                                                    model=request.model or self.settings.model, endpoint=location.endpoint(protocol)))
+                                            emitted = True
+                                            yield event
+                                        return
+                                    raw = bytearray()
+                                    async for chunk in _bounded_response_bytes(response.aiter_bytes(), self.settings.max_response_bytes):
+                                        raw.extend(chunk)
+                                    try:
+                                        envelope = json.loads(raw.decode("utf-8"))
+                                        turn = parse_native_tool_turn(envelope, protocol, allow_argument_errors=True)
+                                    except ProviderStreamError as exc:
+                                        raise IncompleteModelAnswer(str(exc)) from exc
+                                    except ValueError as exc:
+                                        last_error = ModelProviderError(
+                                            "Provider 返回格式无效"
+                                        )
+                                        last_error.__cause__ = last_http_error
+                                        if emitted:
+                                            raise last_error from exc
+                                        break
+                                    if turn.text:
+                                        emitted = True
+                                        yield ModelEvent(ModelEventType.TEXT_DELTA, text=turn.text)
+                                    for call in turn.tool_calls:
+                                        emitted = True
+                                        yield ModelEvent(
+                                            ModelEventType.TOOL_CALL_COMPLETED,
+                                            tool_call=ModelToolCall(
+                                                call_id=call.call_id,
+                                                name=call.name,
+                                                arguments=call.arguments,
+                                                argument_error=call.argument_error,
+                                                raw_arguments=call.raw_arguments,
+                                            ),
+                                        )
+                                    if turn.usage is not None:
+                                        emitted = True
+                                        yield ModelEvent(
+                                            ModelEventType.USAGE,
+                                            usage=turn.usage.to_dict(),
+                                        )
+                                    emitted = True
+                                    yield ModelEvent(
+                                        ModelEventType.FINISH, finish_reason=turn.finish_reason,
+                                        provider_state=_provider_state(protocol, request.model or self.settings.model, location.endpoint(protocol), turn.private_layout_json)
+                                        if turn.private_layout_json else None,
                                     )
-                                    if emitted:
-                                        raise last_error from exc
+                                    return
+                                except asyncio.CancelledError:
+                                    # 所有响应读取/输出共用终态保护，先退出清理再抛安全原因。
+                                    can_fallback = False
+                                    read_failure = asyncio.CancelledError()
+                                    read_failure.__cause__ = last_http_error
                                     break
-                                if turn.text:
-                                    emitted = True
-                                    yield ModelEvent(ModelEventType.TEXT_DELTA, text=turn.text)
-                                for call in turn.tool_calls:
-                                    emitted = True
-                                    yield ModelEvent(
-                                        ModelEventType.TOOL_CALL_COMPLETED,
-                                        tool_call=ModelToolCall(
-                                            call_id=call.call_id,
-                                            name=call.name,
-                                            arguments=call.arguments,
-                                        ),
-                                    )
-                                if turn.usage is not None:
-                                    yield ModelEvent(
-                                        ModelEventType.USAGE,
-                                        usage=turn.usage.to_dict(),
-                                    )
-                                yield ModelEvent(
-                                    ModelEventType.FINISH, finish_reason=turn.finish_reason
-                                )
-                                return
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:
+                            can_fallback = False
+                            if read_failure is not None:
+                                break
                             last_error = exc
+                            if last_http_error is not None:
+                                category = next((kind.__name__ for kind in (
+                                    httpx.TransportError, OSError, ValueError, IncompleteModelAnswer,
+                                ) if isinstance(exc, kind)), "Exception")
+                                message = ("Provider 流在完成事件前中断" if isinstance(exc, IncompleteModelAnswer)
+                                           else f"Provider 请求失败（传输/响应处理：{category}）")
+                                last_error = ModelProviderError(message)
+                                last_error.__cause__ = last_http_error
                             if emitted:
-                                raise
+                                if last_http_error is None:
+                                    raise
+                                break
                             if attempt == 0 and _retryable_provider_exception(exc):
-                                await asyncio.sleep(_MODEL_RETRY_DELAY_SECONDS)
                                 continue
                             break
-        except TimeoutError as exc:
-            raise ModelProviderError("Provider 请求超时") from exc
+                    if read_failure is not None:
+                        raise read_failure
+                    if not can_fallback:
+                        break
+        except TimeoutError:
+            last_error = ModelProviderError("Provider 请求超时")
+            last_error.__cause__ = TimeoutError()
+            last_error.__cause__.__cause__ = last_http_error
         finally:
             await client.aclose()
         if isinstance(last_error, ModelProviderError):

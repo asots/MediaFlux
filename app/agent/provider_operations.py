@@ -49,6 +49,7 @@ def build_provider_catalog() -> ProviderCatalog:
             parameters={
                 "type": "object",
                 "properties": RECENT_MEDIA_PROPERTIES,
+                "not": {"required": ["library_name", "library_ref"]},
                 "additionalProperties": False,
             },
             reference_arguments={"library_ref": "media_library"},
