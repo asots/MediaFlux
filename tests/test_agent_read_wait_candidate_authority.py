@@ -19,7 +19,7 @@ def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
         clock = [100]
         _, stale = await parked_runtime(clock)
         clock[0] = 110
-        scanned = await SQLiteKernelStore(clock=lambda: clock[0]).due_read_waits()
+        scanned = await SQLiteKernelStore(clock=lambda: clock[0]).due_continuations()
         assert len(scanned) == 1 and scanned[0] == stale
         stale = scanned[0]  # Actual signed due-scan snapshot delayed by another worker.
         active, script, reads = resumed(clock)
@@ -91,13 +91,13 @@ def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
             def forbidden(*args):
                 factories.append(True)
                 raise AssertionError('retirement must not build a model runtime')
-            scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), read_wait_runtime_factory=forbidden)
-            with patch.object(SQLiteKernelStore, 'due_read_waits', delayed_scan):
-                outcome = await asyncio.to_thread(scheduler._run_due_read_wait_once)
+            scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), continuation_runtime_factory=forbidden)
+            with patch.object(SQLiteKernelStore, 'due_continuations', delayed_scan):
+                outcome = await asyncio.to_thread(scheduler._run_due_continuation_once)
             assert factories == []
         elif mode == 'stale_binding_control':
-            binding = replace(fresh.session.read_wait_binding, effective_digest='stale-snapshot')
-            outcome = await fresh.store.claim_read_wait(stale, binding)
+            binding = replace(fresh.session.continuation_binding, effective_digest='stale-snapshot')
+            outcome = await fresh.store.claim_continuation(stale, binding)
         else:
             outcome = await fresh.session.resume_wait(candidate=new if mode == 'fresh_control' else stale)
         after = await SQLiteKernelStore(clock=lambda: clock[0]).load(owner=OWNER, session_id='wait-control')

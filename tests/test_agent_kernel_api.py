@@ -466,6 +466,19 @@ class AgentKernelApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["pending_effect_count"], 1)
 
+    def test_web_keeps_observing_after_receipt_until_original_goal_continuation_finishes(self):
+        for continuation, expected in (("waiting", 1), ("pending", 1), ("claimed", 1), ("running", 1), ("terminal", 0), ("cancelled", 0)):
+            with self.subTest(continuation=continuation):
+                self.runtime.store.state.metadata = {"effect_waits": {
+                    "plan": {"delivered": True, "receipt_message": "复制已完成", "continuation": {"state": continuation}},
+                }}
+                response = self.client.get("/api/agent/sessions/session_1234567890")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["pending_effect_count"], expected)
+        # Telegram's unsent terminal view alone does not keep a Web polling loop alive.
+        self.runtime.store.state.metadata["effect_waits"]["plan"]["continuation"]["delivery_pending"] = True
+        self.assertEqual(self.client.get("/api/agent/sessions/session_1234567890").json()["pending_effect_count"], 0)
+
     def test_evicted_turn_start_does_not_hide_an_unconfirmed_terminal_state(self):
         self.runtime.store.add_event(owner="webk:v1:" + "a" * 64, session_id="session_1234567890", event={
             "type": "model.delta", "turn_id": "old-turn", "request_id": "old-request",

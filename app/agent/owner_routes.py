@@ -5,11 +5,46 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from collections.abc import Mapping
+from typing import Any
 
 from app import config
 
 _TELEGRAM_OWNER_RE = re.compile(r"^tg:v1:(-?[1-9][0-9]*)\x1f([1-9][0-9]*)$")
 
+_TELEGRAM_CHAT_RE = re.compile(r"^-?[1-9][0-9]*$")
+_TELEGRAM_THREAD_RE = re.compile(r"^[1-9][0-9]{0,18}$")
+
+
+class TransportInputError(ValueError):
+    """对外安全的入口参数错误。"""
+
+
+def normalize_delivery_route(
+    value: Mapping[str, Any], *, channel: str = "telegram", owner: str = "",
+) -> dict[str, Any]:
+    """校验服务端物理投递地址；HTTP 和模型上下文不是地址来源。"""
+    if not isinstance(value, Mapping):
+        raise TransportInputError("delivery_route 无效")
+    if not value:
+        return {}
+    if channel != "telegram" or set(value) - {"chat_id", "message_thread_id"}:
+        raise TransportInputError("delivery_route 仅允许 Telegram 服务端设置")
+    chat = value.get("chat_id")
+    if isinstance(chat, bool) or not _TELEGRAM_CHAT_RE.fullmatch(str(chat)):
+        raise TransportInputError("delivery_route.chat_id 无效")
+    target = str(int(chat))
+    if owner:
+        identity = _TELEGRAM_OWNER_RE.fullmatch(owner)
+        if identity is None or identity.group(1) != target:
+            raise TransportInputError("delivery_route 不属于当前 Telegram owner")
+    route: dict[str, Any] = {"chat_id": target}
+    thread = value.get("message_thread_id")
+    if thread is not None:
+        if isinstance(thread, bool) or not _TELEGRAM_THREAD_RE.fullmatch(str(thread)):
+            raise TransportInputError("delivery_route.message_thread_id 无效")
+        route["message_thread_id"] = int(thread)
+    return route
 
 def web_kernel_owner(login_identity: object) -> str:
     """由已认证登录身份派生跨浏览器会话稳定、不可逆的 Web principal。"""

@@ -35,6 +35,7 @@ from .state import (
     PendingEffectGuard,
     _apply_effect_state_change,
     _begin_publication,
+    _record_stop_request,
     _cancel_publication,
     commit_conversation,
     _consume_delivered_effect_receipts,
@@ -179,42 +180,67 @@ class SQLiteKernelStore:
     async def due_effect_waits(self, *, limit: int = 16) -> list[dict[str, Any]]:
         return await session_io(self._due_effect_waits_sync, limit)
 
-    async def due_read_waits(self, *, limit: int = 16) -> list[dict[str, Any]]:
-        return await session_io(self._due_read_waits_sync, limit)
+    async def due_continuations(self, *, limit: int = 16) -> list[dict[str, Any]]:
+        return await session_io(self._due_continuations_sync, limit)
 
-    def _due_read_waits_sync(self, limit):
+    def _due_continuations_sync(self, limit):
+        from .continuation import due_records
         maximum = max(0, min(16, int(limit)))
         due = []
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT owner_digest,session_digest,generation,state_json,state_hmac FROM agent_kernel_sessions "
-                "WHERE json_valid(state_json) AND json_extract(state_json,'$.metadata.read_wait.state') IN ('pending','claimed') "
-                "AND json_extract(state_json,'$.metadata.read_wait.due_at')<=? "
-                "ORDER BY json_extract(state_json,'$.metadata.read_wait.due_at') LIMIT ?",
-                (self._clock(), maximum),
+                "WHERE json_valid(state_json) AND ("
+                "(json_extract(state_json,'$.metadata.read_wait.state') IN ('pending','claimed') "
+                "AND json_extract(state_json,'$.metadata.read_wait.due_at')<=?) OR EXISTS ("
+                "SELECT 1 FROM json_each(json_extract(state_json,'$.metadata.effect_waits')) AS effect "
+                "WHERE ((json_extract(effect.value,'$.continuation.state') IN ('pending','claimed','running') "
+                "AND json_extract(effect.value,'$.continuation.due_at')<=? "
+                "AND COALESCE(json_extract(effect.value,'$.continuation.claim_until'),0)<=?) "
+                "OR (json_extract(effect.value,'$.continuation.delivery_pending')=1 "
+                "AND json_extract(effect.value,'$.continuation.due_at')<=?)))) "
+                "ORDER BY updated_at LIMIT ?",
+                (self._clock(), self._clock(), self._clock(), self._clock(), maximum),
             ).fetchall()
             for row in rows:
                 try:
-                    payload = self._decode(row['state_json'], row['state_hmac'],
+                    payload = self._decode(row["state_json"], row["state_hmac"],
                         domain=f"state:v1:{row['owner_digest']}:{row['session_digest']}:{row['generation']}".encode(), expected_type=dict)
-                    record = payload['metadata']['read_wait']
-                    if self._scope(record['owner'], record['session_id']) != (row['owner_digest'], row['session_digest']):
-                        continue
-                    if record['state'] == 'claimed' and record['claim_until'] > self._clock():
-                        continue
-                    due.append(deepcopy(record))
+                    for record in due_records(payload.get("metadata") or {}, self._clock()):
+                        if self._scope(record["owner"], record["session_id"]) == (row["owner_digest"], row["session_digest"]):
+                            due.append(record)
                 except (ValueError, KeyError, TypeError):
                     continue
-        return due
+        return sorted(due, key=lambda r: r["due_at"])[:maximum]
 
-    async def claim_read_wait(self, candidate, binding):
+    async def request_stop_generation(self, *, owner: str, session_id: str, generation: int) -> bool:
+        # Only an intent flag: no file-guard acquisition and no change of publication authority.
+        # The fresh signed state is updated under the same SQLite transaction as the CAS.
+        return await session_io(self._request_stop_generation_sync, owner, session_id, generation)
+
+    def _request_stop_generation_sync(self, owner, session_id, generation):
+        with db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?",
+                            self._scope(owner, session_id)).fetchone() is None:
+                return False
+            state = self._load_row(conn, owner, session_id)
+            if not _record_stop_request(state, generation):
+                return False
+            self._write_state(conn, state)
+            return True
+
+    async def claim_continuation(self, candidate, binding):
         return await guarded_state_call(candidate['owner'], candidate['session_id'],
-            self._claim_read_wait_sync, candidate, binding, kind="commit")
+            self._claim_continuation_sync, candidate, binding, kind="commit")
 
-    def _claim_read_wait_sync(self, candidate, binding):
-        from .read_wait import claim
+    def _claim_continuation_sync(self, candidate, binding):
+        from .continuation import claim
         with session_scope_guard(candidate['owner'], candidate['session_id'], kind="commit"), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            scope = self._scope(candidate['owner'], candidate['session_id'])
+            if conn.execute("SELECT 1 FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?", scope).fetchone() is None:
+                return None  # A purge between scan and claim must never resurrect an empty session.
             state = self._load_row(conn, candidate['owner'], candidate['session_id'])
             lease = claim(state, candidate, self._clock(), binding, conn)
             self._write_state(conn, state)
@@ -567,8 +593,8 @@ class SQLiteKernelStore:
         return lease, state.clone()
 
     def _is_current_sync(self, lease: PublicationLease) -> bool:
-        if lease.read_wait_id:
-            from .read_wait import check_claim
+        if lease.continuation_id:
+            from .continuation import check_claim
             from app.agent.feature_gate import RuntimeFenceError
             with db.get_conn() as conn:
                 conn.execute("BEGIN")
@@ -607,7 +633,7 @@ class SQLiteKernelStore:
             state = self._load_row(conn, lease.owner, lease.session_id)
             if not publication_commit_matches(lease, state, conversation, updates):
                 raise StalePublicationError("turn no longer owns publication authority")
-            from .read_wait import apply_actions, check_claim, task_changed
+            from .continuation import apply_actions, check_claim, task_changed
             check_claim(state, lease, self._clock(), conn)
             if task_patch is not None:
                 state.metadata["task"] = reduce_task(state.metadata.get("task"), task_patch, owner=state.owner, session_id=state.session_id)
@@ -860,7 +886,7 @@ class SQLiteKernelStore:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM agent_kernel_refs WHERE expires_at<=?", (now,))
             if lease is not None:
-                from .read_wait import check_claim
+                from .continuation import check_claim
                 state = self._load_row(conn, lease.owner, lease.session_id)
                 if not publication_commit_matches(lease, state, None, ()):
                     raise StalePublicationError("reference publication revoked")
@@ -933,7 +959,7 @@ class SQLiteKernelStore:
                 state = self._load_row(conn, owner, lease.session_id)
                 if event.session_id != lease.session_id or not publication_commit_matches(lease, state, None, ()):
                     raise StalePublicationError("event publication revoked")
-                from .read_wait import check_claim
+                from .continuation import check_claim
                 check_claim(state, lease, self._clock(), conn, publication=True)
             conn.execute(
                 "INSERT OR IGNORE INTO agent_kernel_events(event_id,owner_digest,session_digest,turn_id,request_id,sequence,event_type,event_json,event_hmac,occurred_at,created_at) "

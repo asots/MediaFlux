@@ -13,6 +13,8 @@ from contextlib import aclosing, suppress
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+from app.agent.owner_routes import TransportInputError, normalize_delivery_route
+
 from .adapters import EventObserver, TurnView, consume_events, iter_ndjson
 from .events import AgentEventType
 from .metrics import KernelMetrics
@@ -22,10 +24,6 @@ from .ux_selection import normalize_selection
 
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
 _PLAN_RE = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
-
-
-class TransportInputError(ValueError):
-    """对外安全的入口参数错误。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +36,7 @@ class QueryEnvelope:
     reply_context: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     selection: Mapping[str, Any] | None = None
+    delivery_route: Mapping[str, Any] = field(default_factory=dict)
 
     def to_agent_input(self) -> AgentInput:
         owner = _owner(self.owner)
@@ -58,6 +57,9 @@ class QueryEnvelope:
                 channel=channel,
                 reply_context=dict(self.reply_context),
                 metadata=metadata,
+                delivery_route=normalize_delivery_route(
+                    self.delivery_route, channel=channel, owner=owner,
+                ),
             )
         except (ValueError, SelectionInvalidError) as exc:
             raise TransportInputError(str(exc)) from exc
@@ -70,6 +72,7 @@ class EffectEnvelope:
     plan_id: str
     request_id: str = ""
     channel: str = "api"
+    delivery_route: Mapping[str, Any] = field(default_factory=dict)
 
     def normalized(self) -> EffectEnvelope:
         plan_id = str(self.plan_id or "").strip()
@@ -84,6 +87,9 @@ class EffectEnvelope:
             plan_id=plan_id,
             request_id=_request_id(self.request_id),
             channel=channel,
+            delivery_route=normalize_delivery_route(
+                self.delivery_route, channel=channel, owner=_owner(self.owner),
+            ),
         )
 
 
@@ -104,7 +110,10 @@ class ExplainEnvelope:
             message = AgentInput(message=self.message, owner=effect.owner, session_id=effect.session_id).message
         except ValueError as exc:
             raise TransportInputError(str(exc)) from exc
-        return ExplainEnvelope(**asdict(effect), message=message)
+        return ExplainEnvelope(
+            owner=effect.owner, session_id=effect.session_id, plan_id=effect.plan_id,
+            request_id=effect.request_id, channel=effect.channel, message=message,
+        )
 
 
 class _KernelTransport:
@@ -139,22 +148,22 @@ class WebKernelTransport(_KernelTransport):
             return await consume_events(self.metrics.track(events, channel="web"))
 
     async def query(self, request: QueryEnvelope) -> AsyncIterator[bytes]:
-        async with aclosing(self.session.run(replace(request, channel="web").to_agent_input())) as events:
+        async with aclosing(self.session.run(replace(request, channel="web", delivery_route={}).to_agent_input())) as events:
             async for chunk in iter_ndjson(self.metrics.track(events, channel="web")):
                 yield chunk
 
     async def query_view(self, request: QueryEnvelope) -> TurnView:
-        async with aclosing(self.session.run(replace(request, channel="web").to_agent_input())) as events:
+        async with aclosing(self.session.run(replace(request, channel="web", delivery_route={}).to_agent_input())) as events:
             return await consume_events(self.metrics.track(events, channel="web"))
 
     async def confirm(self, request: EffectEnvelope) -> AsyncIterator[bytes]:
-        events = self.session.confirm(**asdict(request.normalized()))
+        events = self.session.confirm(**asdict(replace(request, channel="web", delivery_route={}).normalized()))
         async with aclosing(events):
             async for chunk in iter_ndjson(self.metrics.track(events, channel="web")):
                 yield chunk
 
     async def confirm_view(self, request: EffectEnvelope) -> TurnView:
-        events = self.session.confirm(**asdict(request.normalized()))
+        events = self.session.confirm(**asdict(replace(request, channel="web", delivery_route={}).normalized()))
         async with aclosing(events):
             return await consume_events(self.metrics.track(events, channel="web"))
 

@@ -44,7 +44,7 @@ class ResultScript(NativeScript):
 
 def runtime_for(script, clock):
     runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: clock[0]))
-    runtime.session.read_wait_binding = _capture_creation_binding()
+    runtime.session.continuation_binding = _capture_creation_binding()
     return runtime
 
 

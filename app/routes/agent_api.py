@@ -489,8 +489,10 @@ async def get_session(request: Request, session_id: str):
         messages = public_conversation_messages(state.conversation, candidate_view=candidate_view)
         effect_waits = getattr(state, "metadata", {}).get("effect_waits", {})
         wait_records = effect_waits.values() if isinstance(effect_waits, Mapping) else ()
+        from app.agent.kernel.continuation import EFFECT_PENDING
         pending_effect_count = sum(
-            not wait.get("delivered") and not wait.get("receipt_message")
+            (not wait.get("delivered") and not wait.get("receipt_message"))
+            or (wait.get("continuation") or {}).get("state") in EFFECT_PENDING
             for wait in wait_records
         )
         pending_approval = None

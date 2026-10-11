@@ -196,7 +196,7 @@ def _build_agent_kernel_runtime(
         stream_display=lambda: config.get_bool("AGENT_STREAM_DISPLAY_ENABLED"),
     )
     metrics = KernelMetrics()
-    session.read_wait_binding = creation_binding
+    session.continuation_binding = creation_binding
     lifecycle = AgentSessionLifecycle(
         session=session,
         store=kernel_store,

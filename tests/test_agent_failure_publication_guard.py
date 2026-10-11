@@ -23,7 +23,7 @@ def test_cold_cancel_blocks_late_terminal_failure(phase):
         script.prefix = "initial"  # Real adapter returns the forbidden old native ID.
         store = SQLiteKernelStore(clock=lambda: clock[0])
         runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         entered, release = threading.Event(), threading.Event()
         append = store._append_event_sync
         delivered = []

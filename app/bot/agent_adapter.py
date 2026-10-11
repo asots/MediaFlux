@@ -9,15 +9,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import json
 import logging
 import re
 import threading
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import suppress
 from contextvars import ContextVar, copy_context
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app import config
 from app.agent.feature_gate import (
@@ -33,7 +34,13 @@ from app.agent.kernel.state import (
     SelectionInvalidError,
     SessionBusyError,
 )
-from app.agent.kernel.transports import EffectEnvelope, ExplainEnvelope, QueryEnvelope
+from app.agent.kernel.transports import (
+    EffectEnvelope,
+    ExplainEnvelope,
+    QueryEnvelope,
+    TransportInputError,
+    normalize_delivery_route,
+)
 from app.agent.kernel.task_state import classify_public_task
 from app.agent.owner_routes import configured_telegram_user_ids
 from app.agent.public_safety import public_tool_label, sanitize_public_text
@@ -48,6 +55,10 @@ from app.modules.telegram_write_confirmations import (
     TelegramWriteConfirmationError,
     get_telegram_write_confirmation_store,
 )
+
+if TYPE_CHECKING:
+    from app.modules.telegram_notification_center import NotificationPublishResult
+    from app.notifier import TelegramSendResult
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +231,14 @@ def _thread_kwargs(source: Any) -> dict[str, Any]:
     return {"message_thread_id": thread_id} if thread_id is not None else {}
 
 
+def _delivery_route(source: Any, *, owner: str) -> dict[str, Any]:
+    message = getattr(source, "message", source)
+    return normalize_delivery_route({
+        "chat_id": message.chat.id,
+        "message_thread_id": getattr(message, "message_thread_id", None),
+    }, owner=owner)
+
+
 def _session_for_source(chat_id: object, user_id: object, source: Any) -> tuple[str, str, object]:
     owner = telegram_agent_owner(chat_id, user_id)
     thread_id = getattr(source, "message_thread_id", None)
@@ -384,6 +403,20 @@ def _render_turn(view: TurnView) -> str:
     else:
         body = _safe_text(view.answer or "本轮处理已结束。")
     return render_telegram_markdown(body + "\n\n" + _task_summary(view.task))
+
+
+def _render_approval_turn(view: TurnView) -> str:
+    assert view.approval is not None
+    receipt = render_telegram_markdown(format_public_result(view.effect_result)) if view.effect_result else ""
+    refresh_notice = (
+        "⚠️ 原确认因状态变化失效；本次没有自动执行。以下为重新预检后的新计划，请再次明确确认。\n\n"
+        if view.error_code == "confirmation_stale" else ""
+    )
+    return (
+        refresh_notice + (receipt + "\n\n" if receipt else "")
+        + "\n".join(_preview_lines(view.approval, tool_calls=view.tool_calls))
+        + "\n\n" + render_telegram_markdown(_task_summary(view.task))
+    )
 
 
 class _ExistingMessageProgress(TelegramProgress):
@@ -554,8 +587,9 @@ def _approval_markup(
     owner: str,
     session_id: str,
     message_thread_id: object = None,
+    bind_session: bool = False,
 ) -> Any:
-    if message_thread_id is None:
+    if message_thread_id is None and not bind_session:
         callback_prefix = "agk:{action}:"
     else:
         from app.modules.telegram_topic_routing import create_session_callback_route
@@ -575,6 +609,109 @@ def _approval_markup(
         ),
     )
     return markup
+
+
+def _approval_from_delivery(value: Mapping[str, Any]) -> ApprovalView:
+    return ApprovalView(
+        plan_id=str(value["plan_id"]), tool_name=str(value["tool_name"]),
+        effect=str(value["effect"]), preview=dict(value.get("preview") or {}),
+        result=dict(value.get("result") or {}), expires_at=str(value.get("expires_at") or ""),
+        confirmation=dict(value.get("confirmation") or {}),
+    )
+
+
+def prepare_agent_continuation_delivery(
+    view: Mapping[str, Any], *, owner: str, session_id: str,
+    delivery_route: Mapping[str, Any], delivery_id: str = "",
+) -> dict[str, Any]:
+    """把核心持久化的原生 TurnView.to_dict 转为可幂等重放的 outbox 投影。"""
+    route = normalize_delivery_route(delivery_route, owner=owner)
+    if not route or view.get("session_id") != session_id:
+        raise TransportInputError("后台 Telegram 结果缺少可信地址或不属于当前会话")
+    error = view.get("error") or {}
+    raw_approval = view.get("approval")
+    turn = TurnView(
+        session_id=session_id, turn_id=str(view["turn_id"]),
+        request_id=str(view.get("request_id") or ""), status=str(view["status"]),
+        answer=str(view.get("answer") or ""),
+        approval=_approval_from_delivery(raw_approval) if raw_approval else None,
+        effect_result=dict(view.get("effect_result") or {}),
+        error_code=str(error.get("code") or ""), error_message=str(error.get("message") or ""),
+        tool_calls=tuple(view.get("tool_calls") or ()), task=view.get("task"),
+    )
+    identity = str(delivery_id or turn.turn_id).strip()
+    if not turn.terminal or not identity or (turn.approval is not None) != (turn.status == "approval_required"):
+        raise TransportInputError("后台 Telegram 结果不是可交付终态")
+    body = _render_approval_turn(turn) if turn.approval else _render_turn(turn)
+    # 预留失效计划的事实提示空间；确认按钮只放在最后一段。
+    chunks = split_telegram_html(body, limit=_MAX_MESSAGE - 200 if turn.approval else _MAX_MESSAGE)
+    parts: list[dict[str, Any]] = [{"html": chunk} for chunk in (chunks or ["本轮处理已结束。"])]
+    if turn.approval:
+        parts[-1]["approval"] = turn.approval.to_dict()
+    return json.loads(json.dumps({
+        "version": 1, "owner": owner, "session_id": session_id,
+        "delivery_id": identity, "delivery_route": route, "parts": parts,
+    }, ensure_ascii=False, allow_nan=False))
+
+
+async def publish_agent_continuation_delivery(
+    payload: Mapping[str, Any],
+) -> NotificationPublishResult:
+    """所有分段已持久入既有 outbox 才 accepted；不把入队当成实际送达。"""
+    from app.modules.telegram_notification_center import (
+        NotificationPublishResult,
+        publish_agent_continuation_parts,
+    )
+
+    try:
+        return await asyncio.to_thread(publish_agent_continuation_parts, payload)
+    except Exception as exc:  # noqa: BLE001 - 核心保留 pending，以同一 identity 重试
+        logger.warning("Telegram Agent 结果入队失败 type=%s", type(exc).__name__)
+        return NotificationPublishResult(False, status="persist_failed")
+
+
+def _send_agent_continuation_part(payload: Mapping[str, Any]) -> TelegramSendResult:
+    """outbox 使用原生 Bot 回执与按钮协议；不运行模型、不改变 Agent 状态。"""
+    from app.notifier import TelegramSendResult, call_telegram_delivery, get_bot
+
+    owner = str(payload["owner"])
+    session_id = str(payload["session_id"])
+    route = normalize_delivery_route(payload["delivery_route"], owner=owner)
+    user_id = owner.partition("\x1f")[2]
+    if telegram_agent_control_access(route["chat_id"], user_id) != "allowed":
+        return TelegramSendResult(False, error="AgentDeliveryUnauthorized", status_code=403)
+    if not is_agent_enabled() or not _enabled(config.get("TG_AGENT_ENABLED", "0")):
+        return TelegramSendResult(False, error="AgentDeliveryDisabled", status_code=503)
+    bot = get_bot()
+    if bot is None:
+        return TelegramSendResult(False, error="TelegramUnavailable", status_code=503)
+    body = str(payload["html"])
+    markup = None
+    if payload.get("approval"):
+        approval = _approval_from_delivery(payload["approval"])
+        try:
+            runtime = get_agent_kernel_runtime()
+            plan = asyncio.run(runtime.session.pipeline.get_pending_plan(owner=owner, session_id=session_id))
+        except Exception as exc:  # noqa: BLE001 - outbox 保留暂不可核验的确认卡
+            # 状态不可读取不是计划失效：保持待交付，不能悄悄吞掉真实确认按钮。
+            return TelegramSendResult(False, error=f"AgentPlanUnavailable:{type(exc).__name__}", status_code=503)
+        if plan is not None and plan.plan_id == approval.plan_id:
+            import telebot
+
+            markup = _approval_markup(
+                telebot, approval, owner=owner, session_id=session_id,
+                message_thread_id=route.get("message_thread_id"), bind_session=True,
+            )
+        else:
+            body = body.replace("⚠️ <b>等待确认</b>", "<b>原计划事实（已失效）</b>", 1)
+            body += "\n\n<i>该确认计划已失效或已被处理；以上仅为事实记录，没有执行新操作。</i>"
+    kwargs: dict[str, Any] = {"parse_mode": "HTML", "reply_markup": markup}
+    if "message_thread_id" in route:
+        kwargs["message_thread_id"] = route["message_thread_id"]
+    result, _ = call_telegram_delivery(lambda: bot.send_message(route["chat_id"], body, **kwargs))
+    if result.ok and result.message_id <= 0:
+        return TelegramSendResult(False, error="MissingTelegramReceipt")
+    return result
 
 
 def _reply_context(message: Any) -> dict[str, Any]:
@@ -649,6 +786,7 @@ def _execute_query(
                     message=text,
                     request_id=_request_id(source, text),
                     channel="telegram",
+                    delivery_route=_delivery_route(source, owner=owner),
                     reply_context=_reply_context(source),
                     metadata={"candidate_context": candidate_context} if candidate_context else {},
                 ),
@@ -657,10 +795,7 @@ def _execute_query(
             )
         ))
         if view.approval is not None:
-            body = "\n".join(
-                _preview_lines(view.approval, tool_calls=view.tool_calls)
-            )
-            body += "\n\n" + render_telegram_markdown(_task_summary(view.task))
+            body = _render_approval_turn(view)
             progress.finish_many(
                 split_telegram_html(body, limit=_MAX_MESSAGE),
                 reply_markup=_approval_markup(
@@ -834,6 +969,7 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         plan_id=match.group("plan"),
         request_id=f"tgcb_{getattr(call, 'id', '')}"[:150],
         channel="telegram",
+        delivery_route=_delivery_route(call, owner=owner),
     )
     runtime = get_agent_kernel_runtime()
     plan_verified = False
@@ -907,18 +1043,7 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
             progress.finish_many(split_telegram_html(notice, limit=_MAX_MESSAGE), clear_reply_markup=True)
             return
         if view.approval is not None:
-            receipt = render_telegram_markdown(format_public_result(view.effect_result)) if view.effect_result else ""
-            refresh_notice = (
-                "⚠️ 原确认因状态变化失效；本次没有自动执行。以下为重新预检后的新计划，请再次明确确认。\n\n"
-                if view.error_code == "confirmation_stale"
-                else ""
-            )
-            body = (
-                refresh_notice
-                + (receipt + "\n\n" if receipt else "")
-                + "\n".join(_preview_lines(view.approval, tool_calls=view.tool_calls))
-                + "\n\n" + render_telegram_markdown(_task_summary(view.task))
-            )
+            body = _render_approval_turn(view)
             markup = _approval_markup(
                 telebot_module,
                 view.approval,

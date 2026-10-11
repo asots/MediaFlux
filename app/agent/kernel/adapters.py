@@ -69,11 +69,14 @@ class TurnView:
 
     @property
     def terminal(self) -> bool:
+        # The response stream can finish by durably handing off a still-running task.
+        # This is not proof that the user's task or remote operation has completed.
         return self.status in {
             "success",
             "partial",
             "approval_required",
             "effect_completed",
+            "waiting",
             "failed",
             "cancelled",
         }

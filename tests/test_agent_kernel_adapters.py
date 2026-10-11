@@ -136,6 +136,24 @@ class AgentKernelAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view.error_message, "")
         self.assertIn("其余可继续", view.answer)
 
+    async def test_durable_wait_is_a_complete_response_not_a_completed_task(self):
+        for receipt in ({}, {"ok": True, "status": "running", "summary": "复制仍在执行"}):
+            with self.subTest(effect=bool(receipt)):
+                factory = EventFactory(session_id="s", turn_id="t", request_id="r")
+                events = [factory.create(AgentEventType.TURN_STARTED)]
+                if receipt:
+                    events.append(factory.create(AgentEventType.EFFECT_COMPLETED, {"result": receipt}))
+                events.append(factory.create(AgentEventType.TURN_COMPLETED, {
+                    "status": "waiting", "answer": "已交给后台继续，尚未完成。",
+                }))
+                view = await consume_events(event_stream(events))
+                self.assertTrue(view.terminal)
+                self.assertEqual(view.status, "waiting")
+                self.assertEqual(view.answer, "已交给后台继续，尚未完成。")
+                self.assertEqual(view.effect_result, receipt)
+                self.assertFalse(view.error_code)
+                self.assertIsNone(view.approval)
+
     async def test_step_receipt_without_turn_terminal_is_incomplete_not_success(self):
         factory = EventFactory(session_id="s", turn_id="t", request_id="r")
         result = {"ok": True, "summary": "目录已移动"}

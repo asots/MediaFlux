@@ -107,6 +107,7 @@ class EffectCompletionScope:
     lease: PublicationLease
     plan_id: str
     channel: str = "api"
+    origin: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -640,6 +641,7 @@ def _effect_seed(result: ToolResult, tracker: _CompletionTracker, tool: str,
         "plan_id": scope.plan_id, "channel": scope.channel, "tool": str(tool),
         "tracker": {"kind": tracker.kind, "value": tracker.value},
         "result": dict(DefaultProjector().project(result).public_content),
+        **({"origin": scope.origin} if scope.origin else {}),
     }
 
 
@@ -686,6 +688,11 @@ def _effect_wait_registration(
                 "next_poll_at": now + _EFFECT_POLL_SECONDS, "delivered": False,
                 "state": "pending", "last_status": "", "read_errors": 0,
             }
+        from app.agent.kernel.continuation import register_effect
+        register_effect(waits[scope.plan_id], scope, now)
+        if (state.metadata.get("stop_requested_generation") == scope.lease.generation
+                and waits[scope.plan_id].get("continuation")):
+            waits[scope.plan_id]["continuation"].update(state="cancelled", terminal_reason="cancelled")
         _next_effect_poll(state)
         return True
     return register
@@ -756,6 +763,8 @@ async def _record_effect_observation(
         if final is not None:
             row.update(state="terminal", final_result=dict(DefaultProjector().project(final).public_content),
                        foreground_final=True)
+            from app.agent.kernel.continuation import release_effect
+            release_effect(row, time.time())
         _next_effect_poll(state)
         stop_requested = (
             state.generation == scope.lease.generation
@@ -788,7 +797,11 @@ async def acknowledge_effect_receipt(store, *, owner, session_id, plan_id):
         waits = state.metadata.get(_EFFECT_WAITS_KEY) or {}
         row = waits.get(plan_id)
         if row and row.get("state") == "terminal" and row.get("foreground_final"):
-            waits.pop(plan_id)
+            from app.agent.kernel.continuation import effect_active
+            if effect_active(row):
+                row["delivered"] = True
+            else:
+                waits.pop(plan_id)
             _next_effect_poll(state)
             return True
         return False
@@ -864,6 +877,8 @@ def _enqueue_late_receipt(seed: Mapping[str, Any], message: Mapping[str, Any]) -
         _effect_reply_key(seed), NotificationEvent(
             title="已确认任务的后续结果", lines=(message["public_content"],),
         ), chat_id=match.group(1), deliver_now=False,
+        **({"message_thread_id": seed["origin"]["delivery_route"].get("message_thread_id")}
+           if isinstance(seed.get("origin"), dict) and isinstance(seed["origin"].get("delivery_route"), dict) else {}),
     )
     # 用户关闭 TG Agent 时不排队补发旧交互，但 Web/历史中的任务事实仍保留。
     return bool(published) or published.status == "disabled"
@@ -945,11 +960,15 @@ async def poll_effect_receipts(
                         return None
                     template = row.get("receipt_template")
                     if row.get("foreground_final") and template and template in state.conversation:
-                        waits.pop(plan_id)
+                        from app.agent.kernel.continuation import effect_active
+                        if not effect_active(row):
+                            waits.pop(plan_id)
                         _next_effect_poll(state)
                         return None
                     message = template or _late_receipt(seed, final)
                     row.update(state="terminal", final_result=final, receipt_message=message)
+                    from app.agent.kernel.continuation import release_effect
+                    release_effect(row, time.time())
                     commit_conversation(state, state.conversation)
                     _next_effect_poll(state)
                     return message

@@ -65,7 +65,7 @@ def test_native_quota_park_and_cold_cancel():
         store = SQLiteKernelStore(clock=lambda: 100)
         runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
         # Explicit trusted injection; ordinary model metadata cannot supply authority.
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         runtime.session.pipeline.rate_limiter = Quota()
         events = [e async for e in runtime.session.run(AgentInput(message=GOAL, owner=OWNER,
                             session_id='wait-park', request_id='wait-source'))]
@@ -99,7 +99,7 @@ def test_scheduler_cold_native_resume_uses_new_id_and_one_read():
         initialize_runtime_fence()
         script = WaitScript()
         runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         runtime.session.pipeline.rate_limiter = Quota()
         events = [e async for e in runtime.session.run(AgentInput(message=GOAL, owner=OWNER,
                           session_id='wait-resume', request_id='resume-source'))]
@@ -110,7 +110,7 @@ def test_scheduler_cold_native_resume_uses_new_id_and_one_read():
     handlers = []
     def factory(candidate, binding, store):
         runtime = build_agent_kernel_runtime(model=resumed.adapter, store=store)
-        runtime.session.read_wait_binding = binding
+        runtime.session.continuation_binding = binding
         async def read(args, context):
             handlers.append(args)
             return {'ok': True, 'summary': 'fixture READ complete'}
@@ -118,8 +118,8 @@ def test_scheduler_cold_native_resume_uses_new_id_and_one_read():
         runtime.session.catalog._tools['web.search'] = replace(tool, read=read)
         return replace(runtime, creation_binding=binding)
     scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(timer[0]))
-    scheduler._read_wait_runtime_factory = factory
-    assert getattr(scheduler, '_run_due_read_wait_once', lambda: 0)() == 1
+    scheduler._continuation_runtime_factory = factory
+    assert getattr(scheduler, '_run_due_continuation_once', lambda: 0)() == 1
     assert len(handlers) == 1
     assert len(resumed.requests) == 2
     assert [t['function']['name'] for t in resumed.requests[0]['tools']] == ['web__search']
@@ -138,7 +138,7 @@ def test_scheduler_cold_native_resume_uses_new_id_and_one_read():
         assert 'fixture READ complete' in results['resume-read']['content']
         assert results['initial-read'] != results['resume-read']
     asyncio.run(verify())
-    assert scheduler._run_due_read_wait_once() == 0
+    assert scheduler._run_due_continuation_once() == 0
 
 
 @pytest.mark.parametrize('bad', ['write', 'arguments', 'old_id', 'empty', 'multiple'])
@@ -168,7 +168,7 @@ def test_illegal_resume_is_terminal_without_business_io(bad):
                 return httpx.Response(200, json=body)
         script = Invalid(True)
         runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         async def forbidden(*args, **kwargs):
             raise AssertionError('business I/O forbidden')
         with patch.object(runtime.session.pipeline, 'execute', side_effect=forbidden):
@@ -188,7 +188,7 @@ def test_cold_wait_expiry_or_clock_reversal_never_requests_model(advance):
         timer[0] += advance
         script = WaitScript(True)
         runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         assert not await runtime.session.resume_wait(candidate=candidate)
         state = await runtime.store.load(owner=OWNER, session_id='wait-control')
         assert state.metadata['read_wait']['state'] == 'terminal'
@@ -211,14 +211,14 @@ def test_claim_exclusion_running_never_replays_after_lease():
                 yield ModelEvent(ModelEventType.TEXT_DELTA, text='not a read')
                 yield ModelEvent(ModelEventType.FINISH, finish_reason='stop')
         runtime = build_agent_kernel_runtime(model=Held(), store=SQLiteKernelStore(clock=lambda: timer[0]))
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         worker = asyncio.create_task(runtime.session.resume_wait(candidate=candidate))
         try:
             await asyncio.wait_for(entered.wait(), 5)
             cold = SQLiteKernelStore(clock=lambda: timer[0])
             timer[0] = 151
-            assert await cold.claim_read_wait(candidate, runtime.session.read_wait_binding) is None
-            assert await cold.due_read_waits() == []
+            assert await cold.claim_continuation(candidate, runtime.session.continuation_binding) is None
+            assert await cold.due_continuations() == []
             state = await cold.load(owner=OWNER, session_id='wait-control')
             assert state.metadata['read_wait']['state'] == 'running'
             assert state.metadata['read_wait']['budget']['model_spent'] == 4
@@ -239,7 +239,7 @@ def test_repark_segments_and_task_budgets_survive_cold_runtimes():
             script = WaitScript(True)
             script.prefix = f'resume-{index}'
             fresh = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
-            fresh.session.read_wait_binding = _capture_creation_binding()
+            fresh.session.continuation_binding = _capture_creation_binding()
             class Again:
                 async def acquire(self, **kwargs):
                     raise ToolRateLimitError(RateLimitDecision(False, 6, 1, 0, retry_after_seconds=10,
@@ -265,7 +265,7 @@ def test_new_turn_or_durable_epoch_revokes_old_wait(change):
         timer[0] = 110
         script = WaitScript(True)
         fresh = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
-        fresh.session.read_wait_binding = _capture_creation_binding()
+        fresh.session.continuation_binding = _capture_creation_binding()
         if change == 'foreground':
             script.steps = ['finish']
             events = [e async for e in fresh.session.run(AgentInput(message='继续', owner=OWNER,
@@ -304,8 +304,10 @@ def test_scheduler_fault_branch_does_not_block_jobs_or_receipts():
         scheduler._stop_event.set()
         scheduler._wake_event.set()
         raise RuntimeError('fixture read error')
-    with patch('app.agent.effect_completion.poll_effect_receipts', side_effect=receipt), patch.object(scheduler, 'run_once', side_effect=job), patch.object(scheduler, '_run_due_read_wait_once', side_effect=read, create=True), patch.object(scheduler._wake_event, 'wait', side_effect=lambda **kw: scheduler._stop_event.set()):
+    with patch('app.agent.effect_completion.poll_effect_receipts', side_effect=receipt), patch.object(scheduler, 'run_once', side_effect=job), patch.object(scheduler, '_run_due_continuation_once', side_effect=read), patch.object(scheduler._wake_event, 'wait', side_effect=lambda **kw: scheduler._stop_event.set()), patch('app.modules.agent_jobs_scheduler.threading.Thread'):
         scheduler._loop()
+        scheduler._stop_event.clear()
+        scheduler._continuation_loop()
     assert seen == ['receipt', 'job', 'read']
     assert scheduler._thread is None
 
@@ -320,7 +322,7 @@ def test_cancel_during_journal_io_cannot_publish_late_tool_event():
         store = SQLiteKernelStore(clock=lambda: timer[0])
         script = WaitScript(True)
         runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         async def read(args, context):
             return {'ok': True, 'summary': 'read-before-cancel'}
         tool = runtime.session.catalog.get('web.search')
@@ -356,7 +358,7 @@ async def parked_runtime(timer, session_id='wait-control'):
     initialize_runtime_fence()
     script = WaitScript()
     runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
-    runtime.session.read_wait_binding = _capture_creation_binding()
+    runtime.session.continuation_binding = _capture_creation_binding()
     runtime.session.pipeline.rate_limiter = Quota()
     events = [e async for e in runtime.session.run(AgentInput(message=GOAL, owner=OWNER,
                       session_id=session_id, request_id='source'))]
@@ -375,7 +377,7 @@ def test_cold_cancel_blocks_handler_start_and_late_reference(phase):
         timer[0] = 110
         script = WaitScript(True)
         fresh = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
-        fresh.session.read_wait_binding = _capture_creation_binding()
+        fresh.session.continuation_binding = _capture_creation_binding()
         entered, release = asyncio.Event(), asyncio.Event()
         calls = []
         class Limiter:

@@ -7,10 +7,13 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from typing import Any
 
 from app import config
 from app.agent.feature_gate import is_agent_enabled
+from app.agent.owner_routes import normalize_delivery_route
 from app.logger import get_logger
 from app.modules.telegram_notification_policy import (
     NotificationImportance,
@@ -53,6 +56,9 @@ _MAX_LOGICAL_KEY_BYTES = 240
 _AGENT_INTERACTION_LOGICAL_KEY_PREFIX = "agent-effect:"
 _AGENT_INTERACTION_EVENT_KEY_PREFIX = "tg:event:agent:agent-effect:"
 _AGENT_INTERACTION_STATE = "agent_effect_reply"
+_AGENT_CONTINUATION_KEY_PREFIX = "agent-continuation:"
+_AGENT_CONTINUATION_EVENT_PREFIX = "tg:event:agent:agent-continuation:"
+_AGENT_CONTINUATION_STATE = "agent_continuation_reply"
 _CHAT_ID_RE = re.compile(r"-?[0-9]+\Z")
 _PURGE_INTERVAL_SECONDS = 6 * 60 * 60
 _PURGE_RETRY_SECONDS = 60
@@ -360,6 +366,27 @@ def _dispatch_item(item: dict) -> bool:
     generation = int(item["lease_generation"])
     claimed_revision = int(item["revision"])
     event = None
+    continuation_delivery = None
+    continuation_candidate = (
+        str(item.get("topic") or "") == NotificationTopic.AGENT.value
+        and str(item.get("event_key") or "").startswith(_AGENT_CONTINUATION_EVENT_PREFIX)
+    )
+    if continuation_candidate:
+        try:
+            stored = json.loads(str(item.get("event_json") or "{}"))
+            event = deserialize_notification_event(str(item.get("event_json") or ""))
+            continuation_delivery = stored["_agent_continuation_delivery"]
+            route = normalize_delivery_route(
+                continuation_delivery["delivery_route"], owner=continuation_delivery["owner"],
+            )
+            if event.state != _AGENT_CONTINUATION_STATE or route.get("chat_id") != str(item.get("chat_id") or ""):
+                raise ValueError("Agent continuation route mismatch")
+        except (KeyError, TypeError, ValueError):
+            fail_notification(
+                notification_id, lease_generation=generation, claimed_revision=claimed_revision,
+                error="InvalidAgentContinuationDelivery",
+            )
+            return False
     interaction_candidate = (
         str(item.get("topic") or "") == NotificationTopic.AGENT.value
         and str(item.get("event_key") or "").startswith(
@@ -456,7 +483,20 @@ def _dispatch_item(item: dict) -> bool:
     chat_id = str(item.get("chat_id") or "")
     message_id = int(item.get("message_id") or 0)
     message_thread_id = None
-    if str(item.get("topic") or "") == NotificationTopic.DOWNLOAD.value:
+    try:
+        stored = json.loads(str(item.get("event_json") or "{}"))
+        if "_delivery_route" in stored:
+            route = normalize_delivery_route(stored["_delivery_route"])
+            if route.get("chat_id") != chat_id:
+                raise ValueError("Telegram delivery route mismatch")
+            message_thread_id = route.get("message_thread_id")
+    except (TypeError, ValueError):
+        fail_notification(
+            notification_id, lease_generation=generation, claimed_revision=claimed_revision,
+            error="InvalidTelegramDeliveryRoute",
+        )
+        return False
+    if message_thread_id is None and str(item.get("topic") or "") == NotificationTopic.DOWNLOAD.value:
         thread_key = str(item.get("thread_key") or "")
         if thread_key.startswith("download:"):
             from app.modules.telegram_topic_routing import download_request_thread
@@ -470,7 +510,16 @@ def _dispatch_item(item: dict) -> bool:
     outcome: TelegramSendResult
     fallback_to_new_message = False
     try:
-        if message_id > 0:
+        if continuation_delivery is not None:
+            from app.bot.agent_adapter import _send_agent_continuation_part
+
+            outcome = _send_agent_continuation_part(continuation_delivery)
+            if not outcome.ok:
+                logger.warning(
+                    "Telegram Agent 续行投递未完成 key=%s status=%s error=%s",
+                    item.get("event_key"), outcome.status_code, outcome.error,
+                )
+        elif message_id > 0:
             outcome = edit_event_result(
                 event, chat_id=chat_id, message_id=message_id,
             )
@@ -563,9 +612,21 @@ def _publish(
     deliver_now: bool = True,
     agent_interaction: bool = False,
     agent_interaction_attempt_id: str = "",
+    delivery_route: Mapping[str, Any] | None = None,
+    agent_continuation_delivery: Mapping[str, Any] | None = None,
 ) -> NotificationPublishResult:
     normalized_importance = NotificationImportance(_importance(importance))
     normalized_topic = _topic(topic)
+    agent_continuation = agent_continuation_delivery is not None
+    if agent_continuation:
+        if (
+            normalized_topic != NotificationTopic.AGENT.value or thread
+            or not str(logical_key).startswith(_AGENT_CONTINUATION_KEY_PREFIX)
+            or event.state != _AGENT_CONTINUATION_STATE
+        ):
+            return NotificationPublishResult(False, status="invalid_continuation")
+        if not _agent_interaction_enabled():
+            return NotificationPublishResult(False, status="disabled")
     if agent_interaction:
         normalized_logical_key = _bounded_logical_key(logical_key)
         if (
@@ -603,7 +664,7 @@ def _publish(
         and int(existing.get("message_id") or 0) > 0
         and int(existing.get("delivered_revision") or 0) > 0
     )
-    if not agent_interaction:
+    if not agent_interaction and not agent_continuation:
         allowed = allows_notification(
             normalized_importance, topic_enabled=topic_enabled,
         )
@@ -631,14 +692,18 @@ def _publish(
         if thread:
             event = _bounded_thread_event(event)
         event_json = serialize_notification_event(event)
-        if agent_interaction_attempt_id:
+        if agent_interaction_attempt_id or delivery_route or agent_continuation:
             payload = json.loads(event_json)
-            payload["_agent_interaction_attempt_id"] = str(
-                agent_interaction_attempt_id
-            )
-            event_json = json.dumps(
-                payload, ensure_ascii=False, separators=(",", ":"),
-            )
+            if agent_interaction_attempt_id:
+                payload["_agent_interaction_attempt_id"] = str(agent_interaction_attempt_id)
+            if delivery_route:
+                route = normalize_delivery_route(delivery_route)
+                if route.get("chat_id") != target:
+                    raise ValueError("Telegram delivery route mismatch")
+                payload["_delivery_route"] = route
+            if agent_continuation:
+                payload["_agent_continuation_delivery"] = dict(agent_continuation_delivery)
+            event_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except Exception as exc:
         logger.warning(
             "拒绝无法序列化的 Telegram 通知 topic=%s type=%s",
@@ -703,12 +768,17 @@ def publish_agent_interaction_reply(
     event: NotificationEvent,
     *,
     chat_id: str,
+    message_thread_id: object = None,
     deliver_now: bool = False,
 ) -> NotificationPublishResult:
-    """持久化并发送已确认 Agent 任务的交互回执，不走主动通知策略。"""
+    """持久化交互回执；话题必须来自已冻结的服务端物理地址。"""
     target = str(chat_id if chat_id is not None else "").strip()
     if not _CHAT_ID_RE.fullmatch(target):
         return NotificationPublishResult(False, status="invalid_chat_id")
+    try:
+        route = normalize_delivery_route({"chat_id": target, "message_thread_id": message_thread_id})
+    except ValueError:
+        return NotificationPublishResult(False, status="invalid_delivery_route")
 
     key = str(logical_key or "").strip()
     try:
@@ -758,6 +828,7 @@ def publish_agent_interaction_reply(
         deliver_now=deliver_now,
         agent_interaction=True,
         agent_interaction_attempt_id=attempt_id,
+        delivery_route=route if message_thread_id is not None else None,
     )
     if not published.accepted:
         return published
@@ -777,6 +848,42 @@ def publish_agent_interaction_reply(
             event_key=event_key,
         )
     return published
+
+
+def publish_agent_continuation_parts(payload: Mapping[str, Any]) -> NotificationPublishResult:
+    """续行结果只复用现有 outbox；分段分别幂等，部分入队失败可用原 payload 重试。"""
+    try:
+        if payload["version"] != 1:
+            raise ValueError("unsupported delivery version")
+        owner, session_id = str(payload["owner"]), str(payload["session_id"])
+        identity = str(payload["delivery_id"])
+        route = normalize_delivery_route(payload["delivery_route"], owner=owner)
+        parts = payload["parts"]
+        if not route or not session_id or not identity or not isinstance(parts, list) or not parts:
+            raise ValueError("invalid delivery payload")
+        if any(not isinstance(part, dict) or not isinstance(part.get("html"), str) or not part["html"] for part in parts):
+            raise ValueError("invalid delivery parts")
+        digest = hashlib.sha256(json.dumps([owner, session_id, identity], ensure_ascii=False).encode()).hexdigest()
+    except (KeyError, TypeError, ValueError):
+        return NotificationPublishResult(False, status="invalid_delivery")
+    results = []
+    for index, part in enumerate(parts):
+        delivery = {**part, "owner": owner, "session_id": session_id, "delivery_route": route}
+        result = _publish(
+            f"{_AGENT_CONTINUATION_KEY_PREFIX}{digest}:{index}",
+            NotificationEvent("Media Agent", state=_AGENT_CONTINUATION_STATE),
+            topic=NotificationTopic.AGENT, importance=NotificationImportance.RESULT,
+            chat_id=route["chat_id"], thread=False, topic_enabled=True, deliver_now=False,
+            delivery_route=route, agent_continuation_delivery=delivery,
+        )
+        if not result.accepted:
+            return result
+        results.append(result)
+    status = next((r.status for r in results if r.status in {"failed", "outcome_unknown", "suppressed"}), results[-1].status)
+    return NotificationPublishResult(
+        True, delivered=all(r.delivered for r in results), queued=any(r.queued for r in results),
+        status=status, event_key=results[-1].event_key,
+    )
 
 
 def publish_notification_thread(

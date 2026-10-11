@@ -20,7 +20,7 @@ from tests.test_agent_read_wait_lifecycle import (
 def resumed(clock, script=None):
     script = script or WaitScript(True)
     runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: clock[0]))
-    runtime.session.read_wait_binding = _capture_creation_binding()
+    runtime.session.continuation_binding = _capture_creation_binding()
     calls = []
 
     async def read(args, context):
@@ -82,7 +82,7 @@ def test_telegram_issued_model_policy_is_not_rerouted(changed):
         first.adapter.settings = replace(first.adapter.settings, telegram_channel=prefs._channel_fingerprint())
         runtime = build_agent_kernel_runtime(model=first.adapter, store=SQLiteKernelStore(clock=lambda: clock[0]))
         binding = _capture_creation_binding()
-        runtime.session.read_wait_binding = binding
+        runtime.session.continuation_binding = binding
         runtime.session.pipeline.rate_limiter = Quota()
         # Routing-only control; real authorization is covered separately.
         with patch('app.agent.kernel.ports.mediaflux_policy.telegram_owner_route_is_currently_authorized', return_value=True):
@@ -125,15 +125,15 @@ def test_scheduler_retires_revoked_epoch_without_factory():
         calls.append(True)
         raise AssertionError('revoked route constructed runtime')
 
-    scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), read_wait_runtime_factory=forbidden)
-    assert scheduler._run_due_read_wait_once() == 0
+    scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), continuation_runtime_factory=forbidden)
+    assert scheduler._run_due_continuation_once() == 0
     assert calls == []
 
     async def check():
         store = SQLiteKernelStore(clock=lambda: clock[0])
         record = (await store.load(owner=OWNER, session_id='wait-control')).metadata['read_wait']
         assert (record['state'], record['terminal_reason']) == ('terminal', 'runtime_changed')
-        assert await store.due_read_waits() == []
+        assert await store.due_continuations() == []
     asyncio.run(check())
 
 
@@ -173,7 +173,7 @@ def test_stale_cleanup_preserves_newer_authority(winner):
         if winner == 'cancel':
             await runtime.session.cancel(owner=OWNER, session_id='wait-control', request_id='source')
         else:
-            lease, state = await runtime.store.claim_read_wait(stale, runtime.session.read_wait_binding)
+            lease, state = await runtime.store.claim_continuation(stale, runtime.session.continuation_binding)
             task = state.metadata['task']
             await runtime.store.commit(lease, task_patch=TaskPatch(identity(task), 'cancel',
                 {'operation': 'cancel', 'expected': identity(task), 'source': GOAL}, 'source', GOAL))
@@ -196,9 +196,9 @@ def test_stale_cleanup_preserves_newer_authority(winner):
             assert before.metadata['task']['task_id'] != stale['task_id']
         if winner == 'new_wait':
             assert before.metadata['read_wait']['wait_id'] != stale['wait_id']
-        binding = runtime.session.read_wait_binding
+        binding = runtime.session.continuation_binding
         changed = replace(binding, effective_digest='different-snapshot')
-        assert await runtime.store.claim_read_wait(stale, changed) is None
+        assert await runtime.store.claim_continuation(stale, changed) is None
         assert not await runtime.session.resume_wait(candidate=stale)
         after = await runtime.store.load(owner=OWNER, session_id='wait-control')
         assert after.to_payload() == before.to_payload()

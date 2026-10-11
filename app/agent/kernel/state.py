@@ -97,6 +97,7 @@ class AgentInput:
     channel: str = "api"
     reply_context: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    delivery_route: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         message = str(self.message or "").strip()
@@ -119,6 +120,7 @@ class AgentInput:
         object.__setattr__(self, "channel", channel)
         object.__setattr__(self, "reply_context", deepcopy(dict(self.reply_context)))
         object.__setattr__(self, "metadata", deepcopy(dict(self.metadata)))
+        object.__setattr__(self, "delivery_route", deepcopy(dict(self.delivery_route)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,8 +130,9 @@ class PublicationLease:
     generation: int
     turn_id: str
     request_id: str
-    read_wait_id: str = ""
-    read_claim_id: str = ""
+    continuation_id: str = ""
+    continuation_claim_id: str = ""
+    continuation_kind: str = "read_quota"
 
 
 def publication_matches(
@@ -577,6 +580,16 @@ def merge_effect_receipts(
         ):
             continue
 
+        final_result = record.get("final_result")
+        if isinstance(final_result, Mapping):
+            # The original native call and its late receipt are one observation.
+            # Keeping accepted/running in the tool row while appending completed as
+            # an assistant row gives the next model two contradictory authorities.
+            for message in reversed(merged):
+                if message.get("role") == "tool" and message.get("effect_plan_id") == plan_id:
+                    message["content"] = json.dumps(dict(final_result), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                    break
+
         matches = [
             index for index, message in enumerate(merged)
             if message.get("completion_receipt_id") == plan_id
@@ -623,10 +636,11 @@ def _consume_delivered_effect_receipts(state: SessionState) -> None:
     if delivered:
         commit_conversation(state, state.conversation, receipt_metadata={"effect_waits": delivered})
 
+    from .continuation import effect_active
     remaining = {
         plan_id: deepcopy(record)
         for plan_id, record in waits.items()
-        if plan_id not in delivered
+        if plan_id not in delivered or effect_active(record)
     }
     if remaining:
         state.metadata["effect_waits"] = remaining
@@ -634,6 +648,7 @@ def _consume_delivered_effect_receipts(state: SessionState) -> None:
             record.get("next_poll_at")
             for record in remaining.values()
             if isinstance(record, Mapping)
+            and not record.get("delivered")
             and isinstance(record.get("next_poll_at"), (int, float))
             and not isinstance(record.get("next_poll_at"), bool)
         ]
@@ -677,9 +692,17 @@ def _apply_effect_state_change(
     return updated, result, updated != state
 
 
+def _record_stop_request(state: SessionState, generation: int) -> bool:
+    """停止意图不抢占确认持有者；同代确认提交后读取此栅栏。"""
+    if type(generation) is not int or generation <= 0 or state.generation != generation:
+        return False
+    state.metadata["stop_requested_generation"] = generation
+    return True
+
+
 def _begin_publication(state: SessionState, request_id: str) -> None:
     """Internal durable request identity, never copied from model metadata."""
-    from .read_wait import revoke
+    from .continuation import revoke
     revoke(state, "superseded")
     state.metadata["active_publication"] = {
         "generation": state.generation, "request_id": request_id, "status": "running",
@@ -695,7 +718,7 @@ def _cancel_publication(state: SessionState, request_id: str) -> bool:
             or (isinstance(confirmed, dict) and confirmed.get("generation") == state.generation)):
         return False
     state.metadata["active_publication"] = {**active, "status": "cancelled"}
-    from .read_wait import revoke
+    from .continuation import revoke
     revoke(state, "cancelled")
     state.generation += 1
     return True
@@ -726,13 +749,18 @@ class _CancelledReadInline:
     _content: str | None = field(default=None, init=False)
 
     @classmethod
-    def capture(cls, lease, conversation, assistant_index, call_index, tool_index, *, tool):
+    def capture(cls, lease, conversation, call_index, *, tool):
         from .capabilities import ToolEffect
         if tool.effect is not ToolEffect.READ:
             raise ValueError("only catalog READ invocations may retain returned facts")
+        # Receipts can be merged after the current native batch. Locate its
+        # assistant row, not the conversation tail or a reusable historical call ID.
+        assistant_index = next(index for index in range(len(conversation) - 1, -1, -1)
+                               if conversation[index].get("role") == "assistant"
+                               and conversation[index].get("tool_calls"))
         call = conversation[assistant_index]["tool_calls"][call_index]
         return cls(lease, _exact_value(conversation), assistant_index, call_index,
-                   tool_index, _exact_value(call), tool)
+                   assistant_index + 1 + call_index, _exact_value(call), tool)
 
     def reject_incomplete(self) -> None:
         if self._content is not None:
@@ -814,6 +842,8 @@ class SessionStateStore(Protocol):
         change: Callable[[SessionState], Any],
     ) -> Any: ...
 
+    async def request_stop_generation(self, *, owner: str, session_id: str, generation: int) -> bool: ...
+
     async def due_effect_waits(self, *, limit: int = 16) -> list[dict[str, Any]]: ...
 
     async def load(self, *, owner: str, session_id: str) -> SessionState: ...
@@ -891,8 +921,8 @@ class InMemorySessionStateStore:
     async def is_current(self, lease: PublicationLease) -> bool:
         async with self._lock:
             state = self._states.get((lease.owner, lease.session_id))
-            if state and lease.read_wait_id:
-                from .read_wait import check_claim
+            if state and lease.continuation_id:
+                from .continuation import check_claim
                 try:
                     check_claim(state, lease, self._clock(), publication=True)
                 except StalePublicationError:
@@ -916,7 +946,7 @@ class InMemorySessionStateStore:
             if state is None or not publication_commit_matches(lease, state, conversation, updates):
                 raise StalePublicationError("turn no longer owns publication authority")
             state = state.clone()
-            from .read_wait import apply_actions, check_claim, task_changed
+            from .continuation import apply_actions, check_claim, task_changed
             check_claim(state, lease, self._clock())
             if task_patch is not None:
                 state.metadata["task"] = reduce_task(state.metadata.get("task"), task_patch, owner=state.owner, session_id=state.session_id)
@@ -953,17 +983,19 @@ class InMemorySessionStateStore:
                 self._states[key] = updated.clone()
             return result
 
-    async def due_read_waits(self, *, limit: int = 16) -> list[dict[str, Any]]:
+    async def due_continuations(self, *, limit: int = 16) -> list[dict[str, Any]]:
+        from .continuation import due_records
         async with self._lock:
-            now = self._clock()
-            records = [deepcopy(s.metadata["read_wait"]) for s in self._states.values()
-                       if s.metadata.get("read_wait", {}).get("state") in {"pending", "claimed"}
-                       and s.metadata["read_wait"]["due_at"] <= now
-                       and s.metadata["read_wait"].get("claim_until", 0) <= now]
+            records = [record for state in self._states.values() for record in due_records(state.metadata, self._clock())]
             return sorted(records, key=lambda r: r["due_at"])[:max(0, min(16, limit))]
 
-    async def claim_read_wait(self, candidate, binding):
-        from .read_wait import claim
+    async def request_stop_generation(self, *, owner: str, session_id: str, generation: int) -> bool:
+        async with self._lock:
+            state = self._states.get((owner, session_id))
+            return _record_stop_request(state, generation) if state is not None else False
+
+    async def claim_continuation(self, candidate, binding):
+        from .continuation import claim
         async with self._lock:
             key = candidate['owner'], candidate['session_id']
             current = self._states.get(key)

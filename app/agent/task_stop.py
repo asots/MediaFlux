@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from app.agent.effect_completion import current_session_effect_trackers
+from app.agent.kernel.continuation import EFFECT_PENDING
 from app.agent.kernel.session_guard import session_scope_guard
 from app.agent.kernel.state import SessionBusyError
 
@@ -203,24 +204,31 @@ async def _cancel_background_trackers(
     return results
 
 
-async def _request_stop_generation(
+async def _cancel_effect_continuations(
     store: Any, *, owner: str, session_id: str, generation: int,
-) -> bool:
-    """仅在捕获的回合仍拥有当前状态代次时写停止栅栏。"""
-    expected_generation = max(0, int(generation))
-    if not expected_generation:
-        return False
+) -> list[str] | None:
+    """撤销当前快照中的持久续行，不删除回执或声称后台工作已终止。"""
+    def cancel(state: Any) -> list[str] | None:
+        if state.generation != generation:
+            return None
+        cancelled: list[str] = []
+        for plan_id, row in (state.metadata.get("effect_waits") or {}).items():
+            if not isinstance(row, Mapping):
+                continue
+            record = row.get("continuation") or {}
+            if record.get("state") not in EFFECT_PENDING:
+                continue
+            if (record.get("owner"), record.get("session_id"), record.get("wait_id")) != (
+                owner, session_id, plan_id,
+            ):
+                continue
+            record.update(state="cancelled", terminal_reason="cancelled")
+            cancelled.append(plan_id)
+        return cancelled
 
-    def mark(state: Any) -> bool:
-        if int(state.generation) != expected_generation:
-            return False
-        state.metadata["stop_requested_generation"] = expected_generation
-        return True
-
-    value = await store.update_effect_state(
-        owner=owner, session_id=session_id, change=mark
+    return await store.update_effect_state(
+        owner=owner, session_id=session_id, change=cancel,
     )
-    return value is True
 
 
 def _same_turn(active: Any, *, generation: int, request_id: str) -> bool:
@@ -248,20 +256,33 @@ async def _stop_captured_turn(
     if generation <= 0 or not request_id:
         return "stop_unconfirmed", 0
 
-    marked = await _request_stop_generation(
-        store, owner=owner, session_id=session_id, generation=generation
+    marked = await store.request_stop_generation(
+        owner=owner, session_id=session_id, generation=generation,
     )
+    if not marked:
+        return "superseded", 0
+    cancel_busy = False
     stop_generation = generation if marked else 0
     was_cancelling = active.get("status") == "cancelling"
 
-    # request_id is an identity fence: if a later generation wins between the
-    # snapshot and this call, its turn is not cancelled.
-    accepted = await session.cancel(
-        owner=owner, session_id=session_id, request_id=request_id
-    )
+    # Effect 续行会复用 source request_id，必须同时复查 generation，不能仅凭 request_id。
+    current = await session.coordinator.describe(owner=owner, session_id=session_id)
+    state = await store.load(owner=owner, session_id=session_id)
+    if state.generation != generation or (current is not None and not _same_turn(
+        current, generation=generation, request_id=request_id,
+    )):
+        return "superseded", stop_generation
+    try:
+        accepted = await session.cancel(
+            owner=owner, session_id=session_id, request_id=request_id
+        )
+    except SessionBusyError:
+        # 原生 cancel 已尝试通知本地 coordinator；仍需复查保护及回合身份。
+        accepted = False
+        cancel_busy = True
     current = await session.coordinator.describe(owner=owner, session_id=session_id)
     if current is None:
-        return "not_running", stop_generation
+        return ("stop_unconfirmed" if cancel_busy else "not_running"), stop_generation
     if not _same_turn(current, generation=generation, request_id=request_id):
         return "superseded", stop_generation
     if current.get("protected") is True:
@@ -270,12 +291,16 @@ async def _stop_captured_turn(
     # If cancel observed the protected state just before unprotect, retry against
     # the same request after revalidation; never fall through to a newer request.
     if not accepted and current.get("status") != "cancelling":
-        accepted = await session.cancel(
-            owner=owner, session_id=session_id, request_id=request_id
-        )
+        try:
+            accepted = await session.cancel(
+                owner=owner, session_id=session_id, request_id=request_id
+            )
+        except SessionBusyError:
+            accepted = False
+            cancel_busy = True
         current = await session.coordinator.describe(owner=owner, session_id=session_id)
         if current is None:
-            return "not_running", stop_generation
+            return ("stop_unconfirmed" if cancel_busy else "not_running"), stop_generation
         if not _same_turn(current, generation=generation, request_id=request_id):
             return "superseded", stop_generation
         if current.get("protected") is True:
@@ -294,6 +319,7 @@ def _response(
     confirmation: str,
     background_tasks: list[dict[str, str]],
     stop_requested_generation: int = 0,
+    cancelled_continuations: list[str] | None = None,
 ) -> dict[str, Any]:
     critical = model_turn == "critical_pending" or any(
         item["status"] == "critical_pending" for item in background_tasks
@@ -320,7 +346,7 @@ def _response(
         else "partial"
         if uncancellable
         else "stopped"
-        if stopped and (confirmation != "none" or any(
+        if stopped and (cancelled_continuations or confirmation != "none" or any(
             item["status"] in {"cancelled", "already_terminal"}
             for item in background_tasks
         ))
@@ -335,6 +361,7 @@ def _response(
         "background_tasks": background_tasks,
         "uncancellable": [item for item in background_tasks if item["status"] == "uncancellable"],
         "stop_requested_generation": stop_requested_generation,
+        "cancelled_continuations": cancelled_continuations or [],
     }
 
 async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[str, Any]:
@@ -349,12 +376,14 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
     model_turn = "not_running"
     confirmation = "none"
     stop_requested_generation = 0
+    cancelled_continuations: list[str] = []
 
     active = await session.coordinator.describe(owner=owner_key, session_id=session_key)
     if active and active.get("protected") is True:
-        model_turn, stop_requested_generation = await _stop_captured_turn(
-            session, store, owner=owner_key, session_id=session_key, active=active
-        )
+        async with session._start_lock:
+            model_turn, stop_requested_generation = await _stop_captured_turn(
+                session, store, owner=owner_key, session_id=session_key, active=active
+            )
         confirmation = "unchanged"
     else:
         try:
@@ -378,8 +407,17 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
 
                         if model_turn != "superseded":
                             state = await store.load(owner=owner_key, session_id=session_key)
+                            if state.generation > 0:
+                                cancelled = await _cancel_effect_continuations(
+                                    store, owner=owner_key, session_id=session_key,
+                                    generation=state.generation,
+                                )
+                                if cancelled is None:
+                                    model_turn = "superseded"
+                                else:
+                                    cancelled_continuations = cancelled
                             plan_id = str(state.pending_effect_plan_id or "").strip()
-                            if plan_id:
+                            if plan_id and model_turn != "superseded":
                                 revoked = await session.cancel_effect(
                                     owner=owner_key,
                                     session_id=session_key,
@@ -394,7 +432,12 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
                     owner=owner_key, session_id=session_key
                 )
                 if active is None:
-                    model_turn = "critical_pending"
+                    state = await store.load(owner=owner_key, session_id=session_key)
+                    marked = await store.request_stop_generation(
+                        owner=owner_key, session_id=session_key, generation=state.generation,
+                    )
+                    model_turn = "critical_pending" if marked else "stop_unconfirmed"
+                    stop_requested_generation = state.generation if marked else 0
                     confirmation = "unchanged"
                 else:
                     model_turn, stop_requested_generation = await _stop_captured_turn(
@@ -415,4 +458,5 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
         confirmation=confirmation,
         background_tasks=background_tasks,
         stop_requested_generation=stop_requested_generation,
+        cancelled_continuations=cancelled_continuations,
     )

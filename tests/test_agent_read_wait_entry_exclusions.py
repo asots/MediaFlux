@@ -103,7 +103,7 @@ def test_real_authorization_changes_block_wait_stream(tg_config, change):
     owner, sid = 'tg:v1:-100123\x1f7', 'actual-tg'
     script = WaitScript()
     runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: clock[0]))
-    runtime.session.read_wait_binding = _capture_creation_binding()
+    runtime.session.continuation_binding = _capture_creation_binding()
     runtime.session.pipeline.rate_limiter = Quota()
 
     async def park():
@@ -112,7 +112,7 @@ def test_real_authorization_changes_block_wait_stream(tg_config, change):
         return (await runtime.store.load(owner=owner, session_id=sid)).metadata['read_wait']
 
     candidate = asyncio.run(park())
-    old = runtime.session.read_wait_binding
+    old = runtime.session.continuation_binding
     if change == 'tg_revoke':
         config.set_and_save({'TG_AGENT_ALLOWED_USER_IDS': '8'})
     elif change == 'disable_enable':
@@ -140,8 +140,8 @@ def test_real_authorization_changes_block_wait_stream(tg_config, change):
         factories.append(True)
         raise AssertionError('revoked wait constructed runtime')
 
-    scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), read_wait_runtime_factory=forbidden)
-    assert scheduler._run_due_read_wait_once() == 0
+    scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), continuation_runtime_factory=forbidden)
+    assert scheduler._run_due_continuation_once() == 0
     assert factories == [] and script.requests == []
 
 
@@ -158,7 +158,7 @@ def test_legacy_policy_absence_never_infers_telegram_authority(tg_config, telegr
         script = WaitScript()
         store = SQLiteKernelStore(clock=lambda: clock[0])
         runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
-        runtime.session.read_wait_binding = _capture_creation_binding()
+        runtime.session.continuation_binding = _capture_creation_binding()
         runtime.session.pipeline.rate_limiter = Quota()
         write = store._write_state
 
@@ -191,7 +191,7 @@ def test_scheduler_rejects_cached_factory_snapshot(tg_config):
     from dataclasses import replace
     clock = [100]
     old, script, _ = resumed(clock)
-    old = replace(old, creation_binding=old.session.read_wait_binding)
+    old = replace(old, creation_binding=old.session.continuation_binding)
     config.set_and_save({'AGENT_LLM_MODEL': 'new-default'})
     asyncio.run(parked_runtime(clock))
     clock[0] = 110
@@ -202,7 +202,7 @@ def test_scheduler_rejects_cached_factory_snapshot(tg_config):
         assert old.creation_binding != binding
         return old
 
-    scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), read_wait_runtime_factory=stale_factory)
-    assert scheduler._run_due_read_wait_once() == 0
+    scheduler = AgentJobsScheduler(clock=lambda: datetime.fromtimestamp(clock[0]), continuation_runtime_factory=stale_factory)
+    assert scheduler._run_due_continuation_once() == 0
     assert len(factories) == 1
     assert script.requests == []

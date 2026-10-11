@@ -30,9 +30,10 @@ from . import error_repair
 from .capabilities import CapabilityRetriever, ToolCatalog, ToolEffect
 from .conversation_codec import pending_content
 from .state import _ExecutionCapacity, _PublicationFinished
-from .read_wait import _ReadWaitAction
+from .continuation import _ContinuationAction
 from .discovery import DISCOVERY_TOOL, CapabilityDiscovery
-from .events import AgentEvent, AgentEventType, EventFactory
+from .events import AgentEvent, AgentEventType, EventFactory, TERMINAL_EVENT_TYPES
+from .adapters import TurnViewBuilder
 from .model import (
     ModelAdapter,
     ModelEventType,
@@ -261,7 +262,7 @@ class AgentSession:
         self.system_prompt = str(system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
         self.stream_display = stream_display
         self.turn_admission = turn_admission or AllowAllTurnAdmission()
-        self.read_wait_binding = None
+        self.continuation_binding = None
         # 只串行化极短的“取得 generation + 注册 active turn + 保存安全输入”窗口；
         # 已确认写操作一旦开始就不会被后续聊天抢占。
         self._start_lock = CrossLoopAsyncLock()
@@ -280,29 +281,30 @@ class AgentSession:
 
     async def resume_wait(self, *, candidate, cancelled=lambda: False) -> bool:
         """Internal continuation: signed-store claim, no synthetic user turn."""
-        from .read_wait import ACTIVE_SECONDS, history_call
-        if self.read_wait_binding is None or cancelled():
+        from .continuation import ACTIVE_SECONDS, EFFECT_ACTIVE_SECONDS, history_call, effect_payload, for_lease
+        if self.continuation_binding is None or cancelled():
             return False
         current = await self.state_store.load(owner=candidate['owner'], session_id=candidate['session_id'])
-        record = current.metadata.get('read_wait') or {}
+        record = ((current.metadata.get('effect_waits') or {}).get(candidate['wait_id']) or {}).get('continuation', {}) if candidate.get('kind') == 'effect' else current.metadata.get('read_wait') or {}
         if record.get('wait_id') != candidate.get('wait_id'):
             return False
         # Admission only; the executor receives the signed original user row below.
         agent_input = AgentInput(message="恢复已保存的只读查询", owner=current.owner, session_id=current.session_id,
                                 request_id=record['source_request_id'], channel=record['channel'])
         await self.turn_admission.begin(agent_input)
-        claimed = await self.state_store.claim_read_wait(candidate, self.read_wait_binding)
+        claimed = await self.state_store.claim_continuation(candidate, self.continuation_binding)
         if claimed is None:
             return False
         lease, state = claimed
-        record = state.metadata['read_wait']
-        original = history_call(state, record)
-        user = next(row for row in reversed(state.conversation) if row.get('role') == 'user')
-        agent_input = replace(agent_input, message=user['content'], reply_context=user.get('reply_context') or {})
+        record = for_lease(state, lease)
+        original = effect_payload(state, record) if lease.continuation_kind == 'effect' else history_call(state, record)
+        user = original['origin']['goal'] if lease.continuation_kind == 'effect' else next(row for row in reversed(state.conversation) if row.get('role') == 'user')
+        agent_input = replace(agent_input, message=user['content'], reply_context=user.get('reply_context') or {},
+                              delivery_route=original['origin'].get('delivery_route') or {} if lease.continuation_kind == 'effect' else {})
         if cancelled():
             await self.cancel(owner=lease.owner, session_id=lease.session_id, request_id=lease.request_id)
             return False
-        timeout = min(ACTIVE_SECONDS, record['expires_at'] - self.state_store._clock())
+        timeout = min(EFFECT_ACTIVE_SECONDS if lease.continuation_kind == 'effect' else ACTIVE_SECONDS, record['expires_at'] - self.state_store._clock())
         async with asyncio.timeout(max(0, timeout)):
             async with aclosing(self._run_background(
                 lambda queue: self._drive(agent_input, queue, resume_context=(lease, state, original)),
@@ -314,10 +316,10 @@ class AgentSession:
 
     async def explain(
         self, *, owner: str, session_id: str, plan_id: str, message: str,
-        request_id: str = "", channel: str = "api",
+        request_id: str = "", channel: str = "api", delivery_route: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         agent_input = AgentInput(message=message, owner=owner, session_id=session_id,
-                                 request_id=request_id, channel=channel)
+                                 request_id=request_id, channel=channel, delivery_route=delivery_route or {})
         async with aclosing(self._run_background(
             lambda queue: self._drive(agent_input, queue, explain_plan_id=plan_id),
             cancel_on_consumer_close=channel != "web",
@@ -333,11 +335,12 @@ class AgentSession:
         plan_id: str,
         request_id: str = "",
         channel: str = "api",
+        delivery_route: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         async with aclosing(self._run_background(
             lambda queue: self._drive(
                 AgentInput(message="继续已确认任务", owner=owner, session_id=session_id,
-                           request_id=request_id, channel=channel),
+                           request_id=request_id, channel=channel, delivery_route=delivery_route or {}),
                 queue, plan_id=str(plan_id or "").strip(),
             ),
             cancel_on_consumer_close=False,
@@ -461,6 +464,22 @@ class AgentSession:
         has_tool_result = False
         attempted_write = confirming
         resume_read_done = False
+        is_effect_resume = resume_context is not None and resume_context[0].continuation_kind == "effect"
+        is_read_resume = resume_context is not None and not is_effect_resume
+        continuation_view = TurnViewBuilder()
+
+        async def record_continuation_event(event):
+            nonlocal state
+            continuation_view.apply(event)
+            if lease is None or lease.continuation_kind != "effect" or not lease.continuation_id or event.type not in TERMINAL_EVENT_TYPES:
+                return
+            view = continuation_view.build()
+            if view.status == "waiting":
+                return  # A trusted quota park retains its goal and cumulative budget.
+            state = await self.state_store.commit(lease, updates=(_ContinuationAction("", {
+                "operation": "finish", "reason": view.status,
+                **({"delivery_view": view.to_dict()} if is_effect_resume and agent_input.channel == "telegram" else {}),
+            }, binding=self.continuation_binding),))
 
         def record_result(
             name: str, arguments: Mapping[str, Any], result: Mapping[str, Any],
@@ -492,7 +511,7 @@ class AgentSession:
             task_patch: TaskPatch | None = None,
             staged_messages: list[ModelMessage] | None = None,
             staged_completed: set[str] | None = None,
-            wait_action: _ReadWaitAction | None = None,
+            wait_action: _ContinuationAction | None = None,
         ) -> None:
             nonlocal state
             checkpoint_messages = list(messages if staged_messages is None else staged_messages)
@@ -523,12 +542,12 @@ class AgentSession:
                 extra_updates = ()
                 if wait_action is not None:
                     extra_updates = (wait_action,)
-                elif task_patch is not None and task_patch.operation == "create" and self.read_wait_binding is not None:
-                    extra_updates = (_ReadWaitAction("", {
+                elif task_patch is not None and task_patch.operation == "create" and self.continuation_binding is not None:
+                    extra_updates = (_ContinuationAction("", {
                         "operation": "seed", "model_limit": self.limits.max_model_rounds,
                         "tool_limit": self.limits.max_tool_calls,
                         "model_spent": round_index + 1, "tool_spent": total_tool_calls,
-                    }, binding=self.read_wait_binding),)
+                    }, binding=self.continuation_binding),)
                 await _require_complete_inline_history(
                     state.conversation, retain_conversation(stored), code="history_capacity_exceeded",
                     pipeline=self.pipeline, lease=lease,
@@ -648,10 +667,11 @@ class AgentSession:
                     return
             guarded_failure = lease is not None and token is not None and not confirming
             try:
-                if resume_context is not None:
-                    state = await self.state_store.commit(lease, updates=(_ReadWaitAction("", {
+                if is_read_resume:
+                    state = await self.state_store.commit(lease, updates=(_ContinuationAction("", {
                         "operation": "finish", "reason": code,
-                    }, binding=self.read_wait_binding),))
+                    }, binding=self.continuation_binding),))
+                await record_continuation_event(event)
                 if self.journal is not None:
                     append_for_turn = getattr(self.journal, "append_for_turn", None)
                     if guarded_failure and append_for_turn is not None:
@@ -822,6 +842,7 @@ class AgentSession:
                     payload = {**(payload or {}), "turn_status": (payload or {}).get("status", "failed" if event_type is AgentEventType.TURN_FAILED else "cancelled"),
                                "task": task_projection(state.metadata.get("task"))}
                 event = factory.create(event_type, payload, **extra)
+                await record_continuation_event(event)
                 if self.journal is not None:
                     append_for_turn = getattr(self.journal, "append_for_turn", None)
                     if not confirming and append_for_turn is not None:
@@ -855,6 +876,14 @@ class AgentSession:
             async def progress(payload: Mapping[str, Any]) -> None:
                 await publish(AgentEventType.TOOL_STARTED if payload.get("kind") == "confirmed_effect" else AgentEventType.TOOL_PROGRESS, payload)
 
+            selected_model = ""
+            if agent_input.channel == "telegram":
+                from app.modules.telegram_model_preferences import get_telegram_model_preference
+
+                preference_options = {}
+                if isinstance(self.model, OpenAICompatibleModelAdapter):
+                    preference_options["settings"] = self.model.settings
+                selected_model = get_telegram_model_preference(lease.owner, lease.session_id, **preference_options)
             tool_context = ToolCallContext(
                 owner=agent_input.owner,
                 session_id=agent_input.session_id,
@@ -865,6 +894,10 @@ class AgentSession:
                 report_progress=progress,
                 wait_for_completion=True,
                 channel=agent_input.channel,
+                continuation_binding=self.continuation_binding,
+                delivery_route=agent_input.delivery_route,
+                continuation_policy={"model_policy": selected_model,
+                    "model_limit": self.limits.max_model_rounds, "tool_limit": self.limits.max_tool_calls},
                 selection_arguments=validated_selection.arguments if validated_selection else None,
                 resource_candidate_ref=candidate_context.guard.ref if candidate_context else "",
                 # Capture the admitted/restored task before either stale refresh or
@@ -873,6 +906,13 @@ class AgentSession:
                 user_history=historical_user_sources(state),
                 user_reply_context=telegram_reference.context_copy(agent_input.reply_context),
             )
+            if is_effect_resume:
+                from .continuation import confirmed_result as restore_confirmed, for_lease
+                result = restore_confirmed(self.catalog, state, for_lease(state, lease))
+                confirmed_result = dict(result.outcome.public_content)
+                record_result(result.tool.name, result.arguments, result.outcome.audit_result())
+                tool_context = replace(tool_context, confirmed_effect=result,
+                                       diagnostic_only=confirmed_result.get("ok") is False)
             if plan_id is not None:
                 result = None
                 try:
@@ -907,6 +947,14 @@ class AgentSession:
                     "message": str(public_result.get("error") or public_result.get("summary") or "执行未完成") if failed else "",
                     "elapsed_ms": result.elapsed_ms if result else 0,
                 })
+                # Consume the foreground continuation while the confirmation still owns
+                # the session guard; a completion poll must not start a competing model loop.
+                if not failed and receipt_saved and last_user:
+                    from .continuation import adopt_foreground
+                    adopted = await adopt_foreground(self.state_store, lease, plan_id)
+                    if adopted is not None:
+                        lease = adopted
+                        state = await self.state_store.load(owner=lease.owner, session_id=lease.session_id)
                 # 写入及回执已完成：先解除保护，再读停止标记，关闭两者之间的竞态窗口。
                 scope.close()
                 await self.coordinator.unprotect(lease, token)
@@ -956,6 +1004,14 @@ class AgentSession:
                     confirmed_result = public_result
                     await failure("receipt_unavailable", "执行结果已取得，但会话记录保存失败，未继续后续步骤；请先核对任务状态。")
                     return
+                background = (public_result.get("data") or {}).get("background_job") or {}
+                if background.get("followup_pending") and str(background.get("status") or "") not in {
+                        "completed", "partial", "failed", "cancelled", "manual_review", "stopped"}:
+                    await publish(AgentEventType.TURN_COMPLETED, {
+                        "status": "waiting", "answer": format_public_result(public_result),
+                        "finish_reason": "effect_pending", "usage": {}, "model_calls": 0, "tool_calls": 0,
+                    })
+                    return
                 result_state = public_result_state(public_result)
                 if result_state not in {"success", "submitted"} or not last_user:
                     await publish(AgentEventType.TURN_COMPLETED, {
@@ -968,7 +1024,7 @@ class AgentSession:
                     })
                     return
                 confirmed_result = public_result
-                tool_context = replace(tool_context, confirmed_effect=result)
+                tool_context = replace(tool_context, lease=lease, confirmed_effect=result)
                 confirming = False
                 admission_token = await self.turn_admission.begin(agent_input)
                 checkpoint = persist_conversation
@@ -996,7 +1052,7 @@ class AgentSession:
                 maximum=getattr(self.retriever, "maximum", 10),
             )
             selected_tools = () if explaining else discovery.window(selection.tools)
-            if resume_context is not None:
+            if is_read_resume:
                 resumed_tool = self.catalog.get(state.metadata['read_wait']['anchor']['tool'])
                 if resumed_tool.effect is not ToolEffect.READ or resumed_tool.name.startswith('agent.'):
                     raise ToolPipelineError("等待能力不可恢复。", code="read_resume_invalid")
@@ -1091,9 +1147,9 @@ class AgentSession:
                     answer, confirmed_result, results=progress_results,
                 ) if confirmed_result is not None else answer
                 messages.append(ModelMessage(role="assistant", content=public_answer, effect_plan_id=plan_id or "", provider_state=response_state))
-                await persist_conversation(wait_action=_ReadWaitAction("", {
-                    "operation": "finish", "reason": "completed" if resume_read_done else "incomplete",
-                }, binding=self.read_wait_binding) if resume_context is not None else None)
+                await persist_conversation(wait_action=_ContinuationAction("", {
+                    "operation": "finish", "reason": "completed" if resume_read_done or lease.continuation_kind == "effect" else "incomplete",
+                }, binding=self.continuation_binding) if lease.continuation_id and lease.continuation_kind == "read_quota" else None)
                 await publish(AgentEventType.TURN_COMPLETED, {
                     "status": status, "answer": public_answer, "finish_reason": reason,
                     "usage": total_usage, "model_calls": model_calls, "tool_calls": total_tool_calls,
@@ -1103,7 +1159,7 @@ class AgentSession:
 
             tool_context = replace(tool_context, capability_search=discovery.search)
             discovery.context["has_task"] = bool(state.metadata.get("task"))
-            if state.metadata.get("task") and not explaining and resume_context is None:
+            if state.metadata.get("task") and not explaining and not is_read_resume:
                 selected_tools = discovery.window(selected_tools)
                 selected_names = {tool.name for tool in selected_tools}
                 selected_model_names = {tool.model_name for tool in selected_tools}
@@ -1134,16 +1190,9 @@ class AgentSession:
 
             history_end = current_user_index if current_user_index is not None else next(
                 (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), len(messages))
-            selected_model = ""
-            if agent_input.channel == "telegram":
-                from app.modules.telegram_model_preferences import get_telegram_model_preference
-
-                preference_options = {}
-                if isinstance(self.model, OpenAICompatibleModelAdapter):
-                    preference_options["settings"] = self.model.settings
-                selected_model = get_telegram_model_preference(lease.owner, lease.session_id, **preference_options)
             if resume_context is not None:
-                record = state.metadata['read_wait']
+                from .continuation import for_lease
+                record = for_lease(state, lease)
                 # Legacy non-TG waits used only the fence-bound default route.
                 # A missing TG selection has no historical authority to infer.
                 issued_model = record.get('model_policy', None if agent_input.channel == 'telegram' else "")
@@ -1160,13 +1209,13 @@ class AgentSession:
             history_snapshot: tuple[str, str] = ("", "")
             async def reserve_budget(*, model: int = 0, tools: int = 0) -> None:
                 nonlocal state
-                if self.read_wait_binding is not None and state.metadata.get("read_wait"):
+                if self.continuation_binding is not None and (lease.continuation_id or state.metadata.get("read_wait")):
                     try:
-                        state = await self.state_store.commit(lease, updates=(_ReadWaitAction("", {
+                        state = await self.state_store.commit(lease, updates=(_ContinuationAction("", {
                             "operation": "reserve", "model_spent": model, "tool_spent": tools,
-                            "require_tool": bool(model and resume_context is not None and not resume_read_done),
+                            "require_tool": bool(model and is_read_resume and not resume_read_done),
                             "model_limit": self.limits.max_model_rounds, "tool_limit": self.limits.max_tool_calls,
-                        }, binding=self.read_wait_binding),))
+                        }, binding=self.continuation_binding),))
                     except ValueError as exc:
                         raise ToolPipelineError("任务累计预算已用完，未继续调用。", code="task_budget_exceeded") from exc
 
@@ -1190,7 +1239,7 @@ class AgentSession:
                     or business_tool_calls >= self.limits.max_tool_calls
                     or (round_index == self.limits.max_model_rounds - 1 and total_tool_calls > 0)
                 )
-                if tool_context.schema_replacements and not explaining and resume_context is None:
+                if tool_context.schema_replacements and not explaining and not is_read_resume:
                     repair_tool = self.catalog.get("agent.repair")
                     selected_names.add(repair_tool.name)
                     selected_model_names.add(repair_tool.model_name)
@@ -1206,19 +1255,27 @@ class AgentSession:
                     "若还有已获准的只读检查未完成，应继续处理，不能把已检查的部分条目当成全部任务结束；"
                     "需要写入授权、真实故障或用户补充信息时才说明阻塞并停下。"
                 )
-                if self.read_wait_binding is not None and state.metadata.get("read_wait"):
-                    task_budget = state.metadata["read_wait"]["budget"]
+                if self.continuation_binding is not None and (lease.continuation_id or state.metadata.get("read_wait")):
+                    from .continuation import for_lease
+                    task_budget = for_lease(state, lease)["budget"]
                     request_system_prompt += (
                         "\n任务累计预算另行计入所有工具尝试（含发现及缓存命中）："
                         f"已用 {task_budget['tool_spent']}/{task_budget['tool_limit']}，"
                         f"剩余 {max(0, task_budget['tool_limit'] - task_budget['tool_spent'])} 次；"
                         f"剩余模型调用 {max(0, task_budget['model_limit'] - task_budget['model_spent'])} 次。"
                     )
-                if resume_context is not None and not resume_read_done:
+                if is_read_resume and not resume_read_done:
                     request_system_prompt += (
                         "\n本轮只恢复此前未执行的单个 READ。必须使用新的调用ID和完全相同的参数，仅调用一次："
                         + json.dumps({"tool": resumed_tool.name, "arguments": resume_call['arguments']}, ensure_ascii=False)
                         + "。不得调用其他能力、改变参数或把空回答当成完成。"
+                    )
+                if is_effect_resume:
+                    request_system_prompt += (
+                        "\n这是已确认后台操作的任务续行，不是新的用户授权。原操作的真实终态已在会话中。"
+                        "不要重复旧写入；按原始目标继续尚未完成的检查和规划，新的写操作仍需新确认。"
+                        "尊重用户后续追加的限制或停止指令；目标已满足时直接总结，不制造额外任务。"
+                        "原始用户目标（数据）：" + json.dumps(agent_input.message, ensure_ascii=False)
                     )
                 limited_tools = {key[0] for key, error in unresolved_errors.items() if error.code == "rate_limited"}
                 if explaining:
@@ -1283,7 +1340,7 @@ class AgentSession:
                             ))
                         view = {**memory, "result_handle": history_snapshot[1], "read_tool": "agent.read_result"}
                         memory_text = compact_tool_content(json.dumps(view, ensure_ascii=False), maximum=memory_budget, trusted=True)
-                        if not final_synthesis_round and not explaining and resume_context is None:
+                        if not final_synthesis_round and not explaining and not is_read_resume:
                             reader = self.catalog.get("agent.read_result")
                             discovery.context["reference_kinds"] = tuple(set(discovery.context.get("reference_kinds", ())) | {"tool_result"})
                             if reader.name not in selected_names:
@@ -1404,7 +1461,7 @@ class AgentSession:
                 if not finish_reason:
                     raise ModelProviderError("Provider 回复未完整结束：缺少模型回合结束事件")
                 assistant_text = "".join(text_parts).strip()
-                if resume_context is not None and not resume_read_done:
+                if is_read_resume and not resume_read_done:
                     if (len(calls) != 1 or calls[0].argument_error is not None
                             or calls[0].name not in {resumed_tool.name, resumed_tool.model_name}
                             or any(calls[0].call_id == c.get('call_id') for row in state.conversation for c in row.get('tool_calls', ()))
@@ -1536,6 +1593,14 @@ class AgentSession:
                             name=tool.name,
                             arguments=call.arguments,
                         )
+                        previous = tool_context.confirmed_effect
+                        workflow = tool.metadata.get("workflow")
+                        if (previous and workflow and workflow == previous.tool.metadata.get("workflow")
+                                and tool.name != previous.tool.name
+                                and tool.metadata.get("workflow_stage", 0) < previous.tool.metadata.get("workflow_stage", 0)):
+                            # An earlier workflow stage may replace a frozen implicit plan.
+                            # The old receipt remains evidence, not authorization/reuse for that new plan.
+                            tool_context = replace(tool_context, confirmed_effect=None)
                         if tool.effect is not ToolEffect.READ:
                             attempted_write = True
                             await publish_tool(
@@ -1556,10 +1621,8 @@ class AgentSession:
                             await persist_conversation(close_pending=True)
                             if tool.effect is ToolEffect.READ:
                                 from .state import _CancelledReadInline
-                                assistant_index = len(state.conversation) - len(active_calls) - 1
                                 returned_read = _CancelledReadInline.capture(
-                                    lease, state.conversation, assistant_index, call_index,
-                                    assistant_index + 1 + call_index, tool=tool,
+                                    lease, state.conversation, call_index, tool=tool,
                                 )
                             result = await self.pipeline.execute(
                                 canonical_call.name,
@@ -1569,19 +1632,19 @@ class AgentSession:
                                 **({"_returned_read": returned_read} if returned_read is not None else {}),
                             )
                         except ToolPipelineError as exc:
-                            if (isinstance(exc, _ReadPermitRejected) and self.read_wait_binding is not None
-                                    and state.metadata.get("read_wait") and not confirming and not explaining
+                            if (isinstance(exc, _ReadPermitRejected) and self.continuation_binding is not None
+                                    and (state.metadata.get("read_wait") or lease.continuation_kind == "effect") and not confirming and not explaining
                                     and not attempted_write and not state.pending_effect_plan_id
                                     and all(c.call_id in completed_call_ids for c in calls if c is not call)):
                                 staged = [*messages, self._tool_error_message(call, exc)]
                                 done = completed_call_ids | {call.call_id}
                                 try:
                                     await persist_conversation(staged_messages=staged, staged_completed=done,
-                                        wait_action=_ReadWaitAction("", {
+                                        wait_action=_ContinuationAction("", {
                                             "operation": "park", "permit": exc, "call_id": call.call_id,
                                             "channel": agent_input.channel,
                                             "model_policy": selected_model,
-                                        }, binding=self.read_wait_binding))
+                                        }, binding=self.continuation_binding))
                                 except ValueError:
                                     pass  # Invalid retry/capacity/legacy state is never advertised as waiting.
                                 else:
@@ -1589,7 +1652,7 @@ class AgentSession:
                                     await publish_tool(AgentEventType.TOOL_FAILED, call, code=exc.code, message=str(exc))
                                     await publish(AgentEventType.TURN_COMPLETED, {
                                         "status": "waiting", "answer": "查询受到本地额度限制，已保存等待；尚未完成。",
-                                        "retry_at_epoch": state.metadata["read_wait"]["due_at"],
+                                        "retry_at_epoch": (state.metadata["effect_waits"][lease.continuation_id]["continuation"] if lease.continuation_kind == "effect" else state.metadata["read_wait"])["due_at"],
                                         "model_calls": round_index + 1, "tool_calls": total_tool_calls,
                                     })
                                     return
@@ -1611,7 +1674,7 @@ class AgentSession:
                                     tool_name=tool.name,
                                     input_schema=tool.input_schema,
                                 )
-                            if resume_context is not None:
+                            if is_read_resume:
                                 # Only trusted acquire rejection above may repark.
                                 # Preserve the closed error/TaskPatch, never retry a started READ.
                                 raise
@@ -1640,7 +1703,7 @@ class AgentSession:
                                 messages, completed_call_ids = staged, done
                                 record_result(tool.name, call.arguments, {"ok": False, "summary": str(error)}, error=error)
                                 await publish_tool(AgentEventType.TOOL_FAILED, call, code=error.code, message=str(error))
-                                if resume_context is not None:
+                                if is_read_resume:
                                     raise error
                                 continue
                             messages, completed_call_ids = staged, done
@@ -1680,13 +1743,13 @@ class AgentSession:
                         # 完成事实在对外通知、进入下一项I/O之前落盘；新追问才能继承本批前半段。
                         await persist_conversation(close_pending=True)
                         await publish_tool_result(canonical_call, result)
-                    if resume_context is not None:
+                    if is_read_resume:
                         # Both plain and observed results have committed successfully.
                         resume_read_done = True
                     active_calls = ()
                     await persist_conversation()
                     additions = discovery.consume()
-                    next_tools = selected_tools if resume_context is not None else discovery.window(selected_tools, additions)
+                    next_tools = selected_tools if is_read_resume else discovery.window(selected_tools, additions)
                     if next_tools != selected_tools:
                         # 只在完整工具批次之后更新Schema；同一模型批次不能猜新工具名绕过初选。
                         token.raise_if_cancelled()
@@ -1734,6 +1797,11 @@ class AgentSession:
                     AgentEventType.TURN_CANCELLED,
                     {"reason": str(exc) or (token.reason if token else "cancelled"), **settlement, **await terminal_task("cancelled")},
                 )
+                if lease is not None and lease.continuation_kind == "effect":
+                    try:
+                        await record_continuation_event(event)
+                    except (StalePublicationError, SessionBusyError):
+                        pass  # A newer user owns the session; never publish an old delivery into it.
                 if self.journal is not None:
                     await self.journal.append(event, owner=agent_input.owner)
                 await queue.put(event)
@@ -1763,7 +1831,15 @@ class AgentSession:
         finally:
             scope.close()
             if lease is not None and token is not None:
-                if not lease.read_wait_id:
+                if lease.continuation_kind == "effect" and lease.continuation_id:
+                    try:
+                        await self.state_store.commit(lease, updates=(
+                            _ContinuationAction("", {"operation": "finish", "reason": "turn_ended"}, binding=self.continuation_binding),
+                            _PublicationFinished("", None),
+                        ))
+                    except (StalePublicationError, SessionBusyError):
+                        pass
+                if not lease.continuation_id:
                     try:
                         await self.state_store.commit(lease, updates=(_PublicationFinished("", None),))
                     except (StalePublicationError, SessionBusyError):

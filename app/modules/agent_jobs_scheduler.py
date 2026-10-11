@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 import json
 import threading
+import time
 from typing import Any, Callable
 
 from app import database as db
@@ -39,20 +40,21 @@ class AgentJobsScheduler:
         audit_executor: Callable[[dict[str, Any]], ToolResult] | None = None,
         interval: float = 2.0,
         clock: Callable[[], datetime] | None = None,
-        read_wait_runtime_factory: Callable | None = None,
+        continuation_runtime_factory: Callable | None = None,
     ) -> None:
         self._audit_executor = audit_executor or self._default_audit_executor
         self.interval = max(0.1, float(interval))
         self._clock = clock or datetime.now
-        self._read_wait_runtime_factory = read_wait_runtime_factory
+        self._continuation_runtime_factory = continuation_runtime_factory
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._lifecycle_lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._continuation_thread: threading.Thread | None = None
 
     def start(self) -> None:
         with self._lifecycle_lock:
-            if self._thread and self._thread.is_alive():
+            if any(worker and worker.is_alive() for worker in (self._thread, self._continuation_thread)):
                 return
             self._stop_event.clear()
             self._thread = threading.Thread(
@@ -67,21 +69,23 @@ class AgentJobsScheduler:
         with self._lifecycle_lock:
             self._stop_event.set()
             self._wake_event.set()
-            thread = self._thread
-        if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=max(0.0, float(timeout)))
-        stopped = not thread or not thread.is_alive()
+            workers = (self._thread, self._continuation_thread)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for worker in workers:
+            if worker and worker.is_alive() and worker is not threading.current_thread():
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
         with self._lifecycle_lock:
-            if self._thread is thread and stopped:
-                self._thread = None
-        return stopped
+            for name, worker in zip(("_thread", "_continuation_thread"), workers):
+                if getattr(self, name) is worker and worker is not None and not worker.is_alive():
+                    setattr(self, name, None)
+            return not any(worker and worker.is_alive() for worker in (self._thread, self._continuation_thread))
 
     def wake(self) -> None:
         self._wake_event.set()
 
     def status(self) -> dict[str, object]:
         return {
-            "running": bool(self._thread and self._thread.is_alive()),
+            "running": any(bool(worker and worker.is_alive()) for worker in (self._thread, self._continuation_thread)),
             "interval_seconds": self.interval,
         }
 
@@ -438,8 +442,8 @@ class AgentJobsScheduler:
     def _after(self, seconds: float) -> str:
         return self._format(self._clock() + timedelta(seconds=max(0.0, seconds)))
 
-    def _run_due_read_wait_once(self) -> int:
-        """One bounded READ continuation, separate from receipt-only polling."""
+    def _run_due_continuation_once(self) -> int:
+        """一个有界的原任务续行；读取等待与后台终态共用执行器。"""
         from app import config
         from app.agent.feature_gate import is_agent_enabled
         from app.agent.kernel.bootstrap import (
@@ -454,36 +458,64 @@ class AgentJobsScheduler:
 
         async def run():
             store = SQLiteKernelStore(clock=lambda: self._clock().timestamp())
-            for candidate in await store.due_read_waits(limit=16):
+            for candidate in await store.due_continuations(limit=16):
                 if self._stop_event.is_set():
                     return 0
+                if candidate.get('kind') == 'effect_delivery':
+                    from app.agent.kernel.continuation import deliver_effect_result
+                    if await deliver_effect_result(store, candidate):
+                        return 1
+                    continue
                 with config.runtime_config_read_guard():
                     binding = _capture_creation_binding()
                 if (candidate['admission_fence'] != asdict(binding.fence)
                         or candidate['effective_digest'] != binding.effective_digest):
                     # The same claim transaction retires only this exact old wait.
-                    await store.claim_read_wait(candidate, binding)
+                    await store.claim_continuation(candidate, binding)
                     continue
                 await MediaFluxTurnAdmission().begin(AgentInput(
-                    message="恢复已保存的只读查询", owner=candidate['owner'], session_id=candidate['session_id'],
+                    message="恢复已保存的任务", owner=candidate['owner'], session_id=candidate['session_id'],
                     request_id=candidate['source_request_id'], channel=candidate['channel']))
                 with config.use_runtime_config_snapshot(binding.snapshot):
                     # Explicit factory is a trusted embedding/test dependency, never model metadata.
-                    if self._read_wait_runtime_factory is None:
+                    if self._continuation_runtime_factory is None:
                         if not config.get_bool('AGENT_LLM_ENABLED', False):
                             return 0
                         runtime = build_agent_kernel_runtime(store=store)
                     else:
-                        runtime = self._read_wait_runtime_factory(candidate, binding, store)
+                        runtime = self._continuation_runtime_factory(candidate, binding, store)
                 with config.runtime_config_read_guard():
                     _recheck_creation_binding(binding)
-                if runtime.creation_binding != binding or runtime.session.read_wait_binding != binding:
+                if runtime.creation_binding != binding or runtime.session.continuation_binding != binding:
                     return 0
-                return int(await runtime.session.resume_wait(candidate=candidate, cancelled=self._stop_event.is_set))
+                from app.agent.kernel.state import SessionBusyError
+                try:
+                    resumed = await runtime.session.resume_wait(candidate=candidate, cancelled=self._stop_event.is_set)
+                except SessionBusyError:
+                    continue  # This session's foreground confirmation must not starve others.
+                if resumed:
+                    return 1
             return 0
         return asyncio.run(run())
 
+    def _continuation_loop(self) -> None:
+        # One bounded worker uses the same claim/_drive executor. Slow model I/O
+        # must not suspend completion receipts and durable domain-job polling.
+        while not self._stop_event.is_set():
+            try:
+                self._run_due_continuation_once()
+            except Exception as exc:
+                logger.warning("Agent 任务续行失败 type=%s", type(exc).__name__)
+            self._stop_event.wait(timeout=self.interval)
+
     def _loop(self) -> None:
+        with self._lifecycle_lock:
+            if self._stop_event.is_set():
+                return
+            self._continuation_thread = threading.Thread(
+                target=self._continuation_loop, name="agent-continuation", daemon=True,
+            )
+            self._continuation_thread.start()
         while not self._stop_event.is_set():
             try:
                 from app.agent.effect_completion import poll_effect_receipts
@@ -503,10 +535,6 @@ class AgentJobsScheduler:
                         break
             except Exception as exc:
                 logger.warning("Agent 长任务轮询失败 type=%s", type(exc).__name__)
-            try:
-                self._run_due_read_wait_once()
-            except Exception as exc:
-                logger.warning("Agent READ 等待续行失败 type=%s", type(exc).__name__)
             self._wake_event.wait(timeout=self.interval)
             self._wake_event.clear()
 

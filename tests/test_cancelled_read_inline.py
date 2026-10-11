@@ -283,7 +283,7 @@ def test_exact_whole_state_capacity(backend, excess):
         projected.conversation[-1]["content"] = content
         filler = 256 * 1024 - len(json_text(projected.to_payload()).encode()) + excess
         state = await store.commit(lease, updates=(StateUpdate("metadata.filler", "z" * filler),))
-        receipt = _CancelledReadInline.capture(lease, state.conversation, 0, 0, 1, tool=READ_TOOL)
+        receipt = _CancelledReadInline.capture(lease, state.conversation, 0, tool=READ_TOOL)
         receipt.put_once(content)
         await store.cancel_publication(owner="o", session_id="s", request_id="same")
         cold = sqlite_store() if backend == "sqlite" else store
@@ -316,7 +316,9 @@ def test_checkpoint_cas(backend, mode):
             rows[1]["tool_calls"].append(deepcopy(rows[1]["tool_calls"][0]))
             rows.append(deepcopy(rows[-1]))
         state = await store.commit(lease, conversation=rows, updates=(_ExecutionCapacity("", True),))
-        receipt = _CancelledReadInline.capture(lease, state.conversation, 1, 0, 3 if mode == "wrong_same_id" else 2, tool=READ_TOOL)
+        receipt = _CancelledReadInline.capture(lease, state.conversation, 0, tool=READ_TOOL)
+        if mode == "wrong_same_id":
+            receipt = replace(receipt, tool_index=3)
         receipt.put_once(json.dumps({"ok": True, "data": "x" * 50000 + "FULL_TAIL"}))
         with pytest.raises(ValueError):
             receipt.put_once('{"replacement":true}')

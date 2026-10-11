@@ -158,6 +158,7 @@ def handle_callback(
     from app.agent.kernel.transports import QueryEnvelope
     from app.bot.agent_adapter import (
         _approval_markup,
+        _delivery_route,
         _edit_final,
         _preview_lines,
         _render_turn,
@@ -219,6 +220,7 @@ def handle_callback(
             message=f"预览候选 {','.join(str(pos) for pos in draft['positions'])}，目标 {draft['target']}。",
             selection={"ref": view["selection_ref"], "positions": draft["positions"], "target": draft["target"]},
             request_id=f"tgsel_{call.id}"[:150], channel="telegram",
+            delivery_route=_delivery_route(call, owner=owner),
         ), cancellation=AGENT_CANCELLATION.get()))
         if result.approval:
             draft.update(phase="approval", plan_id=result.approval.plan_id)

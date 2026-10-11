@@ -110,6 +110,10 @@ class ToolCallContext:
     resource_candidate_ref: str = ""
     channel: str = "api"
     completion_scope: Any = None
+    continuation_binding: Any = None
+    continuation_policy: Mapping[str, Any] | None = None
+    diagnostic_only: bool = False
+    delivery_route: Mapping[str, Any] = field(default_factory=dict)
     confirmed_effect: PipelineResult | None = None
     argument_repairs: dict[tuple[str, str], _ArgumentRepair] = field(default_factory=dict)
     current_task: dict | None = None
@@ -601,6 +605,8 @@ class ToolPipeline:
             tool = self.catalog.get(name)
         except KeyError as exc:
             raise ToolPipelineError("未知工具", code="tool_not_found") from exc
+        if context.diagnostic_only and tool.effect is not ToolEffect.READ:
+            raise ToolPipelineError("前序写操作未能完整核验，本次自动续行只允许诊断；新写需要用户重新提出。", code="effect_diagnostic_only")
         raw_arguments = dict(arguments or {})
         if tool.name == error_repair.REPAIR_TOOL:
             _validate_json_schema(raw_arguments, tool.input_schema)
@@ -939,10 +945,12 @@ class ToolPipeline:
                     "工具不支持确认执行", code="confirmation_not_supported"
                 )
             from app.agent.effect_completion import EffectCompletionScope
+            from .continuation import effect_origin
 
             context = replace(context, completion_scope=EffectCompletionScope(
                 store=self.state_store, lease=context.lease,
                 plan_id=plan.plan_id, channel=context.channel,
+                origin=effect_origin(current, context, plan),
             ))
             value = await _invoke(
                 tool.execute_confirmed,
@@ -1046,7 +1054,7 @@ class ToolPipeline:
         scope = (session_scope_guard(context.owner, context.session_id)
                  if not confirmation and tool.effect is not ToolEffect.READ else nullcontext())
         with scope:
-            if context.lease.read_wait_id:
+            if context.lease.continuation_id:
                 # Same-connection fence check linearizes handler start after acquire.
                 await self.state_store.commit(context.lease)
             elif not await self.state_store.is_current(context.lease):
