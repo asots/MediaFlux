@@ -103,37 +103,13 @@ def initialized_web_runtime(paths=None):
 
 
 class InitializedWebTestCase(unittest.TestCase):
-    """显式提供已初始化 Web 测试环境，不依赖 tests 包导入副作用。"""
+    """每个测试类使用真实初始化的独立安装，不能依赖其它用例先创建 schema。"""
 
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        cls._initialized_web_env = patch.dict(
-            os.environ,
-            {
-                "MEDIAFLUX_INITIALIZED": "1",
-                "ENV_WEB_PASSPORT": "admin",
-                "ENV_WEB_PASSWORD": "123456",
-                "WEB_SECRET_KEY": "test-secret",
-                # API 合同测试不得继承开发者本机 user.env 中的 Agent 开关。
-                "AGENT_ENABLED": "1",
-            },
-            clear=False,
-        )
-        cls._initialized_web_env.start()
-        from app.modules import first_run
-
-        first_run._reset_startup_state_for_tests()
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        try:
-            cls._initialized_web_env.stop()
-            from app.modules import first_run
-
-            first_run._reset_startup_state_for_tests()
-        finally:
-            super().tearDownClass()
+        # class cleanup 在子类 setUpClass 失败时同样执行；不遗留安装目录或配置。
+        cls.enterClassContext(initialized_web_runtime())
 
 
 class IsolatedDatabaseTestCase(InitializedWebTestCase):
