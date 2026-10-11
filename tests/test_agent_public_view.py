@@ -460,7 +460,7 @@ class AgentKernelPublicViewTests(unittest.TestCase):
             "failed",
         )
 
-        for status in ("queued", "running", "in_progress", "retry_wait"):
+        for status in ("pending", "queued", "running", "in_progress", "retry_wait"):
             with self.subTest(status=status):
                 result = {"ok": True, "status": status, "summary": "任务状态已更新"}
                 self.assertEqual(public_result_state(result), "pending")
@@ -485,7 +485,7 @@ class AgentKernelPublicViewTests(unittest.TestCase):
         self.assertTrue(format_public_result(result).startswith("⚠️ "))
 
     def test_non_success_confirmed_answer_drops_model_completion_claim(self) -> None:
-        for status in ("queued", "running", "partial", "outcome_unknown", "stopped"):
+        for status in ("pending", "queued", "running", "partial", "outcome_unknown", "stopped"):
             with self.subTest(status=status):
                 result = {"ok": status != "outcome_unknown", "status": status, "summary": "真实业务状态"}
                 answer = (

@@ -453,6 +453,7 @@ class AgentSession:
         explaining = explain_plan_id is not None
         explanation_plan = None
         confirmed_result: dict[str, Any] | None = None
+        diagnosing_effect = False
         active_calls: tuple[ModelToolCall, ...] = ()
         completed_call_ids: set[str] = set()
         started_call_id = ""
@@ -552,10 +553,12 @@ class AgentSession:
                     state.conversation, retain_conversation(stored), code="history_capacity_exceeded",
                     pipeline=self.pipeline, lease=lease,
                 )
+                # 失败确认后的诊断仍属于同一执行组，不能在续接前撤掉已有的有界容量。
+                # 下一用户回合仍按正常规则释放；保留此阶段并不会提高容量上限。
                 state = await self.state_store.commit(
                     lease,
                     updates=(_ExecutionCapacity(
-                        "", state.execution_capacity if preserve_capacity else close_pending and any(
+                        "", state.execution_capacity if preserve_capacity or diagnosing_effect else close_pending and any(
                             call.call_id not in completed for call in active_calls
                         ),
                         current_start=start if any(row.get("tool_calls") or row.get("reply_context", {}).get("reference_handle") for row in stored[start:]) else None,
@@ -910,9 +913,9 @@ class AgentSession:
                 from .continuation import confirmed_result as restore_confirmed, for_lease
                 result = restore_confirmed(self.catalog, state, for_lease(state, lease))
                 confirmed_result = dict(result.outcome.public_content)
-                record_result(result.tool.name, result.arguments, result.outcome.audit_result())
+                diagnosing_effect = public_result_state(confirmed_result) in {"failed", "warning", "pending"}
                 tool_context = replace(tool_context, confirmed_effect=result,
-                                       diagnostic_only=confirmed_result.get("ok") is False)
+                                       diagnostic_only=diagnosing_effect)
             if plan_id is not None:
                 result = None
                 try:
@@ -940,6 +943,7 @@ class AgentSession:
                     } if result and result.tool.name == "ingest.submit" and result.arguments.get("source_type") == "resource_candidates" else None,
                 )
                 failed = public_result.get("ok") is False
+                stopped = public_result.get("status") in {"stopped", "cancelled"}
                 await publish(AgentEventType.EFFECT_FAILED if failed else AgentEventType.EFFECT_COMPLETED, {
                     "plan_id": plan_id, "tool": result.tool.name if result else "confirmed_effect", "result": result.outcome.audit_result() if result else public_result,
                     "receipt": format_public_result(public_result),
@@ -949,12 +953,13 @@ class AgentSession:
                 })
                 # Consume the foreground continuation while the confirmation still owns
                 # the session guard; a completion poll must not start a competing model loop.
-                if not failed and receipt_saved and last_user:
+                if receipt_saved and last_user:
                     from .continuation import adopt_foreground
                     adopted = await adopt_foreground(self.state_store, lease, plan_id)
                     if adopted is not None:
                         lease = adopted
                         state = await self.state_store.load(owner=lease.owner, session_id=lease.session_id)
+                        tool_context = replace(tool_context, lease=lease)
                 # 写入及回执已完成：先解除保护，再读停止标记，关闭两者之间的竞态窗口。
                 scope.close()
                 await self.coordinator.unprotect(lease, token)
@@ -994,12 +999,14 @@ class AgentSession:
                             return
                         if refreshed_plan:
                             await self.pipeline.cancel_effect(refreshed_plan.plan_id, lease=lease)
-                    data = public_result.get("data")
-                    if isinstance(data, dict) and data.get("operation_items"):
-                        confirmed_result = public_result
-                        checkpoint = persist_conversation
-                    await failure(str(public_result.get("status") or "effect_failed"), str(public_result.get("summary") or "执行未完成"))
-                    return
+                    if not receipt_saved or not last_user or stopped or public_result.get("status") in {
+                            "authorization_denied", "agent_disabled", "confirmation_invalid",
+                            "confirmation_not_supported", "tool_not_found"}:
+                        if result is not None:
+                            confirmed_result = public_result
+                            checkpoint = persist_conversation if receipt_saved else None
+                        await failure(str(public_result.get("status") or "effect_failed"), str(public_result.get("summary") or "执行未完成"))
+                        return
                 if not receipt_saved:
                     confirmed_result = public_result
                     await failure("receipt_unavailable", "执行结果已取得，但会话记录保存失败，未继续后续步骤；请先核对任务状态。")
@@ -1013,9 +1020,9 @@ class AgentSession:
                     })
                     return
                 result_state = public_result_state(public_result)
-                if result_state not in {"success", "submitted"} or not last_user:
+                if not last_user or stopped:
                     await publish(AgentEventType.TURN_COMPLETED, {
-                        "status": "success",
+                        "status": "partial" if not stopped and result_state in {"failed", "warning"} else "success",
                         "answer": format_public_result(public_result),
                         "finish_reason": f"effect_{result_state}",
                         "usage": {},
@@ -1024,7 +1031,9 @@ class AgentSession:
                     })
                     return
                 confirmed_result = public_result
-                tool_context = replace(tool_context, lease=lease, confirmed_effect=result)
+                diagnosing_effect = result_state in {"failed", "warning", "pending"}
+                tool_context = replace(tool_context, lease=lease, confirmed_effect=result,
+                                       diagnostic_only=diagnosing_effect)
                 confirming = False
                 admission_token = await self.turn_admission.begin(agent_input)
                 checkpoint = persist_conversation
@@ -1292,6 +1301,12 @@ class AgentSession:
                         "\n已有工具返回真实频率限制：" + "、".join(sorted(limited_tools))
                         + "。不要对受限能力换关键词反复重试；优先基于已有结果回答用户的问题，"
                         "清楚说明哪些补充查询未完成。只读问答不要输出确认卡/写操作/重放提示。"
+                    )
+                if diagnosing_effect:
+                    request_system_prompt += (
+                        "\n前序写操作失败、部分完成或尚未核验；原回执不能被后续查询成功改成写入成功。"
+                        "先用只读业务工具核对真实状态、定位阻塞，不要直接重复原写入。"
+                        "核对后可为原任务中仍可推进的后续动作准备新的确认卡；新预检不等于执行，不能沿用旧授权。"
                     )
                 if confirmed_result is not None:
                     request_system_prompt += (
@@ -1679,6 +1694,12 @@ class AgentSession:
                                 # Preserve the closed error/TaskPatch, never retry a started READ.
                                 raise
                             continue
+                        if (tool_context.diagnostic_only and tool.effect is ToolEffect.READ
+                                and not tool.name.startswith("agent.")
+                                and public_result_state(result.outcome.public_content) == "success"):
+                            # An observed business result permits planning another proposal,
+                            # not replaying a write or upgrading the original failed receipt.
+                            tool_context = replace(tool_context, diagnostic_only=False)
                         if tool.name == DISCOVERY_TOOL and result.outcome.public_content.get("ok") is False:
                             discovery.restore(discovery_checkpoint)
                         if result.outcome.public_content.get("result_handle"):
@@ -1777,7 +1798,8 @@ class AgentSession:
                     message = f"仍有工具调用受到频率限制：{pending_error}" if pending_error.code == "rate_limited" else str(pending_error)
                     await failure(pending_error.code, message, analysis_text=assistant_text)
                     return
-                await finish_answer(assistant_text, "success", finish_reason, round_index + 1, response_state=provider_state)
+                await finish_answer(assistant_text, "partial" if diagnosing_effect else "success", finish_reason,
+                                    round_index + 1, response_state=provider_state)
                 return
 
             # 单模型轮次等边界没有额外汇总调用机会，仍保留本轮已执行事实。

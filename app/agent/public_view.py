@@ -38,7 +38,7 @@ _COUNT_FIELDS: tuple[tuple[str, str], ...] = (
 )
 _SUBMITTED_RESULT_STATUSES = frozenset({"accepted", "submitted"})
 _PENDING_RESULT_STATUSES = frozenset(
-    {"queued", "running", "in_progress", "retry_wait"}
+    {"pending", "queued", "running", "in_progress", "retry_wait"}
 )
 _FS_CHANGE_ACTION_LABELS = {
     "rename": "改名",

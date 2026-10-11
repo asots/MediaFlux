@@ -128,6 +128,7 @@ def test_both_intent_inputs_share_one_batch_plan_and_settle_after_confirm(store,
             result_events = await _events(session.confirm(owner=OWNER, session_id=SESSION, plan_id=plan))
             result = next(e.payload["result"] for e in result_events if e.type is AgentEventType.EFFECT_COMPLETED)
             assert [(item["position"], item["status"]) for item in result["data"]["items"]] == [(1, "submitted"), (2, "manual_review")]
+            assert result_events[-1].payload["status"] == "partial"
             text = format_public_result(result)
             assert "#1" in text and "下载请求 #81" in text and "结果未知，请先核验" in text
             await _events(session.confirm(owner=OWNER, session_id=SESSION, plan_id=plan))
@@ -136,7 +137,7 @@ def test_both_intent_inputs_share_one_batch_plan_and_settle_after_confirm(store,
             events = await _events(session.run(QueryEnvelope(owner=OWNER, session_id=SESSION, message="仍只做预检", selection=_selection(view, [1, 2], "both")).to_agent_input()))
             assert sum(e.type is AgentEventType.EFFECT_APPROVAL_REQUIRED for e in events) == 1
             execute.assert_called_once()
-            assert model.calls == int(natural)
+            assert model.calls == int(natural) + 1, "部分完成后仅续接解释，重复确认不能再次调用模型"
     asyncio.run(exercise())
 
 
@@ -251,7 +252,8 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
         ended = asyncio.run(states.load(owner=owner, session_id=session_id)).metadata["ux_candidate_draft"]
         assert ended["phase"] == "result" and ended["positions"] == [] and ended["plan_id"] == ""
         assert agent_candidates.render(TELEBOT, view, ended)[1] is None
-        assert bot.sent == [] and session.model.requests == []
+        assert bot.sent == []
+        assert len(session.model.requests) == (1 if terminal_action == "c" else 0)
         count = len(bot.edits)
         agent_adapter.handle_agent_callback(bot, Call(f"agk:c:{plan}", message), TELEBOT)
         assert len(bot.edits) == count

@@ -874,10 +874,10 @@ def test_unfinished_confirmation_preserves_capacity_and_receipt_without_replay(
     """Real Session read -> preview -> explicit confirm, inspect terminal paths."""
 
     async def exercise():
-        writes = []
+        writes, reads = [], []
         read = spec(
             "inspect_batch",
-            lambda a, c: ToolOutcome(
+            lambda a, c: reads.append(a["selector"]) or ToolOutcome(
                 model_content="{}",
                 public_content={"ok": True, "status": "success"},
                 state_updates=(StateUpdate("metadata.pad", "p" * 270000),),
@@ -905,6 +905,7 @@ def test_unfinished_confirmation_preserves_capacity_and_receipt_without_replay(
             "chat_completions",
             [
                 batch("chat_completions", calls),
+                batch("chat_completions", [("diagnose", read.name, {"selector": "diagnose"})]),
                 native_reply("chat_completions", "完成", private=False),
             ],
         )
@@ -938,13 +939,10 @@ def test_unfinished_confirmation_preserves_capacity_and_receipt_without_replay(
         assert duplicate[-1].payload.get("code") == "confirmation_invalid"
         assert current.execution_capacity and B < size <= T
         assert current.metadata["pad"] == "p" * 270000
-        assert (
-            confirmed[-1].payload["finish_reason"]
-            == {
-                "running": "effect_pending",
-                "partial": "effect_warning",
-            }[result_status]
-        )
+        assert confirmed[-1].payload["finish_reason"] == "stop"
+        assert confirmed[-1].payload["status"] == "partial"
+        assert reads == ["r", "diagnose"], "续接诊断不得提前撤掉同一执行组的有界容量"
+        assert "internal_error" not in str(confirmed[-1].payload)
         receipts = [
             row
             for row in current.conversation
@@ -953,7 +951,7 @@ def test_unfinished_confirmation_preserves_capacity_and_receipt_without_replay(
         assert len(receipts) == 1
         assert "receipt" in receipts[0]["content"]
         assert await reopened() == current
-        wire.verify(1)
+        wire.verify(3)
 
     with isolated_test_database():
         asyncio.run(exercise())

@@ -465,7 +465,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((view.status, view.answer), ("success", "完整回答"))
         self.assertEqual(reads, [False, True])
 
-    async def test_confirmed_partial_file_plan_has_factual_answer_without_more_model_calls(self):
+    async def test_confirmed_partial_file_plan_preserves_facts_during_diagnostic_continuation(self):
         outcomes = [
             {"position": 1, "operation": "rename", "label": "改名：A → A-done", "status": "completed", "completed_actions": ["rename"]},
             {"position": 2, "operation": "relocate", "label": "移动并改名：dirty → target / clean", "status": "partial", "completed_actions": ["move"], "reason": "write_rejected"},
@@ -478,7 +478,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             execute_confirmed=lambda *args: writes.append(1) or ToolResult(False, "partial", "文件变更部分完成",
                 data={"total": 3, "stats": {"total": 3, "renamed": 1, "failed": 2}, "operation_items": outcomes}))
         model = ScriptedModel([[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("plan", "cloud.change", {})),
-                                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")]])
+                                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")],
+                               [ModelEvent(ModelEventType.TEXT_DELTA, text="三个目录都整理好了。"),
+                                ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
         state, catalog = InMemorySessionStateStore(), ToolCatalog([tool])
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(minimum=1, maximum=1),
             pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
@@ -492,7 +494,8 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("本轮未执行新的写操作", result.answer)
         self.assertNotIn("可信系统结果", result.answer)
         self.assertEqual(writes, [1])
-        self.assertEqual(len(model.requests), 1, "失败确认应交付已有事实，不再让模型猜测或重放写入")
+        self.assertEqual(len(model.requests), 2, "失败后续接，但不能用模型声称成功覆盖原始部分完成事实")
+        self.assertNotIn("三个目录都整理好了", result.answer)
         history = await state.load(owner="owner", session_id="session")
         self.assertEqual(history.conversation[-1]["content"], result.answer)
         self.assertEqual(result.effect_result["data"]["operation_items"], outcomes)
@@ -2115,7 +2118,8 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
                                tool_call=ModelToolCall("move", tool.name, {})),
                     ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
-                ]])
+                ], [ModelEvent(ModelEventType.TEXT_DELTA, text="需核对真实目录状态，不能视为完成。"),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
                 session = AgentSession(
                     model=model, catalog=catalog, retriever=CapabilityRetriever(),
                     pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state,
@@ -2130,17 +2134,20 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     owner="owner", session_id="session", plan_id=plan_id,
                 ))
                 self.assertEqual(calls, ["execute"])
-                self.assertEqual(confirmed.status, "failed")
-                self.assertEqual(confirmed.error_code, code)
-                self.assertEqual(confirmed.error_message, reason)
+                self.assertEqual(confirmed.status, "failed" if code == "confirmation_invalid" else "partial")
+                self.assertEqual(confirmed.error_code, code if code == "confirmation_invalid" else "")
+                if code == "confirmation_invalid":
+                    self.assertEqual(confirmed.error_message, reason)
                 self.assertEqual(dict(confirmed.effect_result), {
                     "ok": False, "status": code, "summary": reason,
                 })
                 saved = await state.load(owner="owner", session_id="session")
                 self.assertEqual(saved.pending_effect_plan_id, "")
-                self.assertIn("光鸭变更预览已过期", saved.conversation[-1]["public_content"])
-                self.assertIn("请重新生成", saved.conversation[-1]["public_content"])
-                self.assertEqual(len(model.requests), 1, "确认结果不得再依赖模型")
+                receipt = next(row for row in saved.conversation
+                               if row.get("effect_plan_id") == plan_id and row.get("public_content"))
+                self.assertIn("光鸭变更预览已过期", receipt["public_content"])
+                self.assertIn("请重新生成", receipt["public_content"])
+                self.assertEqual(len(model.requests), 1 if code == "confirmation_invalid" else 2)
 
                 previous_conversation = saved.conversation
                 replay = await consume_events(session.confirm(
@@ -4101,13 +4108,19 @@ class ConfirmedEffectReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepares, [{"step": 1}, {"step": 1}])
         self.assertEqual(writes, [{"step": 1}])
 
-    async def test_failed_effect_cannot_enter_successful_replay_continuation(self):
-        session, model, prepares, writes, _ = self.runtime([], failed=True)
+    async def test_failed_effect_can_inspect_but_never_reuses_a_successful_receipt(self):
+        session, model, prepares, writes, reads = self.runtime([
+            self.call("cloud.inspect", {}, "diagnose"),
+            self.call("cloud.change", {"step": 1}, "retry-proposal"),
+        ], failed=True)
         final = await consume_events(_events_stream(await self.confirm(session)))
         self.assertFalse(final.effect_result["ok"])
-        self.assertEqual(len(model.requests), 1)
-        self.assertEqual(prepares, [{"step": 1}])
-        self.assertEqual(writes, [{"step": 1}])
+        self.assertEqual(final.status, "approval_required")
+        self.assertIsNotNone(final.approval)
+        self.assertEqual(len(model.requests), 3)
+        self.assertEqual(reads, [1])
+        self.assertEqual(prepares, [{"step": 1}, {"step": 1}])
+        self.assertEqual(writes, [{"step": 1}], "新的重试建议未获确认，不得执行")
 
     async def test_receipt_reuse_still_checks_authorization_schema_cancellation_and_scope(self):
         from dataclasses import replace

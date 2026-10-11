@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from app.agent.kernel.adapters import TurnView, consume_events
 from app.agent.kernel.events import AgentEventType, EventFactory
+from app.agent.kernel.model import ModelEvent, ModelEventType
 from app.agent.kernel.state import AgentInput
 from app.agent.models import ToolResult
 from app.agent.public_view import format_public_result
@@ -22,20 +23,33 @@ FAILURE = {'ok': False, 'status': 'manual_review', 'summary': '下载提交结�
 
 class AgentFailureProjectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_kernel_failure_keeps_dto_and_retry_warning_for_telegram(self):
-        session, _, _ = _runtime(SameTurnSearchSubmitModel())
+        class ReceiptModel(SameTurnSearchSubmitModel):
+            async def stream(self, request, *, cancellation):
+                if len(self.requests) < 2:
+                    async for event in super().stream(request, cancellation=cancellation):
+                        yield event
+                    return
+                self.requests.append(request)
+                yield ModelEvent(ModelEventType.TEXT_DELTA, text="下载已全部完成，可以重复提交。")
+                yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
+        model = ReceiptModel()
+        session, _, _ = _runtime(model)
         with patch('app.agent.indexer_candidate_actions.prepare_submit_resource', return_value=(
             ToolResult(True, 'confirmation_required', '确认下载'), 'snapshot')), patch(
             'app.agent.indexer_candidate_actions.submit_resource_confirmed', return_value=ToolResult(
-                False, 'manual_review', FAILURE['summary'], data=FAILURE['data'], error=WARNING)):
+                False, 'manual_review', FAILURE['summary'], data=FAILURE['data'], error=WARNING)) as execute:
             first = await _collect(session.run(AgentInput(message='搜索资源并推送到云盘',
                 owner='fixture-owner', session_id=SESSION_ID)))
             plan = next(e.payload['plan'] for e in first if e.type is AgentEventType.EFFECT_APPROVAL_REQUIRED)
             events = await _collect(session.confirm(owner='fixture-owner', session_id=SESSION_ID,
                 plan_id=plan['plan_id']))
         view = await consume_events(event_stream(events))
-        self.assertEqual(view.status, 'failed')
+        self.assertEqual(view.status, 'partial')
         self.assertEqual(view.effect_result['status'], 'manual_review')
-        self.assertIn(WARNING, view.error_message)
+        self.assertIn(WARNING, view.effect_result['error'])
+        self.assertEqual(len(model.requests), 3)
+        execute.assert_called_once()
+        self.assertNotIn('下载已全部完成', view.answer)
         self.assertIn('请先核对下载器', _render_turn(view))
         self.assertIn('勿直接重复提交', _render_turn(view))
         self.assertIn('光鸭云盘', _render_turn(view))

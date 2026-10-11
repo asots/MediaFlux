@@ -377,7 +377,10 @@ def test_read_preview_confirmation_and_duplicate_keep_receipt_without_replay(unk
         assert_native_wire("chat_completions", next_wire.requests[0], calls)
         assert writes == [({"selector": "frozen"}, "frozen-synthetic-snapshot")]
         assert reads == [{"selector": "read"}] and preparations == [{"selector": "frozen"}]
-        transport.verify(1 if unknown else 2)
+        if unknown:
+            assert confirmed[-1].payload["status"] == "partial"
+            assert "写入已完成" not in confirmed[-1].payload["answer"]
+        transport.verify(2)
         next_wire.verify()
     with isolated_test_database():
         asyncio.run(exercise())

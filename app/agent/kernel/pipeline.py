@@ -606,7 +606,7 @@ class ToolPipeline:
         except KeyError as exc:
             raise ToolPipelineError("未知工具", code="tool_not_found") from exc
         if context.diagnostic_only and tool.effect is not ToolEffect.READ:
-            raise ToolPipelineError("前序写操作未能完整核验，本次自动续行只允许诊断；新写需要用户重新提出。", code="effect_diagnostic_only")
+            raise ToolPipelineError("前序写操作未能完整核验；请先用只读业务工具核对真实状态，再为后续动作重新预检。新计划仍需确认，不能重放旧写入。", code="effect_diagnostic_only")
         raw_arguments = dict(arguments or {})
         if tool.name == error_repair.REPAIR_TOOL:
             _validate_json_schema(raw_arguments, tool.input_schema)

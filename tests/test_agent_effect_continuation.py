@@ -321,14 +321,14 @@ def test_new_tg_approval_is_durable_without_executing_it(tmp_path):
     asyncio.run(run())
 
 
-def test_failed_prior_effect_cannot_prepare_new_writes(tmp_path):
+def test_failed_prior_effect_requires_read_before_new_write_preview(tmp_path):
     async def run():
         async with _ready_case(tmp_path, fail_write=True) as (store, candidate, client, reads, stack, _users):
             state = await store.load(owner=OWNER, session_id=SID)
             assert state.metadata['effect_waits'][candidate['wait_id']]['final_result']['ok'] is False
             script = NextWriteScript()
-            # A READ preview may observe/freeze a plan; the subsequent WRITE must be rejected.
-            script.steps.append('finish')
+            # An immediate WRITE cannot replace an actual diagnostic observation.
+            script.steps = ['execute', 'finish']
             original = script.respond
             async def respond(request):
                 if script.steps[0] != 'finish':
@@ -347,15 +347,19 @@ def test_failed_prior_effect_cannot_prepare_new_writes(tmp_path):
     asyncio.run(run())
 
 
-def test_foreground_completion_consumes_same_goal_without_background_double_run(tmp_path):
+@pytest.mark.parametrize("fail_write", [False, True])
+def test_foreground_completion_consumes_same_goal_without_background_double_run(tmp_path, fail_write):
+    class RefusingClient(_OfflineClient):
+        def rename(self, *_args, **_kwargs):
+            raise RuntimeError("offline provider rejected rename")
     async def run():
-        with isolated_test_database(), _offline_runtime(tmp_path, _OfflineClient()) as stack, _paused_manager():
+        with isolated_test_database(), _offline_runtime(tmp_path, RefusingClient() if fail_write else _OfflineClient()) as stack, _paused_manager():
             initialize_runtime_fence()
             from app.agent import guangya_fs_change_actions
             client = guangya_fs_change_actions.GuangYaClient()
             _preview_domain('fs', client, ToolContext(owner=OWNER, session_id=SID), stack)
             store, reads, script = SQLiteKernelStore(), [], FollowScript()
-            script.steps += ['inspect', 'finish']
+            script.steps += ['finish'] if fail_write else ['inspect', 'finish']
             session = _session(store, script, client, reads)
             events = [e async for e in session.run(AgentInput(message=GOAL, owner=OWNER, session_id=SID, channel='web'))]
             assert events[-1].payload['status'] == 'approval_required'
@@ -368,9 +372,9 @@ def test_foreground_completion_consumes_same_goal_without_background_double_run(
                     return await effects.wait_for_effect_completion(result, **options)
             with patch.object(existing_actions, 'wait_for_effect_completion', complete_before_wait):
                 confirmed = [e async for e in session.confirm(owner=OWNER, session_id=SID, plan_id=plan_id, channel='web')]
-            assert confirmed[-1].payload['status'] == 'success', confirmed[-1].payload
+            assert confirmed[-1].payload['status'] == ('partial' if fail_write else 'success'), confirmed[-1].payload
             assert not script.steps
-            assert reads == ['admitted.mp4']
+            assert reads == ([] if fail_write else ['admitted.mp4'])
             assert await SQLiteKernelStore().due_continuations() == []
     asyncio.run(run())
 
