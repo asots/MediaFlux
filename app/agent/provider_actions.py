@@ -140,7 +140,8 @@ def query_provider(arguments: dict[str, Any], context: ToolContext) -> ToolResul
     try:
         return get_provider_gateway().query(context=context, **normalized)
     except ProviderGatewayError as exc:
-        raise AgentToolError(exc.safe_message, code=exc.code) from exc
+        raise AgentToolError(exc.safe_message, code=exc.code,
+                             argument_schemas={"arguments": exc.parameter_schema} if exc.parameter_schema is not None else None) from exc
 
 
 def provider_plan_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +165,8 @@ def preview_provider_change(
     try:
         return get_provider_gateway().preview_change(context=context, **normalized)
     except ProviderGatewayError as exc:
-        raise AgentToolError(exc.safe_message, code=exc.code) from exc
+        raise AgentToolError(exc.safe_message, code=exc.code,
+                             argument_schemas={"arguments": exc.parameter_schema} if exc.parameter_schema is not None else None) from exc
 
 
 def prepare_provider_change_execution(
@@ -176,7 +178,8 @@ def prepare_provider_change_execution(
             context=context, **normalized
         )
     except ProviderGatewayError as exc:
-        raise AgentToolError(exc.safe_message, code=exc.code) from exc
+        raise AgentToolError(exc.safe_message, code=exc.code,
+                             argument_schemas={"arguments": exc.parameter_schema} if exc.parameter_schema is not None else None) from exc
 
 
 def execute_provider_change_confirmed(
@@ -190,7 +193,8 @@ def execute_provider_change_confirmed(
             **normalized,
         )
     except ProviderGatewayError as exc:
-        raise AgentToolError(exc.safe_message, code=exc.code) from exc
+        raise AgentToolError(exc.safe_message, code=exc.code,
+                             argument_schemas={"arguments": exc.parameter_schema} if exc.parameter_schema is not None else None) from exc
 
 
 def provider_change_status(
@@ -200,4 +204,5 @@ def provider_change_status(
     try:
         return get_provider_gateway().change_status(context=context, **normalized)
     except ProviderGatewayError as exc:
-        raise AgentToolError(exc.safe_message, code=exc.code) from exc
+        raise AgentToolError(exc.safe_message, code=exc.code,
+                             argument_schemas={"arguments": exc.parameter_schema} if exc.parameter_schema is not None else None) from exc

@@ -2015,9 +2015,10 @@ class AgentSession:
     def _tool_error_message(
         call: ModelToolCall, error: ToolPipelineError, *, input_schema: Mapping[str, Any] | None = None,
     ) -> ModelMessage:
-        # 仅重述本轮已提供给模型的工具契约，不回显调用参数，也不进入用户事件。
-        repair = ({"expected_input_schema": dict(input_schema)}
-                  if error.code == "invalid_arguments" and input_schema is not None else {})
+        # 重述静态工具/已登记 operation 的真实契约，不回显调用参数，也不进入用户事件。
+        schema = error_repair.effective_schema(input_schema, error.argument_schemas) if input_schema is not None else None
+        repair = ({"expected_input_schema": dict(schema)}
+                  if error.code == "invalid_arguments" and schema is not None else {})
         if error.repair_ticket:
             repair["repair"] = {"tool": "agent.repair", "ticket": error.repair_ticket,
                                 "semantics": "explicit replacement of this rejected invocation; valid arguments stay fixed"}

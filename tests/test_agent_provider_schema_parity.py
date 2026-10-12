@@ -174,3 +174,32 @@ def test_domain_success_controls(name, args):
     trace = []
     assert asyncio.run(execute(catalog_schema(name), args, trace)).arguments == args
     assert trace == [("validate", args), ("read", args)]
+
+
+@pytest.mark.parametrize('invalid', [
+    {'nested': {'flag': True, 'extra': 'not-a-schema'}},
+    {'nested': {}},
+    {'nested': {'flag': 'yes'}},
+])
+def test_failed_provider_normalization_retains_registered_schema_without_changing_it(invalid):
+    from copy import deepcopy
+    from app.agent.kernel.pipeline import _validate_json_schema
+    from app.agent.provider_policy import validate_provider_arguments
+
+    # Missing additionalProperties is still closed by Provider normalization.
+    schema = {'type': 'object', 'properties': {
+        'nested': {'type': 'object', 'required': ['flag'],
+                   'properties': {'flag': {'type': 'boolean'}}}}, 'required': ['nested']}
+    original = deepcopy(schema)
+    with pytest.raises(ProviderGatewayError) as failure:
+        validate_provider_arguments(schema, invalid)
+    assert schema == original
+    effective = failure.value.parameter_schema
+    assert effective is not None
+    assert effective['properties']['nested']['additionalProperties'] is False
+    with pytest.raises(ToolPipelineError):
+        _validate_json_schema(invalid, effective)
+    corrected = {'nested': {'flag': True}}
+    _validate_json_schema(corrected, effective)
+    assert validate_provider_arguments(schema, corrected) == corrected
+    assert 'not-a-schema' not in str(failure.value)

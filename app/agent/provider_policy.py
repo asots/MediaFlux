@@ -87,7 +87,9 @@ def _validation_schema(schema: Mapping[str, Any], *, normalization: bool = True)
     if isinstance(schema.get("not"), Mapping):
         result["not"] = _validation_schema(schema["not"], normalization=False)
     if normalization:
-        if schema.get("type") == "string":
+        if schema.get("type") == "object":
+            result["additionalProperties"] = False  # _normalize_object only admits registered keys.
+        elif schema.get("type") == "string":
             result.setdefault("maxLength", 4096)
         elif schema.get("type") == "integer":
             result.setdefault("minimum", -(2**63))
@@ -107,9 +109,12 @@ def validate_provider_arguments(
         raise _error("Provider arguments 必须是对象")
     if str(schema.get("type") or "object") != "object":
         raise _error("Provider operation schema 无效")
-    normalized = _normalize_object(schema, arguments)
+    parameter_schema = _validation_schema(schema)
     try:
-        _validate_json_schema(normalized, _validation_schema(schema))
-    except ToolPipelineError as exc:
-        raise _error(str(exc)) from None
+        normalized = _normalize_object(schema, arguments)
+        _validate_json_schema(normalized, parameter_schema)
+    except (ProviderGatewayError, ToolPipelineError) as exc:
+        # Only the registered operation schema is evidence for a repair;
+        # neither provider responses nor model-supplied fields define it.
+        raise ProviderGatewayError(str(exc), code="invalid_arguments", parameter_schema=parameter_schema) from None
     return normalized

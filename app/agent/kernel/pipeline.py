@@ -51,12 +51,14 @@ from .ux_selection import (
 
 
 class ToolPipelineError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "tool_failed", task_patch: TaskPatch | None = None, invalid_fields: tuple[str, ...] = ()) -> None:
+    def __init__(self, message: str, *, code: str = "tool_failed", task_patch: TaskPatch | None = None, invalid_fields: tuple[str, ...] = (),
+                 argument_schemas: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.task_patch = task_patch
         self.repair_ticket = ""
         self.invalid_fields = invalid_fields
+        self.argument_schemas = argument_schemas
 
 
 class _ReadPermitRejected(ToolPipelineError):
@@ -480,7 +482,7 @@ class ToolPipeline:
             raise
         content = result.outcome.public_content
         if result.effect_plan is None and content.get("ok") is not False and content.get("status", "success") in {"success", "completed"}:
-            return replace(result, recovered_failures=lineage)
+            return replace(result, recovered_failures=tuple(dict.fromkeys((*lineage, *result.recovered_failures))))
         return result
 
     async def _read_result(self, arguments: dict[str, Any], context: ToolCallContext) -> ToolOutcome:
@@ -661,7 +663,7 @@ class ToolPipeline:
             normalized = tool.validator(raw_arguments)
         except ToolPipelineError as exc:
             if exc.code == "invalid_arguments":
-                exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, invalid_fields=exc.invalid_fields)
+                exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, invalid_fields=exc.invalid_fields, argument_schemas=exc.argument_schemas)
             raise
         except Exception as exc:
             safe_message = sanitize_public_text(
@@ -710,7 +712,7 @@ class ToolPipeline:
                 value = await _invoke(tool.read, resolved, context)
             except ToolPipelineError as exc:
                 if exc.code == "invalid_arguments":
-                    exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, invalid_fields=exc.invalid_fields)
+                    exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, invalid_fields=exc.invalid_fields, argument_schemas=exc.argument_schemas)
                 if tool.observe is not None:
                     exc.task_patch = observation_patch(context.current_task, owner=context.owner,
                         session_id=context.session_id, tool=tool.name, call_id=context.call_id,
@@ -765,6 +767,7 @@ class ToolPipeline:
                 outcome=outcome,
                 elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
                 task_patch=patch,
+                recovered_failures=error_repair.completed(tool, raw_arguments, context, outcome.public_content),
             )
 
         if tool.prepare is None:  # pragma: no cover - ToolSpec 已校验

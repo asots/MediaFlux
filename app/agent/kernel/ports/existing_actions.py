@@ -19,6 +19,7 @@ from app.agent.domain_tool_metadata import (
     TOOL_RETRIEVAL_TERMS,
 )
 from app.agent.effect_completion import wait_for_effect_completion
+from app.agent.errors import AgentToolError
 from app.agent.feature_gate import (
     AgentRuntimeDisabled,
     agent_runtime_admission,
@@ -101,7 +102,8 @@ def _safe_error(exc: Exception, *, fallback_code: str) -> ToolPipelineError:
     )
     raw_code = str(getattr(exc, "code", "") or fallback_code).strip().casefold()
     code = raw_code if _ERROR_CODE_RE.fullmatch(raw_code) else fallback_code
-    return ToolPipelineError(message, code=code)
+    return ToolPipelineError(message, code=code,
+                             argument_schemas=exc.argument_schemas if isinstance(exc, AgentToolError) else None)
 
 
 def _assert_success(result: ToolResult, *, code: str) -> ToolResult:

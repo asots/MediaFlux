@@ -20,6 +20,7 @@ class ProviderGatewayError(RuntimeError):
         *,
         code: str = "provider_unavailable",
         external_write_possible: bool = False,
+        parameter_schema: Mapping[str, Any] | None = None,
     ):
         super().__init__(message)
         self.safe_message = str(message or "Provider 当前不可用")
@@ -27,6 +28,7 @@ class ProviderGatewayError(RuntimeError):
         # Transport 只有在真实外部写请求可能已发出时才设置该标记。
         # Gateway 据此区分可安全失败与必须人工核对的结果未知。
         self.external_write_possible = bool(external_write_possible)
+        self.parameter_schema = parameter_schema
 
 
 @dataclass(frozen=True, slots=True)
