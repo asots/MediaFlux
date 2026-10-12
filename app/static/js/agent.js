@@ -165,28 +165,40 @@
 
     function renderTaskSnapshot(task) {
         const status = classifyPublicTask(task);
+        if (status === 'untracked') {
+            clearTaskSnapshot();
+            return;
+        }
         const labels = {
-            complete: '已声明检查项已核验', partial: '已声明检查项尚未全部核验',
-            blocked: '存在阻塞', cancelled: '会话声明任务已取消',
-            untracked: '未建立任务验收清单', unknown: '任务验收状态未知',
+            complete: '已核验全部检查项', partial: `${task?.remaining_obligation_ids?.length} 项待核验`,
+            blocked: '任务有阻塞', cancelled: '任务已取消', unknown: '任务进度待核对',
         };
         let panel = document.getElementById('agentTaskSnapshot');
         if (!panel) {
-            panel = element('section', 'text-muted');
+            panel = element('details', 'agent-task-snapshot');
             panel.id = 'agentTaskSnapshot';
-            // Independent of answer cards and the transcript's replacement lifecycle.
-            panel.style.cssText = 'flex:0 1 auto;min-height:0;max-height:24vh;overflow:auto;overflow-wrap:anywhere;margin:0 20px 8px';
+            panel.append(element('summary', ''), element('div', 'agent-task-details'));
         }
+        const taskId = status === 'unknown' ? '' : task.task_id;
+        if (panel.dataset.taskId !== taskId) panel.open = false;
+        panel.dataset.taskId = taskId;
         panel.dataset.taskStatus = status;
-        panel.replaceChildren(element('div', '', `会话声明任务快照：${labels[status]}`));
+        panel.firstElementChild.textContent = labels[status];
+        const details = panel.lastElementChild;
+        const scrollTop = details.scrollTop;
+        if (status === 'unknown') {
+            details.replaceChildren(element('p', '', '暂时无法读取任务进度，请核对会话记录后再继续。'));
+        } else {
+            details.replaceChildren(element('p', '', `目标：${clipText(task.root_goal, 240)}`));
+            details.append(element('p', 'text-muted', '仅反映本会话记录的检查项，不代表其他后续操作已完成。'));
+            const remaining = new Set(task.remaining_obligation_ids);
+            const descriptions = task.obligations.filter(item => remaining.has(item.id));
+            descriptions.slice(0, 4).forEach(item => details.append(element('p', '', `待核验：${clipText(item.description, 240)}`)));
+            task.blockers.slice(0, 3).forEach(item => details.append(element('p', '', `阻塞：${clipText(item.text, 240)}`)));
+            if (descriptions.length > 4 || task.blockers.length > 3) details.append(element('p', 'text-muted', '仅显示部分检查项与阻塞。'));
+        }
         placeTaskSnapshot(panel);
-        if (status === 'untracked' || status === 'unknown') return;
-        panel.append(element('div', '', `目标：${clipText(task.root_goal, 240)}`));
-        const remaining = new Set(task.remaining_obligation_ids);
-        const descriptions = task.obligations.filter(item => remaining.has(item.id));
-        descriptions.slice(0, 4).forEach(item => panel.append(element('div', '', `待核验：${clipText(item.description, 240)}`)));
-        task.blockers.slice(0, 3).forEach(item => panel.append(element('div', '', `阻塞：${clipText(item.text, 240)}`)));
-        if (descriptions.length > 4 || task.blockers.length > 3) panel.append(element('div', '', '仅显示部分检查项与阻塞。'));
+        details.scrollTop = scrollTop;
     }
 
     function consumeTerminalTask(event) {
@@ -2385,7 +2397,10 @@
                 turn.boundSelection = active?.kind === 'candidate_preview';
                 turn.requestMessage = active?.turn?.requestMessage || '';
                 turn.confirmationRequested = active?.kind === 'confirm';
-                finalizeError(turn, message, {cancelled: terminalTurn.status === 'cancelled'});
+                const failureMessage = terminalTurn.status === 'failed' && message === '本轮未能完成'
+                    ? '当前会话摘要未提供具体失败原因。可查看日志定位；涉及文件变更时，请先核对结果。'
+                    : message;
+                finalizeError(turn, failureMessage, {cancelled: terminalTurn.status === 'cancelled'});
             }
         }
 

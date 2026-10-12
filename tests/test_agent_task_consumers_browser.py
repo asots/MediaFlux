@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+
 from tests.test_agent_task_consumers import native_snapshots
 from tests.test_agent_ux_shell_browser import AgentShellBrowserCase
 
@@ -31,10 +32,10 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
         session = "consumer-empty-session-0001"
         partial = self.snapshots[0]["api"]["task"]
         cases = (
-            ("missing", {}, "untracked", "未建立任务验收清单", 900, 700),
-            ("null", {"task": None}, "untracked", "未建立任务验收清单", 900, 700),
-            ("unknown", {"task": {}}, "unknown", "任务验收状态未知", 900, 700),
-            ("partial", {"task": partial}, "partial", "已声明检查项尚未全部核验", 360, 667),
+            ("missing", {}, "untracked", "", 900, 700),
+            ("null", {"task": None}, "untracked", "", 900, 700),
+            ("unknown", {"task": {}}, "unknown", "任务进度待核对", 900, 700),
+            ("partial", {"task": partial}, "partial", "1 项待核验", 360, 667),
         )
         for name, fields, status, label, width, height in cases:
             with self.subTest(snapshot=name):
@@ -52,40 +53,49 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
                     config, session, {"width": width, "height": height}
                 )
                 page.wait_for_function(
-                    "status=>document.querySelector('#agentTaskSnapshot')?.dataset.taskStatus===status",
-                    arg=status,
+                    "id=>window.__kernelCalls.some(c=>c.url==='/api/agent/sessions/'+id) && document.querySelector('#agentRestoreNotice').hidden",
+                    arg=session,
                 )
+                if status != "untracked":
+                    page.wait_for_function(
+                        "status=>document.querySelector('#agentTaskSnapshot')?.dataset.taskStatus===status",
+                        arg=status,
+                    )
                 page.wait_for_function(
                     "document.querySelector('#agentStartActions').getAttribute('aria-busy')==='false'"
                 )
                 page.evaluate("async()=>{await document.fonts.ready}")
                 panel = page.locator("#agentTaskSnapshot")
-                self.assertTrue(panel.is_visible())
-                self.assertIn(label, panel.inner_text())
-                if name == "partial":
-                    self.assertIn("观察配置 qbittorrent", panel.inner_text())
+                if status == "untracked":
+                    self.assertEqual(panel.count(), 0)
+                else:
+                    self.assertTrue(panel.is_visible())
+                    self.assertIn(label, panel.inner_text())
+                    self.assertFalse(panel.evaluate("node => node.open"))
                 geometry = page.evaluate("""() => {
-                    const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
+                    const rect = selector => document.querySelector(selector)?.getBoundingClientRect().toJSON();
                     window.__taskNode = document.querySelector('#agentTaskSnapshot');
                     return {rows:getComputedStyle(document.querySelector('.agent-console')).gridTemplateRows,
                         panel:rect('#agentTaskSnapshot'), composer:rect('#agentComposer'),
                         console:rect('.agent-console'), auxiliary:rect('.agent-start-panel'),
                         width:document.documentElement.clientWidth, scrollWidth:document.documentElement.scrollWidth,
-                        parent:window.__taskNode.parentElement.className};
+                        parent:window.__taskNode?.parentElement.className};
                 }""")
                 evidence = os.environ.get("CONSUMER_EVIDENCE")
                 if evidence:
                     Path(evidence, f"empty-{name}.json").write_text(json.dumps(geometry, indent=2))
                     page.screenshot(path=str(Path(evidence, f"empty-{name}.png")))
                 self.assertEqual(len(geometry["rows"].split()), 3, geometry)
-                self.assertIn("agent-start-panel", geometry["parent"])
+                if status != "untracked":
+                    self.assertIn("agent-start-panel", geometry["parent"])
                 self.assertLessEqual(abs(
                     geometry["composer"]["y"] + geometry["composer"]["height"] / 2
                     - geometry["console"]["y"] - geometry["console"]["height"] / 2
                 ), 0.5)
                 self.assertLessEqual(geometry["scrollWidth"], geometry["width"])
-                self.assertGreaterEqual(geometry["panel"]["top"], geometry["composer"]["bottom"])
-                self.assertLessEqual(geometry["panel"]["bottom"], geometry["auxiliary"]["bottom"])
+                if status != "untracked":
+                    self.assertGreaterEqual(geometry["panel"]["top"], geometry["composer"]["bottom"])
+                    self.assertLessEqual(geometry["panel"]["bottom"], geometry["auxiliary"]["bottom"])
                 self.assertLessEqual(geometry["composer"]["bottom"], height)
                 action = page.locator(".agent-start-action").last
                 action.scroll_into_view_if_needed()
@@ -93,18 +103,21 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
                 self.assertEqual(page.locator("#agentPrompt").input_value(), "查看待办 2")
                 page.locator("#agentSend").click()
                 page.wait_for_function("document.querySelector('#agentStop').hidden")
-                self.assertTrue(page.evaluate("""() => window.__taskNode === document.querySelector('#agentTaskSnapshot')
-                    && window.__taskNode.nextElementSibling === document.querySelector('#agentComposer')"""))
-                self.assertTrue(panel.is_visible())
+                if status == "untracked":
+                    self.assertEqual(panel.count(), 0)
+                else:
+                    self.assertTrue(page.evaluate("""() => window.__taskNode === document.querySelector('#agentTaskSnapshot')
+                        && window.__taskNode.nextElementSibling === document.querySelector('#agentComposer')"""))
+                    self.assertTrue(panel.is_visible())
                 page.locator("#agentNewSession").click()
                 self.assertEqual(panel.count(), 0)
-                self.assertTrue(page.evaluate("!window.__taskNode.isConnected"))
+                self.assertTrue(page.evaluate("!window.__taskNode?.isConnected"))
                 self.assertEqual(errors, [])
                 self.assertEqual(unexpected, [])
 
     def test_candidate_preview_and_active_poll_consume_snapshot(self):
-        from tests.test_agent_ux_browser import candidate_view, active_turn
         from tests.test_agent_kernel_browser import _event
+        from tests.test_agent_ux_browser import active_turn, candidate_view
 
         session = "consumer-browser-session-0001"
         task = self.snapshots[0]["api"]["task"]
@@ -268,9 +281,9 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             {"width": 360, "height": 667}, history=False
         )
         for task, label in (
-            (None, "未建立任务验收清单"),
-            ({"status": "complete", "root_goal": "DO NOT DISPLAY"}, "任务验收状态未知"),
-            (captured["payload"]["task"], "已声明检查项已核验"),
+            (None, None),
+            ({"status": "complete", "root_goal": "DO NOT DISPLAY"}, "任务进度待核对"),
+            (captured["payload"]["task"], "已核验全部检查项"),
         ):
             payload = {**captured["payload"], "task": task}
             page.evaluate(
@@ -279,13 +292,15 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             )
             page.locator("#agentPrompt").fill("继续核对")
             page.locator("#agentSend").click()
-            page.wait_for_function(
-                '(label)=>document.querySelector("#agentTaskSnapshot")?.textContent.includes(label)',
-                arg=label,
-            )
-            self.assertNotIn(
-                "DO NOT DISPLAY", page.locator("#agentTaskSnapshot").inner_text()
-            )
+            page.wait_for_function("document.querySelector('#agentStop').hidden")
+            if label is None:
+                self.assertEqual(page.locator("#agentTaskSnapshot").count(), 0)
+            else:
+                page.wait_for_function(
+                    '(label)=>document.querySelector("#agentTaskSnapshot")?.textContent.includes(label)',
+                    arg=label,
+                )
+                self.assertNotIn("DO NOT DISPLAY", page.locator("#agentTaskSnapshot").text_content())
             self.assertIn("部分完成", page.locator("#agentTranscript").inner_text())
         page.evaluate("window.__kernelConfig.sessions.draft_scope='b'.repeat(64)")
         page.locator("#toggleAgentRail").click()
@@ -312,7 +327,9 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
                 panel.count(), 1, "A committed session task needs its own panel"
             )
             self.assertTrue(panel.is_visible())
-            self.assertIn("已声明检查项尚未全部核验", panel.inner_text())
+            self.assertIn("1 项待核验", panel.inner_text())
+            self.assertNotIn("观察配置 qbittorrent", panel.inner_text())
+            panel.locator("summary").click()
             self.assertIn("观察配置 qbittorrent", panel.inner_text())
             partial_geometry = page.evaluate("""() => ({text:document.querySelector('#agentTaskSnapshot').textContent,
                 width:document.documentElement.clientWidth, scrollWidth:document.documentElement.scrollWidth,
@@ -355,7 +372,7 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             )
             page.reload()
             page.wait_for_function(
-                "document.querySelector('#agentTaskSnapshot')?.textContent.includes('尚未全部核验')"
+                "document.querySelector('#agentTaskSnapshot')?.textContent.includes('项待核验')"
             )
             self.assertEqual(panel.count(), 1)
             page.evaluate(
@@ -364,9 +381,9 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             page.locator("#agentPrompt").fill("继续")
             page.locator("#agentSend").click()
             page.wait_for_function(
-                "document.querySelector('#agentTaskSnapshot')?.textContent.includes('已声明检查项已核验')"
+                "document.querySelector('#agentTaskSnapshot')?.textContent.includes('已核验全部检查项')"
             )
-            self.assertIn("会话声明任务快照", panel.inner_text())
+            self.assertNotIn("会话声明任务快照", panel.inner_text())
             # A new same-session question retains the committed session snapshot.
             page.evaluate(
                 "(events) => {window.__kernelConfig.queryEvents=events; window.__kernelConfig.queryDelayMs=25}",
@@ -374,9 +391,9 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             )
             page.locator("#agentPrompt").fill("一个无关问题")
             page.locator("#agentSend").click()
-            self.assertIn("已声明检查项已核验", panel.inner_text())
+            self.assertIn("已核验全部检查项", panel.inner_text())
             page.wait_for_function("document.querySelector('#agentStop').hidden")
-            self.assertIn("已声明检查项已核验", panel.inner_text())
+            self.assertIn("已核验全部检查项", panel.inner_text())
             self.assertNotIn(
                 "Media Agent 已完成", page.locator("#agentResponseStatus").inner_text()
             )

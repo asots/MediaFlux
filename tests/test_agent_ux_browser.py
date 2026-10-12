@@ -754,22 +754,28 @@ class AgentUXBrowserTests(unittest.TestCase):
         sessions = {'sessions': [{'session_id': SESSION_A, 'title': '失败任务历史'}], 'draft_scope': SCOPE}
         initial = {'sessions': sessions, 'sessionDetails': {SESSION_A: session_snapshot(SESSION_A)}}
         page = self.page(initial, stored_session=SESSION_A)
-        failed = session_snapshot(
-            SESSION_A,
-            messages=[{'role': 'user', 'content': '执行受控失败任务'}],
-            last_turn={
-                'request_id': 'rq-refresh-failed-0001',
-                'turn_id': 'turn-rq-refresh-failed-0001',
-                'status': 'failed',
-                'message': '受控任务失败，状态已同步。',
-            },
-        )
-        self.reload_ui(page, {'sessions': sessions, 'sessionDetails': {SESSION_A: failed}})
-        page.wait_for_function("() => document.querySelector('.agent-result-card.is-interrupted .agent-stream-text')?.textContent.includes('受控任务失败')")
-        self.assertEqual(page.locator('.agent-result-card.is-interrupted .agent-stream-text').count(), 1)
-        self.assertEqual(page.locator('#agentTranscript .agent-message-user').count(), 1)
-        self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 0)
-        self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
+        for message, expected in (
+            ('受控任务失败，状态已同步。', '受控任务失败，状态已同步。'),
+            ('本轮未能完成', '当前会话摘要未提供具体失败原因。可查看日志定位；涉及文件变更时，请先核对结果。'),
+        ):
+            with self.subTest(message=message):
+                failed = session_snapshot(
+                    SESSION_A,
+                    messages=[{'role': 'user', 'content': '执行受控失败任务'}],
+                    last_turn={
+                        'request_id': 'rq-refresh-failed-0001',
+                        'turn_id': 'turn-rq-refresh-failed-0001',
+                        'status': 'failed',
+                        'message': message,
+                    },
+                )
+                self.reload_ui(page, {'sessions': sessions, 'sessionDetails': {SESSION_A: failed}})
+                page.wait_for_function("text => document.querySelector('.agent-result-card.is-interrupted .agent-stream-text')?.textContent.includes(text)", arg=expected)
+                self.assertEqual(page.locator('.agent-result-card.is-interrupted .agent-stream-text').inner_text(), expected)
+                self.assertEqual(page.locator('.agent-result-card.is-interrupted .agent-stream-text').count(), 1)
+                self.assertEqual(page.locator('#agentTranscript .agent-message-user').count(), 1)
+                self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 0)
+                self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm').length"), 0)
 
     def test_resume_nonempty_history_preserves_focused_resume_control(self):
         page = self.page({'sessions': {'sessions': [{'session_id': SESSION_A, 'title': '已保存的历史'}]},
