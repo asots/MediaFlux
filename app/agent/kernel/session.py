@@ -151,6 +151,17 @@ async def _require_complete_inline_history(original, candidate, *, code, pipelin
 def _provider_failure_message(exc: ModelProviderError) -> str:
     """把 Provider 内部故障归一为不泄露配置的用户提示。"""
 
+    diagnostic = exc.failure
+    if diagnostic is not None:
+        if diagnostic.emitted and diagnostic.kind in {
+            "connect_timeout", "read_timeout", "write_timeout", "pool_timeout",
+            "connection_error", "transport_error", "deadline",
+        }:
+            return "模型回复传输中断，本轮未完整生成；请稍后重试。"
+        if diagnostic.kind in {"read_timeout", "write_timeout", "pool_timeout", "deadline"}:
+            return "模型服务响应超时，请稍后重试。"
+        if diagnostic.kind in {"connect_timeout", "connection_error"}:
+            return "无法连接模型服务，请检查网络或模型路由后重试。"
     reason = str(exc or "")
     if "完成事件前中断" in reason or "未完整结束" in reason:
         return "模型回复未完整生成，请重试；不要把截断内容视为完成结果。"
@@ -1835,7 +1846,7 @@ class AgentSession:
             await failure(exc.code, str(exc))
         except ModelProviderError as exc:
             await preserve_checkpoint()
-            logger.warning("Agent model provider failed type=%s", type(exc).__name__)
+            logger.warning("Agent model provider failed type=%s diagnostic=%s", type(exc).__name__, exc.failure)
             await failure("model_provider_error", _provider_failure_message(exc))
         except Exception as exc:  # noqa: BLE001 - final turn fault boundary
             await preserve_checkpoint()

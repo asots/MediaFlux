@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
+from time import monotonic
 
 import httpx
 
@@ -55,12 +56,48 @@ from .model_budget import is_window_feedback, parse_budget_profiles, reduced_out
 from app.agent.model_context_budget import conservative_tokens
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderFailure:
+    """仅记录故障阶段和数值，不保存地址、请求体或原始异常文本。"""
+
+    kind: str
+    phase: str
+    protocol: str
+    attempts: int
+    http_status: int | None
+    emitted: bool
+    elapsed_ms: int
+    idle_timeout_seconds: int
+    deadline_seconds: int
+
+
 class ModelProviderError(RuntimeError):
-    pass
+    failure: ProviderFailure | None = None
 
 
 class IncompleteModelAnswer(ModelProviderError):
     """Provider 原生协议缺少成功终态；可有界重新汇总，不代表业务工具失败。"""
+
+
+def _failure_kind(exc: BaseException | None, http_status: int | None) -> str:
+    # 使用白名单类型，不记录可能包含 URL/令牌的异常消息或任意类名。
+    for kind, name in (
+        (httpx.ConnectTimeout, "connect_timeout"),
+        (httpx.ReadTimeout, "read_timeout"),
+        (httpx.WriteTimeout, "write_timeout"),
+        (httpx.PoolTimeout, "pool_timeout"),
+        (httpx.ConnectError, "connection_error"),
+        (httpx.TransportError, "transport_error"),
+        (TimeoutError, "deadline"),
+        (IncompleteModelAnswer, "incomplete_response"),
+        (ProviderStreamError, "incomplete_response"),
+        (ValueError, "invalid_response"),
+    ):
+        if isinstance(exc, kind):
+            return name
+    if http_status is not None and not 200 <= http_status < 300:
+        return "http_error"
+    return "provider_error"
 
 
 def _provider_state(protocol: str, model: str, endpoint: str, layout: str) -> ProviderState:
@@ -692,6 +729,13 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
             pin_resolved_address=True,
         )
         emitted = False
+        phase = "request"
+        protocol = configured
+        attempts = 0
+        http_status: int | None = None
+        last_fault: BaseException | None = None
+        started = monotonic()
+        deadline = _stream_deadline_seconds(network_idle_timeout)
         feedback_used = False
         last_error: Exception | None = None
         last_http_error: ModelProviderError | None = None
@@ -699,7 +743,7 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
             # HTTP 客户端已经按配置限制连接/读写空闲时间；流式工具调用可能
             # 持续产生有效数据并超过该时长，不能再用同一个值把总响应硬切断。
             # 这里仅保留更宽松且有上限的整轮保险丝。
-            async with asyncio.timeout(_stream_deadline_seconds(network_idle_timeout)):
+            async with asyncio.timeout(deadline):
                 for protocol in protocol_attempts(configured):
                     can_fallback = False
                     cancellation.raise_if_cancelled()
@@ -734,8 +778,13 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                         # 等待只发生在前次 response 清理和异常处理全部退出后；
                         # 取消/总 deadline 不得被清理异常覆盖，也不继承原异常图。
                         if attempt:
+                            phase = "retry_wait"
                             await asyncio.sleep(_MODEL_RETRY_DELAY_SECONDS)
                         cancellation.raise_if_cancelled()
+                        phase = "request"
+                        http_status = None
+                        last_fault = None
+                        attempts += 1
                         try:
                             async with client.stream_post_json(
                                 location.endpoint(protocol),
@@ -747,6 +796,8 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                 ),
                                 max_redirects=0,
                             ) as response:
+                                phase = "response"
+                                http_status = response.status_code
                                 try:
                                     if (
                                         response.status_code < 200
@@ -795,7 +846,8 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                                     can_fallback = is_protocol_fallback_error(
                                                         response.status_code, raw_error.decode("utf-8"), protocol=protocol,
                                                     )
-                                            except Exception:
+                                            except Exception as exc:
+                                                last_fault = exc
                                                 # 延后终态到 context 退出后，清理失败不得覆盖它或重发。
                                                 can_fallback = False
                                                 read_failure = ModelProviderError("Provider 错误响应读取失败")
@@ -825,6 +877,7 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                     except ProviderStreamError as exc:
                                         raise IncompleteModelAnswer(str(exc)) from exc
                                     except ValueError as exc:
+                                        last_fault = exc
                                         last_error = ModelProviderError(
                                             "Provider 返回格式无效"
                                         )
@@ -872,6 +925,7 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                             can_fallback = False
                             if read_failure is not None:
                                 break
+                            last_fault = exc
                             last_error = exc
                             if last_http_error is not None:
                                 category = next((kind.__name__ for kind in (
@@ -882,8 +936,6 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                 last_error = ModelProviderError(message)
                                 last_error.__cause__ = last_http_error
                             if emitted:
-                                if last_http_error is None:
-                                    raise
                                 break
                             if attempt == 0 and _retryable_provider_exception(exc):
                                 continue
@@ -893,11 +945,27 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                     if not can_fallback:
                         break
         except TimeoutError:
+            last_fault = TimeoutError()
             last_error = ModelProviderError("Provider 请求超时")
             last_error.__cause__ = TimeoutError()
             last_error.__cause__.__cause__ = last_http_error
+        except ModelProviderError as exc:
+            # 已有协议/读取失败保留原类型和原因，补充同一份安全诊断。
+            # 取消及请求构建中的内部编程错误仍按原异常传播。
+            last_error = exc
+            last_fault = last_fault or exc
         finally:
             await client.aclose()
         if isinstance(last_error, ModelProviderError):
-            raise last_error
-        raise ModelProviderError("Provider 暂时不可用") from last_error
+            error = last_error
+        else:
+            error = ModelProviderError("Provider 暂时不可用")
+            error.__cause__ = last_error
+        error.failure = ProviderFailure(
+            kind=_failure_kind(last_fault or last_error, http_status),
+            phase=phase, protocol=protocol, attempts=attempts,
+            http_status=http_status, emitted=emitted,
+            elapsed_ms=max(0, round((monotonic() - started) * 1000)),
+            idle_timeout_seconds=network_idle_timeout, deadline_seconds=deadline,
+        )
+        raise error
