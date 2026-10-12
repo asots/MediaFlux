@@ -461,6 +461,7 @@ async def download_indexer_result(
     admission_id: int | None = None,
     origin_namespace: str = "indexer",
     scope: str = "manual",
+    _public_errors: bool = False,
 ) -> dict[str, Any]:
     """按服务端调用入口校验后解析并提交资源结果。"""
     normalized_target = str(target or "").strip().lower()
@@ -471,8 +472,19 @@ async def download_indexer_result(
         raise IndexerValidationError("invalid download origin namespace")
 
     async with _download_limiter():
-        stored, resolved = await _resolve(service, result_id, scope=scope)
-        item = await _resolved_download_input(service, stored, resolved)
+        try:
+            stored, resolved = await _resolve(service, result_id, scope=scope)
+            item = await _resolved_download_input(service, stored, resolved)
+        except (IndexerError, InvalidDownloadData) as exc:
+            if not _public_errors:
+                raise
+            # 仅解析 / 输入转换阶段能证明尚未创建请求或调用下载后端。
+            # public 入口后续的兜底异常没有此标记；非 public 入口仍保留原异常契约。
+            error = exc.public_message if isinstance(exc, IndexerError) else "资源下载数据无效"
+            return {
+                **_failed_download_result(result_id, normalized_target, error),
+                "pre_submission_failure": True,
+            }
         submitted = await asyncio.to_thread(
             submit_download_input,
             item,
@@ -535,6 +547,7 @@ async def download_indexer_result_public(
             message_id=message_id,
             origin_namespace=origin_namespace,
             scope=scope,
+            _public_errors=True,
             **({"admission_id": admission_id} if admission_id is not None else {}),
         )
     except IndexerError as exc:

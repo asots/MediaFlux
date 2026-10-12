@@ -624,7 +624,7 @@ class BackupTests(unittest.TestCase):
             paths.token_file.unlink()
 
             restored = restore_backup(paths, archive)
-            self.assertEqual(restored.payload["format_version"], 1)
+            self.assertEqual(restored.payload["format_version"], 2)
             self.assertEqual(paths.env_file.read_text(encoding="utf-8"), "WEB_PORT=12370\n")
             self.assertEqual(json.loads(paths.token_file.read_text(encoding="utf-8"))["token"], "secret")
             check = sqlite3.connect(paths.database_path)

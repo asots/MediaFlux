@@ -684,16 +684,21 @@ async function loadEntries({preserve=true}={}){
                 failed:{icon:'alert-circle',class:'status-failed',text:'失败'},
                 skipped:{icon:'minus-circle',class:'status-skipped',text:e.skip_reason?'自动跳过':'手动已处理'}
             };
-            const stInfo=statusMap[e.status]||{icon:'help-circle',class:'status-skipped',text:e.status};
+            const delivery=e.delivery||{};
+            const needsReview=e.status!=='skipped'&&Boolean(delivery.review_required);
+            const deliveryFailed=e.status!=='skipped'&&Boolean(delivery.failed);
+            const canRetry=Boolean(delivery.retryable);
+            const stInfo=needsReview?{icon:'alert-circle',class:'status-failed',text:'需核验'}:deliveryFailed?{icon:'alert-circle',class:'status-failed',text:'下载失败'}:statusMap[e.status]||{icon:'help-circle',class:'status-skipped',text:e.status};
+            const statusHint=(deliveryFailed||needsReview)?`${stInfo.text} · 请求 #${Number(delivery.request_id)||0}${delivery.error?'：'+delivery.error:''}`:stInfo.text;
             const parsed=parseEntryTitle(e.title);
             return `<article class="rss-entry-card">
                 <label class="rss-entry-check" title="选择条目"><input type="checkbox" data-entry-check="${e.id}" ${selectedEntries.has(Number(e.id))?'checked':''}></label>
-                <div class="rss-status-badge ${stInfo.class}" title="${escapeHtml(stInfo.text)}"><i data-lucide="${stInfo.icon}"></i></div>
+                <div class="rss-status-badge ${stInfo.class}" title="${escapeHtml(statusHint)}" aria-label="${escapeHtml(statusHint)}"><i data-lucide="${stInfo.icon}"></i></div>
                 <div class="rss-entry-body">
                     <div class="rss-entry-title-row"><span class="rss-entry-title-text">${escapeHtml(parsed.mainTitle)}</span>${parsed.tags.length?`<div class="rss-tag-group">${parsed.tags.map(t=>`<span class="rss-tag">${escapeHtml(t)}</span>`).join('')}</div>`:''}</div>
                     <div class="rss-entry-meta"><span class="meta-item"><i data-lucide="rss"></i> ${escapeHtml(e.sub_name||'未知订阅源')}</span><span class="meta-sep">•</span><span class="meta-item"><i data-lucide="calendar"></i> ${escapeHtml(e.pub_date||'未知时间')}</span>${e.media_episode?`<span class="meta-sep">•</span><span class="meta-item"><i data-lucide="scan-search"></i> S${String(e.media_season).padStart(2,'0')}E${String(e.media_episode).padStart(2,'0')}</span>`:''}${e.skip_reason?`<span class="rss-entry-skip-reason"><i data-lucide="shield-check"></i>${escapeHtml(e.skip_reason)}</span>`:''}</div>
                 </div>
-                <div class="rss-entry-actions">${e.processed?'<div class="rss-icon-done-badge" title="已完成处理"><i data-lucide="check-check"></i></div>':`<button class="rss-btn" style="background:var(--accent);color:var(--on-accent);border-color:var(--accent);" type="button" onclick="dlEntry(${e.id},this)"><i data-lucide="download"></i><span>下载</span></button>`}</div>
+                <div class="rss-entry-actions" style="min-height:32px;min-width:78px;justify-content:flex-end;align-items:center">${needsReview||(deliveryFailed&&e.processed&&!canRetry)?'<a class="rss-btn" href="/downloads" aria-label="前往下载中心核验">查看下载</a>':e.processed&&!canRetry?'<div class="rss-icon-done-badge" title="已完成处理"><i data-lucide="check-check"></i></div>':`<button class="rss-btn" style="background:var(--accent);color:var(--on-accent);border-color:var(--accent);" type="button" onclick="dlEntry(${e.id},this)"><i data-lucide="download"></i><span>${canRetry?'重试':'下载'}</span></button>`}</div>
             </article>`;
         }).join('');
         window.renderLucideIcons?.(list);
@@ -760,7 +765,7 @@ async function batchMark(processed,trigger){
 }
 
 async function dlEntry(id,trigger){
-    if(trigger?.disabled)return;setRssButtonBusy(trigger,true,'提交中');
+    if(trigger?.disabled)return;setRssButtonBusy(trigger,true,'提交');
     try{
         const d=await rssApiJSON('/api/rss/entries/'+id+'/download',{method:'POST'});
         const result=d.result||{};

@@ -25,6 +25,7 @@ class _Cloud:
         self.fail_empty_scan = ""
         self.fail_delete = ""
         self.fail_move = False
+        self.directory_sequence = 0
         self.add("incoming", "0", "Incoming", is_dir=True)
         self.add("source", "incoming", "Synthetic source", is_dir=True)
         self.add("leaf", "source", "Season 1", is_dir=True)
@@ -54,7 +55,8 @@ class _Cloud:
         parent.etag = f"directory-version-{parent.updated_at}"
 
     def create_dir(self, name, parent_id):
-        file_id = f"created-{len(self.nodes)}"
+        self.directory_sequence += 1
+        file_id = f"created-{self.directory_sequence}"
         self.add(file_id, parent_id, name, is_dir=True)
         self._touch(parent_id)
         return file_id
@@ -212,9 +214,174 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertEqual((log["status"], log["operation_type"]), ("success", "reorganize"))
         self.assertEqual(self.cloud.nodes["video"].parent_id, result["target_dir_id"])
         with db.get_conn() as conn:
-            audits = conn.execute("SELECT file_id,status FROM organize_delete_audit ORDER BY id").fetchall()
-        self.assertEqual([(row["file_id"], row["status"]) for row in audits],
-                         [("leaf", "success"), ("source", "success")])
+            audits = conn.execute("SELECT file_id,file_name,parent_id,status FROM organize_delete_audit ORDER BY id").fetchall()
+        self.assertEqual([(row["file_id"], row["file_name"], row["parent_id"], row["status"]) for row in audits],
+                         [("leaf", "Season 1", "source", "success"),
+                          ("source", "Synthetic source", "incoming", "success")])
+
+    def test_cleaned_source_is_recreated_for_return_with_companions(self):
+        self.cloud.add("subtitle", "leaf", "Original.S01E01.zh.srt")
+        self._add_item("subtitle", "subtitle")
+        self._reorganize()
+        self.assertEqual(self.cloud.deleted, ["leaf", "source"])
+        result = self.service.return_to_source(
+            self.log_id, "return-cleaned", self.service.detail(self.log_id)["version"],
+        )
+        self.assertTrue(result['success'])
+        parent = self.cloud.file_info(self.cloud.nodes['video'].parent_id)
+        self.assertEqual((parent.name, self.cloud.file_info(parent.parent_id).name),
+                         ('Season 1', 'Synthetic source'))
+        self.assertEqual(self.cloud.nodes['subtitle'].parent_id, parent.file_id)
+        self.assertEqual(self.cloud.nodes['video'].name, 'Original.S01E01.mkv')
+        self.assertEqual(db.get_organize_log(self.log_id)['current_parent_id'], parent.file_id)
+        self.assertNotIn('leaf', self.cloud.nodes)
+
+    def test_cleaned_source_is_recreated_for_revert(self):
+        self._reorganize()
+        self.assertTrue(self.service.revert_latest(
+            self.log_id, "undo-cleaned", self.service.detail(self.log_id)['version'],
+        )['success'])
+        parent = self.cloud.file_info(self.cloud.nodes['video'].parent_id)
+        self.assertEqual(parent.name, 'Season 1')
+        self.assertEqual(self.cloud.nodes['video'].name, 'Original.S01E01.mkv')
+        self.assertNotIn('leaf', self.cloud.nodes)
+
+    def test_reorganize_after_return_cleans_restored_source_and_can_return_again(self):
+        self._reorganize()
+        self.service.return_to_source(self.log_id, 'return-first', self.service.detail(self.log_id)['version'])
+        restored_leaf = self.cloud.nodes['video'].parent_id
+        restored_source = self.cloud.nodes[restored_leaf].parent_id
+        self.assertTrue(self._reorganize()['success'])
+        self.assertNotIn(restored_leaf, self.cloud.nodes)
+        self.assertNotIn(restored_source, self.cloud.nodes)
+        self.assertTrue(self.service.return_to_source(
+            self.log_id, 'return-second', self.service.detail(self.log_id)['version'],
+        )['success'])
+        leaf = self.cloud.file_info(self.cloud.nodes['video'].parent_id)
+        self.assertEqual(leaf.name, 'Season 1')
+        self.assertEqual(self.cloud.file_info(leaf.parent_id).name, 'Synthetic source')
+
+    def test_failed_request_does_not_recover_when_remote_member_changed_after_move(self):
+        request_id, _ = self._staging()
+        db.update_download_request(request_id, organize_started=-1, organize_status='failed')
+        move = self.cloud.move
+        def changed_after_move(ids, parent):
+            result = move(ids, parent)
+            self.cloud.nodes['video'].etag = 'external-content-change'
+            return result
+        with patch.object(self.cloud, 'move', side_effect=changed_after_move):
+            self.assertTrue(self._reorganize()['success'])
+        self.assertEqual(db.get_download_request(request_id)['organize_started'], -1)
+        self.assertIn('source', self.cloud.nodes)
+
+    def test_return_reuses_persisted_restore_receipt_after_file_failure(self):
+        self._reorganize()
+        self.cloud.fail_move = True
+        with self.assertRaisesRegex(RuntimeError, 'synthetic move failure'):
+            self.service.return_to_source(self.log_id, 'first-return', self.service.detail(self.log_id)['version'])
+        created_count = self.cloud.directory_sequence
+        self.cloud.fail_move = False
+        self.assertTrue(self.service.return_to_source(
+            self.log_id, 'retry-return', self.service.detail(self.log_id)['version'],
+        )['success'])
+        self.assertEqual(self.cloud.directory_sequence, created_count)
+
+    def test_return_rejects_same_name_directory_without_restore_receipt(self):
+        self._reorganize()
+        self.cloud.add('external', 'incoming', 'Synthetic source', is_dir=True)
+        before = self.cloud.nodes['video'].parent_id
+        with self.assertRaisesRegex(RuntimeError, '同名'):
+            self.service.return_to_source(self.log_id, 'collision', self.service.detail(self.log_id)['version'])
+        self.assertEqual(self.cloud.nodes['video'].parent_id, before)
+        self.assertEqual(self.cloud.list_dir('external'), [])
+
+    def test_failed_cleanup_keeps_existing_original_directory_returnable_without_recreation(self):
+        self.cloud.fail_delete = 'leaf'
+        self._reorganize()
+        self.assertIn('leaf', self.cloud.nodes)
+        count = self.cloud.directory_sequence
+        self.assertTrue(self.service.return_to_source(
+            self.log_id, 'return-retained', self.service.detail(self.log_id)['version'],
+        )['success'])
+        self.assertEqual(self.cloud.nodes['video'].parent_id, 'leaf')
+        self.assertEqual(self.cloud.directory_sequence, count)
+
+    def test_return_never_builds_without_successful_complete_delete_receipt(self):
+        self._reorganize()
+        with db.get_conn() as conn:
+            conn.execute("UPDATE organize_delete_audit SET file_name='空目录 leaf',parent_id='' WHERE file_id='leaf'")
+        count = self.cloud.directory_sequence
+        with self.assertRaisesRegex(RuntimeError, '清理凭据'):
+            self.service.return_to_source(self.log_id, 'incomplete', self.service.detail(self.log_id)['version'])
+        self.assertEqual(self.cloud.directory_sequence, count)
+
+    def test_unknown_restore_response_is_not_replayed_or_adopted_by_name(self):
+        self._reorganize()
+        create = self.cloud.create_dir
+        def lose_response(name, parent):
+            create(name, parent)
+            raise TimeoutError('unknown create')
+        with (
+            patch.object(self.cloud, 'create_dir', side_effect=lose_response),
+            self.assertRaisesRegex(TimeoutError, 'unknown create'),
+        ):
+            self.service.return_to_source(self.log_id, 'lost-create', self.service.detail(self.log_id)['version'])
+        count = self.cloud.directory_sequence
+        with self.assertRaisesRegex(RuntimeError, '结果未知'):
+            self.service.return_to_source(self.log_id, 'retry-create', self.service.detail(self.log_id)['version'])
+        self.assertEqual(self.cloud.directory_sequence, count)
+
+    def test_stale_version_cannot_create_restore_directories(self):
+        version = self.service.detail(self.log_id)['version']
+        self._reorganize()
+        count = self.cloud.directory_sequence
+        with self.assertRaisesRegex(RuntimeError, '版本'):
+            self.service.return_to_source(self.log_id, 'stale', version)
+        self.assertEqual(self.cloud.directory_sequence, count)
+
+    def test_failed_request_recovers_only_after_actual_success_and_empty_source(self):
+        request_id, token = self._staging()
+        db.update_download_request(request_id, organize_started=-1, organize_status='failed', organize_error='move failed')
+        result = self._reorganize()
+        self.assertTrue(result['success'])
+        row = db.get_download_request(request_id)
+        self.assertEqual((row['organize_status'], row['organize_started'], row['organize_error']), ('completed', 1, ''))
+        self.assertEqual(db.get_organize_confirmation(token)['status'], 'completed')
+        self.assertEqual(row['gy_staging_cleanup_status'], 'completed')
+        self.assertEqual(self.cloud.deleted, ['leaf', 'source'])
+
+    def test_failed_request_with_no_confirmation_recovers_and_cleans_source(self):
+        request_id, token = self._staging()
+        with db.get_conn() as conn:
+            conn.execute('DELETE FROM organize_confirmations WHERE token=?', (token,))
+        db.update_download_request(request_id, organize_started=-1, organize_status='failed')
+        self.assertTrue(self._reorganize()['success'])
+        row = db.get_download_request(request_id)
+        self.assertEqual((row['organize_status'], row['organize_started'], row['gy_staging_cleanup_status']),
+                         ('completed', 1, 'completed'))
+
+    def test_failed_request_keeps_failure_when_unlogged_file_remains(self):
+        request_id, _ = self._staging()
+        db.update_download_request(request_id, organize_started=-1, organize_status='failed')
+        self.cloud.add('unlogged', 'leaf', 'unlogged.mkv')
+        self.assertTrue(self._reorganize()['success'])
+        self.assertEqual(db.get_download_request(request_id)['organize_status'], 'failed')
+        self.assertIn('source', self.cloud.nodes)
+        self.assertIn('unlogged', self.cloud.nodes)
+
+    def test_request_cancelled_during_reorganize_is_not_resurrected(self):
+        request_id, _ = self._staging()
+        db.update_download_request(request_id, organize_started=-1, organize_status='failed')
+        move = self.cloud.move
+        def cancel_after_move(ids, parent):
+            result = move(ids, parent)
+            db.update_download_request(request_id, status='cancelled')
+            return result
+        with patch.object(self.cloud, 'move', side_effect=cancel_after_move):
+            self.assertTrue(self._reorganize()['success'])
+        row = db.get_download_request(request_id)
+        self.assertEqual((row['status'], row['organize_status'], row['organize_started']), ('cancelled', 'failed', -1))
+        self.assertIn('source', self.cloud.nodes)
 
     def test_permanent_source_root_is_preserved_but_empty_child_is_cleaned(self):
         self.permanent_sources.append({"id": "source", "name": "Synthetic source"})

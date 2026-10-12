@@ -5,7 +5,7 @@ from fastapi import APIRouter, Body, Query, Request
 
 from app import database as db
 from app.logger import get_logger
-from app.modules.rss import RSSEngine
+from app.modules.rss import RSSEngine, rss_entry_delivery
 from app.modules.rss_subscription_config import (
     normalize_rss_subscription_create,
     normalize_rss_subscription_update,
@@ -149,6 +149,7 @@ def list_entries(
         "title": r["title"],
         "status": r["status"],
         "processed": bool(r["processed"]),
+        "delivery": rss_entry_delivery(r),
         "submitted_at": r["submitted_at"],
         "processed_at": r["processed_at"],
         "pub_date": r["pub_date"],

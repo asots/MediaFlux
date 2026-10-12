@@ -6,7 +6,7 @@ from dataclasses import replace
 import json
 
 from app import config, database as db
-from app.modules.local_media_outcomes import local_media_task_outcome
+from app.modules.local_media_outcomes import local_media_refresh_status, local_media_task_outcome
 from app.modules.telegram_notification_center import (
     NotificationPublishResult,
     get_notification_thread_event,
@@ -94,28 +94,22 @@ def _download_label(row) -> str:
     return " · ".join(parts) or _label(_value(row, "status"), empty="等待开始")
 
 
-def _archive_stage(row) -> tuple[str, str, str]:
+def _archive_stage(row, task) -> tuple[str, str, str]:
     """一次读取本地文件事实，阶段文案、总状态及投递级别共同使用。"""
     local_status = _status(_value(row, "local_import_status"))
     organize_status = _status(_value(row, "organize_status"))
-    reference = str(_value(row, "local_import_target"))
-    prefix = "local-media-task:"
-    suffix = reference.removeprefix(prefix)
-    task_id = int(suffix) if reference.startswith(prefix) and len(suffix) <= 19 and suffix.isascii() and suffix.isdigit() else 0
-    if local_status == "completed" and 0 < task_id < 2**63:
-        task = db.get_local_media_task(task_id)
-        if task is not None:
-            outcome = local_media_task_outcome(task, db.list_local_media_task_items(task_id))
-            kind = outcome["file_outcome"]
-            archived, skipped = outcome["archived_video_count"], outcome["skipped_video_count"]
-            if kind == "preview_only":
-                return "本地整理", "skipped", "仅预览，未移动文件"
-            if kind == "conflict_skipped":
-                return "本地整理", "skipped", f"冲突跳过 {skipped} 项，未新增归档"
-            if kind not in {"archived", "partial"} or outcome["unknown_video_count"]:
-                return "本地整理", "manual_review", "归档结果待核对"
-            detail = f"已归档 {archived} 项" + (f" · 冲突跳过 {skipped} 项" if skipped else "")
-            return "本地整理", "completed", detail
+    if local_status == "completed" and task is not None:
+        outcome = local_media_task_outcome(task, db.list_local_media_task_items(task.id))
+        kind = outcome["file_outcome"]
+        archived, skipped = outcome["archived_video_count"], outcome["skipped_video_count"]
+        if kind == "preview_only":
+            return "本地整理", "skipped", "仅预览，未移动文件"
+        if kind == "conflict_skipped":
+            return "本地整理", "skipped", f"冲突跳过 {skipped} 项，未新增归档"
+        if kind not in {"archived", "partial"} or outcome["unknown_video_count"]:
+            return "本地整理", "manual_review", "归档结果待核对"
+        detail = f"已归档 {archived} 项" + (f" · 冲突跳过 {skipped} 项" if skipped else "")
+        return "本地整理", "completed", detail
     if local_status:
         return "本地整理", local_status, _label(local_status)
     if organize_status:
@@ -127,7 +121,7 @@ def _archive_stage(row) -> tuple[str, str, str]:
     return "自动整理", "", detail
 
 
-def _overall_state(row, *, archive_status: str, verification_status: str = "") -> str:
+def _overall_state(row, *, archive_status: str, verification_status: str = "", refresh_status: str = "") -> str:
     states = {
         _status(_value(row, key))
         for key in (
@@ -138,7 +132,7 @@ def _overall_state(row, *, archive_status: str, verification_status: str = "") -
     verification = _status(verification_status)
     if states.intersection(_ATTENTION_STATES) or verification == "attention":
         return "attention"
-    if states.intersection(_ERROR_STATES):
+    if states.intersection(_ERROR_STATES) or refresh_status == "failed":
         return "error"
     if states.intersection(_PROCESSING_STATES):
         return "processing"
@@ -231,8 +225,13 @@ def build_download_lifecycle_event(
     previous = get_notification_thread_event(
         f"download:{request_id}", topic=NotificationTopic.DOWNLOAD, chat_id=chat_id,
     )
-    archive_name, archive_status, archive_value = _archive_stage(row)
-    state = _overall_state(row, archive_status=archive_status, verification_status=verification_status)
+    reference = str(_value(row, "local_import_target"))
+    suffix = reference.removeprefix("local-media-task:")
+    task_id = int(suffix) if reference.startswith("local-media-task:") and len(suffix) <= 19 and suffix.isascii() and suffix.isdigit() else 0
+    task = db.get_local_media_task(task_id) if 0 < task_id < 2**63 else None
+    archive_name, archive_status, archive_value = _archive_stage(row, task)
+    refresh_status = local_media_refresh_status(task, stats) if task is not None else ""
+    state = _overall_state(row, archive_status=archive_status, verification_status=verification_status, refresh_status=refresh_status)
     title = {
         "attention": "⚠️ 下载入库需要处理",
         "error": "⚠️ 下载入库部分完成",
@@ -241,6 +240,9 @@ def build_download_lifecycle_event(
         "processing": "⏳ 下载与入库处理中",
         "cancelled": "⏹️ 下载跟踪已停止",
     }[state]
+    if task is not None and state == "completed":
+        # 本地文件归档完成不代表异步媒体库已经可见，不能把刷新入队当作入库验证。
+        title = "✅ 下载与归档完成"
     media_title = notification_payload.get("title")
     if not usable_download_title(media_title):
         media_title = download_display_title(row)
@@ -252,7 +254,15 @@ def build_download_lifecycle_event(
     strm_status = _status(_value(row, "strm_status"))
     if strm_status:
         fields.append(("STRM", _label(strm_status)))
-    refresh_value = str(media_refresh or "").strip() or _previous_field(previous, "媒体库")
+    refresh_value = str(media_refresh or "").strip() or {
+        "failed": "刷新失败（需处理） ❌",
+        "queued": "已排队（合并刷新） ⏳",
+        "completed": "刷新完成 🎯",
+        "skipped": "未启用",
+    }.get(refresh_status, "") or _previous_field(previous, "媒体库")
+    if refresh_status == "failed":
+        # 同请求另一后端的刷新成功不能掩盖本地入队失败。
+        refresh_value = "本地媒体库刷新失败（需处理） ❌"
     if refresh_value:
         fields.append(("媒体库", refresh_value))
     if verification_status:

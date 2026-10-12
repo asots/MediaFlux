@@ -153,7 +153,7 @@ _DOWNLOAD_ATTENTION_BASE_WHERE = (
     "status IN ('failed','manual_review') OR "
     "qb_status IN ('failed','manual_review') OR gy_status IN ('failed','manual_review') OR "
     "local_import_status='failed' OR organize_started<0 OR "
-    "organize_status IN ('failed','requires_manual') OR strm_status='failed' OR "
+    "organize_status IN ('failed','requires_manual') OR strm_status IN ('failed','partial') OR "
     "gy_staging_cleanup_status IN ('retained','failed')"
 )
 
@@ -400,13 +400,20 @@ def create_download_request(request_key: str, kind: str, title: str = "",
         conn.execute("BEGIN IMMEDIATE")
         if retry_source_request_id is not None:
             source = conn.execute(
-                "SELECT status,qb_status,gy_status FROM download_requests WHERE id=?",
+                "SELECT status,qb_status,gy_status,organize_status FROM download_requests WHERE id=?",
                 (int(retry_source_request_id),),
             ).fetchone()
             if source is None or str(source["status"] or "") != str(retry_source_status):
                 raise DownloadRequestRetryFenceError(
                     "原下载请求状态已变化，未重新提交"
                 )
+            if str(origin or "").startswith("rss:"):
+                from app.repositories.rss import rss_retry_source_is_safe
+
+                if not rss_retry_source_is_safe(source, initial_targets):
+                    raise DownloadRequestRetryFenceError(
+                        "RSS 原下载状态已变化，请在下载中心核验"
+                    )
             selected_statuses = (
                 [source["qb_status"], source["gy_status"]]
                 if initial_targets == "both" or source["status"] in terminal_statuses
@@ -1502,6 +1509,39 @@ def mark_download_request_local_media_skipped(request_id: int, content_path: str
             (str(content_path or ""), str(error or "")[:1000], db.now(), db.now(), int(request_id)),
         )
         return cur.rowcount == 1
+
+
+def can_retry_download_local_import(row) -> bool:
+    """仅重开尚未建本地任务的确定失败；已绑定任务沿原 task 重试。"""
+    return bool(
+        row is not None
+        and str(row["status"] or "") not in {"cancelled", "resubmitted"}
+        and str(row["qb_status"] or "") == "completed"
+        and str(row["local_import_status"] or "") == "failed"
+        and not str(row["local_import_target"] or "").strip()
+    )
+
+
+def retry_download_local_import(request_id: int) -> bool:
+    """在同一写事务校验并恢复原请求；不重投下载、不修改另一后端。"""
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM download_requests WHERE id=?", (int(request_id),)).fetchone()
+        if not can_retry_download_local_import(row):
+            return False
+        conn.execute(
+            "UPDATE download_requests SET local_import_status='pending',"
+            "local_import_attempts=0,local_import_error='',local_import_started_at=NULL,"
+            "local_import_completed_at=NULL,attention_cleared_at=NULL,attention_clear_note='',updated_at=? "
+            "WHERE id=?",
+            (db.now(), int(request_id)),
+        )
+        timestamp = db.now()
+        _update_download_request_conn(
+            conn, int(request_id),
+            _download_notification_refresh_fields(str(row["status"]), timestamp), timestamp,
+        )
+        return True
 
 
 def mark_download_request_local_media_failed(

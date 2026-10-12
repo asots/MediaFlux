@@ -13,7 +13,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from app import database as db
+from app import config, database as db
 from app.clients.guangya import GuangYaFile
 from app.modules.directory_media import (
     DirectoryInspection,
@@ -260,10 +260,15 @@ def _local_media_operation(method):
     """把公开业务入口纳入服务生命周期，嵌套调用复用外层 lease。"""
     @wraps(method)
     def guarded(self, *args, **kwargs):
-        with self._lifecycle_operation():
+        with self.operation_lease():
             return method(self, *args, **kwargs)
 
     return guarded
+
+
+LOCAL_MEDIA_RUNTIME_KEYS = (
+    "TMDB_API_KEY", "TMDB_API_URL", "TMDB_MATCH_MODE", "PROXY_URL",
+)
 
 
 class LocalMediaService:
@@ -282,10 +287,46 @@ class LocalMediaService:
         self._active_operations = 0
         self._operation_depth = threading.local()
         self._operation_lock = threading.RLock()
-        self.scraper = scraper or TMDBScraper()
-        self.organizer = Organizer(client=object(), scraper=self.scraper)
+        # 与配置发布共用锁，保证 Key、端点、代理和模式来自同一次读取。
+        with config._lock:
+            self._runtime_config = config.get_many(LOCAL_MEDIA_RUNTIME_KEYS)
+            self.scraper = scraper or TMDBScraper()
+            self.organizer = Organizer(client=object(), scraper=self.scraper)
         self.inspections = inspection_store or _InspectionStore()
         self._sibling_scan_batch = LocalSiblingScanBatch()
+
+    def reload_config(self) -> bool:
+        """只在空闲边界替换自有识别器；在途操作继续使用原实例。"""
+        # 与 close 同序；不能持配置锁等待服务关闭锁。
+        with self._close_call_lock, self._lifecycle_condition:
+            if self._closed or self._closing:
+                return False
+            values = config.get_many(LOCAL_MEDIA_RUNTIME_KEYS)
+            if not self._owns_scraper or values == self._runtime_config:
+                return True
+            if self._active_operations:
+                return False
+            # 关闭或构造失败后仍须重试，不能把半关闭的旧实例当作可用配置。
+            self._runtime_config = None
+            if self.organizer.close() is not True:
+                return False
+            if not self._scraper_closed:
+                self._scraper_closed = self.scraper.close() is True
+            if not self._scraper_closed:
+                return False
+            with config._lock:
+                # 关闭期间配置可能再次发布，构造时重读最新完整配置。
+                values = config.get_many(LOCAL_MEDIA_RUNTIME_KEYS)
+                scraper = TMDBScraper()
+                try:
+                    organizer = Organizer(client=object(), scraper=scraper)
+                except BaseException:
+                    scraper.close()
+                    raise
+                self.scraper, self.organizer = scraper, organizer
+                self._scraper_closed = False
+                self._runtime_config = values
+            return True
 
     def parallel_planning_safe(self) -> bool:
         """仅默认 TMDB Scraper 声明可共享缓存并发规划。"""
@@ -310,7 +351,8 @@ class LocalMediaService:
         return worker
 
     @contextmanager
-    def _lifecycle_operation(self):
+    def operation_lease(self):
+        """公开操作和共享识别器的规划批次使用同一 lease，嵌套调用不换代。"""
         depth = int(getattr(self._operation_depth, "value", 0) or 0)
         if depth:
             self._operation_depth.value = depth + 1
@@ -320,6 +362,8 @@ class LocalMediaService:
                 self._operation_depth.value = depth
             return
 
+        if not self.reload_config():
+            raise LocalMediaServiceError("本地媒体服务正在关闭或切换配置，请稍后重试")
         with self._lifecycle_condition:
             if self._closed or self._closing:
                 raise LocalMediaServiceError("本地媒体服务正在关闭，请稍后重试")
@@ -2037,6 +2081,13 @@ def get_local_media_service() -> LocalMediaService:
         with _service_lock:
             if _service is service:
                 _service = None
+
+
+def reload_local_media_service() -> bool:
+    """刷新已创建的 Web 服务，不为保存设置额外创建服务。"""
+    with _service_lock:
+        service = _service
+    return service is None or service.reload_config()
 
 
 def close_local_media_service() -> bool:

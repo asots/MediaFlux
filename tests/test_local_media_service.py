@@ -1890,7 +1890,7 @@ class LocalMediaServiceTests(IsolatedDatabaseTestCase):
                             self.assertEqual(event.title, "✅ 下载完成（自动入库已跳过）")
                             self.assertEqual(event.state, "downloaded")
                         else:
-                            self.assertEqual(event.title, "✅ 下载与入库完成")
+                            self.assertEqual(event.title, "✅ 下载与归档完成")
                             self.assertEqual(event.state, "completed")
                         self.assertEqual(db.get_download_request(request_id)["local_import_status"], "completed")
                         self.assertEqual(row["event_json"], serialize_notification_event(event))

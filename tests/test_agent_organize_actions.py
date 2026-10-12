@@ -202,7 +202,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
 
         client.list_dir.side_effect = list_dir
         client.file_info.return_value = SimpleNamespace(
-            is_dir=True, etag="empty-v2", updated_at=201
+            is_dir=True, name="Empty", parent_id="parent", etag="empty-v2", updated_at=201
         )
         organizer = Organizer(client=client)
         with patch("app.modules.organize.execute_recycle_bin_delete") as delete:
@@ -231,7 +231,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         client.supports_guarded_empty_directory_delete = True
         client.supports_atomic_empty_directory_delete = True
         client.file_info.return_value = SimpleNamespace(
-            is_dir=True, etag="empty-v8", updated_at=701
+            is_dir=True, name="Empty", parent_id="source", etag="empty-v8", updated_at=701
         )
         client.list_dir.side_effect = lambda dir_id: (
             [child] if dir_id == "source" else []
@@ -274,7 +274,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         client.supports_guarded_empty_directory_delete = True
         client.supports_atomic_empty_directory_delete = True
         client.file_info.return_value = SimpleNamespace(
-            is_dir=True, etag="empty-v2", updated_at=201
+            is_dir=True, name="Empty", parent_id="parent-source", etag="empty-v2", updated_at=201
         )
 
         def list_dir(dir_id):
@@ -315,7 +315,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
             [],
         ]
         client.file_info.return_value = SimpleNamespace(
-            is_dir=True, etag="", updated_at=0
+            is_dir=True, name="Empty", parent_id="source", etag="", updated_at=0
         )
         report = Organizer(client=client).clean_empty_dirs("source", with_report=True)
         self.assertEqual(

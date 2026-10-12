@@ -28,7 +28,11 @@ from app.modules.qb_control import (
     remove_qb_tasks,
 )
 from app.web import api_error, api_response, require_api_login
-from app.repositories.download_requests import download_display_title
+from app.repositories.download_requests import (
+    can_retry_download_local_import,
+    download_display_title,
+    retry_download_local_import,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/downloads")
@@ -173,7 +177,7 @@ def _attention_stages(row) -> list[dict[str, str]]:
     if int(row["organize_started"] or 0) < 0 or organize_status in {"failed", "requires_manual"}:
         append("organize", "自动整理", organize_status or "failed", row["organize_error"])
     strm_status = str(row["strm_status"] or "")
-    if strm_status == "failed":
+    if strm_status in {"failed", "partial"}:
         append("strm", "STRM 同步", strm_status, row["strm_error"])
     cleanup_status = str(row["gy_staging_cleanup_status"] or "")
     if cleanup_status in {"retained", "failed"}:
@@ -194,6 +198,7 @@ def _attention_json(row) -> dict:
         "status": str(row["status"] or ""),
         "stages": _attention_stages(row),
         "retry_targets": download_resubmit_capabilities(row),
+        "retry_local_import": can_retry_download_local_import(row),
         "created_at": str(row["created_at"] or ""),
         "updated_at": str(row["updated_at"] or row["created_at"] or ""),
     }
@@ -502,6 +507,22 @@ def clear_issues_batch(request: Request, data: dict | None = Body(default=None))
         "already_cleared": len(result["already_cleared"]),
         "skipped": skipped,
     })
+
+
+@router.post("/issues/{request_id}/retry-local-import")
+def retry_local_import_issue(request_id: int, request: Request):
+    """修正来源配置后只恢复本地整理，不创建第二个下载请求。"""
+    require_api_login(request)
+    if db.get_download_request(request_id) is None:
+        return api_error("下载请求不存在", 404)
+    if not db.list_local_media_sources(owner="admin", enabled_only=True):
+        return api_error("请先配置并启用本地媒体来源，再重试整理", 400)
+    if not retry_download_local_import(request_id):
+        return api_error("该请求不能重试本地整理；已绑定任务请在本地媒体任务页重试", 409)
+    from app.modules.download_tracker import get_download_tracker
+
+    get_download_tracker().reload()
+    return api_response({"ok": True, "request_id": request_id, "local_import_status": "pending"})
 
 
 @router.post("/issues/{request_id}/resubmit")

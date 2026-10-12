@@ -511,7 +511,7 @@ function renderIssues(data) {
                 <div class="download-attention-operation" aria-label="待处理操作">
                     <div class="download-attention-actions" role="group" aria-label="重新下载目标">
                         ${actionButton('guangya','光鸭','cloud-download')}
-                        ${actionButton('qb','qB','download')}
+                        ${r.retry_local_import?`<button type="button" class="rss-btn download-attention-action" data-issue-local-retry data-request-id="${id}" onclick="retryLocalImport(${id})" ${busy?'disabled':''} aria-busy="${rowBusy?'true':'false'}" aria-label="重试本地整理" title="仅重试本地整理，不会重新下载"><i data-lucide="folder-sync"></i><span>整理</span></button>`:actionButton('qb','qB','download')}
                         ${actionButton('both','两者','copy-plus')}
                     </div>
                     <button type="button" class="rss-btn download-attention-clear" data-issue-clear data-request-id="${r.id}" onclick="clearIssue(${r.id})" ${busy?'disabled':''} aria-busy="${rowBusy?'true':'false'}" title="移出待处理；不会删除文件、任务或日志"><i data-lucide="x"></i><span>清除</span></button>
@@ -638,6 +638,33 @@ async function resubmitIssue(requestId,target){
             title:'重新下载失败',
             message:receivedResponse?(error.message||'下载服务拒绝了本次提交'):'提交状态未知，请先刷新待处理列表核对，不要立即重复提交。',
         });
+        return false;
+    }finally{
+        issueActionBusy.delete(id);
+        syncIssueActionButtons(id);
+        syncIssueSelectionControls();
+    }
+}
+
+async function retryLocalImport(requestId){
+    const id=Number(requestId)||0;
+    if(!id||issueBatchBusy||issueActionBusy.has(id))return false;
+    const confirmed=await appConfirm({title:'重试本地整理',message:'请先修好本地来源或路径映射。此操作只重新排队整理，不会重新下载资源。',confirmText:'重试整理'});
+    if(!confirmed||issueBatchBusy||issueActionBusy.has(id))return false;
+    issueActionBusy.add(id);
+    syncIssueActionButtons(id);
+    syncIssueSelectionControls();
+    let receivedResponse=false;
+    try{
+        const response=await api(`/api/downloads/issues/${id}/retry-local-import`,{method:'POST'});
+        receivedResponse=true;
+        const data=await response.json().catch(()=>({}));
+        if(!response.ok||!data.ok)throw new Error(data.error||'本地整理未能重新排队');
+        appAlert({type:'success',title:'本地整理已重新排队',message:`请求 #${id} 将由下载跟踪器重新检查，不会重新提交下载。`});
+        await Promise.all([loadIssues(downloadIssuePage),loadOverview()]);
+        return true;
+    }catch(error){
+        appAlert({type:receivedResponse?'error':'warning',title:receivedResponse?'重试整理失败':'重试状态待核对',message:receivedResponse?(error.message||'请核对本地来源配置'):'请先刷新任务状态核对，不要立即重复操作。'});
         return false;
     }finally{
         issueActionBusy.delete(id);

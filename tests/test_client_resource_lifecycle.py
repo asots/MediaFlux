@@ -424,12 +424,12 @@ class ClientResourceLifecycleTests(unittest.TestCase):
 
         def start_new_operation() -> None:
             try:
-                with service._lifecycle_operation():
+                with service.operation_lease():
                     pass
             except BaseException as exc:  # pragma: no cover - assertion aid
                 rejected.append(exc)
 
-        with service._lifecycle_operation():
+        with service.operation_lease():
             self.assertFalse(service.close())
             self.assertEqual(
                 service.preview("owner", "inspection"),
@@ -515,7 +515,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
             directory_scrape_module._service = directory_old
 
         try:
-            with local_old._lifecycle_operation():
+            with local_old.operation_lease():
                 self.assertFalse(local_media_module.close_local_media_service())
                 with self.assertRaises(LocalMediaServiceError):
                     local_media_module.get_local_media_service()

@@ -31,6 +31,8 @@ from app.indexers.providers.base import magnet_infohash
 from app.logger import get_logger
 from app.modules import media_identity
 from app.modules.media_identity import build_media_key, parse_episode_label
+from app.repositories.rss import RSSMediaAlreadyClaimedError, rss_retry_source_is_safe
+from app.sensitive_data import redact_sensitive_text
 
 logger = get_logger(__name__)
 
@@ -297,6 +299,24 @@ def _safe_download_source_marker(url: str) -> str:
         return "[http]"
     return "[torrent]" if normalized else ""
 
+
+
+def rss_entry_delivery(entry) -> dict:
+    """公开当前请求的交付状态；不返回源链接、种子或原始异常正文。"""
+    row = dict(entry)
+    return {
+        "request_id": int(row.get("delivery_request_id") or 0),
+        "status": str(row.get("delivery_status") or ""),
+        "backend_status": str(row.get("delivery_backend_status") or ""),
+        "failed": bool(row.get("delivery_failed")),
+        "retryable": bool(row.get("delivery_retryable")),
+        "review_required": bool(row.get("delivery_review_required")) or (
+            not row.get("delivery_request_id") and row.get("failure_code") in {
+                "qb_outcome_unknown", "guangya_outcome_unknown", "submission_outcome_unknown",
+            }
+        ),
+        "error": redact_sensitive_text(str(row.get("delivery_error") or ""))[:500],
+    }
 
 @dataclass
 class RSSEntry:
@@ -837,7 +857,14 @@ class RSSEngine:
             return {"ok": False, "cancelled": True, "error": RSS_REFRESH_CONFLICT_ERROR}
 
         entry_id = int(entry["id"])
-        method = self._entry_method(entry)
+        if entry["status"] == "downloaded" or bool(entry["processed"]):
+            # 同资源批量操作前一项可能已创建 successor；不能用批次旧失败视图回写。
+            entry = db.get_rss_entry(entry_id)
+            if entry is None:
+                return {"error": "条目不存在", "ok": False}
+        # 已绑定的失败恢复沿原目标与内容身份，不因订阅配置 / feed URL 变化改投。
+        method = str(self._entry_value(entry, "download_backend", "") or self._entry_method(entry))
+        delivery = rss_entry_delivery(entry)
         if method not in {"qb", "guangya"}:
             method = "qb"
         try:
@@ -850,11 +877,16 @@ class RSSEngine:
         )
         infohash = self._torrent_infohash(torrent_url) if torrent_url else ""
         if entry["status"] == "downloaded" or bool(entry["processed"]):
-            # 后端曾受理不等于云端文件已落稳。只重开明确关联的后处理失败，
-            # 活跃、结果未知、正常完成及手动跳过仍保留原去重语义。
-            if (entry["status"] == "downloaded"
+            # 受理回执与交付状态分离；只有显式操作能重开当前请求的确定失败。
+            if (entry["status"] == "downloaded" and auto_guard is None
                     and db.update_rss_entries_processed([entry_id], False)):
                 entry = db.get_rss_entry(entry_id)
+            elif entry["status"] == "downloaded" and (delivery["failed"] or delivery["review_required"]):
+                return {
+                    "ok": False, "existing": True, "method": method, "status": delivery["status"],
+                    "request_id": delivery["request_id"], "review_required": delivery["review_required"],
+                    "error": delivery["error"] or "关联下载失败或结果待核验，请在下载中心处理",
+                }
             else:
                 return {
                     "ok": True,
@@ -864,7 +896,11 @@ class RSSEngine:
                     "infohash": infohash,
                     "already_processed": True,
                 }
-        if not torrent_url:
+        linked_key = str(self._entry_value(entry, "download_request_key", "") or "")
+        if (entry["status"] == "failed" and delivery["retryable"] and auto_guard is None
+                and db.update_rss_entries_processed([entry_id], False)):
+            entry = db.get_rss_entry(entry_id)
+        if not torrent_url and not linked_key:
             code, message = ("missing_torrent_url", "条目无种子链接") if isinstance(payload, dict) else ("invalid_payload", "条目数据无效")
             if entry_already_claimed or db.claim_rss_entry(entry_id):
                 db.record_rss_entry_failure(entry_id, code, False)
@@ -887,7 +923,6 @@ class RSSEngine:
 
         request_id = 0
         try:
-            item = self._download_input(entry, torrent_url)
             runtime = qb_runtime_config if isinstance(qb_runtime_config, dict) else None
             qb_save_path = str(self._entry_value(entry, "qb_save_path", "") or "")
             if not qb_save_path and runtime is not None:
@@ -899,25 +934,33 @@ class RSSEngine:
             )
             from app.indexers.downloads import submit_download_input
             from app.modules.download_dispatcher import (
-                guangya_download_needs_resubmit,
                 public_dispatch_summary,
                 resubmit_download_request,
             )
 
-            linked_key = str(self._entry_value(entry, "download_request_key", "") or "")
             retry_source = db.get_download_request_by_request_key(linked_key) if linked_key else None
-            if (method == "guangya" and retry_source is not None
-                    and guangya_download_needs_resubmit(retry_source)):
+            if linked_key:
                 from app.repositories.rss import bind_rss_entry_download
 
-                # 保留已验证身份；successor 认领和后端受理投影沿现有统一事务，
-                # 不清空键、不把完成的光鸭后端降成 failed 来绕过去重。
+                if retry_source is None:
+                    raise ValueError("原下载请求不存在")
                 bind_rss_entry_download(entry_id, linked_key, method)
+                if not rss_retry_source_is_safe(retry_source, method):
+                    current = db.get_rss_entry(entry_id)
+                    if current["status"] == "downloaded":
+                        return {"ok": True, "existing": True, "method": method,
+                                "status": "downloaded", "request_id": int(retry_source["id"])}
+                    code = "qb_outcome_unknown" if method == "qb" else "guangya_outcome_unknown"
+                    db.record_rss_entry_failure(entry_id, code, False, request_id=int(retry_source["id"]))
+                    return {"ok": False, "method": method, "review_required": True,
+                            "request_id": int(retry_source["id"]),
+                            "error": "原下载仍在处理或结果待核验，请在下载中心处理"}
+                # 重提读取原请求源与已验证身份，最终写事务再次执行 RSS 安全栅栏。
                 dispatch = resubmit_download_request(
                     int(retry_source["id"]), method,
                     origin=f"rss:{int(entry['rss_item_id'])}",
                     rss_item_id=int(entry["rss_item_id"]),
-                    log_path=_safe_download_source_marker(torrent_url),
+                    log_path=_safe_download_source_marker(str(retry_source["source_value"] or "")),
                 )
                 submission = {
                     "request_id": int(dispatch.get("request_id") or retry_source["id"]),
@@ -926,7 +969,7 @@ class RSSEngine:
                 }
             else:
                 submission = submit_download_input(
-                    item,
+                    self._download_input(entry, torrent_url),
                     method,
                     origin=f"rss:{int(entry['rss_item_id'])}",
                     gy_target_dir=str(self._entry_value(entry, "gy_target_dir", "") or ""),
@@ -942,6 +985,9 @@ class RSSEngine:
                     log_path=_safe_download_source_marker(torrent_url),
                 )
             request_id = int(submission.get("request_id") or 0)
+        except RSSMediaAlreadyClaimedError:
+            return {"ok": True, "existing": True, "method": method, "status": "skipped",
+                    "already_processed": True}
         except ValueError:
             db.record_rss_entry_failure(entry_id, "invalid_payload", False)
             db.add_download_log(
@@ -1034,10 +1080,10 @@ class RSSEngine:
                 )
         else:
             failure_code, retryable, review_required = self._backend_failure(method, submission)
-            if summary.get("duplicate") and current_request is not None:
+            if current_request is not None:
                 backend_field = "qb_status" if method == "qb" else "gy_status"
                 backend_status = str(current_request[backend_field] or "").strip().lower()
-                if backend_status in {"outcome_unknown", "manual_review"}:
+                if backend_status in {"outcome_unknown", "manual_review"} or current_request["status"] == "manual_review":
                     failure_code = (
                         "qb_outcome_unknown"
                         if method == "qb"
@@ -1134,7 +1180,7 @@ class RSSEngine:
                 cancelled.append(item)
             elif result.get("pending"):
                 pending.append(item)
-            elif result.get("existing"):
+            elif result.get("existing") and result.get("ok"):
                 existing.append(item)
             elif result.get("unverified") and result.get("ok"):
                 unverified.append(item)

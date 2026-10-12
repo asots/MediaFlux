@@ -62,3 +62,17 @@ def local_media_task_outcome(task: Any, items: Iterable[Any]) -> dict[str, Any]:
         "updated_at": str(_field(task, "updated_at")),
         "completed_at": str(_field(task, "completed_at")),
     }
+
+
+def local_media_refresh_status(task: Any, result: Any = None) -> str:
+    """共用同一刷新事实：显式结果优先，重建通知时仍保留持久警告。"""
+    status = str(_field(result, "media_refresh_status") or "").strip().lower()
+    if status in {"failed", "queued", "completed", "skipped"}:
+        return status
+    warnings = _field(result, "warnings", ()) or ()
+    if not warnings:
+        warnings = str(_field(task, "warning") or "").split("；")
+    failure_markers = ("刷新失败", "刷新入队失败", "未刷新媒体库", "已跳过刷新")
+    if any(any(marker in str(item) for marker in failure_markers) for item in warnings):
+        return "failed"
+    return ""

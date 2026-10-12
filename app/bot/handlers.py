@@ -4380,14 +4380,15 @@ def _stop_bot_locked(timeout: float = 5.0, *, cancel_operations: bool = True) ->
             shutdown_telegram_indexer_worker,
         )
 
-        shutdown_telegram_indexer_worker(timeout=timeout)
+        indexer_finished = shutdown_telegram_indexer_worker(timeout=timeout) is True
     except Exception as exc:
+        indexer_finished = False
         logger.warning("停止 Telegram 资源站服务失败 type=%s", type(exc).__name__)
-    return thread_finished and recovery_finished and agent_finished
+    return thread_finished and recovery_finished and agent_finished and indexer_finished
 
 
 def stop_bot(timeout: float = 5.0) -> bool:
-    """停止 Telegram 长轮询，并返回 polling 与恢复线程是否均已退出。"""
+    """停止 Telegram 长轮询，并汇总 polling、恢复与资源站 worker 的关停结果。"""
     with _lifecycle_control_lock:
         return _stop_bot_locked(timeout=timeout)
 
@@ -4399,7 +4400,7 @@ def restart_bot() -> bool:
 
     with _lifecycle_control_lock:
         if not _stop_bot_locked(cancel_operations=False):
-            logger.error("Telegram Bot 旧 polling 未在超时内退出，已取消热重启")
+            logger.error("Telegram Bot 旧运行时尚未完全退出，已取消热重启")
             return False
         reset()
         with _lifecycle_lock:

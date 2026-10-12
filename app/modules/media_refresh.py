@@ -107,7 +107,9 @@ def plan_refresh_targets(
             continue
         parent = str(PurePosixPath(normalized).parent)
         if parent and parent not in {".", "/"}:
-            candidates.append(parent)
+            # 单来源允许视频直接位于媒体根。不能把该变化扩大为根扫描，
+            # 也不能丢弃：保留明确的文件目标，由客户端做受控定位。
+            candidates.append(normalized if parent in boundary.roots else parent)
     unique = [item for item in dict.fromkeys(candidates) if boundary.allows(item)]
     if not unique:
         return RefreshPlan(reason="本轮没有可定位的变化目录")

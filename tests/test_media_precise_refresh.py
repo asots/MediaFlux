@@ -88,8 +88,9 @@ class RefreshTargetPlanningTests(unittest.TestCase):
             [f"{ROOT}/E01.strm"], media_roots=[ROOT],
         )
 
-        self.assertEqual(plan.targets, ())
-        self.assertTrue(plan.reason)
+        self.assertEqual(plan.targets, (f"{ROOT}/E01.strm",))
+        self.assertNotIn(ROOT, plan.targets)
+        self.assertTrue(plan.has_targets)
 
     def test_empty_change_set_reports_a_reason_instead_of_silent_success(self):
         plan = plan_refresh_targets([], [], media_roots=[ROOT])

@@ -709,88 +709,91 @@ class LocalMediaScheduler:
         return source is not None and str(source.media_type or "") != "nsfw"
 
     def _run_parallel_planning_batch(self, tasks: list, workers: int) -> int:
+        """支持并行的注入服务同样须提供 operation_lease 与 create_planning_worker。"""
         if not tasks:
             return 0
-        planner_local = threading.local()
-        planner_guard = threading.Lock()
-        planners: list[object] = []
+        # 规划 worker 共享父服务的 scraper，整个已接纳批次都持有其 lease。
+        with self.service.operation_lease():
+            planner_local = threading.local()
+            planner_guard = threading.Lock()
+            planners: list[object] = []
 
-        def planner_for_thread():
-            planner = getattr(planner_local, "service", None)
-            if planner is None:
-                planner = self.service.create_planning_worker()
-                planner_local.service = planner
-                with planner_guard:
-                    planners.append(planner)
-            return planner
+            def planner_for_thread():
+                planner = getattr(planner_local, "service", None)
+                if planner is None:
+                    planner = self.service.create_planning_worker()
+                    planner_local.service = planner
+                    with planner_guard:
+                        planners.append(planner)
+                return planner
 
-        def prepare(task):
-            return planner_for_thread().prepare_task(self.owner, task.id)
+            def prepare(task):
+                return planner_for_thread().prepare_task(self.owner, task.id)
 
-        pending: deque[tuple[object, str, Future]] = deque()
-        iterator = iter(tasks)
-        window = min(len(tasks), max(workers, workers * 2))
-        processed = 0
-        pool = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="local-media-plan",
-        )
+            pending: deque[tuple[object, str, Future]] = deque()
+            iterator = iter(tasks)
+            window = min(len(tasks), max(workers, workers * 2))
+            processed = 0
+            pool = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="local-media-plan",
+            )
 
-        def fill_window() -> None:
-            nonlocal processed
-            while len(pending) < window and not self._stop_event.is_set():
-                try:
-                    task = next(iterator)
-                except StopIteration:
-                    return
-                try:
-                    key = self._claim_waiting_task(task)
-                except Exception as exc:
-                    processed += int(self._execute_claimed_task(
-                        task, "", prepare_error=exc,
-                    ))
-                    continue
-                if key is None:
-                    continue
-                try:
-                    future = pool.submit(prepare, task)
-                except Exception as exc:
-                    # 规划仅用于预热共享识别/探测缓存；线程池拒绝任务时
-                    # 自动回退权威单 Writer 路径，不能降低原有整理成功率。
-                    logger.warning(
-                        "本地媒体并行预热提交失败，回退串行执行 task=%s type=%s",
-                        task.id, type(exc).__name__,
-                    )
-                    processed += int(self._execute_claimed_task(task, key))
-                    continue
-                pending.append((task, key, future))
+            def fill_window() -> None:
+                nonlocal processed
+                while len(pending) < window and not self._stop_event.is_set():
+                    try:
+                        task = next(iterator)
+                    except StopIteration:
+                        return
+                    try:
+                        key = self._claim_waiting_task(task)
+                    except Exception as exc:
+                        processed += int(self._execute_claimed_task(
+                            task, "", prepare_error=exc,
+                        ))
+                        continue
+                    if key is None:
+                        continue
+                    try:
+                        future = pool.submit(prepare, task)
+                    except Exception as exc:
+                        # 规划仅用于预热共享识别/探测缓存；线程池拒绝任务时
+                        # 自动回退权威单 Writer 路径，不能降低原有整理成功率。
+                        logger.warning(
+                            "本地媒体并行预热提交失败，回退串行执行 task=%s type=%s",
+                            task.id, type(exc).__name__,
+                        )
+                        processed += int(self._execute_claimed_task(task, key))
+                        continue
+                    pending.append((task, key, future))
 
-        try:
-            fill_window()
-            while pending:
-                task, key, future = pending.popleft()
-                try:
-                    future.result()
-                except Exception as exc:
-                    # 预热失败不代表正式整理失败。Writer 会重新扫描来源、
-                    # 重读最新目标库存并执行完整识别，因此这里安全降级。
-                    logger.warning(
-                        "本地媒体并行预热失败，回退串行执行 task=%s type=%s",
-                        task.id, type(exc).__name__,
-                    )
-                processed += int(self._execute_claimed_task(task, key))
+            try:
                 fill_window()
-        finally:
-            pool.shutdown(wait=True, cancel_futures=False)
-            for planner in planners:
-                try:
-                    if planner.close() is not True:
-                        logger.warning("关闭本地媒体规划 Worker 未完成")
-                except Exception as exc:
-                    logger.warning(
-                        "关闭本地媒体规划 Worker 失败 type=%s",
-                        type(exc).__name__,
-                    )
-        return processed
+                while pending:
+                    task, key, future = pending.popleft()
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        # 预热失败不代表正式整理失败。Writer 会重新扫描来源、
+                        # 重读最新目标库存并执行完整识别，因此这里安全降级。
+                        logger.warning(
+                            "本地媒体并行预热失败，回退串行执行 task=%s type=%s",
+                            task.id, type(exc).__name__,
+                        )
+                    processed += int(self._execute_claimed_task(task, key))
+                    fill_window()
+            finally:
+                pool.shutdown(wait=True, cancel_futures=False)
+                for planner in planners:
+                    try:
+                        if planner.close() is not True:
+                            logger.warning("关闭本地媒体规划 Worker 未完成")
+                    except Exception as exc:
+                        logger.warning(
+                            "关闭本地媒体规划 Worker 失败 type=%s",
+                            type(exc).__name__,
+                        )
+            return processed
 
     def run_once(self) -> int:
         tasks = db.list_waiting_local_media_tasks(owner=self.owner, limit=500)
@@ -851,6 +854,13 @@ def get_local_media_scheduler() -> LocalMediaScheduler:
         if _scheduler is None:
             _scheduler = LocalMediaScheduler()
         return _scheduler
+
+
+def reload_local_media_scheduler_config() -> bool:
+    """刷新常驻消费者，不重建线程或中断正在执行的任务。"""
+    with _scheduler_lock:
+        scheduler = _scheduler
+    return scheduler is None or scheduler.service.reload_config()
 
 
 def peek_local_media_scheduler_status() -> dict[str, bool | float]:

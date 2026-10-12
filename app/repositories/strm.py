@@ -6,8 +6,42 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from collections.abc import Iterable
 from typing import Any
+
+
+@dataclass(frozen=True)
+class StrmRefreshPolicy:
+    """本轮固定的刷新策略；索引提交与既有 outbox 共用一个事务。"""
+
+    media_root: str
+    allow_emby: bool = True
+    request_owners: object = None
+    enabled: bool = True
+
+    def __call__(self, targets: list[str]) -> None:
+        """溢出统计和旧路径凭据共用本策略，只持久化，不唤醒消费者。"""
+        if not self.enabled:
+            return
+        from app.modules.media_refresh import plan_refresh_targets
+
+        planned = plan_refresh_targets(changed_dirs=targets, media_roots=[self.media_root])
+        db.enqueue_strm_refresh_paths(
+            planned.targets, allow_emby=self.allow_emby, request_owners=self.request_owners,
+        )
+
+    def record(self, conn: sqlite3.Connection, paths: object) -> None:
+        if not self.enabled:
+            return
+        from app.modules.media_refresh import plan_refresh_targets
+
+        targets = plan_refresh_targets(paths, media_roots=[self.media_root]).targets
+        if targets:
+            _enqueue_strm_refresh_paths(
+                conn, targets, stamp=db.now(), allow_emby=self.allow_emby,
+                request_owners=self.request_owners,
+            )
 
 
 # 单条、批量与冲突替换使用相同 SQL，所有丢失旧索引的分支都保留凭据。
@@ -54,8 +88,9 @@ def upsert_strm_index(
     content_fingerprint: str = "",
     *,
     conflicting_file_ids: list[str] | tuple[str, ...] = (),
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> str:
-    """写入 STRM 索引，并在同一事务内清理冲突文件索引。"""
+    """提交索引、冲突清理及本轮刷新意图；纯索引维护不传刷新策略。"""
     database = db
     conflicts = [
         item
@@ -86,6 +121,8 @@ def upsert_strm_index(
             ),
         )
         _delete_conflicting_indexes(conn, source, conflicts, database.now())
+        if refresh_policy is not None:
+            refresh_policy.record(conn, [strm_path])
         return str(previous["strm_path"] or "") if previous else ""
 
 
@@ -239,7 +276,11 @@ def list_strm_index_by_prefix(prefix: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def delete_strm_index_ids(source: str, file_ids: list[str]) -> int:
+def delete_strm_index_ids(
+    source: str, file_ids: list[str], *,
+    refresh_policy: StrmRefreshPolicy | None = None,
+    refresh_paths: object = (),
+) -> int:
     ids = list(dict.fromkeys(str(item) for item in file_ids if str(item)))
     if not ids:
         return 0
@@ -249,6 +290,8 @@ def delete_strm_index_ids(source: str, file_ids: list[str]) -> int:
             f"DELETE FROM strm_index WHERE source=? AND file_id IN ({placeholders})",
             [source, *ids],
         )
+        if refresh_policy is not None:
+            refresh_policy.record(conn, refresh_paths)
         return cur.rowcount
 
 

@@ -21,7 +21,7 @@ from typing import Any, BinaryIO, Iterator
 from app.runtime_paths import RuntimePaths, protected_runtime_output_target
 from app.version import BuildInfo
 
-BACKUP_FORMAT_VERSION = 1
+BACKUP_FORMAT_VERSION = 2
 _ALLOWED_PAYLOADS = {
     "database/mediaflux.db",
     "config/user.env",
@@ -164,9 +164,14 @@ def _create_backup_unlocked(
         if not payloads:
             raise BackupError("没有可备份的 MediaFlux 数据")
 
+        full_snapshot = include_settings and {
+            "database/mediaflux.db", "config/user.env",
+        } <= payloads.keys()
         build = BuildInfo.current()
         manifest = {
             "format_version": BACKUP_FORMAT_VERSION,
+            "scope": "full" if full_snapshot else "partial",
+            "absent_entries": sorted(_ALLOWED_PAYLOADS - payloads.keys()) if full_snapshot else [],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "reason": str(reason or "manual")[:100],
             "build": build.as_dict(),
@@ -278,7 +283,7 @@ def _verified_backup(archive_path: Path) -> Iterator[tuple[BackupManifest, dict[
                     manifest = json.loads(archive.read("manifest.json"))
                 except (ValueError, UnicodeError, KeyError) as exc:
                     raise BackupError("备份 manifest 无效") from exc
-                if not isinstance(manifest, dict) or manifest.get("format_version") != BACKUP_FORMAT_VERSION:
+                if not isinstance(manifest, dict) or manifest.get("format_version") not in {1, BACKUP_FORMAT_VERSION}:
                     raise BackupError("不支持的备份格式版本")
                 entries = manifest.get("entries")
                 if not isinstance(entries, list) or not entries:
@@ -305,6 +310,28 @@ def _verified_backup(archive_path: Path) -> Iterator[tuple[BackupManifest, dict[
                     payloads[name] = staged
                 if names != expected_names | {"manifest.json"}:
                     raise BackupError("备份内容与 manifest 不一致")
+                # v1 的缺条目仅表示未备份，不能据此删除目标。v2 完整快照
+                # 必须逐项覆盖受管文件；数据库和配置仍是完整恢复的必要输入。
+                absent = manifest.get("absent_entries", [])
+                if manifest["format_version"] == 1:
+                    if "absent_entries" in manifest or "scope" in manifest:
+                        raise BackupError("历史备份不能声明文件缺席")
+                else:
+                    scope = manifest.get("scope")
+                    if scope not in {"full", "partial"} or not isinstance(absent, list):
+                        raise BackupError("备份快照范围无效")
+                    if any(not isinstance(name, str) or name not in _ALLOWED_PAYLOADS for name in absent):
+                        raise BackupError("备份缺席条目无效")
+                    if len(absent) != len(set(absent)) or expected_names & set(absent):
+                        raise BackupError("备份条目与缺席状态冲突")
+                    if scope == "full":
+                        if (
+                            not {"database/mediaflux.db", "config/user.env"} <= expected_names
+                            or expected_names | set(absent) != _ALLOWED_PAYLOADS
+                        ):
+                            raise BackupError("完整备份缺少受管文件状态")
+                    elif absent:
+                        raise BackupError("部分备份不能声明文件缺席")
                 database_payload = payloads.get("database/mediaflux.db")
                 if database_payload is not None:
                     actual_schema_version = _verify_sqlite(database_payload)
@@ -329,7 +356,7 @@ def verify_backup(archive_path: Path) -> BackupManifest:
         return manifest
 
 
-_RESTORE_JOURNAL_VERSION = 1
+_RESTORE_JOURNAL_VERSION = 2
 _RESTORE_JOURNAL_NAME = ".mediaflux-restore.journal.json"
 _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS = {
     errno.EINVAL,
@@ -411,7 +438,7 @@ def _fingerprint(payload: bytes) -> dict[str, Any]:
 
 
 def _same_fingerprint(actual: dict[str, Any] | None, expected: dict[str, Any] | None) -> bool:
-    return actual is not None and expected is not None and actual == expected
+    return actual == expected
 
 
 def _write_private_file(path: Path, payload: bytes | Path) -> dict[str, Any]:
@@ -458,7 +485,7 @@ def _validate_fingerprint(value: Any, *, allow_none: bool = False) -> dict[str, 
 
 
 def _validated_journal(paths: RuntimePaths, payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or payload.get("version") != _RESTORE_JOURNAL_VERSION:
+    if not isinstance(payload, dict) or payload.get("version") not in (1, _RESTORE_JOURNAL_VERSION):
         raise BackupError("恢复 journal 格式无效")
     phase = str(payload.get("phase") or "")
     if phase not in {"prepared", "committed"}:
@@ -485,7 +512,10 @@ def _validated_journal(paths: RuntimePaths, payload: Any) -> dict[str, Any]:
             raise BackupError("恢复 journal 缺少旧文件指纹")
         if not had_target and raw.get("old") is not None:
             raise BackupError("恢复 journal 的旧文件指纹冲突")
-        new = _validate_fingerprint(raw.get("new"))
+        new = _validate_fingerprint(
+            raw.get("new"),
+            allow_none=payload["version"] == _RESTORE_JOURNAL_VERSION and name == "data/guangya_token.json",
+        )
         entries.append({
             "name": name,
             "had_target": had_target,
@@ -493,7 +523,7 @@ def _validated_journal(paths: RuntimePaths, payload: Any) -> dict[str, Any]:
             "new": new,
         })
     return {
-        "version": _RESTORE_JOURNAL_VERSION,
+        "version": payload["version"],
         "transaction_id": transaction_id,
         "phase": phase,
         "entries": entries,
@@ -538,7 +568,7 @@ def _delete_restore_journal(paths: RuntimePaths) -> None:
     _fsync_directory(path.parent)
 
 
-def _unlink_matching(path: Path, expected: dict[str, Any]) -> None:
+def _unlink_matching(path: Path, expected: dict[str, Any] | None) -> None:
     actual = _regular_file_fingerprint(path)
     if actual is None:
         return
@@ -769,7 +799,7 @@ def recover_pending_restore(
 
 def _transactional_restore_files(
     paths: RuntimePaths,
-    files: dict[str, tuple[Path, Path]],
+    files: dict[str, tuple[Path, Path | None]],
 ) -> None:
     transaction_id = uuid.uuid4().hex
     entries: list[dict[str, Any]] = []
@@ -782,8 +812,10 @@ def _transactional_restore_files(
             temporary, backup = _restore_artifacts(target, transaction_id)
             if _regular_file_fingerprint(temporary) is not None or _regular_file_fingerprint(backup) is not None:
                 raise BackupError(f"恢复事务临时文件已存在：{target}")
-            staged.append(temporary)
-            new_fingerprint = _write_private_file(temporary, payload)
+            new_fingerprint = None
+            if payload is not None:
+                staged.append(temporary)
+                new_fingerprint = _write_private_file(temporary, payload)
             entries.append({
                 "name": name,
                 "had_target": old is not None,
@@ -809,8 +841,9 @@ def _transactional_restore_files(
                 _fsync_directory(target.parent)
             elif current is not None:
                 raise BackupError(f"恢复目标在发布前被创建：{target}")
-            os.replace(temporary, target)
-            _fsync_directory(target.parent)
+            if entry["new"] is not None:
+                os.replace(temporary, target)
+                _fsync_directory(target.parent)
         journal["phase"] = "committed"
         _write_restore_journal(paths, journal)
         _recover_committed(paths, journal)
@@ -912,5 +945,7 @@ def restore_backup(paths: RuntimePaths, archive_path: Path) -> BackupManifest:
                 )
                 for entry in manifest.entries
             }
+            for name in manifest.payload.get("absent_entries", []):
+                files[name] = (mapping[name], None)
             _transactional_restore_files(paths, files)
             return manifest

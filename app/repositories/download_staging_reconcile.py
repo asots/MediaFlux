@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from app import database as db
 from app.repositories.download_staging import (
     _unsafe_confirmation_stats,
+    list_staging_cleanup_requests,
     requests_for_download_confirmation,
     same_staging_identity,
     staging_confirmation_summary,
@@ -93,7 +94,101 @@ def enqueue_confirmation_cleanup(conn, *, token: str, timestamp: str) -> int | N
     ).fetchone()['id'])
 
 
-def reconcile_reorganized_confirmations(source_ids: list[str], *, conn=None) -> list[str]:
+def reorganized_source_evidence(source_id: str, *, conn=None) -> list[dict]:
+    """完整来源的最新成员事实；缺明细/新失败绝不回退到旧成功。"""
+    with (nullcontext(conn) if conn is not None else db.get_conn()) as connection:
+        rows = [dict(row) for row in connection.execute(
+            "SELECT l.id AS log_id,l.version AS log_version,l.file_id AS primary_file_id,"
+            "l.source_dir_id,l.status AS log_status,l.operation_type,l.legacy_incomplete,i.* "
+            "FROM organize_log l LEFT JOIN organize_log_items i ON i.log_id=l.id "
+            "WHERE l.source='guangya' AND l.file_id IN "
+            "(SELECT file_id FROM organize_log WHERE source='guangya' AND source_dir_id=?) "
+            "AND l.id=(SELECT MAX(newer.id) FROM organize_log newer "
+            "WHERE newer.source='guangya' AND newer.file_id=l.file_id) ORDER BY l.id,i.id",
+            (str(source_id),),
+        )]
+    if not rows or any(
+        row['source_dir_id'] != source_id or row['log_status'] != 'success'
+        or row['legacy_incomplete'] or row['operation_type'] not in ('organize', 'reorganize')
+        or not row['id'] or not row['file_id'] or row['status'] != 'success'
+        or not row['original_parent_id'] or not row['target_parent_id']
+        or row['current_parent_id'] != row['target_parent_id']
+        or row['current_parent_id'] == row['original_parent_id']
+        or not row['target_name'] or row['current_name'] != row['target_name']
+        or int(row['size'] or 0) <= 0 or not row['etag']
+        for row in rows
+    ):
+        return []
+    for log_id in {row['log_id'] for row in rows}:
+        videos = [row for row in rows if row['log_id'] == log_id and row['role'] == 'video']
+        if len(videos) != 1 or videos[0]['file_id'] != videos[0]['primary_file_id']:
+            return []
+    return rows
+
+
+def _recover_reorganized_request(conn, recovery: dict, *, source_ids: list[str]) -> bool:
+    """仅接受人工写入后的远端全量核验；请求和成员在同一事务内再次 CAS。"""
+    expected = recovery['request']
+    source_id = str(expected['gy_target_dir'])
+    if source_id not in source_ids:
+        return False
+    owners = list_staging_cleanup_requests(source_id=source_id, conn=conn)
+    if len(owners) != 1 or owners[0] != expected:
+        return False
+    row = owners[0]
+    # 不放宽后台 _eligible：只有此显式纠偏入口可恢复失败，取消/未知删除仍冻结。
+    if (row['organize_status'] not in ('failed', 'partial', 'completed', 'requires_manual')
+            or (row['organize_status'] not in ('failed', 'partial') and int(row['organize_started']) >= 0)
+            or not _eligible({**row, 'organize_started': 1, 'organize_status': 'completed'})):
+        return False
+    evidence = reorganized_source_evidence(source_id, conn=conn)
+    if not evidence or evidence != recovery['members']:
+        return False
+    confirmations = conn.execute(
+        "SELECT c.* FROM organize_confirmations c WHERE json_valid(c.payload_json) "
+        "AND CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT)=? "
+        "AND NOT EXISTS (SELECT 1 FROM organize_confirmations newer "
+        "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)", (source_id,),
+    ).fetchall()
+    for confirmation in confirmations:
+        if confirmation['status'] in ('queued', 'running'):
+            return False
+        payload = _object(confirmation['payload_json'])
+        bindings = requests_for_download_confirmation(payload, conn=conn)
+        files, companions = payload.get('files'), payload.get('companions', [])
+        if (len(bindings) != 1 or not same_staging_identity(bindings[0], row)
+                or not isinstance(files, list) or not files or not isinstance(companions, list)):
+            return False
+        for item in [*files, *companions]:
+            if not isinstance(item, dict) or not any(
+                proof['file_id'] == item.get('file_id')
+                and proof['original_parent_id'] == item.get('parent_id')
+                and (item.get('size') is None or proof['size'] == item['size'])
+                and (not item.get('etag') or str(proof['etag']).lower() == str(item['etag']).lower())
+                for proof in evidence
+            ):
+                return False
+    unknown = conn.execute(
+        "SELECT 1 FROM organize_delete_audit WHERE trigger='download_staging_cleanup' "
+        "AND status IN ('pending','failed') AND (file_id=? OR parent_id=?) LIMIT 1",
+        (source_id, source_id),
+    ).fetchone()
+    if unknown:
+        return False
+    # BEGIN IMMEDIATE 已锁住读快照；仍明确带上原业务状态，不把历史成功当复活权限。
+    changed = conn.execute(
+        "UPDATE download_requests SET organize_started=1,organize_status='completed',"
+        "organize_error='',organize_finished_at=?,updated_at=? "
+        "WHERE id=? AND status=? AND organize_status=? AND organize_started=? "
+        "AND organize_task_id=? AND gy_target_dir=? AND COALESCE(attention_cleared_at,'')=''",
+        (db.now(), db.now(), int(row['id']), row['status'], row['organize_status'],
+         row['organize_started'], row['organize_task_id'], source_id),
+    )
+    return changed.rowcount == 1
+
+
+def reconcile_reorganized_confirmations(source_ids: list[str], *, conn=None,
+                                       recovery: dict | None = None) -> list[str]:
     """以成功重整的文件快照关闭旧确认，并复用持久收尾队列；不凭下载完成猜入库。"""
     if not source_ids:
         return []
@@ -102,6 +197,8 @@ def reconcile_reorganized_confirmations(source_ids: list[str], *, conn=None) -> 
     with (nullcontext(conn) if conn is not None else db.get_conn()) as connection:
         if conn is None:
             connection.execute('BEGIN IMMEDIATE')
+        if recovery is not None:
+            _recover_reorganized_request(connection, recovery, source_ids=source_ids)
         confirmations = connection.execute(
             "SELECT c.* FROM organize_confirmations c "
             "WHERE c.status IN ('pending','failed','expired','cancelled') "

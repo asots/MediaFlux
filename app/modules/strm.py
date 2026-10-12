@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -34,7 +34,7 @@ import requests
 from urllib3.util import Retry
 
 from app import database as db
-from app.repositories.strm import resolve_strm_failure_with_refresh
+from app.repositories.strm import StrmRefreshPolicy, resolve_strm_failure_with_refresh
 from app.config import get, get_int
 from app.clients.guangya import (
     DirectoryEntryLimitError, GuangYaClient, GuangYaFile, close_guangya_client,
@@ -972,6 +972,7 @@ def _install_video_candidate(
     source_key: str,
     existing_by_id: dict[str, object],
     existing_by_path: dict[str, dict[str, object]],
+    *, refresh_policy: StrmRefreshPolicy | None = None,
 ) -> tuple[int, str]:
     """事务式安装视频赢家；失败时仅回滚仍由本事务持有的内容。"""
     current_raw = existing_by_id.get(str(file.file_id))
@@ -1041,6 +1042,7 @@ def _install_video_candidate(
             source_key, file.file_id, file.etag, file.size, file.name, str(expected),
             state["installed_fingerprint"],
             conflicting_file_ids=tuple(row["file_id"] for row in conflicts),
+            refresh_policy=refresh_policy,
         )
         index_changed = True
         cleaned = 0
@@ -1288,6 +1290,7 @@ def _remove_indexed_item(
     strm_root: str,
     existing_by_id: dict[str, object],
     existing_by_path: dict[str, dict[str, object]],
+    *, refresh_policy: StrmRefreshPolicy | None = None,
 ) -> tuple[int, Path | None]:
     """精准移除单个索引项；共享路径仍有其他 owner 时不删除本地文件。"""
     current_raw = existing_by_id.get(str(file_id))
@@ -1307,7 +1310,10 @@ def _remove_indexed_item(
             deleted = _delete_owned_file(
                 indexed_path, [current], "删除失效 STRM"
             )
-        db.delete_strm_index_ids(source_key, [str(file_id)])
+        db.delete_strm_index_ids(
+            source_key, [str(file_id)], refresh_policy=refresh_policy,
+            refresh_paths=[str(indexed_path)] if indexed_path and not shared_path else [],
+        )
         _discard_backup(backup)
     except Exception:
         if deleted and indexed_path:
@@ -1579,6 +1585,7 @@ def _sync_strm_incremental_impl(
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
     on_refresh_paths: Callable[[list[str]], object] | None = None,
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict:
     """只处理整理成功的最终对象；Client 生命周期由公开入口统一管理。"""
     exts = video_exts or DEFAULT_VIDEO_EXTS
@@ -1743,7 +1750,7 @@ def _sync_strm_incremental_impl(
                     )
                     cleaned, installed_fingerprint = _install_video_candidate(
                         file, rel_dir, expected, base_url, strm_root, video_key,
-                        video_by_id, video_by_path,
+                        video_by_id, video_by_path, refresh_policy=refresh_policy,
                     )
                     stats["cleaned"] += cleaned
                     if cleaned and current:
@@ -1813,7 +1820,8 @@ def _sync_strm_incremental_impl(
                         reason="精准增量确认远端元数据已删除",
                     )
                 cleaned, removed_path = _remove_indexed_item(
-                    source_key, file_id, strm_root, by_id, by_path
+                    source_key, file_id, strm_root, by_id, by_path,
+                    refresh_policy=refresh_policy,
                 )
                 if kind == "metadata":
                     stats["metadata_cleaned"] += cleaned
@@ -1869,6 +1877,7 @@ def sync_strm_incremental(
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
     on_refresh_paths: Callable[[list[str]], object] | None = None,
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict:
     """执行可信变化的精准同步，并释放本函数创建的光鸭连接池。"""
     with _guangya_client_scope(client) as runtime_client:
@@ -1886,6 +1895,7 @@ def sync_strm_incremental(
             on_progress=on_progress,
             should_stop=should_stop,
             on_refresh_paths=on_refresh_paths,
+            refresh_policy=refresh_policy,
         )
 
 
@@ -1958,6 +1968,7 @@ def _sync_strm_impl(
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
     on_refresh_paths: Callable[[list[str]], object] | None = None,
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict:
     """递归扫描光鸭目录，为视频生成 STRM；Client 由公开入口持有。"""
     exts = video_exts or DEFAULT_VIDEO_EXTS
@@ -2440,7 +2451,7 @@ def _sync_strm_impl(
                     )
                     cleaned, installed_fingerprint = _install_video_candidate(
                         file, rel_dir, expected, base_url, strm_root, source_key,
-                        existing_by_id, existing_by_path,
+                        existing_by_id, existing_by_path, refresh_policy=refresh_policy,
                     )
                     stats["cleaned"] += cleaned
                     if cleaned and current:
@@ -2691,6 +2702,7 @@ def _sync_strm_impl(
                     strm_only=True,
                     clean_empty_dirs=False,
                     should_stop=should_stop,
+                    refresh_policy=refresh_policy,
                 )
                 stats["clean_skipped"] = bool(stats["clean_skipped"]) or bool(
                     cleanup.get("skipped")
@@ -2723,6 +2735,7 @@ def _sync_strm_impl(
                         valid_ids=metadata_cleanup_ids,
                         clean_empty_dirs=False,
                         should_stop=should_stop,
+                        refresh_policy=refresh_policy,
                     )
                     stats["clean_skipped"] = (
                         bool(stats["clean_skipped"])
@@ -2817,6 +2830,7 @@ def sync_strm(
     on_progress=None,
     should_stop: Callable[[], bool] | None = None,
     on_refresh_paths: Callable[[list[str]], object] | None = None,
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict:
     """执行一次全量同步；只关闭本函数创建的光鸭连接池。"""
     with _guangya_client_scope(client) as runtime_client:
@@ -2838,6 +2852,7 @@ def sync_strm(
             on_progress=on_progress,
             should_stop=should_stop,
             on_refresh_paths=on_refresh_paths,
+            refresh_policy=refresh_policy,
         )
 
 
@@ -3514,6 +3529,7 @@ def clean_retired_strm_sources(
     should_stop: Callable[[], bool] | None = None,
     active_ids_complete: bool = True,
     clean_empty_dirs: bool = True,
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict:
     """清理已从配置移除的来源；仅删除可证明由 MediaFlux 生成的文件。"""
     active_ids = {str(item) for item in active_source_ids if str(item)}
@@ -3568,6 +3584,10 @@ def clean_retired_strm_sources(
             result["errors"].append(f"{source_id}: {error}")
             continue
         owned_root = (Path(root_text).expanduser() / STRM_SUBDIR).resolve(strict=False)
+        retired_refresh = (
+            replace(refresh_policy, media_root=str(owned_root))
+            if refresh_policy is not None else None
+        )
         rows = []
         for namespace in (f"guangya:{source_id}", f"guangya-meta:{source_id}"):
             rows.extend(db.list_strm_index(namespace))
@@ -3600,7 +3620,10 @@ def clean_retired_strm_sources(
                 result["index_cleaned"] += 1
                 continue
             if not resolved.exists():
-                db.delete_strm_index_ids(namespace, [file_id])
+                db.delete_strm_index_ids(
+                    namespace, [file_id], refresh_policy=retired_refresh,
+                    refresh_paths=[str(resolved)],
+                )
                 result["index_cleaned"] += 1
                 result["removed_paths"].append(str(resolved))
                 continue
@@ -3624,7 +3647,10 @@ def clean_retired_strm_sources(
                 result["blocked"] += 1
                 result["errors"].append(f"{source_id}: 删除失败 {exc}")
                 continue
-            db.delete_strm_index_ids(namespace, [file_id])
+            db.delete_strm_index_ids(
+                namespace, [file_id], refresh_policy=retired_refresh,
+                refresh_paths=[str(resolved)],
+            )
             result["cleaned"] += 1
             result["index_cleaned"] += 1
             result["removed_paths"].append(str(resolved))
@@ -3699,6 +3725,7 @@ def clean_invalid_strm(
     strm_only: bool = False,
     clean_empty_dirs: bool = True,
     should_stop: Callable[[], bool] | None = None,
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict:
     """基于持久化索引批量清理，不逐文件请求播放直链。"""
     root = Path(strm_root) / STRM_SUBDIR
@@ -3778,7 +3805,10 @@ def clean_invalid_strm(
         except OSError as exc:
             blocked_paths.append(path_text)
             logger.debug("清理无效 STRM 失败 type=%s", type(exc).__name__)
-    db.delete_strm_index_ids(source_key, removed_ids)
+    db.delete_strm_index_ids(
+        source_key, removed_ids, refresh_policy=refresh_policy,
+        refresh_paths=removed_paths,
+    )
 
     empty_dirs = 0
     removed_dir_paths: list[str] = []

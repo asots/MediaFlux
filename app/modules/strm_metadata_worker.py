@@ -417,7 +417,7 @@ class STRMMetadataWorker:
                     "STRM 落盘后的媒体库刷新入队失败，将保留变更稍后重试"
                 )
                 continue
-            if any(value == "failed" for value in results.values()):
+            if not results or any(value != "queued" for value in results.values()):
                 retry_pending = True
                 logger.warning(
                     "STRM 已落盘，但媒体库刷新未全部入队，将稍后重试"

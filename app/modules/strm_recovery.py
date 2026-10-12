@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from app import database as db
+from app.modules.media_refresh import plan_refresh_targets
 
 # 只读小型指针文件，不把伪装成 .strm 的媒体文件加载进内存。
 MAX_POINTER_BYTES = 16 * 1024
@@ -79,7 +80,7 @@ def recover_pending_paths(
             return
         after_id = int(batch[-1]["id"])
         completed: list[int] = []
-        changed_dirs: set[str] = set()
+        changed_targets: set[str] = set()
         for row in batch:
             if _stopped(stats, should_stop):
                 break
@@ -136,7 +137,9 @@ def recover_pending_paths(
                     )
                     if len(reported_paths) < strm._MAX_TRACKED_CHANGED_PATHS:
                         reported_paths.add(str(path))
-                changed_dirs.add(str(path.parent))
+                changed_targets.update(plan_refresh_targets(
+                    [str(path)], media_roots=[str(Path(strm_root) / strm.STRM_SUBDIR)],
+                ).targets)
                 if _stopped(stats, should_stop):
                     break
                 completed.append(int(row["id"]))
@@ -144,9 +147,9 @@ def recover_pending_paths(
                 _blocked(stats, path, str(exc))
         # 生产调用使用已固定刷新策略的 sink；持久化失败时不确认凭据。
         if completed:
-            if changed_dirs and on_refresh_paths:
+            if changed_targets and on_refresh_paths:
                 try:
-                    on_refresh_paths(sorted(changed_dirs))
+                    on_refresh_paths(sorted(changed_targets))
                 except Exception as exc:
                     _blocked(
                         stats,

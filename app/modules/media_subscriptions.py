@@ -75,10 +75,14 @@ async def _await_sync_request(call, /, *args):
 class MediaSubscriptionError(ValueError):
     """可安全返回给 Web 的订阅业务错误。"""
 
-    def __init__(self, message: str, *, status_code: int = 400, code: str = "invalid"):
+    def __init__(
+        self, message: str, *, status_code: int = 400, code: str = "invalid",
+        can_try_next_candidate: bool = False,
+    ):
         super().__init__(message)
         self.status_code = int(status_code)
         self.code = str(code)
+        self.can_try_next_candidate = bool(can_try_next_candidate)
 
 
 @dataclass(frozen=True)
@@ -1612,7 +1616,8 @@ class MediaSubscriptionService:
                             cancel_event=cancel_event,
                         )
                     except MediaSubscriptionError as exc:
-                        if exc.code == "unavailable":
+                        if exc.code == "unavailable" or exc.can_try_next_candidate:
+                            self._ensure_active_check(int(row["id"]), revision, cancel_event)
                             continue
                         raise
                     auto_submitted += int(bool(result.get("ok") or result.get("duplicate")))
@@ -1659,7 +1664,8 @@ class MediaSubscriptionService:
                         cancel_event=cancel_event,
                     )
                 except MediaSubscriptionError as exc:
-                    if exc.code == "unavailable":
+                    if exc.code == "unavailable" or exc.can_try_next_candidate:
+                        self._ensure_active_check(int(row["id"]), revision, cancel_event)
                         continue
                     raise
                 auto_submitted = int(bool(result.get("ok") or result.get("duplicate")))
@@ -1867,10 +1873,22 @@ class MediaSubscriptionService:
                 dispatch_error = str(request_row["error"] or "").strip() if request_row else ""
                 if dispatch_error:
                     message = redact_sensitive_text(dispatch_error)[:500]
+            released = False
             if not request_id:
-                db.fail_unbound_media_download_admission(admission_id, message)
+                released = db.fail_unbound_media_download_admission(admission_id, message)
+                if require_active_check:
+                    self._ensure_active_check(int(subscription["id"]), revision, cancel_event)
+                elif cancel_event is not None and cancel_event.is_set():
+                    raise MediaSubscriptionError(
+                        "应用正在停止，下载提交已取消", status_code=409, code="cancelled"
+                    )
+            # 返回值没有 request_id 不等于未提交：必须同时有提交前失败证明，
+            # 且仓储 CAS 确认未绑定请求并已释放准入，才允许自动选源继续。
             raise MediaSubscriptionError(
-                message, status_code=502, code="download_failed"
+                message, status_code=502, code="download_failed",
+                can_try_next_candidate=bool(
+                    result.get("pre_submission_failure") is True and not request_id and released
+                ),
             )
         return {**result, "candidate_id": int(candidate["id"]), "admission_id": admission_id}
 

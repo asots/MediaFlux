@@ -226,6 +226,87 @@ def delete_rss_subscription(sub_id: int) -> None:
         conn.execute("DELETE FROM rss_items WHERE id=?", (sub_id,))
 
 
+
+_RSS_MEDIA_DUPLICATE_REASON = "相同 TMDB 剧集已在 RSS 队列或下载记录中"
+_RSS_REQUEST_JOIN = (
+    " LEFT JOIN download_request_keys k ON k.request_key=e.download_request_key "
+    "LEFT JOIN download_requests r ON r.id=k.request_id "
+)
+_RSS_SELECTED_BACKEND = "CASE e.download_backend WHEN 'qb' THEN r.qb_status WHEN 'guangya' THEN r.gy_status END"
+
+
+class RSSMediaAlreadyClaimedError(ValueError):
+    """同集的另一条目已开始消费；本条目已经事务性标记为自动跳过。"""
+
+
+def _rss_delivery_failed_sql(entry: str = "e") -> str:
+    backend = _RSS_SELECTED_BACKEND.replace("e.", f"{entry}.")
+    return (
+        f"({entry}.status!='skipped' AND (r.status='failed' OR ({backend})='failed' "
+        f"OR ({entry}.download_backend='guangya' AND r.gy_status='completed' AND r.organize_status='failed')))"
+    )
+
+
+def _rss_delivery_retry_sql(entry: str = "e") -> str:
+    backend = _RSS_SELECTED_BACKEND.replace("e.", f"{entry}.")
+    return (
+        "(r.status IN ('failed','completed') "
+        "AND COALESCE(r.qb_status,'') NOT IN ('submitting','submitted','downloading','outcome_unknown','manual_review') "
+        "AND COALESCE(r.gy_status,'') NOT IN ('submitting','submitted','downloading','outcome_unknown','manual_review') "
+        f"AND (({backend})='failed' OR ({entry}.download_backend='guangya' "
+        "AND r.gy_status='completed' AND r.organize_status='failed')))"
+    )
+
+
+
+def rss_retry_source_is_safe(source, target: str) -> bool:
+    """统一重提创建事务使用：RSS 只授权确定失败，不代替用户确认未知结果。"""
+    active = {"submitting", "submitted", "downloading", "outcome_unknown", "manual_review"}
+    return (
+        target in {"qb", "guangya"}
+        and source["status"] in {"failed", "completed"}
+        and source["qb_status"] not in active
+        and source["gy_status"] not in active
+        and (source["qb_status" if target == "qb" else "gy_status"] == "failed"
+             or (target == "guangya" and source["gy_status"] == "completed"
+                 and source["organize_status"] == "failed"))
+    )
+
+def _rss_delivery_columns() -> str:
+    # 读取 canonical key 当前所有者，不缓存另一套下载状态、不做列表逐条查询。
+    return (
+        "r.id AS delivery_request_id,r.status AS delivery_status,"
+        f"({_RSS_SELECTED_BACKEND}) AS delivery_backend_status,"
+        "COALESCE(CASE WHEN e.download_backend='guangya' AND r.gy_status='completed' "
+        "AND r.organize_status='failed' THEN NULLIF(r.organize_error,'') END,r.error,'') AS delivery_error,"
+        f"COALESCE({_rss_delivery_failed_sql()},0) AS delivery_failed,"
+        "COALESCE((e.status='downloaded' OR (e.status='failed' AND e.failure_code IN "
+        "('qb_outcome_unknown','guangya_outcome_unknown','submission_outcome_unknown'))) "
+        f"AND {_rss_delivery_retry_sql()},0) AS delivery_retryable,"
+        f"COALESCE(r.status='manual_review' OR ({_RSS_SELECTED_BACKEND}) "
+        "IN ('outcome_unknown','manual_review'),0) AS delivery_review_required"
+    )
+
+
+def _rss_media_blocker(conn, media_key: str, *, exclude_id: int = 0, binding: bool = False):
+    # pending 只是发现，不是消费凭据。绑定时忽略尚未绑定的批量 submitting：
+    # 同批确认可一次 claim 多条，但第一个绑定身份的条目才获得外部提交权。
+    return conn.execute(
+        "SELECT e.id FROM rss_entry_media m JOIN rss_entries e ON e.id=m.rss_entry_id "
+        + _RSS_REQUEST_JOIN +
+        "WHERE m.media_key=? AND e.id!=? AND ("
+        "e.status='submitting' "
+        + ("AND e.download_request_key!='' " if binding else "") +
+        f"OR (e.status='downloaded' AND NOT COALESCE({_rss_delivery_failed_sql()},0)) "
+        "OR (e.status='failed' AND COALESCE(e.processed,0)=0 AND e.failure_code IN "
+        "('qb_outcome_unknown','guangya_outcome_unknown','submission_outcome_unknown') "
+        f"AND NOT COALESCE({_rss_delivery_retry_sql()},0)) "
+        f"OR (e.status!='skipped' AND (r.status='manual_review' OR ({_RSS_SELECTED_BACKEND}) "
+        "IN ('submitting','submitted','downloading','outcome_unknown','manual_review')))) LIMIT 1",
+        (media_key, exclude_id),
+    ).fetchone()
+
+
 def add_rss_entry_with_media(
     sub_id: int,
     title: str,
@@ -246,23 +327,28 @@ def add_rss_entry_with_media(
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         duplicate_guid = conn.execute(
-            "SELECT id FROM rss_entries WHERE rss_item_id=? AND guid=? LIMIT 1",
-            (sub_id, guid),
+            "SELECT e.id,e.status,m.media_key,m.skip_reason FROM rss_entries e "
+            "LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id "
+            "WHERE e.rss_item_id=? AND e.guid=? LIMIT 1", (sub_id, guid),
         ).fetchone()
         if duplicate_guid is not None:
-            conn.rollback()
+            # 自动语义跳过是可重评估的发现结果；人工跳过与库内跳过不重开。
+            if (duplicate_guid["status"] == "skipped"
+                    and duplicate_guid["skip_reason"] == _RSS_MEDIA_DUPLICATE_REASON
+                    and normalized_key and duplicate_guid["media_key"] == normalized_key
+                    and not normalized_reason
+                    and _rss_media_blocker(conn, normalized_key, exclude_id=duplicate_guid["id"]) is None):
+                conn.execute(
+                    "UPDATE rss_entries SET status='pending',processed=0,processed_at=NULL WHERE id=?",
+                    (duplicate_guid["id"],),
+                )
+                conn.execute(
+                    "UPDATE rss_entry_media SET skip_reason='',updated_at=? WHERE rss_entry_id=?",
+                    (timestamp, duplicate_guid["id"]),
+                )
             return {"id": None, "status": "duplicate_guid", "skip_reason": ""}
-        if normalized_key and not normalized_reason:
-            duplicate_media = conn.execute(
-                "SELECT e.id FROM rss_entry_media m JOIN rss_entries e ON e.id=m.rss_entry_id "
-                "WHERE m.media_key=? AND (e.status IN ('pending','submitting','downloaded') "
-                "OR (e.status='failed' AND COALESCE(e.processed,0)=0 "
-                "AND e.failure_code IN ('qb_outcome_unknown','guangya_outcome_unknown',"
-                "'submission_outcome_unknown'))) ORDER BY e.id DESC LIMIT 1",
-                (normalized_key,),
-            ).fetchone()
-            if duplicate_media is not None:
-                normalized_reason = "相同 TMDB 剧集已在 RSS 队列或下载记录中"
+        if normalized_key and not normalized_reason and _rss_media_blocker(conn, normalized_key):
+            normalized_reason = _RSS_MEDIA_DUPLICATE_REASON
         status = "skipped" if normalized_reason else "pending"
         processed = 1 if normalized_reason else 0
         processed_at = timestamp if normalized_reason else None
@@ -289,7 +375,9 @@ def _rss_entry_filters(sub_id: int | None = None, status: str | None = None,
     if sub_id:
         sql += " AND e.rss_item_id=?"
         params.append(sub_id)
-    if status:
+    if status == "failed":
+        sql += f" AND (e.status='failed' OR {_rss_delivery_failed_sql()})"
+    elif status:
         sql += " AND e.status=?"
         params.append(status)
     if keyword:
@@ -303,22 +391,43 @@ def bind_rss_entry_download(entry_id: int, request_key: str, backend: str) -> No
     """在副作用前绑定已验证内容身份与目标，重试沿统一请求键自动接续。"""
     if backend not in {"qb", "guangya"} or not request_key:
         raise ValueError("RSS 下载目标或资源身份无效")
+    duplicate = False
     with db.get_conn() as conn:
-        changed = conn.execute(
-            "UPDATE rss_entries SET download_request_key=?,download_backend=? "
-            "WHERE id=? AND status='submitting' AND COALESCE(processed,0)=0",
-            (request_key, backend, int(entry_id)),
-        ).rowcount
-        if not changed:
-            raise ValueError("RSS 条目状态已变化，请刷新后重试")
-        # 先绑定与受理回写处于同一事务，既有受理与并发受理都不漏投影。
-        existing = conn.execute(
-            "SELECT request_id FROM download_request_keys WHERE request_key=? UNION "
-            "SELECT id FROM download_requests WHERE request_key=? LIMIT 1",
-            (request_key, request_key),
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT e.status,e.processed,COALESCE(m.media_key,'') AS media_key "
+            "FROM rss_entries e LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id WHERE e.id=?",
+            (int(entry_id),),
         ).fetchone()
-        if existing:
-            _sync_rss_download_entries_conn(conn, int(existing[0]), db.now())
+        if current is None or current["status"] != "submitting" or current["processed"]:
+            raise ValueError("RSS 条目状态已变化，请刷新后重试")
+        duplicate = bool(current["media_key"] and _rss_media_blocker(
+            conn, current["media_key"], exclude_id=int(entry_id), binding=True,
+        ))
+        if duplicate:
+            stamp = db.now()
+            conn.execute(
+                "UPDATE rss_entries SET status='skipped',processed=1,processed_at=? WHERE id=?",
+                (stamp, int(entry_id)),
+            )
+            conn.execute(
+                "UPDATE rss_entry_media SET skip_reason=?,updated_at=? WHERE rss_entry_id=?",
+                (_RSS_MEDIA_DUPLICATE_REASON, stamp, int(entry_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE rss_entries SET download_request_key=?,download_backend=? WHERE id=?",
+                (request_key, backend, int(entry_id)),
+            )
+            # 绑定与受理回写处于同一事务，既有受理与并发受理都不漏投影。
+            existing = conn.execute(
+                "SELECT request_id FROM download_request_keys WHERE request_key=?",
+                (request_key,),
+            ).fetchone()
+            if existing:
+                _sync_rss_download_entries_conn(conn, int(existing[0]), db.now())
+    if duplicate:
+        raise RSSMediaAlreadyClaimedError(_RSS_MEDIA_DUPLICATE_REASON)
 
 
 def _sync_rss_download_entries_conn(conn: sqlite3.Connection, request_id: int, timestamp: str) -> int:
@@ -417,9 +526,9 @@ def list_rss_entries(
     total_projection = "COUNT(*) OVER () AS total_count," if include_total else ""
     sql = (f"SELECT {total_projection}e.*, i.name AS sub_name,COALESCE(m.media_key,'') AS media_key,"
            "m.season AS media_season,m.episode AS media_episode,"
-           "COALESCE(m.skip_reason,'') AS skip_reason FROM rss_entries e "
-           "LEFT JOIN rss_items i ON e.rss_item_id=i.id "
-           "LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id" + filters)
+           "COALESCE(m.skip_reason,'') AS skip_reason," + _rss_delivery_columns() +
+           " FROM rss_entries e LEFT JOIN rss_items i ON e.rss_item_id=i.id "
+           "LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id" + _RSS_REQUEST_JOIN + filters)
     if order == "received_desc":
         sql += " ORDER BY e.id DESC"
     elif order == "received_asc":
@@ -429,7 +538,7 @@ def list_rss_entries(
         # 不可信或缺失日期回退本地入库时间，并用 id 保证稳定顺序。
         sql += " ORDER BY "
         if order == "unprocessed_first":
-            sql += "CASE WHEN COALESCE(e.processed,0)=0 THEN 0 ELSE 1 END,"
+            sql += f"CASE WHEN COALESCE(e.processed,0)=0 OR {_rss_delivery_failed_sql()} THEN 0 ELSE 1 END,"
         sql += (
             "CASE WHEN strftime('%s',e.pub_date) IS NULL THEN 1 ELSE 0 END,"
             " COALESCE(CAST(strftime('%s',e.pub_date) AS INTEGER),"
@@ -450,7 +559,13 @@ def purge_processed_rss_entries(retention_days: int = 7) -> int:
         cur = conn.execute(
             "DELETE FROM rss_entries WHERE COALESCE(processed,0)=1 "
             "AND processed_at IS NOT NULL "
-            "AND datetime(processed_at) < datetime('now', ?)",
+            "AND datetime(processed_at) < datetime('now', ?) "
+            "AND NOT EXISTS (SELECT 1 FROM download_request_keys k "
+            "JOIN download_requests r ON r.id=k.request_id "
+            "WHERE k.request_key=rss_entries.download_request_key AND rss_entries.status!='skipped' AND ("
+            + _rss_delivery_failed_sql("rss_entries") + " OR r.status='manual_review' OR ("
+            + _RSS_SELECTED_BACKEND.replace("e.", "rss_entries.") +
+            ") IN ('outcome_unknown','manual_review')))",
             (f"-{days} days",),
         )
         return int(cur.rowcount or 0)
@@ -486,9 +601,9 @@ def get_rss_entries_by_ids(entry_ids: Iterable[int]) -> dict[int, sqlite3.Row]:
             placeholders = ",".join("?" for _ in batch)
             rows = conn.execute(
                 "SELECT e.*, i.name AS sub_name, i.download_method, i.qb_save_path, "
-                "i.gy_target_dir, i.gy_target_dir_name FROM rss_entries e "
-                "LEFT JOIN rss_items i ON e.rss_item_id=i.id "
-                f"WHERE e.id IN ({placeholders})", batch,
+                "i.gy_target_dir, i.gy_target_dir_name," + _rss_delivery_columns() +
+                " FROM rss_entries e LEFT JOIN rss_items i ON e.rss_item_id=i.id "
+                + _RSS_REQUEST_JOIN + f"WHERE e.id IN ({placeholders})", batch,
             ).fetchall()
             result.update((int(row["id"]), row) for row in rows)
     return result
@@ -840,17 +955,20 @@ def skip_pending_rss_entries(entry_ids: Iterable[int], reason: str) -> int:
 def _rss_processed_update_condition(processed: bool) -> str:
     if processed:
         return "status IN ('pending','failed','skipped')"
-    # downloaded 仅代表曾被后端受理。落稳失败的条目允许显式重开；成功任务
-    # 和活跃/未知任务保持去重，身份绑定不清空，重提仍走统一 successor CAS。
+    # 受理回执不清空身份；当前请求的确定失败才足以撤销历史 unknown 防重。
+    safe_source = (
+        "EXISTS (SELECT 1 FROM download_request_keys k JOIN download_requests r ON r.id=k.request_id "
+        "WHERE k.request_key=rss_entries.download_request_key AND "
+        + _rss_delivery_retry_sql("rss_entries") + ")"
+    )
     return (
-        "(status IN ('failed','skipped') OR (status='downloaded' "
-        "AND download_backend='guangya' AND EXISTS ("
-        "SELECT 1 FROM download_requests r WHERE r.id IN ("
-        "SELECT request_id FROM download_request_keys WHERE request_key=rss_entries.download_request_key UNION "
-        "SELECT id FROM download_requests WHERE request_key=rss_entries.download_request_key) "
-        "AND r.status IN ('completed','failed') AND r.gy_status='completed' "
-        "AND r.organize_status='failed' "
-        "AND COALESCE(r.qb_status,'') NOT IN ('submitting','submitted','downloading','outcome_unknown'))))"
+        f"(status IN ('failed','skipped') OR (status='downloaded' AND {safe_source})) "
+        "AND (failure_code NOT IN ('qb_outcome_unknown','guangya_outcome_unknown','submission_outcome_unknown') "
+        f"OR {safe_source}) "
+        "AND NOT EXISTS (SELECT 1 FROM download_request_keys k JOIN download_requests r ON r.id=k.request_id "
+        "WHERE k.request_key=rss_entries.download_request_key AND (r.status='manual_review' OR ("
+        + _RSS_SELECTED_BACKEND.replace("e.", "rss_entries.") +
+        ") IN ('submitting','submitted','downloading','outcome_unknown','manual_review')))"
     )
 
 
@@ -865,12 +983,13 @@ def update_rss_entries_processed(entry_ids: list[int], processed: bool) -> int:
     with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE rss_entries SET processed=?, processed_at=?, status=?, "
-            "failure_code='', failure_retryable=0, failed_at=NULL "
+            f"failure_code=CASE WHEN {int(processed)}=1 AND failure_code IN ('qb_outcome_unknown','guangya_outcome_unknown',"
+            "'submission_outcome_unknown') THEN failure_code ELSE '' END, failure_retryable=0, failed_at=NULL "
             f"WHERE id IN ({placeholders}) AND {condition} RETURNING id",
             [1 if processed else 0, processed_at, status, *ids],
         )
         updated_ids = [int(row[0]) for row in cur.fetchall()]
-        if not processed and updated_ids:
+        if updated_ids:
             updated_placeholders = ",".join("?" for _ in updated_ids)
             conn.execute(
                 f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
@@ -940,7 +1059,8 @@ def update_rss_entries_processed_snapshot(
         condition = _rss_processed_update_condition(processed)
         cur = conn.execute(
             f"UPDATE rss_entries SET processed=?,processed_at=?,status=?,"
-            "failure_code='',failure_retryable=0,failed_at=NULL "
+            f"failure_code=CASE WHEN {int(processed)}=1 AND failure_code IN ('qb_outcome_unknown','guangya_outcome_unknown',"
+            "'submission_outcome_unknown') THEN failure_code ELSE '' END, failure_retryable=0, failed_at=NULL "
             f"WHERE id IN ({placeholders}) AND {condition}",
             [
                 1 if processed else 0,
@@ -952,12 +1072,11 @@ def update_rss_entries_processed_snapshot(
         if int(cur.rowcount or 0) != len(normalized):
             conn.rollback()
             return 0
-        if not processed:
-            conn.execute(
-                f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
-                f"WHERE rss_entry_id IN ({placeholders})",
-                [db.now(), *ids],
-            )
+        conn.execute(
+            f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
+            f"WHERE rss_entry_id IN ({placeholders})",
+            [db.now(), *ids],
+        )
         return int(cur.rowcount or 0)
 
 

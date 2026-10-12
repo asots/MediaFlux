@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -23,6 +24,9 @@ from tests.support import IsolatedDatabaseTestCase
 
 
 class FakeService:
+    # 无真实共享客户端的注入替身仍遵守规划批次 lease 契约。
+    operation_lease = staticmethod(nullcontext)
+
     def __init__(self): self.calls = []
     def execute_task(self, owner, task_id, qb_client=None):
         self.calls.append((owner, task_id, qb_client))
@@ -1000,6 +1004,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
     def test_parallel_planning_uses_two_workers_and_one_stable_writer(self):
         class ParallelService:
+            # 无真实共享客户端的注入替身仍遵守规划批次 lease 契约。
+            operation_lease = staticmethod(nullcontext)
+
             def __init__(self):
                 self.lock = threading.Lock()
                 self.barrier = threading.Barrier(2)
@@ -1094,6 +1101,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
     def test_parallel_planning_defers_ancestor_descendant_path_overlap(self):
         class PlanningService:
+            # 无真实共享客户端的注入替身仍遵守规划批次 lease 契约。
+            operation_lease = staticmethod(nullcontext)
+
             def __init__(self):
                 self.prepared: list[int] = []
 
@@ -1291,6 +1301,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
     def test_out_of_order_parallel_reviews_are_captured_by_task_id_once(self):
         class ReviewService:
+            # 无真实共享客户端的注入替身仍遵守规划批次 lease 契约。
+            operation_lease = staticmethod(nullcontext)
+
             def __init__(self):
                 self.completed_prepares: list[int] = []
                 self.lock = threading.Lock()
@@ -1422,6 +1435,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
     def test_shutdown_waits_for_inflight_parallel_planners_before_service_close(self):
         class OwnedParallelService:
+            # 无真实共享客户端的注入替身仍遵守规划批次 lease 契约。
+            operation_lease = staticmethod(nullcontext)
+
             def __init__(self):
                 self.lock = threading.Lock()
                 self.release = threading.Event()

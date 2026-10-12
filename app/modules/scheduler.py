@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -38,6 +39,7 @@ from app.notifier import NotificationEvent
 logger = get_logger(__name__)
 
 TASK_NAME = "strm_sync"
+_REFRESH_PENDING_LABEL = "待重试（等待配置恢复）"
 
 
 def _source_local_dir(strm_root: str, source: dict[str, str]) -> str:
@@ -121,6 +123,7 @@ def _refresh_notification_label(refresh: dict) -> str:
             False: "失败",
             "failed": "失败",
             "queued": "已排队",
+            "pending": _REFRESH_PENDING_LABEL,
             "skipped": "已跳过",
         }.get(status, str(status or "未知"))
         labels.append(f"{name} {value}")
@@ -1286,21 +1289,22 @@ class STRMScheduler:
             if not result.get("ok"):
                 logger.warning(result.get("error", "STRM 定时任务触发失败"))
 
-    def _refresh_overflow_sink(self):
-        """固定本轮策略；生成阶段只持久化精确溢出目录，不唤醒消费者。"""
+    def _refresh_overflow_sink(self, strm_root: str | None = None):
+        """同一冻结策略用于索引提交、溢出批次与旧路径恢复，不读取后续轮次。"""
+        from app.repositories.strm import StrmRefreshPolicy
+
         with self._state_lock:
             options = dict(self._run_options)
-
-        def persist(paths: list[str]) -> None:
-            self._refresh_media_servers(
-                emby_enabled=options.get("emby_refresh_override"),
-                media_server_refresh_enabled=options.get("media_server_refresh_override"),
-                changed_dirs=paths,
-                persist_only=True,
-                request_owners=options.get("download_request_owners"),
-            )
-
-        return persist
+            request_owners = deepcopy(options.get("download_request_owners"))
+        enabled = options.get("media_server_refresh_override")
+        allow_emby = options.get("emby_refresh_override")
+        root = get("STRM_ROOT", "") if strm_root is None else strm_root
+        return StrmRefreshPolicy(
+            media_root=str((Path(root).expanduser() / STRM_SUBDIR).resolve()),
+            enabled=True if enabled is None else bool(enabled),
+            allow_emby=True if allow_emby is None else bool(allow_emby),
+            request_owners=request_owners,
+        )
 
     def _run_incremental_sources(
         self,
@@ -1344,7 +1348,7 @@ class STRMScheduler:
         grouped: dict[str, list[dict]] = {}
         for item in changes:
             grouped.setdefault(str(item.get("source_id") or ""), []).append(dict(item))
-        refresh_path_sink = self._refresh_overflow_sink()
+        refresh_policy = self._refresh_overflow_sink(strm_root)
         aggregate = self._empty_stats()
         source_results: list[dict] = []
         stopped = False
@@ -1376,7 +1380,8 @@ class STRMScheduler:
                 source_name=source["name"],
                 on_progress=source_progress,
                 should_stop=self._stop_event.is_set,
-                on_refresh_paths=refresh_path_sink,
+                on_refresh_paths=refresh_policy,
+                refresh_policy=refresh_policy,
             )
             completed_count = sum(int(current.get(key, 0) or 0) for key in (
                 "generated", "skipped", "failed", "metadata_generated",
@@ -1426,11 +1431,23 @@ class STRMScheduler:
         active_ids_complete: bool = True,
     ) -> tuple[dict, list[dict], bool]:
         """执行全量来源扫描；局部来源模式禁止把未选来源判为退役。"""
-        refresh_path_sink = self._refresh_overflow_sink()
+        refresh_policy = self._refresh_overflow_sink(strm_root)
         aggregate = self._empty_stats()
         source_results: list[dict] = []
         _configured, source_error = configured_strm_source_plans()
-        round_cleanup_safe = not bool(source_error) and bool(sources)
+        if not sources and active_ids_complete:
+            from app.modules.strm import parse_strm_sources
+
+            # 移除最后一个来源仍须消费退役记录。只有合法空配置可作为
+            # 完整的空活跃集合；坏 JSON 或局部来源集不能解锁删除。
+            configured, empty_error = parse_strm_sources(
+                get("GY_STRM_SOURCE_DIRS", ""), require_nonempty=False,
+            )
+            if not configured and not empty_error:
+                source_error = ""
+        round_cleanup_safe = not source_error and (
+            bool(sources) or (active_ids_complete and not _configured)
+        )
         stopped = self._stop_event.is_set()
 
         for source_index, source in enumerate(sources):
@@ -1460,7 +1477,8 @@ class STRMScheduler:
                 source_name=source["name"],
                 on_progress=source_progress,
                 should_stop=self._stop_event.is_set,
-                on_refresh_paths=refresh_path_sink,
+                on_refresh_paths=refresh_policy,
+                refresh_policy=refresh_policy,
             )
             completed_count = sum(int(current.get(key, 0) or 0) for key in (
                 "generated", "skipped", "failed", "metadata_generated",
@@ -1563,6 +1581,7 @@ class STRMScheduler:
                     should_stop=self._stop_event.is_set,
                     active_ids_complete=True,
                     clean_empty_dirs=False,
+                    refresh_policy=refresh_policy,
                 )
                 if retirement.get("stopped"):
                     stopped = True
@@ -1610,7 +1629,7 @@ class STRMScheduler:
         if round_cleanup_safe:
             reconcile_historical_strm(
                 strm_root, base_url, sources, aggregate, all_sources=active_ids_complete,
-                should_stop=self._stop_event.is_set, on_refresh_paths=refresh_path_sink,
+                should_stop=self._stop_event.is_set, on_refresh_paths=refresh_policy,
             )
             if aggregate.get("clean_skipped"):
                 round_cleanup_safe = False
@@ -2166,8 +2185,10 @@ class STRMScheduler:
             )
             return {"媒体库": "failed"}
 
-        refresh_failed = any(value == "failed" for value in results.values())
-        if not refresh_failed:
+        refresh_handed_off = bool(results) and all(
+            value == "queued" for value in results.values()
+        )
+        if refresh_handed_off:
             try:
                 db.acknowledge_strm_refresh_paths(entries)
             except Exception:
@@ -2186,7 +2207,7 @@ class STRMScheduler:
             len(targets),
             ",".join(f"{name}:{status}" for name, status in results.items()) or "none",
         )
-        return results
+        return results or {"媒体库": "pending"}
 
     @staticmethod
     def _trigger_label(trigger_type: str) -> str:
@@ -2205,7 +2226,7 @@ class STRMScheduler:
             int(stats.get("failed", 0) or 0) > 0
             or int(stats.get("metadata_failed", 0) or 0) > 0
             or bool(stats.get("clean_skipped"))
-            or any(value in {False, "failed"} for value in refresh.values())
+            or any(value in {False, "failed", "pending"} for value in refresh.values())
         )
         names = [str(item.get("name") or item.get("id") or "未命名") for item in sources]
         source_text = f"{len(sources)} 个"
@@ -2214,6 +2235,8 @@ class STRMScheduler:
             if len(names) > 3:
                 source_text += f" 等 {len(names)} 个"
         def refresh_label(value: object) -> str:
+            if value == "pending":
+                return _REFRESH_PENDING_LABEL
             if value == "queued":
                 return "已排队"
             if value == "skipped":
@@ -2429,7 +2452,7 @@ class STRMScheduler:
                 int(stats.get("failed", 0) or 0)
                 or int(stats.get("metadata_failed", 0) or 0)
                 or stats.get("clean_skipped")
-                or any(value in {False, "failed"} for value in refresh.values())
+                or any(value in {False, "failed", "pending"} for value in refresh.values())
             )
             event = NotificationEvent(
                 "⚠️ STRM 同步部分完成" if partial else "✅ STRM 同步完成",

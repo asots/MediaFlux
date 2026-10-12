@@ -132,8 +132,9 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(len(statements), 10)
         self.assertTrue(all(statement.lstrip().upper().startswith("SELECT") for statement in statements))
-        history_sql = ("download_log", "download_requests", "download_request_keys")
-        self.assertFalse(any(any(table in statement for table in history_sql) for statement in statements))
+        # 列表按 canonical key 读取当前请求投影，不扫描历史日志、不逐条补写。
+        self.assertFalse(any("download_log" in statement for statement in statements))
+        self.assertTrue(all("LEFT JOIN download_request_keys" in statement for statement in statements))
         self.assertFalse(any(statement.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
                              for statement in statements))
 

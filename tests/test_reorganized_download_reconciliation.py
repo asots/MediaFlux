@@ -86,6 +86,96 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         self.drain(cloud)
         self.assertEqual(cloud.deleted, ['stage'])
 
+    def failed_recovery(self):
+        from app.repositories.download_staging import list_staging_cleanup_requests
+        db.update_download_request(self.request_id, organize_status='failed', organize_started=-1)
+        return {
+            'request': list_staging_cleanup_requests(source_id='stage')[0],
+            'members': queue.reorganized_source_evidence('stage'),
+        }
+
+    def test_failed_request_requires_explicit_verified_recovery_not_background_discovery(self):
+        recovery = self.failed_recovery()
+        self.assertEqual(queue.reconcile_reorganized_confirmations(['stage']), [])
+        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
+        self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), ['card'])
+        row = db.get_download_request(self.request_id)
+        self.assertEqual((row['organize_status'], row['organize_started']), ('completed', 1))
+        cloud = _CloudTree()
+        self.drain(cloud)
+        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'completed')
+        self.assertEqual(cloud.deleted, ['stage'])
+
+    def test_failed_recovery_rejects_cancel_resubmit_rebind_hidden_and_unknown_cleanup(self):
+        mutations = [
+            {'status': 'cancelled'}, {'status': 'resubmitted'}, {'organize_task_id': 'new-task'},
+            {'gy_task_id': 'new-cloud-task'}, {'gy_target_dir': 'new-stage'},
+            {'attention_cleared_at': db.now()}, {'gy_staging_cleanup_status': 'failed'},
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                recovery = self.failed_recovery()
+                original = {key: db.get_download_request(self.request_id)[key] for key in mutation}
+                with db.get_conn() as conn:
+                    conn.execute('UPDATE download_requests SET ' + ','.join(f'{key}=?' for key in mutation)
+                                 + ' WHERE id=?', (*mutation.values(), self.request_id))
+                self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
+                row = db.get_download_request(self.request_id)
+                self.assertEqual(row['organize_started'], -1)
+                for key, value in mutation.items():
+                    self.assertEqual(row[key], value)
+                with db.get_conn() as conn:
+                    conn.execute('UPDATE download_requests SET ' + ','.join(f'{key}=?' for key in original)
+                                 + ' WHERE id=?', (*original.values(), self.request_id))
+
+    def test_failed_recovery_rechecks_member_versions_in_transaction(self):
+        recovery = self.failed_recovery()
+        db.update_organize_log(self.log_id, status='failed')
+        self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
+        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'failed')
+
+    def test_failed_recovery_requires_every_latest_group_not_only_last_corrected_video(self):
+        recovery = self.failed_recovery()
+        other = self.evidence('second')
+        db.update_organize_log(other, status='failed')
+        self.assertEqual(queue.reorganized_source_evidence('stage'), [])
+        self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
+        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
+
+    def test_failed_recovery_rejects_missing_confirmation_member_even_when_known_logs_succeed(self):
+        recovery = self.failed_recovery()
+        self.payload['companions'] = [{'file_id': 'unlogged-subtitle', 'parent_id': 'stage'}]
+        with db.get_conn() as conn:
+            conn.execute("UPDATE organize_confirmations SET payload_json=? WHERE token='card'",
+                         (json.dumps(self.payload),))
+        self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
+        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'failed')
+
+    def test_failed_recovery_rejects_active_confirmation_and_unknown_delete(self):
+        recovery = self.failed_recovery()
+        db.update_organize_confirmation('card', status='queued')
+        self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
+        db.update_organize_confirmation('card', status='failed')
+        db.add_organize_delete_audit(trigger='download_staging_cleanup', reason='lost response',
+                                    file_id='stage', file_name='MF-case', parent_id='source', status='failed')
+        self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
+        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
+
+    def test_failed_recovery_and_confirmation_queue_commit_atomically(self):
+        import sqlite3
+        recovery = self.failed_recovery()
+        with db.get_conn() as conn:
+            conn.execute("CREATE TRIGGER reject_recovery BEFORE INSERT ON download_staging_reconcile "
+                         "BEGIN SELECT RAISE(ABORT, 'synthetic queue failure'); END")
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery)
+        finally:
+            with db.get_conn() as conn:
+                conn.execute('DROP TRIGGER reject_recovery')
+        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
+        self.assertEqual(db.get_organize_confirmation('card')['status'], 'failed')
+
     def test_successful_manual_organize_also_supersedes_old_expired_card(self):
         db.update_organize_log(self.log_id, operation_type='organize')
         db.update_organize_confirmation('card', status='expired')

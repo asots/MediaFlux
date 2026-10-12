@@ -9,6 +9,7 @@ from app import config
 from app import database as db
 from app.agent.public_safety import sanitize_public_text
 from app.logger import get_logger
+from app.modules.local_media_outcomes import local_media_refresh_status
 from app.notifier import NOTIFICATION_SECTION_BREAK, NotificationEvent
 from app.sensitive_data import redact_sensitive_text
 
@@ -94,17 +95,7 @@ def build_local_media_event(
                 for item in str(getattr(task, "warning", "") or "").split("；")
                 if item
             ]
-        refresh_status = (
-            str(_value(payload, "media_refresh_status", "") or "").strip().lower()
-        )
-        if not refresh_status:
-            refresh_status = (
-                "failed"
-                if any(
-                    "刷新失败" in item or "未刷新媒体库" in item for item in warnings
-                )
-                else "completed"
-            )
+        refresh_status = local_media_refresh_status(task, result) or "completed"
         refresh_label = {
             "completed": "刷新完成 🎯",
             "queued": "已排队（合并刷新） ⏳",

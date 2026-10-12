@@ -935,3 +935,21 @@ class DownloadAttentionUiContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_strm_refresh_pending_remains_visible_until_request_reconciles_completed():
+    from app.routes import downloads_api
+    from tests.support import isolated_test_database
+
+    with isolated_test_database("refresh-attention.db"):
+        request_id, _created = db.create_download_request("refresh-attention", "magnet")
+        db.update_download_request(
+            request_id, status="completed", gy_status="completed", organize_status="completed",
+            strm_status="partial", strm_error="STRM 已完成，媒体库刷新等待后台重试",
+            gy_staging_cleanup_status="completed",
+        )
+        assert db.count_download_requests_requiring_attention(request_id) == 1
+        stages = downloads_api._attention_json(db.get_download_request(request_id))["stages"]
+        assert any(stage["key"] == "strm" and stage["status"] == "partial" for stage in stages)
+        db.update_download_request(request_id, strm_status="completed", strm_error="")
+        assert db.count_download_requests_requiring_attention(request_id) == 0

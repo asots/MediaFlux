@@ -1137,6 +1137,29 @@ def _normalize_organize_extensions(value: object, *, defaults: tuple[str, ...], 
     return ",".join(normalized)
 
 
+def _reload_local_media_config() -> tuple[list[str], bool]:
+    """正式发布和原值重试共用同一切换结果，不能用 no-op 掩盖待切换状态。"""
+    try:
+        from app.modules.local_media_scheduler import (
+            reload_local_media_scheduler_config,
+        )
+        from app.modules.local_media_service import reload_local_media_service
+
+        web_updated = reload_local_media_service()
+        scheduler_updated = reload_local_media_scheduler_config()
+        if not (web_updated and scheduler_updated):
+            return [
+                (
+                    "本地媒体配置已保存，运行时切换尚未完成；在途操作不受影响，"
+                    "新操作会重试切换，请稍后重试"
+                ),
+            ], False
+        return [], False
+    except Exception as exc:  # noqa: BLE001 - 已落盘配置的切换边界必须报告 warning，不能伪报成功。
+        logger.warning("本地媒体配置热更新失败 type=%s", type(exc).__name__)
+        return ["本地媒体配置已保存，但运行时切换失败；请重试或重启服务"], True
+
+
 @router.post("/config")
 def save_config(request: Request, data: Any = Body(default=None)):
     request_started = time.perf_counter()
@@ -1470,6 +1493,9 @@ def save_config(request: Request, data: Any = Body(default=None)):
             "GY_ORGANIZE_NSFW_SOURCE_IDS",
             media_workflow_updates["GY_ORGANIZE_NSFW_SOURCE_IDS"],
         )
+    from app.modules.local_media_service import LOCAL_MEDIA_RUNTIME_KEYS
+
+    local_media_keys = set(LOCAL_MEDIA_RUNTIME_KEYS) & updates.keys()
     persisted_updates = {
         key: value
         for key, value in updates.items()
@@ -1480,7 +1506,14 @@ def save_config(request: Request, data: Any = Body(default=None)):
             "配置保存完成 changed=0 total_ms=%s",
             max(1, round((time.perf_counter() - request_started) * 1000)),
         )
-        return {"success": True}
+        unchanged_result: dict[str, object] = {"success": True}
+        if local_media_keys:
+            warnings, restart_required = _reload_local_media_config()
+            if warnings:
+                unchanged_result["warnings"] = warnings
+            if restart_required:
+                unchanged_result["restart_required"] = True
+        return unchanged_result
 
     changed_keys = frozenset(persisted_updates)
     previous_values = {key: config.get(key, "") for key in changed_keys}
@@ -1634,6 +1667,10 @@ def save_config(request: Request, data: Any = Body(default=None)):
             logger.warning(
                 "发现页运行时配置热更新失败 type=%s", type(exc).__name__
             )
+    if local_media_keys:
+        local_warnings, local_restart_required = _reload_local_media_config()
+        warnings.extend(local_warnings)
+        restart_required = restart_required or local_restart_required
     if any(key.startswith("INDEXER_") for key in changed_keys):
         try:
             from app.indexers.runtime import (

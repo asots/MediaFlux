@@ -88,6 +88,8 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
             first_sub, "first", "guid-a", media_key=media_key,
             tmdb_id="105556", season=1, episode=7,
         )
+        # 发现 pending 本身不是消费凭据；已经 claim 的条目才阻止另一源。
+        self.assertTrue(db.claim_rss_entry(int(first["id"])))
         second = db.add_rss_entry_with_media(
             second_sub, "second", "guid-b", media_key=media_key,
             tmdb_id="105556", season=1, episode=7,

@@ -7583,8 +7583,8 @@ class Organizer:
                     reason="整理完成后清理本次扫描确认的空目录",
                     candidate=DeleteCandidate(
                         file_id=str(dir_id),
-                        name=f"空目录 {dir_id}",
-                        parent_id="",
+                        name=str(current.name),
+                        parent_id=str(current.parent_id),
                     ),
                     delete_operation=lambda current_id=str(dir_id), current_etag=expected_etag,
                     current_updated_at=expected_updated_at: delete_empty(
