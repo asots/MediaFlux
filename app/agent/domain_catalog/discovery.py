@@ -417,6 +417,7 @@ def register_specs(
                 "additionalProperties": False,
             },
             handler=list_watchlist_summaries,
+            parallel_read=True,
             validator=watchlist_summaries_arguments,
         )
     )
@@ -432,6 +433,7 @@ def register_specs(
                 "additionalProperties": False,
             },
             handler=get_watchlist_summary,
+            parallel_read=True,
             validator=watchlist_summary_arguments,
         )
     )

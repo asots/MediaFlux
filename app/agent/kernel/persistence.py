@@ -116,23 +116,23 @@ class SQLiteKernelStore:
             self._write_state(conn, state)
             return True
 
-    async def settle_cancelled_read_inline(self, receipt) -> bool:
+    async def settle_cancelled_reads(self, receipts) -> bool:
         from .state import _CancelledReadInline
-        if type(receipt) is not _CancelledReadInline:
+        if not isinstance(receipts, tuple) or not receipts or type(receipts[0]) is not _CancelledReadInline:
             return False
-        lease = receipt.lease
+        lease = receipts[0].lease
         return await guarded_state_call(
-            lease.owner, lease.session_id, self._settle_cancelled_read_inline_sync, receipt,
+            lease.owner, lease.session_id, self._settle_cancelled_reads_sync, receipts,
             kind="commit", complete_on_cancel=True,
         )
 
-    def _settle_cancelled_read_inline_sync(self, receipt) -> bool:
-        from .state import _settle_cancelled_read_inline
-        lease = receipt.lease
+    def _settle_cancelled_reads_sync(self, receipts) -> bool:
+        from .state import _settle_cancelled_reads
+        lease = receipts[0].lease
         with session_scope_guard(lease.owner, lease.session_id, kind="commit"), db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             state = self._load_row(conn, lease.owner, lease.session_id)
-            updated = _settle_cancelled_read_inline(state, receipt, self.max_state_bytes)
+            updated = _settle_cancelled_reads(state, receipts, self.max_state_bytes)
             if updated is None:
                 return False
             self._write_state(conn, updated)

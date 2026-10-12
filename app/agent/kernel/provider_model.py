@@ -789,6 +789,7 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                         history=history,
                         tools=definitions,
                         max_tokens=request.max_output_tokens,
+                        allow_parallel_tool_calls=request.allow_parallel_tool_calls,
                         generation_profile=resolve_generation_profile(
                             self.settings.generation_profiles_json, location.base_url,
                             request.model or self.settings.model, protocol,

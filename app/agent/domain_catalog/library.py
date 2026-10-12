@@ -136,6 +136,7 @@ def register_specs(
                 "additionalProperties": False,
             },
             handler=search_library,
+            parallel_read=True,
             validator=_search_arguments,
             examples=(
                 "媒体库里有没有《某片》",
@@ -192,6 +193,7 @@ def register_specs(
                 "additionalProperties": False,
             },
             handler=batch_library_presence,
+            parallel_read=True,
             validator=batch_presence_arguments,
             related_tools=("discovery.person_filmography",),
             examples=(
@@ -504,6 +506,7 @@ def register_specs(
                 "additionalProperties": False,
             },
             handler=count_series_episodes,
+            parallel_read=True,
             validator=count_series_episodes_arguments,
             examples=(
                 "媒体库中《某剧》一共有多少集",

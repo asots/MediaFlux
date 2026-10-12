@@ -66,6 +66,7 @@ from .state import (
     StateUpdate,
     TurnCoordinator,
     HistoryCapacityError,
+    _CancelledReadInline,
     retain_conversation,
     historical_user_sources,
     history_memory,
@@ -216,6 +217,14 @@ class AllowAllTurnAdmission:
 
 
 _INITIAL_PLANNING_ROUNDS = 12
+_MAX_PARALLEL_READS = 4
+
+
+def _independent_read(tool) -> bool:
+    return (tool.effect is ToolEffect.READ and tool.observe is None
+            and tool.metadata.get("parallel_read") is True
+            and not tool.metadata.get("kernel_utility")
+            and tool.metadata.get("source_kind") not in {"resource_index", "resource_presentation"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,8 +482,10 @@ class AgentSession:
         reobservation_source = None
         active_calls: tuple[ModelToolCall, ...] = ()
         completed_call_ids: set[str] = set()
-        started_call_id = ""
-        returned_read = None
+        started_call_ids: dict[str, None] = {}
+        returned_reads: dict[str, _CancelledReadInline] = {}
+        parallel_call_ids: set[str] = set()
+        publication_lock = asyncio.Lock()
         progress_results: list[tuple[str, dict[str, Any]]] = []
         unresolved_errors: dict[tuple[str, int, str], ToolPipelineError] = {}
         last_business_tool = ""
@@ -532,62 +543,63 @@ class AgentSession:
             wait_action: _ContinuationAction | None = None,
         ) -> None:
             nonlocal state
-            checkpoint_messages = list(messages if staged_messages is None else staged_messages)
-            completed = completed_call_ids if staged_completed is None else staged_completed
-            if close_pending:
-                for call in active_calls:
-                    if call.call_id in completed:
-                        continue
-                    started = call.call_id == started_call_id
-                    checkpoint_messages.append(
-                        ModelMessage(
-                            role="tool", content=pending_content(started),
-                            tool_call_id=call.call_id, tool_name=call.name,
+            async with publication_lock:
+                checkpoint_messages = list(messages if staged_messages is None else staged_messages)
+                completed = completed_call_ids if staged_completed is None else staged_completed
+                if close_pending:
+                    for call in active_calls:
+                        if call.call_id in completed:
+                            continue
+                        started = call.call_id in started_call_ids
+                        checkpoint_messages.append(
+                            ModelMessage(
+                                role="tool", content=pending_content(started),
+                                tool_call_id=call.call_id, tool_name=call.name,
+                            )
                         )
+                stored = self._persisted_conversation(
+                    checkpoint_messages,
+                    current_user_index=current_user_index,
+                    original_message=agent_input.message,
+                    reply_context=agent_input.reply_context,
+                    prior_conversation=state.conversation,
+                )
+                # The store enforces retention after receipt merge in its transaction.
+                start = current_user_index if current_user_index is not None else next(
+                    (i for i in range(len(stored) - 1, -1, -1) if stored[i].get("role") == "user"), len(stored),
+                )
+                try:
+                    extra_updates = ()
+                    if wait_action is not None:
+                        extra_updates = (wait_action,)
+                    elif task_patch is not None and task_patch.operation == "create" and self.continuation_binding is not None:
+                        extra_updates = (_ContinuationAction("", {
+                            "operation": "seed", "model_limit": self.limits.max_model_rounds,
+                            "tool_limit": self.limits.max_tool_calls,
+                            "model_spent": round_index + 1, "tool_spent": total_tool_calls,
+                        }, binding=self.continuation_binding),)
+                    await _require_complete_inline_history(
+                        state.conversation, retain_conversation(stored), code="history_capacity_exceeded",
+                        pipeline=self.pipeline, lease=lease,
                     )
-            stored = self._persisted_conversation(
-                checkpoint_messages,
-                current_user_index=current_user_index,
-                original_message=agent_input.message,
-                reply_context=agent_input.reply_context,
-                prior_conversation=state.conversation,
-            )
-            # The store enforces retention after receipt merge in its transaction.
-            start = current_user_index if current_user_index is not None else next(
-                (i for i in range(len(stored) - 1, -1, -1) if stored[i].get("role") == "user"), len(stored),
-            )
-            try:
-                extra_updates = ()
-                if wait_action is not None:
-                    extra_updates = (wait_action,)
-                elif task_patch is not None and task_patch.operation == "create" and self.continuation_binding is not None:
-                    extra_updates = (_ContinuationAction("", {
-                        "operation": "seed", "model_limit": self.limits.max_model_rounds,
-                        "tool_limit": self.limits.max_tool_calls,
-                        "model_spent": round_index + 1, "tool_spent": total_tool_calls,
-                    }, binding=self.continuation_binding),)
-                await _require_complete_inline_history(
-                    state.conversation, retain_conversation(stored), code="history_capacity_exceeded",
-                    pipeline=self.pipeline, lease=lease,
-                )
-                # 失败确认后的诊断仍属于同一执行组，不能在续接前撤掉已有的有界容量。
-                # 下一用户回合仍按正常规则释放；保留此阶段并不会提高容量上限。
-                state = await self.state_store.commit(
-                    lease,
-                    updates=(_ExecutionCapacity(
-                        "", state.execution_capacity if preserve_capacity or diagnosing_effect else close_pending and any(
-                            call.call_id not in completed for call in active_calls
-                        ),
-                        current_start=start if any(row.get("tool_calls") or row.get("reply_context", {}).get("reference_handle") for row in stored[start:]) else None,
-                    ),) + extra_updates,
-                    conversation=stored,
-                    **({"task_patch": task_patch} if task_patch is not None else {}),
-                )
-            except HistoryCapacityError as exc:
-                raise ToolPipelineError(
-                    "当前结果超过历史容量，已保留此前检查点；已开始的调用结果可能未知，请勿重放写操作。",
-                    code="history_capacity_exceeded",
-                ) from exc
+                    # 失败确认后的诊断仍属于同一执行组，不能在续接前撤掉已有的有界容量。
+                    # 下一用户回合仍按正常规则释放；保留此阶段并不会提高容量上限。
+                    state = await self.state_store.commit(
+                        lease,
+                        updates=(_ExecutionCapacity(
+                            "", state.execution_capacity if preserve_capacity or diagnosing_effect else close_pending and any(
+                                call.call_id not in completed for call in active_calls
+                            ),
+                            current_start=start if any(row.get("tool_calls") or row.get("reply_context", {}).get("reference_handle") for row in stored[start:]) else None,
+                        ),) + extra_updates,
+                        conversation=stored,
+                        **({"task_patch": task_patch} if task_patch is not None else {}),
+                    )
+                except HistoryCapacityError as exc:
+                    raise ToolPipelineError(
+                        "当前结果超过历史容量，已保留此前检查点；已开始的调用结果可能未知，请勿重放写操作。",
+                        code="history_capacity_exceeded",
+                    ) from exc
 
         async def remember_result(
             *,
@@ -1256,6 +1268,10 @@ class AgentSession:
                     selected_model_names.add(repair_tool.model_name)
                     tool_definitions = tuple(t for t in tool_definitions if t["name"] != repair_tool.model_name) + (repair_tool.model_definition(),)
                 request_tools = () if final_synthesis_round or explaining else tool_definitions
+                parallel_reads = tuple(tool.model_name for tool in selected_tools if _independent_read(tool)) if (
+                    request_tools and not confirming and not is_read_resume and not tool_context.diagnostic_only
+                    and not tool_context.selection_arguments and not tool_context.schema_replacements
+                ) else ()
                 request_system_prompt = self.system_prompt + (
                     f"\n本轮系统预算：业务工具调用已使用 {business_tool_calls}/{self.limits.max_tool_calls}，"
                     f"当前模型轮次 {round_index + 1}/{self.limits.max_model_rounds}。"
@@ -1268,6 +1284,13 @@ class AgentSession:
                     "若还有已获准的只读检查未完成，应继续处理，不能把已检查的部分条目当成全部任务结束；"
                     "需要写入授权、真实故障或用户补充信息时才说明阻塞并停下。"
                 )
+                if parallel_reads:
+                    request_system_prompt += (
+                        "\n相互独立且参数已经明确的只读查询，可在同一回复中提出多个调用，避免逐项等待。"
+                        "本窗口允许并发执行的只读能力：" + ", ".join(parallel_reads) + "。"
+                        "所需能力尚未载入时，先集中发现这些能力，再批量进行独立查询。"
+                        "依赖前项结果的参数不能猜测后提前提交；写操作与任务状态变更仍按顺序处理并等待原有确认。"
+                    )
                 if self.continuation_binding is not None and (lease.continuation_id or state.metadata.get("read_wait")):
                     from .continuation import for_lease
                     task_budget = for_lease(state, lease)["budget"]
@@ -1412,6 +1435,8 @@ class AgentSession:
                     max_output_tokens=output_tokens,
                     round_index=round_index,
                     model=selected_model,
+                    # 原生开关允许提出多个调用，不授予并行写权限；实际批次仍逐项验资格。
+                    allow_parallel_tool_calls=bool(parallel_reads),
                 )
                 await _require_complete_inline_history(
                     [message.to_dict() for message in protocol_history_baseline(messages, history_end=history_end)],
@@ -1559,7 +1584,9 @@ class AgentSession:
                     )
                     active_calls = tuple(calls)
                     completed_call_ids.clear()
-                    started_call_id = ""
+                    started_call_ids.clear()
+                    returned_reads.clear()
+                    parallel_call_ids.clear()
                     messages.append(
                         ModelMessage(
                             role="assistant",
@@ -1597,6 +1624,79 @@ class AgentSession:
                     total_tool_calls += len(calls)
                     business_tool_calls += business_batch_calls
                     discovery_tool_calls += discovery_batch_calls
+                    # 同一模型批次只对领域明确声明独立的READ做有界并发。
+                    # 发现、修参、任务变更、混合写以及恢复单个READ均沿同一执行链逐项运行。
+                    parallel_batch = (len(calls) > 1 and not confirming and not is_read_resume
+                        and not tool_context.diagnostic_only and not tool_context.selection_arguments
+                        and all(call.argument_error is None
+                            and (call.name in selected_names or call.name in selected_model_names)
+                            and _independent_read(self.catalog.get(call.name)) for call in calls))
+                    ready: dict[str, PipelineResult | BaseException] = {}
+                    read_contexts: dict[str, ToolCallContext] = {}
+
+                    async def run_call_group(start):
+                        width = _MAX_PARALLEL_READS if parallel_batch and not tool_context.schema_replacements else 1
+                        group = calls[start:start + width]
+                        concurrent = len(group) > 1
+                        jobs = []
+                        try:
+                            for offset, item in enumerate(group):
+                                token.raise_if_cancelled()
+                                spec = self.catalog.get(item.name)
+                                canonical = ModelToolCall(item.call_id, spec.name, item.arguments)
+                                started_call_ids[item.call_id] = None
+                                if concurrent:
+                                    parallel_call_ids.add(item.call_id)
+                                if spec.effect is not ToolEffect.READ:
+                                    await publish_tool(AgentEventType.EFFECT_PREVIEW_STARTED, canonical)
+                                await publish_tool(AgentEventType.TOOL_STARTED, canonical, effect=spec.effect.value)
+                                await persist_conversation(close_pending=True)
+                                options = {}
+                                if spec.effect is ToolEffect.READ:
+                                    receipt = _CancelledReadInline.capture(lease, state.conversation, start + offset, tool=spec)
+                                    returned_reads[item.call_id] = receipt
+                                    options["_returned_read"] = receipt
+                                # 只在没有待修复调用时并发；同批独立结果不能互相消除错误。
+                                context = replace(tool_context, current_task=state.metadata.get("task"), call_id=item.call_id,
+                                    schema_replacements={} if concurrent else tool_context.schema_replacements)
+                                read_contexts[item.call_id] = context
+                                admitted = asyncio.Event()
+                                if concurrent:
+                                    options["_read_admitted"] = admitted
+                                    options["_read_publication_lock"] = publication_lock
+                                invocation = self.pipeline.execute(spec.name, item.arguments, context=context, **options)
+                                if not concurrent:
+                                    # 顺序路径直接执行，不创建无用子任务，也不改变既有调用上下文/持锁身份。
+                                    try:
+                                        ready[item.call_id] = await invocation
+                                    except ToolPipelineError as exc:
+                                        ready[item.call_id] = exc
+                                    return
+                                job = asyncio.create_task(invocation)
+                                jobs.append(job)
+                                if concurrent:
+                                    # 按原生调用顺序完成权限/引用/配额准入，再让下一个handler进入；
+                                    # 并发的是已准入的只读I/O，不能靠调度竞速抢占同身份额度。
+                                    waiter = asyncio.create_task(admitted.wait())
+                                    try:
+                                        await asyncio.wait((job, waiter), return_when=asyncio.FIRST_COMPLETED)
+                                    finally:
+                                        waiter.cancel()
+                                        await asyncio.gather(waiter, return_exceptions=True)
+                                    if job.done() and not admitted.is_set():
+                                        break  # 准入失败先按原顺序交付，再校验后续调用，不提前扩大修参范围。
+                            outcomes = await asyncio.gather(*jobs, return_exceptions=True)
+                            for outcome in outcomes:
+                                if isinstance(outcome, (asyncio.CancelledError, StalePublicationError)):
+                                    raise outcome
+                            ready.update((item.call_id, outcome) for item, outcome in zip(group[:len(outcomes)], outcomes, strict=True))
+                        finally:
+                            for job in jobs:
+                                if not job.done():
+                                    job.cancel()
+                            if jobs:
+                                await asyncio.gather(*jobs, return_exceptions=True)
+
                     for call_index, call in enumerate(calls):
                         if (
                             call.name not in selected_names
@@ -1635,12 +1735,6 @@ class AgentSession:
                             tool_context = replace(tool_context, confirmed_effect=None)
                         if tool.effect is not ToolEffect.READ:
                             attempted_write = True
-                            await publish_tool(
-                                AgentEventType.EFFECT_PREVIEW_STARTED, canonical_call,
-                            )
-                        await publish_tool(
-                            AgentEventType.TOOL_STARTED, canonical_call, effect=tool.effect.value,
-                        )
                         discovery_checkpoint = discovery.checkpoint()
                         if tool.name == DISCOVERY_TOOL:
                             current_state = await self.state_store.load(
@@ -1648,21 +1742,15 @@ class AgentSession:
                             )
                             discovery.context["reference_kinds"] = tuple(current_state.ref_kinds)
                         try:
-                            started_call_id = call.call_id
-                            returned_read = None
-                            await persist_conversation(close_pending=True)
-                            if tool.effect is ToolEffect.READ:
-                                from .state import _CancelledReadInline
-                                returned_read = _CancelledReadInline.capture(
-                                    lease, state.conversation, call_index, tool=tool,
-                                )
-                            result = await self.pipeline.execute(
-                                canonical_call.name,
-                                canonical_call.arguments,
-                                context=replace(tool_context, current_task=state.metadata.get("task"),
-                                                call_id=call.call_id),
-                                **({"_returned_read": returned_read} if returned_read is not None else {}),
-                            )
+                            if call.call_id not in ready:
+                                await run_call_group(call_index)
+                            call_context = read_contexts.pop(call.call_id)
+                            if call_context.schema_replacements is not tool_context.schema_replacements:
+                                tool_context.schema_replacements.update(call_context.schema_replacements)
+                            outcome = ready.pop(call.call_id)
+                            if isinstance(outcome, BaseException):
+                                raise outcome
+                            result = outcome
                         except ToolPipelineError as exc:
                             if (isinstance(exc, _ReadPermitRejected) and self.continuation_binding is not None
                                     and (state.metadata.get("read_wait") or lease.continuation_kind == "effect") and not confirming and not explaining
@@ -1827,9 +1915,22 @@ class AgentSession:
         except (asyncio.CancelledError, StalePublicationError) as exc:
             await preserve_checkpoint()
             settlement = {}
-            if returned_read is not None and returned_read._content is not None:
+            completed_reads = []
+            for call_id, receipt in returned_reads.items():
+                if receipt._content is None:
+                    continue
+                if call_id in parallel_call_ids:
+                    # 前面的并发结果可能已按顺序落盘；只迁移同一调用尚未结算的槽，
+                    # 绑定的是本执行器最后一次成功CAS的检查点，不读新用户的历史。
+                    receipt = receipt.at_checkpoint(state.conversation)
+                    if receipt is None:
+                        continue
+                elif call_id != next(reversed(started_call_ids), None):
+                    continue
+                completed_reads.append(receipt)
+            if completed_reads:
                 try:
-                    settled = await self.state_store.settle_cancelled_read_inline(returned_read)
+                    settled = await self.state_store.settle_cancelled_reads(tuple(completed_reads))
                 except Exception as settlement_error:  # local transaction failure leaves unknown
                     logger.warning("Cancelled READ settlement rejected type=%s", type(settlement_error).__name__)
                     settled = False

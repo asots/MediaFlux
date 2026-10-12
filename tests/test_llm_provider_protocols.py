@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from app.clients.openai_compatible import (
     ANTHROPIC_VERSION,
@@ -323,6 +324,40 @@ class LLMProviderProtocolTests(unittest.TestCase):
         self.assertEqual(anthropic["system"], "system")
         self.assertEqual(anthropic["messages"], anthropic_history)
         self.assertNotIn("stream", anthropic)
+
+    def test_native_parallel_tool_permission_requires_true_and_tools(self):
+        cases: list[dict[str, Any]] = [
+            {},  # tools_api 等旧调用不传许可时继续关闭。
+            *({"allow_parallel_tool_calls": value}
+              for value in (False, True, None, 0, 1, "true", {}, [True])),
+        ]
+        capability = {"name": "inspect", "parameters": {"type": "object", "properties": {}}}
+        for protocol in ("chat_completions", "responses", "anthropic_messages"):
+            for has_tools in (False, True):
+                tools = native_tool_definitions(protocol, [capability]) if has_tools else []
+                for options in cases:
+                    with self.subTest(protocol=protocol, tools=has_tools, options=options):
+                        body = native_tool_request_body(
+                            protocol=protocol, model="sample", system_prompt="system",
+                            history=[], tools=tools, max_tokens=400, **options,
+                        )
+                        if protocol == "responses":
+                            self.assertEqual(body["include"], ["reasoning.encrypted_content"])
+                        if not has_tools:
+                            for field in ("tools", "tool_choice", "parallel_tool_calls", "disable_parallel_tool_use"):
+                                self.assertNotIn(field, body)
+                            continue
+                        enabled = options.get("allow_parallel_tool_calls") is True
+                        self.assertEqual(body["tools"], tools)
+                        if protocol == "anthropic_messages":
+                            self.assertEqual(body["tool_choice"], {
+                                "type": "auto", "disable_parallel_tool_use": not enabled,
+                            })
+                            self.assertNotIn("parallel_tool_calls", body)
+                        else:
+                            self.assertEqual(body["tool_choice"], "auto")
+                            self.assertIs(body["parallel_tool_calls"], enabled)
+                            self.assertNotIn("disable_parallel_tool_use", body)
 
     def test_parse_and_append_responses_native_tool_turn(self):
         turn = parse_native_tool_turn({

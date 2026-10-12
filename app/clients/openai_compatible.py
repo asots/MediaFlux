@@ -683,6 +683,7 @@ def native_tool_request_body(
     max_tokens: int,
     generation_profile: Mapping[str, str] | None = None,
     stream: bool = False,
+    allow_parallel_tool_calls: bool = False,
 ) -> dict[str, Any]:
     if protocol == "responses":
         body = {
@@ -696,7 +697,7 @@ def native_tool_request_body(
             body.update({
                 "tools": tools,
                 "tool_choice": "auto",
-                "parallel_tool_calls": False,
+                "parallel_tool_calls": allow_parallel_tool_calls is True,
             })
     elif protocol == "anthropic_messages":
         body = {
@@ -707,7 +708,10 @@ def native_tool_request_body(
         if tools:
             body.update({
                 "tools": tools,
-                "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+                "tool_choice": {
+                    "type": "auto",
+                    "disable_parallel_tool_use": allow_parallel_tool_calls is not True,
+                },
             })
     else:
         body = {
@@ -718,7 +722,7 @@ def native_tool_request_body(
             body.update({
                 "tools": tools,
                 "tool_choice": "auto",
-                "parallel_tool_calls": False,
+                "parallel_tool_calls": allow_parallel_tool_calls is True,
             })
     body.update(_generation_parameters(
         protocol=protocol, model=model, max_tokens=max_tokens,

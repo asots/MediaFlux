@@ -220,7 +220,8 @@ def test_session_closure_preserves_protocol_events_and_persistence(case):
     (RiskLevel.DANGER, True, ToolEffect.DANGER),
 ])
 @pytest.mark.parametrize("freshness", ["live", "snapshot"])
-def test_adapted_specs_keep_shared_fields_costs_and_disjoint_handlers(risk, confirmation, effect, freshness):
+@pytest.mark.parametrize("parallel_read", [False, True])
+def test_adapted_specs_keep_shared_fields_costs_and_disjoint_handlers(risk, confirmation, effect, freshness, parallel_read):
     schema = {"type": "object", "properties": {"query": {"type": "string"}}}
     value = ToolResult(True, "success", "兼容对照")
     spec = ToolSpec(
@@ -230,7 +231,7 @@ def test_adapted_specs_keep_shared_fields_costs_and_disjoint_handlers(risk, conf
         runtime_status=lambda: {"status": "ready"}, domains=("Custom Domain",),
         context_confirmation_preparer=lambda arguments, context: (value, "snapshot"),
         context_confirmed_handler=lambda arguments, snapshot, context: value,
-        examples=("例子",), source_kind="fixture_source", freshness=freshness,
+        examples=("例子",), source_kind="fixture_source", freshness=freshness, parallel_read=parallel_read,
         workflow="fixture_workflow", workflow_stage=3,
         related_tools=("fixture.next", "fixture.next", " "),
     )
@@ -241,7 +242,7 @@ def test_adapted_specs_keep_shared_fields_costs_and_disjoint_handlers(risk, conf
     assert adapted.input_schema is schema and adapted.validator is spec.validator
     assert adapted.runtime_status is spec.runtime_status
     assert adapted.metadata == {
-        "source_kind": "fixture_source", "freshness": freshness,
+        "source_kind": "fixture_source", "freshness": freshness, "parallel_read": parallel_read,
         "workflow": "fixture_workflow", "workflow_stage": 3,
         "related_tools": ("fixture.next",),
         "retrieval_terms": ("Custom Domain", "fixture_source"), "risk": risk.value,

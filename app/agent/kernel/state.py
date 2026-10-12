@@ -762,6 +762,20 @@ class _CancelledReadInline:
         return cls(lease, _exact_value(conversation), assistant_index, call_index,
                    assistant_index + 1 + call_index, _exact_value(call), tool)
 
+    def at_checkpoint(self, conversation):
+        """只绑定同一原生调用在执行器最新检查点中的待结算槽。"""
+        try:
+            current = self.capture(self.lease, conversation, self.call_index, tool=self.tool)
+            row = conversation[current.tool_index]
+            if (current.call != self.call or row.get("tool_call_id") != conversation[current.assistant_index]["tool_calls"][self.call_index].get("call_id")
+                    or _exact_value(row.get("content")) != _exact_value(pending_content(True))):
+                return None
+        except (ValueError, StopIteration, KeyError, IndexError, TypeError):
+            return None
+        if self._content:
+            current.put_once(self._content)
+        return current
+
     def reject_incomplete(self) -> None:
         if self._content is not None:
             raise ValueError("returned read already captured")
@@ -775,34 +789,42 @@ class _CancelledReadInline:
         object.__setattr__(self, "_content", json_text(json.loads(content)))
 
 
-def _settle_cancelled_read_inline(state, receipt, maximum=256 * 1024):
-    if type(receipt) is not _CancelledReadInline or not receipt._content:
+def _settle_cancelled_reads(state, receipts, maximum=256 * 1024):
+    """以同一个取消检查点原子保存已返回的只读事实，不接纳新调用或新发布。"""
+    if not isinstance(receipts, tuple) or not receipts or any(
+        type(receipt) is not _CancelledReadInline or not receipt._content for receipt in receipts
+    ):
         return None
-    lease = receipt.lease
+    lease = receipts[0].lease
     if ((state.owner, state.session_id) != (lease.owner, lease.session_id)
             or state.generation != lease.generation + 1
             or _exact_value(state.metadata.get("active_publication")) != _exact_value({
-                "generation": lease.generation, "request_id": lease.request_id, "status": "cancelled"})
-            or _exact_value(state.conversation) != receipt.expected):
+                "generation": lease.generation, "request_id": lease.request_id, "status": "cancelled"})):
         return None
-    try:
-        assistant = state.conversation[receipt.assistant_index]
-        call = assistant["tool_calls"][receipt.call_index]
-        row = state.conversation[receipt.tool_index]
-        if (not 0 <= receipt.assistant_index < receipt.tool_index < len(state.conversation)
-                or receipt.tool_index != receipt.assistant_index + 1 + receipt.call_index
-                or not 0 <= receipt.call_index < len(assistant["tool_calls"])
-                or assistant.get("role") != "assistant" or _exact_value(call) != receipt.call
-                or any(item.get("role") != "tool" for item in state.conversation[receipt.assistant_index + 1:receipt.tool_index])
-                or row.get("role") != "tool"
-                or row.get("tool_call_id") != call.get("call_id")
-                or row.get("tool_name") != call.get("name")
-                or _exact_value(row.get("content")) != _exact_value(pending_content(True))):
-            return None
-    except (KeyError, IndexError, TypeError):
-        return None
+    expected = _exact_value(state.conversation)
     updated = state.clone()
-    updated.conversation[receipt.tool_index]["content"] = receipt._content
+    positions = set()
+    for receipt in receipts:
+        if receipt.lease != lease or receipt.expected != expected or receipt.tool_index in positions:
+            return None
+        try:
+            assistant = state.conversation[receipt.assistant_index]
+            call = assistant["tool_calls"][receipt.call_index]
+            row = state.conversation[receipt.tool_index]
+            if (not 0 <= receipt.assistant_index < receipt.tool_index < len(state.conversation)
+                    or receipt.tool_index != receipt.assistant_index + 1 + receipt.call_index
+                    or not 0 <= receipt.call_index < len(assistant["tool_calls"])
+                    or assistant.get("role") != "assistant" or _exact_value(call) != receipt.call
+                    or any(item.get("role") != "tool" for item in state.conversation[receipt.assistant_index + 1:receipt.tool_index])
+                    or row.get("role") != "tool"
+                    or row.get("tool_call_id") != call.get("call_id")
+                    or row.get("tool_name") != call.get("name")
+                    or _exact_value(row.get("content")) != _exact_value(pending_content(True))):
+                return None
+        except (KeyError, IndexError, TypeError):
+            return None
+        positions.add(receipt.tool_index)
+        updated.conversation[receipt.tool_index]["content"] = receipt._content
     payload = updated.to_payload()
     if (_exact_value(conversation_rows(payload["conversation"])) != _exact_value(updated.conversation)
             or len(json_text(payload).encode()) > maximum):
@@ -811,7 +833,7 @@ def _settle_cancelled_read_inline(state, receipt, maximum=256 * 1024):
 
 
 class SessionStateStore(Protocol):
-    async def settle_cancelled_read_inline(self, receipt: _CancelledReadInline) -> bool: ...
+    async def settle_cancelled_reads(self, receipts: tuple[_CancelledReadInline, ...]) -> bool: ...
 
     async def cancel_publication(self, *, owner: str, session_id: str, request_id: str) -> bool: ...
 
@@ -905,13 +927,13 @@ class InMemorySessionStateStore:
             self._states[(owner, session_id)] = updated
             return True
 
-    async def settle_cancelled_read_inline(self, receipt: _CancelledReadInline) -> bool:
-        if type(receipt) is not _CancelledReadInline:
+    async def settle_cancelled_reads(self, receipts: tuple[_CancelledReadInline, ...]) -> bool:
+        if not isinstance(receipts, tuple) or not receipts or type(receipts[0]) is not _CancelledReadInline:
             return False
-        key = (receipt.lease.owner, receipt.lease.session_id)
+        key = (receipts[0].lease.owner, receipts[0].lease.session_id)
         async with self._lock:
             state = self._states.get(key)
-            updated = _settle_cancelled_read_inline(state, receipt) if state is not None else None
+            updated = _settle_cancelled_reads(state, receipts) if state is not None else None
             if updated is None:
                 return False
             validate_execution_state(updated)

@@ -190,6 +190,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         metadata={
             "source_kind": spec.source_kind,
             "freshness": spec.freshness,
+            "parallel_read": spec.parallel_read,
             "workflow": spec.workflow,
             "workflow_stage": spec.workflow_stage,
             "related_tools": _related_tools(spec),

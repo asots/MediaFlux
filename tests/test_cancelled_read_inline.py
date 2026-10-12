@@ -289,10 +289,10 @@ def test_exact_whole_state_capacity(backend, excess):
         cold = sqlite_store() if backend == "sqlite" else store
         before = await cold.load(owner="o", session_id="s")
         if excess:
-            with pytest.raises(ValueError): await store.settle_cancelled_read_inline(receipt)
+            with pytest.raises(ValueError): await store.settle_cancelled_reads((receipt,))
             assert await cold.load(owner="o", session_id="s") == before
         else:
-            assert await store.settle_cancelled_read_inline(receipt)
+            assert await store.settle_cancelled_reads((receipt,))
             after = await cold.load(owner="o", session_id="s")
             assert len(json_text(after.to_payload()).encode()) == 256 * 1024
             before.conversation[-1]["content"] = content
@@ -351,18 +351,67 @@ def test_checkpoint_cas(backend, mode):
                 import app.agent.kernel.state as module
                 target, field, injected = module, "validate_execution_state", OSError("before assignment")
             with patch.object(target, field, side_effect=injected), pytest.raises(OSError):
-                await store.settle_cancelled_read_inline(receipt)
+                await store.settle_cancelled_reads((receipt,))
         elif mode == "capacity":
             with pytest.raises(ValueError):
-                await store.settle_cancelled_read_inline(receipt)
+                await store.settle_cancelled_reads((receipt,))
         else:
-            settled = await store.settle_cancelled_read_inline(receipt)
+            settled = await store.settle_cancelled_reads((receipt,))
             assert settled == (mode == "success")
         after = await cold.load(owner="o", session_id="s")
         if mode == "success":
             before.conversation[2]["content"] = receipt._content
-            assert not await store.settle_cancelled_read_inline(receipt)
+            assert not await store.settle_cancelled_reads((receipt,))
         assert after == before
         assert not await store.is_current(lease)
+    with isolated_test_database():
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("mode", ["both", "duplicate", "foreign", "unknown", "new_turn", "combined_capacity"])
+def test_cancelled_read_batch_settlement_is_atomic(backend, mode):
+    async def run():
+        from dataclasses import replace
+        from app.agent.kernel.state import _CancelledReadInline, _ExecutionCapacity
+        from app.agent.kernel.conversation_codec import json_text
+        store = sqlite_store() if backend == "sqlite" else InMemorySessionStateStore()
+        lease, _ = await store.begin_turn(owner="o", session_id="s", request_id="batch")
+        calls = [{"call_id": f"read-{i}", "name": "library.inspect", "arguments": {}} for i in range(2)]
+        conversation = [{"role": "assistant", "content": "", "tool_calls": calls}, *[
+            {"role": "tool", "tool_call_id": call["call_id"], "tool_name": call["name"], "content": pending_content(True)}
+            for call in calls]]
+        state = await store.commit(lease, conversation=conversation, updates=(_ExecutionCapacity("", True),))
+        receipts = [_CancelledReadInline.capture(lease, state.conversation, i, tool=READ_TOOL) for i in range(2)]
+        payloads = [{"ok": True, "data": {"index": i, "value": "x" * (140000 if mode == "combined_capacity" else 10)}} for i in range(2)]
+        for receipt, payload in zip(receipts, payloads, strict=True):
+            receipt.put_once(json_text(payload))
+        if mode == "duplicate":
+            receipts[1] = receipts[0]
+        elif mode == "foreign":
+            foreign = _CancelledReadInline.capture(replace(lease, session_id="elsewhere"), state.conversation, 1, tool=READ_TOOL)
+            foreign.put_once(json_text(payloads[1]))
+            receipts[1] = foreign
+        elif mode == "unknown":
+            receipts[1] = _CancelledReadInline.capture(lease, state.conversation, 1, tool=READ_TOOL)
+        assert await store.cancel_publication(owner="o", session_id="s", request_id="batch")
+        if mode == "new_turn":
+            await store.begin_turn(owner="o", session_id="s", request_id="new")
+        cold = sqlite_store() if backend == "sqlite" else store
+        before = await cold.load(owner="o", session_id="s")
+        if mode == "combined_capacity":
+            with pytest.raises(ValueError):
+                await store.settle_cancelled_reads(tuple(receipts))
+            assert await cold.load(owner="o", session_id="s") == before
+        elif mode == "both":
+            assert await store.settle_cancelled_reads(tuple(receipts))
+            after = await cold.load(owner="o", session_id="s")
+            assert [json.loads(row["content"]) for row in after.conversation[1:]] == payloads
+            before.conversation = after.conversation
+            assert after == before
+            assert not await store.settle_cancelled_reads(tuple(receipts))
+        else:
+            assert not await store.settle_cancelled_reads(tuple(receipts))
+            assert await cold.load(owner="o", session_id="s") == before
     with isolated_test_database():
         asyncio.run(run())

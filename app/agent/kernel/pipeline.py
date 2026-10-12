@@ -599,6 +599,8 @@ class ToolPipeline:
         *,
         context: ToolCallContext,
         _returned_read=None,
+        _read_admitted: asyncio.Event | None = None,
+        _read_publication_lock: asyncio.Lock | None = None,
     ) -> PipelineResult:
         started = time.monotonic()
         context.cancellation.raise_if_cancelled()
@@ -658,7 +660,8 @@ class ToolPipeline:
                 "工具参数校验器返回无效结果", code="invalid_arguments"
             )
         error_repair.validated(pending_repairs, context)
-        resolved = await self._authorize(tool, normalized, context)
+        async with (_read_publication_lock if _read_publication_lock is not None else nullcontext()):
+            resolved = await self._authorize(tool, normalized, context)
         completed = context.confirmed_effect
         plan = completed.effect_plan if completed else None
         if (
@@ -689,6 +692,8 @@ class ToolPipeline:
                     StateUpdate(f"metadata.{CANDIDATE_VIEW_KEY}", None),
                 ))
                 await context.report_progress({"tool": tool.name, "candidate_view": None})
+            if _read_admitted is not None:
+                _read_admitted.set()
             try:
                 value = await _invoke(tool.read, resolved, context)
             except ToolPipelineError as exc:
@@ -736,12 +741,14 @@ class ToolPipeline:
                     ),
                     full_model_content=resource_model_content(projected.full_model_content, maximum=max(len(projected.full_model_content) * 2, self.projector.max_model_chars)) if projected.full_model_content else "",
                 )
-            outcome = await self._materialize_refs(
-                projected, context=context,
-                selected_positions=normalized["positions"] if resource_presentation else None,
-                preserve_native=snapshot_only,
-            )
-            await self._commit_updates(context.lease, outcome.state_updates)
+            # 只串行化同一回合的引用/状态发布，不持锁等待远端只读I/O。
+            async with (_read_publication_lock if _read_publication_lock is not None else nullcontext()):
+                outcome = await self._materialize_refs(
+                    projected, context=context,
+                    selected_positions=normalized["positions"] if resource_presentation else None,
+                    preserve_native=snapshot_only,
+                )
+                await self._commit_updates(context.lease, outcome.state_updates)
             return PipelineResult(
                 tool=tool,
                 arguments=normalized,

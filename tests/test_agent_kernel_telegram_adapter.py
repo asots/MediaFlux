@@ -11,6 +11,7 @@ from app.agent.kernel.events import AgentEventType, EventFactory
 from app.agent.kernel.state import SessionBusyError
 from app.bot import agent_adapter as adapter
 from app.bot.telegram_markdown import telegram_html_text_length
+from tests import test_production
 
 
 class Button:
@@ -1421,11 +1422,10 @@ class TelegramAgentExecutorTests(unittest.TestCase):
     def test_registered_handlers_return_while_queries_run_and_controls_still_dispatch(self):
         import threading
         from app.bot import handlers
-        from tests.test_production import TelegramBotTests
 
         executor = adapter.TelegramAgentExecutor(max_queries=2, max_controls=1)
-        bot = TelegramBotTests.FakeBot()
-        telebot = TelegramBotTests._telebot_types()
+        bot = test_production.TelegramBotTests.FakeBot()
+        telebot = test_production.TelegramBotTests._telebot_types()
         release = threading.Event()
         entered = [threading.Event(), threading.Event()]
         returned = [threading.Event(), threading.Event()]

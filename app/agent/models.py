@@ -127,6 +127,7 @@ class ToolSpec:
     domains: tuple[str, ...] = ()
     source_kind: str = "system_state"
     freshness: str = "snapshot"
+    parallel_read: bool = False
     workflow: str = ""
     workflow_stage: int = 0
     examples: tuple[str, ...] = ()

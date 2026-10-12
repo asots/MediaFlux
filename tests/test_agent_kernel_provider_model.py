@@ -5,6 +5,7 @@ import unittest
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from unittest.mock import patch
+from typing import Any
 
 from app.agent.kernel.model import ModelEventType, ModelRequest
 from app.agent.kernel.provider_model import (
@@ -815,3 +816,139 @@ class NativeAnswerCompletionTests(unittest.IsolatedAsyncioTestCase):
         for protocol, events in frames.items():
             with self.subTest(protocol=protocol), self.assertRaises(UncommittableModelTurn):
                 await collect(iter_protocol_model_events(chunks(events, split=3), protocol=protocol))
+
+
+class ParallelToolCallPermissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_adapter_forwards_only_explicit_parallel_permission_with_tools(self):
+        from tests import test_agent_provider_state as nativefixtures
+
+        replies = {
+            "chat_completions": {"choices": [{"message": {"content": "完成"}, "finish_reason": "stop"}]},
+            "responses": {"status": "completed", "output": []},
+            "anthropic_messages": {"content": [{"type": "text", "text": "完成"}], "stop_reason": "end_turn"},
+        }
+        tools = ({"name": "inspect", "parameters": {"type": "object", "properties": {}}},)
+        cases: list[dict[str, Any]] = [
+            {}, *({"allow_parallel_tool_calls": value} for value in (False, True, None, 1, "true")),
+        ]
+        for protocol, reply in replies.items():
+            wire = nativefixtures.WireClient([reply] * (len(cases) * 2))
+            adapter = OpenAICompatibleModelAdapter(
+                ProviderSettings(api_url="https://api.example.com/v1", model="sample", protocol=protocol),
+                client_factory=lambda **_: wire,
+            )
+            for has_tools in (True, False):
+                for options in cases:
+                    with self.subTest(protocol=protocol, tools=has_tools, options=options):
+                        request = ModelRequest(system_prompt="核验", messages=(),
+                                               tools=tools if has_tools else (), **options)
+                        if not options:
+                            self.assertIs(request.allow_parallel_tool_calls, False)
+                        events = await collect(adapter.stream(request, cancellation=CancellationToken()))
+                        self.assertEqual(events[-1].type, ModelEventType.FINISH)
+                        body = wire.requests[-1]
+                        if not has_tools:
+                            for field in ("tools", "tool_choice", "parallel_tool_calls", "disable_parallel_tool_use"):
+                                self.assertNotIn(field, body)
+                        elif protocol == "anthropic_messages":
+                            self.assertEqual(body["tool_choice"], {
+                                "type": "auto", "disable_parallel_tool_use": options.get("allow_parallel_tool_calls") is not True,
+                            })
+                            self.assertNotIn("parallel_tool_calls", body)
+                        else:
+                            self.assertIs(body["parallel_tool_calls"], options.get("allow_parallel_tool_calls") is True)
+                            self.assertEqual(body["tool_choice"], "auto")
+            self.assertEqual(len(wire.requests), len(cases) * 2)
+            self.assertEqual(wire.replies, [])
+
+    async def test_two_native_calls_preserve_reasoning_order_and_result_ids(self):
+        from app.agent.kernel.model import ModelMessage
+        from tests import test_agent_provider_state as nativefixtures
+        from tests.test_agent_provider_text_authority import stream_reply
+
+        arguments = [{"entry": "first"}, {"entry": "second"}]
+        call_ids = ["read-first", "read-second"]
+        tools = ({"name": "inspect", "parameters": {
+            "type": "object", "properties": {"entry": {"type": "string"}}, "required": ["entry"],
+        }},)
+        for protocol in ("chat_completions", "responses", "anthropic_messages"):
+            for streamed in (False, True):
+                with self.subTest(protocol=protocol, streamed=streamed):
+                    if protocol == "chat_completions":
+                        calls = [{"type": "function", "id": cid, "function": {
+                            "name": "inspect", "arguments": json.dumps(args, separators=(",", ":")),
+                        }} for cid, args in zip(call_ids, arguments)]
+                        assistant = {"role": "assistant", "content": "核验中", "reasoning_content": nativefixtures.THINKING,
+                                     "tool_calls": calls}
+                        reply = {"choices": [{"message": assistant, "finish_reason": "tool_calls"}]}
+                        frames = [{"choices": [{"delta": {**assistant, "tool_calls": [
+                            {**call, "index": index} for index, call in enumerate(calls)
+                        ]}, "finish_reason": "tool_calls"}]}, "[DONE]"]
+                        final = {"choices": [{"message": {"content": "完成"}, "finish_reason": "stop"}]}
+                    elif protocol == "responses":
+                        calls = [{"type": "function_call", "id": f"item-{index}", "call_id": cid,
+                                  "name": "inspect", "arguments": json.dumps(args, separators=(",", ":"))}
+                                 for index, (cid, args) in enumerate(zip(call_ids, arguments))]
+                        reasoning = {"type": "reasoning", "id": "reasoning-1", "encrypted_content": nativefixtures.REDACTED}
+                        text = {"role": "assistant", "content": [{"type": "output_text", "text": "核验中"}]}
+                        assistant = [reasoning, calls[0], text, calls[1]]
+                        reply = {"status": "completed", "output": [reasoning, calls[0], {"type": "message", **text}, calls[1]]}
+                        frames = stream_reply(protocol, reply)
+                        final = {"status": "completed", "output": []}
+                    else:
+                        calls = [{"type": "tool_use", "id": cid, "name": "inspect", "input": args}
+                                 for cid, args in zip(call_ids, arguments)]
+                        assistant = [
+                            {"type": "thinking", "thinking": nativefixtures.THINKING, "signature": nativefixtures.SIGNATURE},
+                            {"type": "redacted_thinking", "data": nativefixtures.REDACTED},
+                            calls[0], {"type": "text", "text": "核验中"}, calls[1],
+                        ]
+                        reply = {"content": assistant, "stop_reason": "tool_use"}
+                        frames = stream_reply(protocol, reply)
+                        final = {"content": [{"type": "text", "text": "完成"}], "stop_reason": "end_turn"}
+                    wire = nativefixtures.WireClient([frames if streamed else reply, final], split=3)
+                    adapter = OpenAICompatibleModelAdapter(
+                        ProviderSettings(api_url="https://api.example.com/v1", model="sample", protocol=protocol),
+                        client_factory=lambda **_: wire,
+                    )
+                    user = ModelMessage(role="user", content="分别核验两个条目")
+                    events = await collect(adapter.stream(ModelRequest(
+                        system_prompt="核验", messages=(user,), tools=tools, allow_parallel_tool_calls=True,
+                    ), cancellation=CancellationToken()))
+                    self.assertEqual(events[-1].type, ModelEventType.FINISH)
+                    parsed = tuple(event.tool_call for event in events if event.tool_call is not None)
+                    self.assertEqual([call.call_id for call in parsed], call_ids)
+                    self.assertEqual([call.name for call in parsed], ["inspect", "inspect"])
+                    self.assertEqual([call.arguments for call in parsed], arguments)
+                    visible = "".join(event.text for event in events)
+                    self.assertEqual(visible, "核验中")
+                    self.assertIsNotNone(events[-1].provider_state)
+                    history = (user, ModelMessage(role="assistant", content=visible, tool_calls=parsed,
+                                                  provider_state=events[-1].provider_state), *(
+                        ModelMessage(role="tool", content=f"result-{index}", tool_call_id=cid)
+                        for index, cid in enumerate(call_ids)
+                    ))
+                    await collect(adapter.stream(ModelRequest(
+                        system_prompt="核验", messages=history, tools=tools,
+                    ), cancellation=CancellationToken()))
+                    self.assertEqual(len(wire.requests), 2)
+                    body = wire.requests[-1]
+                    if protocol == "chat_completions":
+                        self.assertEqual(body["messages"][-3], assistant)
+                        self.assertEqual(body["messages"][-2:], [
+                            {"role": "tool", "tool_call_id": cid, "content": f"result-{index}"}
+                            for index, cid in enumerate(call_ids)
+                        ])
+                    elif protocol == "responses":
+                        self.assertEqual(body["include"], ["reasoning.encrypted_content"])
+                        self.assertEqual(body["input"][2:-2], assistant)
+                        self.assertEqual(body["input"][-2:], [
+                            {"type": "function_call_output", "call_id": cid, "output": f"result-{index}"}
+                            for index, cid in enumerate(call_ids)
+                        ])
+                    else:
+                        self.assertEqual(body["messages"][-2], {"role": "assistant", "content": assistant})
+                        self.assertEqual(body["messages"][-1], {"role": "user", "content": [
+                            {"type": "tool_result", "tool_use_id": cid, "content": f"result-{index}"}
+                            for index, cid in enumerate(call_ids)
+                        ]})
