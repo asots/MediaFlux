@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 import json
 import socket
@@ -106,8 +106,9 @@ def sse(*events):
 
 
 class Body(httpx.AsyncByteStream):
-    def __init__(self, data, *, fault=None, hanging=False, close_fault=None, task_cancel=False):
+    def __init__(self, data, *, fault=None, hanging=False, close_fault=None, task_cancel=False, deadline_scope=None):
         self.data, self.fault, self.hanging = data, fault, hanging
+        self.deadline_scope = deadline_scope
         self.close_fault, self.task_cancel = close_fault, task_cancel
         self.yielded = 0
         self.closed = False
@@ -125,6 +126,8 @@ class Body(httpx.AsyncByteStream):
         if self.fault:
             raise self.fault
         if self.hanging:
+            if self.deadline_scope is not None:
+                self.deadline_scope.reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
 
     async def aclose(self):
@@ -139,22 +142,25 @@ def http_error(status=400, text=UNSUPPORTED, **kwargs):
 
 def wire(actions, *, configured='auto', messages=(), model='', api_url='https://api.example.com/v1',
          maximum=2 * 1024 * 1024, deadline=60, token=None, sleep=None, exit_error=None,
-         generation_profiles_json=''):
+         generation_profiles_json='', deadline_in_body=False, header_delay=0):
     """Exercise real adapter/client; only network transport and clocks are controlled."""
     async def run():
         requests, streams, clients, events = [], [], [], []
         cancellation = token or CancellationToken()
+        deadline_scope = asyncio.Timeout(None) if deadline_in_body else None
 
         async def handler(request):
             protocol = next(p for p, path in PROTOCOL_PATHS.items() if path == request.url.path)
             requests.append({'protocol': protocol, 'body': json.loads(request.content)})
+            if header_delay:
+                await asyncio.sleep(header_delay)
             action = actions[min(len(requests) - 1, len(actions) - 1)] if actions else None
             if isinstance(action, BaseException):
                 raise action
             if action is None:
                 action = dict(status=200, data=json.dumps(good(protocol)).encode())
             stream = Body(action.get('data', b''), fault=action.get('fault'), hanging=action.get('hanging', False),
-                          close_fault=action.get('close_fault'), task_cancel=action.get('task_cancel', False))
+                          close_fault=action.get('close_fault'), task_cancel=action.get('task_cancel', False), deadline_scope=deadline_scope)
             streams.append(stream)
             return httpx.Response(action.get('status', 200), headers=action.get('headers', {}), stream=stream)
 
@@ -179,7 +185,8 @@ def wire(actions, *, configured='auto', messages=(), model='', api_url='https://
             max_response_bytes=maximum), client_factory=factory)
         request = ModelRequest(system_prompt='offline regression', messages=messages, tools=(), model=model)
         error = None
-        with patch.object(pm, '_MODEL_RETRY_DELAY_SECONDS', 0), patch.object(
+        deadline_control = patch.object(pm.asyncio, 'timeout', return_value=deadline_scope) if deadline_scope else nullcontext()
+        with deadline_control, patch.object(pm, '_MODEL_RETRY_DELAY_SECONDS', 0), patch.object(
             pm, '_stream_deadline_seconds', return_value=deadline
         ):
             try:
@@ -192,6 +199,8 @@ def wire(actions, *, configured='auto', messages=(), model='', api_url='https://
                         events.append(event)
             except BaseException as exc:
                 error = exc
+        if deadline_scope is not None:
+            assert deadline_scope.expired(), "目标响应体必须实际触发Timeout上下文"
         assert all(client._client.is_closed for client in clients)
         assert all(stream.closed for stream in streams)
         return dict(requests=requests, streams=streams, events=events, error=error, clients=clients)
@@ -295,7 +304,7 @@ def test_http_complete_explicit_evidence_allows_one_fallback(status, text):
     (http_error(text=UNSUPPORTED.ljust(8193), headers={'content-length': '8193'}), {}),
     (http_error(text=UNSUPPORTED.ljust(100)), {'maximum': 40}),
     (http_error(headers={'content-length': '9000000'}), {}),
-    (http_error(hanging=True), {'deadline': 0.02}),
+    (http_error(hanging=True), {'deadline': 0.02, 'deadline_in_body': True}),
     (http_error(fault=asyncio.CancelledError()), {}),
 ])
 def test_http_error_read_must_finish_within_bounds(action, options, caplog):
@@ -318,7 +327,7 @@ def test_error_read_terminal_state_survives_real_stream_cleanup(mode, close_faul
         'deadline': {'hanging': True},
     }[mode]
     result = wire([http_error(404, json.dumps({'error': UNSUPPORTED}), close_fault=close_fault, **options), None],
-                  deadline=0.02 if mode == 'deadline' else 60)
+                  deadline=0.02 if mode == 'deadline' else 60, deadline_in_body=mode == 'deadline')
     assert protocols(result) == ['responses']
     assert not result['events']
     assert all(SECRET not in str(exc) for exc in error_chain(result['error']))
@@ -383,22 +392,35 @@ def test_original_same_protocol_retry_can_recover(action):
     assert result['error'] is None
 
 
-def real_retry_wire(mode, close_fault, fallback):
+def real_retry_wire(mode, close_fault, fallback, *, header_delay=0):
     """Real retry sleep/timeout, controlled by an independent consuming task.
 
-    No replacement client/context/sleep: the handler only signals that a 503
-    response was supplied, and real stream cleanup raises fresh exceptions.
+    Response cleanup and retry sleep remain real. Deadline expiry is armed
+    at retry-sleep entry, not an assumed number of milliseconds after setup.
     """
     async def run():
         requests, streams, clients, events, cancel_calls = [], [], [], [], []
         retry_response = asyncio.Event()
         token = CancellationToken()
         request_times = []
+        deadline_scope = asyncio.Timeout(None) if mode == 'deadline' else None
+        real_sleep = asyncio.sleep
+        retry_sleep_entered = False
+
+        async def observed_retry_sleep(delay):
+            nonlocal retry_sleep_entered
+            if delay == 0.03:
+                retry_sleep_entered = True
+                assert deadline_scope is not None
+                deadline_scope.reschedule(asyncio.get_running_loop().time())
+            await real_sleep(delay)
 
         async def handler(request):
             protocol = next(p for p, path in PROTOCOL_PATHS.items() if path == request.url.path)
             requests.append({'protocol': protocol, 'body': json.loads(request.content)})
             request_times.append(asyncio.get_running_loop().time())
+            if header_delay:
+                await real_sleep(header_delay)
             if fallback and len(requests) == 1:
                 status, data, fault = 404, json.dumps({'error': UNSUPPORTED}).encode(), None
             elif len(requests) == (2 if fallback else 1) or mode == 'exhaust':
@@ -431,7 +453,9 @@ def real_retry_wire(mode, close_fault, fallback):
             assert task is not None
             return error, task.cancelling()
 
-        with patch.object(pm, '_MODEL_RETRY_DELAY_SECONDS', 0.03), patch.object(
+        deadline_control = patch.object(pm.asyncio, 'timeout', return_value=deadline_scope) if deadline_scope else nullcontext()
+        sleep_control = patch.object(pm.asyncio, 'sleep', observed_retry_sleep) if deadline_scope else nullcontext()
+        with deadline_control, sleep_control, patch.object(pm, '_MODEL_RETRY_DELAY_SECONDS', 0.03), patch.object(
             pm, '_stream_deadline_seconds', return_value=0.01 if mode == 'deadline' else 60
         ):
             task = asyncio.create_task(consume())
@@ -442,6 +466,8 @@ def real_retry_wire(mode, close_fault, fallback):
                 else:
                     token.cancel()
             error, cancelling = await asyncio.wait_for(task, 1)
+        if deadline_scope is not None:
+            assert retry_sleep_entered and deadline_scope.expired()
         assert all(client._client.is_closed for client in clients)
         assert all(stream.closed for stream in streams)
         return dict(requests=requests, streams=streams, events=events, error=error,
@@ -751,7 +777,7 @@ def test_classifier_ambiguous_duplicate_or_overdeep_json_is_closed(text):
 
 
 def test_error_body_timeout_preserves_safe_http_diagnostic():
-    result = wire([http_error(404, hanging=True)], deadline=0.02)
+    result = wire([http_error(404, hanging=True)], deadline=0.02, deadline_in_body=True)
     assert protocols(result) == ['responses']
     assert isinstance(result['error'], pm.ModelProviderError)
     assert isinstance(result['error'].__cause__, TimeoutError)
@@ -812,11 +838,12 @@ def test_fallback_chat_keeps_its_original_retry_budget():
     assert 'HTTP 503' in str(result['error'])
 
 
-def real_success_body_wire(mode, close_fault, fallback, encoding):
+def real_success_body_wire(mode, close_fault, fallback, encoding, *, header_delay=0):
     """Keep a real HTTP 200 body pending through cancellation and cleanup.
 
-    Only the wire transport and deadline/delay constants are controlled; SSE
-    text reaches the consumer before the reader signals the emitted case.
+    SSE text reaches the consumer before the reader signals the emitted case.
+    Deadline expiry uses a real asyncio.Timeout, armed only once the intended
+    body phase is reached; slow setup must not accidentally test a different phase.
     """
     async def run():
         entered = asyncio.Event()
@@ -847,6 +874,8 @@ def real_success_body_wire(mode, close_fault, fallback, encoding):
                         raise close_fault(SECRET) from OSError(SECRET)
 
         async def handler(request):
+            if header_delay:
+                await asyncio.sleep(header_delay)
             protocol = next(p for p, path in PROTOCOL_PATHS.items() if path == request.url.path)
             requests.append({'protocol': protocol, 'body': json.loads(request.content)})
             request_times.append(asyncio.get_running_loop().time())
@@ -892,16 +921,25 @@ def real_success_body_wire(mode, close_fault, fallback, encoding):
             assert task is not None
             return error, task.cancelling()
 
+        deadline_scope = asyncio.Timeout(None) if mode == 'deadline' else None
+        deadline_control = patch.object(pm.asyncio, 'timeout', return_value=deadline_scope) if deadline_scope else nullcontext()
         with patch.object(pm, '_MODEL_RETRY_DELAY_SECONDS', 0.005), patch.object(
             pm, '_stream_deadline_seconds', return_value=0.04 if mode == 'deadline' else 60
-        ):
+        ), deadline_control:
             task = asyncio.create_task(consume())
-            if mode == 'cancel':
+            if mode in {'cancel', 'deadline'}:
                 await asyncio.wait_for(entered.wait(), 1)
                 assert not task.done()
-                cancel_calls.append((task.cancel(SECRET), task.done()))
-                trace.append('controller_cancel')
+                if deadline_scope is not None:
+                    trace.append('controller_deadline')
+                    deadline_scope.reschedule(asyncio.get_running_loop().time())
+                else:
+                    cancel_calls.append((task.cancel(SECRET), task.done()))
+                    trace.append('controller_cancel')
             error, cancelling = await asyncio.wait_for(task, 1)
+        if deadline_scope is not None:
+            assert deadline_scope.expired()
+            assert trace.index('body_pending') < trace.index('controller_deadline') < trace.index('body_closed')
         assert entered.is_set()
         assert clients and all(client._client.is_closed for client in clients)
         assert streams and all(stream.closed for stream in streams)
@@ -965,8 +1003,48 @@ def test_success_body_read_timeout_preserves_normal_retry(close_fault, fallback,
 
 def test_success_stream_total_deadline_never_starts_another_request():
     action = dict(status=200, data=b'', hanging=True, headers={'content-type': 'text/event-stream'})
-    result = wire([action, None], deadline=0.02)
+    result = wire([action, None], deadline=0.02, deadline_in_body=True)
     assert protocols(result) == ['responses'] and not result['events']
     assert isinstance(result['error'], pm.ModelProviderError)
     assert str(result['error']) == 'Provider 请求超时'
     assert isinstance(result['error'].__cause__, TimeoutError)
+
+
+def test_success_body_deadline_is_triggered_after_slow_headers_not_during_setup():
+    # 两次响应头均超过旧40ms全轮期限；本用例要验证的是body清理而非建连超时。
+    result = real_success_body_wire('deadline', httpx.ReadError, True, 'sse', header_delay=0.06)
+    assert protocols(result) == ['responses', 'chat_completions']
+    assert isinstance(result['error'], pm.ModelProviderError)
+    assert isinstance(result['error'].__cause__, TimeoutError)
+    assert result['trace'].index('body_pending') < result['trace'].index('body_closed')
+    assert result['cancelling'] == 0 and not result['cancel_calls']
+    assert all(SECRET not in str(exc) for exc in error_chain(result['error']))
+
+
+def test_error_body_deadline_waits_for_slow_headers_and_keeps_http_evidence():
+    result = wire([http_error(404, hanging=True)], deadline=0.02,
+                  deadline_in_body=True, header_delay=0.06)
+    assert protocols(result) == ['responses'] and not result['events']
+    assert isinstance(result['error'].__cause__, TimeoutError)
+    assert any('HTTP 404' in str(exc) for exc in error_chain(result['error']))
+
+
+def test_retry_deadline_waits_for_real_retry_sleep_after_slow_headers():
+    result = real_retry_wire('deadline', httpx.ReadError, True, header_delay=0.06)
+    assert protocols(result) == ['responses', 'chat_completions']
+    assert isinstance(result['error'].__cause__, TimeoutError)
+    assert result['error'].failure.phase == 'retry_wait'
+    assert not result['events'] and result['cancelling'] == 0
+    chain = error_chain(result['error'])
+    assert any('HTTP 503' in str(exc) for exc in chain)
+    assert any('HTTP 404' in str(exc) for exc in chain)
+
+
+def test_real_total_deadline_before_headers_still_stops_without_retry():
+    # 不控制目标阶段：仍直接使用真正的短整轮deadline，证明请求前等待照常受限。
+    result = wire([None], deadline=0.01, header_delay=0.06)
+    assert len(result['requests']) <= 1 and not result['events']
+    assert isinstance(result['error'].__cause__, TimeoutError)
+    assert result['error'].failure.kind == 'deadline'
+    assert result['error'].failure.phase == 'request'
+    assert result['error'].failure.http_status is None
