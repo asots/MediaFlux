@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""MediaFlux Agent Kernel 离线验收器；不调用 LLM、网络或业务写接口。"""
+"""MediaFlux Agent Kernel 离线验收器；不调用 LLM、网络或业务写接口。
+
+provenance 字段可选，提供即校验；未标记的旧语料归入 legacy_unverified。
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import re
 import statistics
 import sys
 from collections.abc import AsyncIterator, Sequence
@@ -34,11 +38,12 @@ from app.agent.kernel.model import (
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.kernel.state import AgentInput, InMemorySessionStateStore, SessionState
 from app.agent.public_view import public_result_state
 
 DEFAULT_FIXTURE = Path("tests/fixtures/agent_kernel_capability_cases.jsonl")
 DEFAULT_LIFECYCLE_FIXTURE = Path("tests/fixtures/agent_kernel_lifecycle_cases.jsonl")
+PROVENANCE_KINDS = ("legacy_unverified", "synthetic", "simulated_user_real_model")
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +51,7 @@ class EvalCase:
     case_id: str
     message: str
     required: tuple[str, ...]
+    provenance: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +60,7 @@ class EvalOutcome:
     passed: bool
     selected: tuple[str, ...]
     missing: tuple[str, ...]
+    provenance: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +68,7 @@ class EvalOutcome:
             "passed": self.passed,
             "selected": list(self.selected),
             "missing": list(self.missing),
+            "provenance": self.provenance or {"kind": "legacy_unverified"},
         }
 
 
@@ -251,6 +259,64 @@ def evaluate_lifecycle(path: Path = DEFAULT_LIFECYCLE_FIXTURE) -> dict[str, Any]
         "outcomes": outcomes,
     }
 
+def _valid_provenance(
+    provenance: dict[str, Any], message: str, required: tuple[str, ...]
+) -> bool:
+    """仅校验字段与摘录契约；原件哈希供追溯，不读取或认证私有原件。"""
+    if provenance["kind"] != "simulated_user_real_model":
+        return set(provenance) == {"kind"}
+    if set(provenance) != {
+        "kind", "source_commit", "evidence_sha256", "excerpt"
+    } or not isinstance(provenance.get("source_commit"), str) or not re.fullmatch(
+        r"[0-9a-f]{40}", provenance["source_commit"]
+    ):
+        return False
+    hashes = provenance["evidence_sha256"]
+    excerpt = provenance["excerpt"]
+    if not isinstance(hashes, dict) or not {
+        "model-request-1.json", "HTTP-response-1.json", "model-events-1.json",
+        "query-events.json", "case-summary.json",
+    } <= set(hashes) or any(
+        not re.fullmatch(r"[A-Za-z0-9_-]+\.json", name)
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        for name, digest in hashes.items()
+    ):
+        return False
+    if not isinstance(excerpt, dict) or set(excerpt) != {
+        "message", "initial_tools", "initial_missing", "http_status",
+        "completed_tool_calls", "final_status", "business_pass",
+    }:
+        return False
+    tools = excerpt["initial_tools"]
+    calls = excerpt["completed_tool_calls"]
+    if (
+        excerpt["message"] != message
+        or not isinstance(tools, list)
+        or not tools
+        or any(not isinstance(name, str) or not name.strip() for name in tools)
+        or excerpt["initial_missing"] != [name for name in required if name not in tools]
+        or type(excerpt["http_status"]) is not int
+        or not 100 <= excerpt["http_status"] <= 599
+        or type(excerpt["business_pass"]) is not bool
+        or not isinstance(excerpt["final_status"], str)
+        or not excerpt["final_status"].strip()
+        or not isinstance(calls, list)
+        or any(
+            not isinstance(call, dict)
+            or set(call) != {"model_index", "name", "arguments"}
+            or type(call["model_index"]) is not int
+            or call["model_index"] < 1
+            or not isinstance(call["name"], str)
+            or not call["name"].strip()
+            or not isinstance(call["arguments"], dict)
+            for call in calls
+        )
+    ):
+        return False
+    return True
+
+
 def load_cases(path: Path) -> list[EvalCase]:
     cases: list[EvalCase] = []
     seen: set[str] = set()
@@ -263,7 +329,11 @@ def load_cases(path: Path) -> list[EvalCase]:
             raw = json.loads(raw_line)
         except json.JSONDecodeError as exc:
             raise ValueError(f"第 {line_number} 行不是有效 JSON") from exc
-        if not isinstance(raw, dict) or set(raw) != {"id", "message", "required"}:
+        if (
+            not isinstance(raw, dict)
+            or not {"id", "message", "required"} <= set(raw)
+            or set(raw) - {"id", "message", "required", "provenance"}
+        ):
             raise ValueError(f"第 {line_number} 行字段无效")
         case_id = str(raw["id"] or "").strip()
         message = str(raw["message"] or "").strip()
@@ -281,8 +351,15 @@ def load_cases(path: Path) -> list[EvalCase]:
         )
         if any(not item for item in required):
             raise ValueError(f"第 {line_number} 行 required 无效")
+        provenance = raw.get("provenance", {"kind": "legacy_unverified"})
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("kind") not in PROVENANCE_KINDS
+            or not _valid_provenance(provenance, message, required)
+        ):
+            raise ValueError(f"第 {line_number} 行 provenance 无效")
         seen.add(case_id)
-        cases.append(EvalCase(case_id, message, required))
+        cases.append(EvalCase(case_id, message, required, provenance))
     if not cases:
         raise ValueError("评测语料为空")
     return cases
@@ -296,19 +373,25 @@ def evaluate(
     retriever = CapabilityRetriever()
     outcomes: list[EvalOutcome] = []
     for case in load_cases(path):
+        # 与 Session 的首窗一致：当前用户行已经落入历史，而不是只评测裸 query。
+        state = SessionState(owner="offline-eval", session_id="offline-eval-session",
+                             conversation=[{"role": "user", "content": case.message}])
         selection = retriever.retrieve(
             case.message,
             catalog,
             context={
-                "owner": "offline-eval",
-                "session_id": "offline-eval-session",
+                "owner": state.owner,
+                "session_id": state.session_id,
                 "channel": "eval",
                 "reference_kinds": (),
+                **AgentSession._capability_retrieval_context(state),
             },
         )
         selected = selection.names
         missing = tuple(name for name in case.required if name not in selected)
-        outcomes.append(EvalOutcome(case.case_id, not missing, selected, missing))
+        outcomes.append(EvalOutcome(
+            case.case_id, not missing, selected, missing, case.provenance
+        ))
 
     tools = catalog.visible({})
     invalid_effect_tools: list[str] = []
@@ -332,7 +415,19 @@ def evaluate(
     passed = sum(item.passed for item in outcomes)
     safety_ok = not invalid_effect_tools
     lifecycle = evaluate_lifecycle(lifecycle_path)
+    cohorts = {}
+    for kind in PROVENANCE_KINDS:
+        items = [item for item in outcomes if item.provenance["kind"] == kind]
+        count = len(items)
+        hits = sum(item.passed for item in items)
+        cohorts[kind] = {
+            "cases": count, "passed": hits, "failed": count - hits,
+            "retrieval_recall": round(hits / count, 4) if count else None,
+            "missing": {item.case_id: list(item.missing) for item in items if item.missing},
+        }
     return {
+        "recall_scope": "initial_window_corpus_only",
+        "cohorts": cohorts,
         "ok": passed == len(outcomes) and safety_ok and lifecycle["ok"],
         "summary": {
             "cases": len(outcomes),
@@ -360,7 +455,7 @@ def _text_report(result: dict[str, Any]) -> str:
     summary = result["summary"]
     lines = [
         "MediaFlux Agent Kernel 离线验收",
-        f"语料：{summary['passed']}/{summary['cases']} 通过，召回率 {summary['retrieval_recall']:.2%}",
+        f"语料首窗：{summary['passed']}/{summary['cases']} 通过，样本召回率 {summary['retrieval_recall']:.2%}",
         (
             "候选工具："
             f"{summary['candidate_count_min']}-{summary['candidate_count_max']} 项，"
@@ -377,10 +472,27 @@ def _text_report(result: dict[str, Any]) -> str:
             f"{summary['lifecycle_passed']}/{summary['lifecycle_cases']} 通过"
         ),
     ]
+    for kind, cohort in result["cohorts"].items():
+        recall = cohort["retrieval_recall"]
+        rate = f"{recall:.2%}" if recall is not None else "N/A（无样本）"
+        lines.append(f"{kind}：{cohort['passed']}/{cohort['cases']}，首窗样本召回率 {rate}")
+    lines.append(
+        "simulated_user_real_model 是模拟用户输入的真实模型证据，非生产用户自然故障；"
+        "仅代表本语料样本，不代表全局真实用户召回率；"
+        "首窗 FAIL 不等于最终任务失败。"
+    )
     for outcome in result["outcomes"]:
         if not outcome["passed"]:
             lines.append(
-                f"[FAIL] {outcome['case_id']} 缺少：{', '.join(outcome['missing'])}"
+                f"[FAIL] {outcome['case_id']} ({outcome['provenance']['kind']}) 首窗缺少：{', '.join(outcome['missing'])}"
+            )
+        provenance = outcome["provenance"]
+        excerpt = provenance.get("excerpt")
+        if provenance["kind"] == "simulated_user_real_model" and isinstance(excerpt, dict):
+            lines.append(
+                f"[EVIDENCE] {outcome['case_id']} 来源 commit={provenance.get('source_commit')}；"
+                f"历史首窗缺少={excerpt.get('initial_missing')}；"
+                f"证据最终状态={excerpt.get('final_status')}，business_pass={excerpt.get('business_pass')}"
             )
     for outcome in result["lifecycle_outcomes"]:
         if not outcome["passed"]:

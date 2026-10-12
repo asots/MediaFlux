@@ -180,10 +180,13 @@ class ToolCatalog:
 _WORD_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]+", re.IGNORECASE)
 _NEGATED_PHRASE_RE = re.compile(
     r"(?:不要|无需|不需要|不使用|禁止|别用|排除|"
-    r"没(?:有)?(?:让|叫)(?:你)?|不是(?:让|叫)(?:你)?|并非(?:让|叫)(?:你)?)"
-    r"\s*([^，。；;,.!?！？\n]{1,32})",
+    r"没(?:有)?(?:让|叫)(?:你)?|不是(?:让|叫)(?:你)?|并非(?:让|叫)(?:你)?|"
+    r"(?:^|(?<=[，。；;,.!?！？\n、]))\s*(?:不|别)(?!是|同|仅|只))"
+    r"\s*([^，。；;,.!?！？\n、]{1,32})",
     re.IGNORECASE,
 )
+
+_QUOTED_TEXT_RE = re.compile(r'《[^》]*》|「[^」]*」|“[^”]*”|"[^"\n]*"|`[^`\n]*`')
 
 
 def _normalize(value: object) -> str:
@@ -215,12 +218,23 @@ def _tokens(value: object) -> list[str]:
     return tokens
 
 
-def _negated_tokens(value: object) -> Counter[str]:
+def _query_terms(value: object) -> tuple[str, Counter[str], Counter[str]]:
     text = _normalize(value)
-    result: Counter[str] = Counter()
-    for match in _NEGATED_PHRASE_RE.finditer(text):
-        result.update(_tokens(match.group(1)))
-    return result
+    # 片名/引用里的“不要”不是操作指令；保留等长空白以按原始位置切分。
+    directives = _QUOTED_TEXT_RE.sub(lambda match: " " * len(match[0]), text)
+    positive, excluded, offset = [], Counter(), 0
+    for match in _NEGATED_PHRASE_RE.finditer(directives):
+        positive.append(text[offset:match.start()])
+        excluded.update(_tokens(match[1]))
+        offset = match.end()
+    positive.append(text[offset:])
+    query = " ".join(positive)
+    terms = Counter(_tokens(query))
+    # 全句是否定式请求时也可能是在取消既有任务，不能抹掉整个意图。
+    if not terms:
+        return text, Counter(_tokens(text)), Counter()
+    # 同一词也出现在明确正向目标里时，不因另一排除条件而反向惩罚它。
+    return query, terms, Counter({token: count for token, count in excluded.items() if token not in terms})
 
 
 def _bm25_overlap(
@@ -294,18 +308,23 @@ class CapabilityRetriever:
         ]
         if not visible:
             return CapabilitySelection((), {})
-        query_tokens = _tokens(message)
-        query_counts = Counter(query_tokens)
+        normalized_message, query_counts, negated_counts = _query_terms(message)
         raw_hints = runtime.get("recent_user_messages", ())
         if isinstance(raw_hints, str):
             raw_hints = (raw_hints,)
         # 历史只补足省略表达，越旧越弱；当前显式引用不能被旧话题压过。
         history_scale = 0.2 if runtime.get("has_current_reference") else 1.0
-        hints = [
-            (Counter(_tokens(str(item)[:2_000])), _normalize(str(item)[:2_000]), 0.35 ** index)
-            for index, item in enumerate(raw_hints)
-            if str(item).strip()
-        ][:3]
+        hints = []
+        current_text = _normalize(message[:2_000])
+        for index, item in enumerate(raw_hints):
+            text = str(item)[:2_000]
+            # Session 的持久历史已包含当前 user，不能把它再当旧线索重复加权。
+            if not text.strip() or _normalize(text) == current_text:
+                continue
+            hint, terms, _ = _query_terms(text)
+            hints.append((terms, hint, 0.35 ** index))
+            if len(hints) == 3:
+                break
         raw_recent_tools = runtime.get("recent_tool_names", ())
         if isinstance(raw_recent_tools, str):
             raw_recent_tools = (raw_recent_tools,)
@@ -318,13 +337,6 @@ class CapabilityRetriever:
             name: max(0.0, min(1.0, float(explicit_weights.get(name, 1.0))))
             for name in recent_tool_names
         }
-        negated_counts = _negated_tokens(message)
-        for token, count in negated_counts.items():
-            remaining = query_counts.get(token, 0) - count
-            if remaining > 0:
-                query_counts[token] = remaining
-            else:
-                query_counts.pop(token, None)
         documents: dict[str, list[str]] = {}
         negative_documents: dict[str, Counter[str]] = {}
         document_frequency: Counter[str] = Counter()
@@ -363,8 +375,8 @@ class CapabilityRetriever:
             1, len(documents)
         )
         total_docs = len(documents)
-        normalized_message = _normalize(message)
         scores: dict[str, float] = {}
+        negated_names: set[str] = set()
         for tool in visible:
             tokens = documents[tool.name]
             counts = Counter(tokens)
@@ -417,6 +429,8 @@ class CapabilityRetriever:
                 df = document_frequency[token]
                 idf = math.log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
                 negative_overlap += idf * min(frequency, negative_frequency)
+            if negative_overlap:
+                negated_names.add(tool.name)
             score -= negative_overlap * 6.0
             score -= min(2.0, tool.cost * 0.05)
             scores[tool.name] = score
@@ -457,7 +471,7 @@ class CapabilityRetriever:
                 if not catalog.has(str(related_name)):
                     continue
                 target = catalog.get(str(related_name))
-                if target.name in selected_names or target not in visible:
+                if target.name in selected_names or target.name in negated_names or target not in visible:
                     continue
                 workflow = str(source.metadata.get("workflow") or target.name)
                 position = workflow_neighbors.get(workflow, 0)
