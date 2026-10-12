@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from itertools import product
 
 from tests import test_agent_nsfw_clean_review_settings_browser as fixture
 
@@ -32,11 +33,21 @@ class MetadataSettingsAlignmentBrowserTests(unittest.TestCase):
         return [page.locator(f'[aria-labelledby="metadata-{name}-heading"]') for name in ("tmdb", "tavily", "ai")]
 
     def test_desktop_card_edges_align_and_loading_preserves_geometry(self):
-        for width in (1280, 1440, 1920):
-            with self.subTest(width=width):
+        for width, gap_override in product((1280, 1440, 1920), (None, 24)):
+            with self.subTest(width=width, gap_override=gap_override):
                 page, errors = self._open(width)
+                if gap_override is not None:
+                    page.locator(".metadata-column").evaluate_all(
+                        "(columns, gap) => columns.forEach(column => column.style.rowGap = `${gap}px`)", gap_override)
+                    page.wait_for_function(
+                        "gap => [...document.querySelectorAll('.metadata-column')].every(column => parseFloat(getComputedStyle(column).rowGap) === gap)",
+                        arg=gap_override)
                 cards = self._cards(page)
                 before = [self._rect(card) for card in cards]
+                # Read the declared gap after layout, alongside the rectangles;
+                # a just-injected style need not have been resolved before layout.
+                gap = cards[0].evaluate("card => parseFloat(getComputedStyle(card.parentElement).rowGap)")
+                self.assertGreater(gap, 0, "cards must keep the spacing declared by their layout")
                 self._resolve_config(page)
                 tmdb, tavily, ai = [self._rect(card) for card in cards]
                 for old, new in zip(before, (tmdb, tavily, ai)):
@@ -44,7 +55,7 @@ class MetadataSettingsAlignmentBrowserTests(unittest.TestCase):
                 self.assertAlmostEqual(tmdb["y"], ai["y"], delta=.5)
                 self.assertAlmostEqual(tavily["y"] + tavily["height"], ai["y"] + ai["height"], delta=.5)
                 self.assertAlmostEqual(tmdb["width"], ai["width"], delta=.5)
-                self.assertAlmostEqual(tavily["y"] - tmdb["y"] - tmdb["height"], 28, delta=.5)
+                self.assertAlmostEqual(tavily["y"] - tmdb["y"] - tmdb["height"], gap, delta=.5)
                 for card in cards:
                     self.assertGreaterEqual(card.locator(".metadata-card-body").bounding_box()["height"], 100)
                 for field in ("tmdbApiUrlInput", "tmdbApiKeyInput"):
