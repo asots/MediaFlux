@@ -215,17 +215,20 @@ class AllowAllTurnAdmission:
         return True
 
 
+_INITIAL_PLANNING_ROUNDS = 12
+
+
 @dataclass(frozen=True, slots=True)
 class SessionLimits:
-    # 复杂的只读观察 -> 批量计划通常需要 5 轮以上；预算仍有硬上限，
-    # 但不能让分页本身把正常任务挤成 model_round_budget_exceeded。
-    max_model_rounds: int = 12
+    # 硬上限与实际规划额度分开：只有新成功的业务READ才增加初始额度。
+    # 工具、上下文及持久续行预算仍各自生效，不能以“有进展”绕过。
+    max_model_rounds: int = 32
     max_tool_calls: int = 16
     max_output_tokens: int = 6_000
     context_window_tokens: int = 128_000
 
     def __post_init__(self) -> None:
-        if not 1 <= self.max_model_rounds <= 12:
+        if not 1 <= self.max_model_rounds <= 32:
             raise ValueError("max_model_rounds out of range")
         if not 1 <= self.max_tool_calls <= 32:
             raise ValueError("max_tool_calls out of range")
@@ -1082,6 +1085,7 @@ class AgentSession:
             discovery_tool_calls = 0
             tool_budget_blocked = False
             total_usage: dict[str, int] = {}
+            observed_reads: set[tuple[str, str]] = set()
 
             async def publish_tool(
                 event_type: AgentEventType,
@@ -1227,6 +1231,7 @@ class AgentSession:
                         raise ToolPipelineError("任务累计预算已用完，未继续调用。", code="task_budget_exceeded") from exc
 
             for round_index in range(self.limits.max_model_rounds):
+                round_limit = min(self.limits.max_model_rounds, _INITIAL_PLANNING_ROUNDS + len(observed_reads))
                 token.raise_if_cancelled()
                 await reserve_budget(model=1)
                 phase = "answer_recovery" if round_index == recovery_round else (
@@ -1237,13 +1242,12 @@ class AgentSession:
                 calls: list[ModelToolCall] = []
                 finish_reason = ""
                 provider_state = None
-                # 只要本轮已经执行过工具，最后一次模型调用就专门用于汇总。
-                # 否则第 12 轮仍执行工具后没有第 13 轮收束，会真实完成调用却
-                # 对用户报 model_round_budget_exceeded，并丢失可续跑上下文。
+                # 当前额度的最后一轮专门汇总；成功的新观察可在此前扩展额度，
+                # 失败、重复调用、能力发现和模型自称“有进展”均不产生额度。
                 final_synthesis_round = (
                     resume_read_done or tool_budget_blocked
                     or business_tool_calls >= self.limits.max_tool_calls
-                    or (round_index == self.limits.max_model_rounds - 1 and total_tool_calls > 0)
+                    or (round_index == round_limit - 1 and total_tool_calls > 0)
                 )
                 if any(entry.offered and entry.scope == error_repair.scope(tool_context)
                        for entry in tool_context.schema_replacements.values()) and not explaining and not is_read_resume:
@@ -1257,7 +1261,9 @@ class AgentSession:
                     f"当前模型轮次 {round_index + 1}/{self.limits.max_model_rounds}。"
                     f"实际剩余工具调用 {max(0, self.limits.max_tool_calls - business_tool_calls)} 次（业务，不含能力发现）；"
                     f"能力发现尝试 {discovery_tool_calls}/16（含缓存命中），不同选择 {discovery.requests}/8；"
-                    f"本次回复后仍可继续 {self.limits.max_model_rounds - round_index - 1} 轮模型调用。"
+                    f"硬上限内，本次回复后仍可继续 {self.limits.max_model_rounds - round_index - 1} 轮模型调用；"
+                    f"其中当前规划额度剩余 {round_limit - round_index - 1} 轮。"
+                    "只有已完成的新业务只读观察可扩展规划额度，重复查询、失败和能力发现不增加额度。"
                     "未收到预算耗尽错误或最终汇总要求时，不得自行声称工具额度不足。"
                     "若还有已获准的只读检查未完成，应继续处理，不能把已检查的部分条目当成全部任务结束；"
                     "需要写入授权、真实故障或用户补充信息时才说明阻塞并停下。"
@@ -1476,7 +1482,7 @@ class AgentSession:
                 except UncommittableModelTurn as exc:
                     # 本次模型回合尚未提交调用；丢弃残稿后最多重建一次。
                     # 继续原阶段而非强制收束，旧工具事实与授权边界不变。
-                    if recovery_round is not None or round_index + 1 >= self.limits.max_model_rounds:
+                    if recovery_round is not None or round_index + 1 >= round_limit:
                         raise
                     recovery_round = round_index + 1
                     recovery_reason = exc.reason
@@ -1571,7 +1577,7 @@ class AgentSession:
                     for call in calls:
                         await close_failed_call(call, error)
                     active_calls = ()
-                    if over_tool_budget and not final_synthesis_round and round_index + 1 < self.limits.max_model_rounds:
+                    if over_tool_budget and not final_synthesis_round and round_index + 1 < round_limit:
                         tool_budget_blocked = True
                         continue
                 if blocked_calls or tool_budget_blocked or (final_synthesis_round and not assistant_text):
@@ -1775,6 +1781,9 @@ class AgentSession:
                         # 完成事实在对外通知、进入下一项I/O之前落盘；新追问才能继承本批前半段。
                         await persist_conversation(close_pending=True)
                         await publish_tool_result(canonical_call, result)
+                        if (result.tool.effect is ToolEffect.READ and not result.tool.metadata.get("kernel_utility")
+                                and public_result_state(result.outcome.public_content) == "success"):
+                            observed_reads.add((result.tool.name, json.dumps(dict(result.arguments), sort_keys=True, ensure_ascii=False)))
                     if is_read_resume:
                         # Both plain and observed results have committed successfully.
                         resume_read_done = True

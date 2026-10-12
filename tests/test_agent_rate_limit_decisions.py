@@ -336,3 +336,23 @@ def test_failed_permit_rolls_back_cleanup_and_releases_writer_lock():
     with db.get_conn() as conn:
         assert tuple(conn.execute('SELECT count,previous_count,window_start FROM agent_rate_limit_buckets').fetchone())==(1,0,240)
     print('ROLLBACK: expired cleanup rolled back on failure; reopened transaction admitted exactly once')
+
+
+def test_local_watchlist_pages_share_existing_default_budget_across_workers():
+    names = ('discovery.watchlist_summaries', 'discovery.get_watchlist_summary')
+    for name in names:
+        assert rates.tool_rate_limit_policy(name) == ('discovery-watchlist-read', 30, 1)
+    for index in range(30):
+        # 每次重建limiter，仍读取同一SQLite身份桶，而非重置进程内额度。
+        limiter = AgentRateLimiter(shared=True, wall_clock=lambda: 120.0)
+        with patch.object(rates, 'agent_rate_limiter', limiter):
+            assert rates.consume_agent_tool('watchlist-owner', names[index % 2]).allowed
+    with patch.object(rates, 'agent_rate_limiter', AgentRateLimiter(shared=True, wall_clock=lambda: 120.0)):
+        for name in names:
+            denied = rates.consume_agent_tool('watchlist-owner', name)
+            assert not denied.allowed and denied.reason == 'quota' and denied.limit == 30
+        assert rates.consume_agent_tool('other-owner', names[0]).allowed
+    # 放宽的是纯本地收藏读取特例，外部搜索及写入没有改额度。
+    assert rates.tool_rate_limit_policy('discovery.search')[1] == 6
+    assert rates.tool_rate_limit_policy('discovery.add_watchlist')[1] == 4
+    assert rates.tool_rate_limit_policy('discovery.remove_watchlist')[1] == 4

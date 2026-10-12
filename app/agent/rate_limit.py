@@ -137,8 +137,6 @@ _TOOL_RATE_LIMITS = {
     "discovery.search": 6,
     "discovery.recommend": 6,
     "discovery.person_filmography": 6,
-    "discovery.watchlist_summaries": 8,
-    "discovery.get_watchlist_summary": 12,
     "discovery.detail": 8,
     "discovery.mapping_candidates": 4,
     "discovery.confirm_mapping": 4,
