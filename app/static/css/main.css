@@ -3223,8 +3223,9 @@ body:has(.discovery-dialog[open]) { overflow: hidden; }
 .tmdb-lock-head strong, .tmdb-lock-head span { display: block; }
 .tmdb-lock-head strong { font-size: 13px; }
 .tmdb-lock-head span { margin-top: 3px; color: var(--text-muted); font-size: 10px; }
-.tmdb-lock-search { display: flex; align-items: center; gap: 7px; }
-.tmdb-lock-search .form-input { min-width: 220px; }
+.tmdb-lock-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.tmdb-lock-search .form-input { width: 100%; min-width: 0; height: 40px; }
+.tmdb-lock-search .jump-btn { min-width: 96px; height: 40px; padding: 0 16px; justify-content: center; white-space: nowrap; flex-shrink: 0; }
 .strm-source-list { min-height: var(--strm-source-reserved-height, 52px); display: grid; align-content: start; gap: 8px; margin-top: 4px; overflow-anchor: none; }
 .strm-source-empty { padding: 14px; color: var(--text-muted); background: var(--control-tint); border: 1px dashed var(--border-soft); border-radius: var(--radius-sm); font-size: 12px; text-align: center; }
 .strm-source-item {
@@ -4745,8 +4746,8 @@ body:has(.discovery-dialog[open]) { overflow: hidden; }
     .strm-source-row .field-label, .strm-cron-row .field-label { padding-top: 0; }
     .strm-runtime-head { grid-template-columns: 1fr; }
     .strm-runtime-actions { grid-template-columns: 1fr; }
-    .tmdb-lock-head, .tmdb-lock-search { align-items: stretch; flex-direction: column; }
-    .tmdb-lock-search .form-input, .tmdb-lock-search .jump-btn { width: 100%; min-width: 0; }
+    .tmdb-lock-head { align-items: stretch; flex-direction: column; }
+    .tmdb-lock-search { grid-template-columns: minmax(0, 1fr) auto; }
     .network-test-grid { grid-template-columns: 1fr; }
     .network-test-grid .jump-btn { width: 100%; }
     .settings-savebar { align-items: stretch; flex-direction: column; }
