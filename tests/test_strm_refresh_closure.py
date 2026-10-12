@@ -104,10 +104,17 @@ def _consume(*, providers, expected_paths):
 
 
 _CHILD = r'''
-import os, runpy, sys
+import os, socket, sys
 from pathlib import Path
 from unittest.mock import patch
-runpy.run_path('.superpowers/tmp/run_web_setup_nonbrowser_suite.py', run_name='offline_guard')
+# 在应用导入前封闭子进程网络；不依赖本机未入库的执行脚本。
+def deny_network(event, args):
+    if event in ('socket.getaddrinfo', 'socket.gethostbyname'):
+        raise AssertionError('network disabled in crash-recovery subprocess')
+    if event in ('socket.connect', 'socket.bind', 'socket.sendto') and args[0].family != socket.AF_UNIX:
+        raise AssertionError('network disabled in crash-recovery subprocess')
+
+sys.addaudithook(deny_network)
 import tests
 from app import database as db
 from tests.test_strm_refresh_closure import _run, _providers
@@ -405,3 +412,12 @@ def test_notification_pending_standalone_publish_cannot_claim_completion(tmp_pat
                 assert "private-root" not in str(event)
             else:
                 assert dict(event.fields)["媒体库刷新"] == "媒体库 待重试（等待配置恢复）"
+
+
+def test_crash_child_network_guard_runs_without_repository_or_temporary_helpers(tmp_path):
+    bootstrap = _CHILD.split("\nimport tests\n", 1)[0]
+    child = subprocess.run(
+        [sys.executable, "-c", bootstrap + "\ntry:\n    socket.getaddrinfo('network.invalid', 443)\nexcept AssertionError as exc:\n    assert str(exc) == 'network disabled in crash-recovery subprocess'\nelse:\n    raise AssertionError('DNS was not blocked')\n"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert child.returncode == 0, (child.stdout, child.stderr)
