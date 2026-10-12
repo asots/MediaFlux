@@ -1209,7 +1209,7 @@ class AgentSession:
                 context_window, output_tokens, conservative_budget = self.model.budget_for_model(
                     selected_model, context_window, output_tokens,
                 )
-            answer_recovery = False
+            recovery_round: int | None = None
             history_snapshot: tuple[str, str] = ("", "")
             async def reserve_budget(*, model: int = 0, tools: int = 0) -> None:
                 nonlocal state
@@ -1226,7 +1226,7 @@ class AgentSession:
             for round_index in range(self.limits.max_model_rounds):
                 token.raise_if_cancelled()
                 await reserve_budget(model=1)
-                phase = "answer_recovery" if answer_recovery else (
+                phase = "answer_recovery" if round_index == recovery_round else (
                     "confirmed_synthesis" if confirmed_result is not None else "planning"
                 )
                 await publish(AgentEventType.MODEL_STARTED, {"round": round_index + 1, "phase": phase})
@@ -1238,8 +1238,7 @@ class AgentSession:
                 # 否则第 12 轮仍执行工具后没有第 13 轮收束，会真实完成调用却
                 # 对用户报 model_round_budget_exceeded，并丢失可续跑上下文。
                 final_synthesis_round = (
-                    resume_read_done or answer_recovery
-                    or tool_budget_blocked
+                    resume_read_done or tool_budget_blocked
                     or business_tool_calls >= self.limits.max_tool_calls
                     or (round_index == self.limits.max_model_rounds - 1 and total_tool_calls > 0)
                 )
@@ -1328,12 +1327,12 @@ class AgentSession:
                         "只有涉及写入任务时才说明未执行的写操作；纯查询不要添加确认/重放提示。"
                         "不得声称已生成不存在的确认计划。"
                     )
-                if answer_recovery:
+                if round_index == recovery_round:
                     request_system_prompt += (
-                        "\n上一轮模型正文未完整结束，本轮只重新汇总已经取得的真实工具结果。"
-                        "不要续写残句，不要重复调用任何工具，不要描述媒体情节或复述完整原始文件标题。"
-                        "简洁说明已完成的检查、没有执行的操作与真实阻塞；未核验的识别原因不能当作事实。"
-                        "如无法继续处理，明确说明，不要虚构完成或让用户以为已经入库。"
+                        "\n上一轮模型回复未完整结束，残稿未纳入对话历史，该回合的工具调用也未执行。"
+                        "从当前完整历史继续原任务；仍须遵守本轮工具窗口与预算，需要工具时重新生成完整调用。"
+                        "不要续写残句或重做历史回执已经完成的操作；新的写操作仍需新的确认。"
+                        "只能基于核验结果说明进展，未完成的步骤不能当作已经完成。"
                     )
                 request_system_prompt += loaded_tool_guidance(
                     tool.name for tool in selected_tools
@@ -1467,10 +1466,11 @@ class AgentSession:
                             finish_reason = model_event.finish_reason
                             provider_state = model_event.provider_state
                 except IncompleteModelAnswer:
-                    # 原生协议确实未完成时最多重新汇总一次；不存残稿、不重放工具。
-                    if answer_recovery or round_index + 1 >= self.limits.max_model_rounds:
+                    # 本次模型回合尚未提交调用；丢弃残稿后最多重建一次。
+                    # 继续原阶段而非强制收束，旧工具事实与授权边界不变。
+                    if recovery_round is not None or round_index + 1 >= self.limits.max_model_rounds:
                         raise
-                    answer_recovery = True
+                    recovery_round = round_index + 1
                     continue
                 finally:
                     token.interruptible = False  # 工具阶段协作停止，保留已完成的批量结果。

@@ -928,12 +928,13 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                             last_fault = exc
                             last_error = exc
                             if last_http_error is not None:
-                                category = next((kind.__name__ for kind in (
-                                    httpx.TransportError, OSError, ValueError, IncompleteModelAnswer,
-                                ) if isinstance(exc, kind)), "Exception")
-                                message = ("Provider 流在完成事件前中断" if isinstance(exc, IncompleteModelAnswer)
-                                           else f"Provider 请求失败（传输/响应处理：{category}）")
-                                last_error = ModelProviderError(message)
+                                if isinstance(exc, IncompleteModelAnswer):
+                                    last_error = IncompleteModelAnswer("Provider 流在完成事件前中断")
+                                else:
+                                    category = next((kind.__name__ for kind in (
+                                        httpx.TransportError, OSError, ValueError,
+                                    ) if isinstance(exc, kind)), "Exception")
+                                    last_error = ModelProviderError(f"Provider 请求失败（传输/响应处理：{category}）")
                                 last_error.__cause__ = last_http_error
                             if emitted:
                                 break

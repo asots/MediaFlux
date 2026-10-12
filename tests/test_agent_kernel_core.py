@@ -3649,11 +3649,16 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def scenario(self, *, recovery='success', max_rounds=5):
         from app.agent.kernel.provider_model import IncompleteModelAnswer
-        reads = []
+        reads, next_reads = [], []
         state = InMemorySessionStateStore()
-        catalog = ToolCatalog([read_tool('cloud.inspect', handler=lambda *_: reads.append('read') or {
-            'ok': True, 'summary': '已检查4个目录；尚未刮削入库',
-        })])
+        catalog = ToolCatalog([
+            read_tool('cloud.inspect', handler=lambda *_: reads.append('read') or {
+                'ok': True, 'summary': '已检查4个目录；尚未刮削入库',
+            }),
+            read_tool('cloud.inspect_next', handler=lambda *_: next_reads.append('read') or {
+                'ok': True, 'summary': '补充检查完成，仍未入库',
+            }),
+        ])
 
         class Model:
             requests = []
@@ -3667,8 +3672,8 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 elif index == 2 or recovery == 'failure':
                     yield ModelEvent(ModelEventType.TEXT_DELTA, text='2. **`044')
                     raise IncompleteModelAnswer('Provider 流在完成事件前中断')
-                elif recovery == 'tool':
-                    yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall('forbidden', 'cloud.inspect', {}))
+                elif recovery == 'tool' and index == 3:
+                    yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall('next-read', 'cloud.inspect_next', {}))
                     yield ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')
                 elif recovery == 'cancel':
                     cancellation.cancel('user cancelled')
@@ -3687,10 +3692,11 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all('mf_answer_end_' not in r.system_prompt for r in model.requests))
         self.assertLessEqual(len(model.requests), max_rounds)
         self.assertNotIn('**`044', str(saved.conversation), '未完成草稿不得成为下一轮可信历史')
-        if len(model.requests) == 3:
-            self.assertEqual(model.requests[-1].tools, ())
-            self.assertIn('不要重复调用任何工具', model.requests[-1].system_prompt)
-            self.assertNotIn('**`044', str(model.requests[-1].messages))
+        self.assertEqual(next_reads, ['read'] if recovery == 'tool' else [])
+        if len(model.requests) >= 3:
+            self.assertEqual(model.requests[2].tools, model.requests[1].tools)
+            self.assertIn('不要续写残句或重做历史回执已经完成的操作', model.requests[2].system_prompt)
+            self.assertNotIn('**`044', str(model.requests[2].messages))
         return events, model.requests
 
     async def test_interrupted_stream_is_recovered_once_without_repeating_tools(self):
@@ -3719,10 +3725,14 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].payload['status'], 'partial')
         self.assertIn('尚未刮削入库', events[-1].payload['answer'])
 
-    async def test_recovery_refuses_unrequested_tools(self):
-        events, _ = await self.scenario(recovery='tool')
-        self.assertEqual(events[-1].payload['status'], 'partial')
-        self.assertTrue(any(e.type == AgentEventType.TOOL_FAILED and e.payload['code'] == 'not_executed_final_round' for e in events))
+    async def test_recovery_continues_remaining_read_without_repeating_completed_read(self):
+        events, requests = await self.scenario(recovery='tool')
+        self.assertEqual(events[-1].payload['status'], 'success')
+        self.assertEqual(len(requests), 4)
+        self.assertFalse(any(e.type == AgentEventType.TOOL_FAILED for e in events))
+        phases = [e.payload['phase'] for e in events if e.type == AgentEventType.MODEL_STARTED]
+        self.assertEqual(phases[-2:], ['answer_recovery', 'planning'])
+        self.assertNotIn('上一轮模型回复未完整结束', requests[-1].system_prompt)
 
     async def test_user_can_cancel_recovery(self):
         events, _ = await self.scenario(recovery='cancel')
@@ -3745,8 +3755,8 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         yield ModelEvent(ModelEventType.TEXT_DELTA, text='2. **`044')
                         raise IncompleteModelAnswer('模型回复未完整结束')
                     self_request = self.requests[-1]
-                    if self_request.tools:
-                        raise AssertionError('恢复时不能再暴露写工具')
+                    if self_request.tools != self.requests[-2].tools:
+                        raise AssertionError('恢复必须保留原工具窗口，不能自行扩权或撤走工具')
                     yield ModelEvent(ModelEventType.TEXT_DELTA, text='改名已经完成，尚未移动或归档。')
                     yield ModelEvent(ModelEventType.FINISH, finish_reason='stop')
                 else:
@@ -3767,6 +3777,118 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await consume_events(session.confirm(owner='owner', session_id='confirm-recovery', plan_id=preview.approval.plan_id))
         self.assertEqual(writes, [1])
         self.assertEqual(len(model.requests), 3)
+
+
+    async def test_recovered_followup_write_requires_a_new_confirmation(self):
+        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        prepared, writes = [], []
+
+        def prepare(arguments, _context):
+            prepared.append(arguments['step'])
+            return PreparedEffect(preview={'summary': f"处理{arguments['step']}"},
+                                  snapshot_fingerprint=f"snapshot-{arguments['step']}")
+
+        tool = KernelToolSpec(
+            name='cloud.change', domain='cloud', description='处理两个对象',
+            input_schema={'type': 'object', 'properties': {'step': {'type': 'string'}},
+                          'required': ['step'], 'additionalProperties': False}, effect=ToolEffect.WRITE,
+            prepare=prepare,
+            execute_confirmed=lambda arguments, _snapshot, _context: writes.append(arguments['step']) or {
+                'ok': True, 'summary': f"已处理{arguments['step']}",
+            },
+        )
+
+        class Model:
+            def __init__(self):
+                self.requests = []
+
+            async def stream(self, request, *, cancellation):
+                self.requests.append(request)
+                index = len(self.requests)
+                if index == 2:
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text='未完成的规划残稿')
+                    raise IncompleteModelAnswer('Provider 流在完成事件前中断')
+                if index in {1, 3}:
+                    step = 'first' if index == 1 else 'second'
+                    yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
+                                     tool_call=ModelToolCall(f'call-{step}', tool.name, {'step': step}))
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')
+                else:
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text='两个对象均已处理。')
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason='stop')
+
+        model = Model()
+        catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                               pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        original = await consume_events(session.run(AgentInput(
+            message='依次处理first和second', owner='owner', session_id='recovered-followup',
+        )))
+        self.assertEqual(writes, [])
+        followup = await consume_events(session.confirm(owner='owner', session_id='recovered-followup',
+                                                        plan_id=original.approval.plan_id))
+        self.assertEqual(writes, ['first'])
+        self.assertEqual(prepared, ['first', 'second'])
+        self.assertIsNotNone(followup.approval)
+        self.assertNotEqual(followup.approval.plan_id, original.approval.plan_id)
+        self.assertEqual(model.requests[2].tools, model.requests[1].tools)
+        self.assertNotIn('未完成的规划残稿', str(model.requests[2].messages))
+        stale = await consume_events(session.confirm(owner='owner', session_id='recovered-followup',
+                                                     plan_id=original.approval.plan_id))
+        self.assertEqual(stale.error_code, 'confirmation_invalid')
+        self.assertEqual(writes, ['first'])
+        self.assertEqual(len(model.requests), 3)
+        final = await consume_events(session.confirm(owner='owner', session_id='recovered-followup',
+                                                     plan_id=followup.approval.plan_id))
+        self.assertEqual(writes, ['first', 'second'])
+        self.assertTrue(final.effect_result['ok'])
+        self.assertEqual(len(model.requests), 4)
+        duplicate = await consume_events(session.confirm(owner='owner', session_id='recovered-followup',
+                                                         plan_id=followup.approval.plan_id))
+        self.assertEqual(duplicate.error_code, 'confirmation_invalid')
+        self.assertEqual(writes, ['first', 'second'])
+        self.assertEqual(len(model.requests), 4)
+
+
+    async def test_interrupted_explanation_keeps_tools_disabled_and_plan_pending(self):
+        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        prepared, writes = [], []
+        tool = KernelToolSpec(
+            name='cloud.change', domain='cloud', description='改名',
+            input_schema={'type': 'object', 'properties': {}}, effect=ToolEffect.WRITE,
+            prepare=lambda *_: prepared.append(1) or PreparedEffect(
+                preview={'summary': '改名预览'}, snapshot_fingerprint='snapshot'),
+            execute_confirmed=lambda *_: writes.append(1) or {'ok': True},
+        )
+
+        class Model(ScriptedModel):
+            async def stream(self, request, *, cancellation):
+                if len(self.requests) == 1:
+                    self.requests.append(request)
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text='解释残稿')
+                    raise IncompleteModelAnswer('Provider 流在完成事件前中断')
+                async for event in super().stream(request, cancellation=cancellation):
+                    yield event
+
+        model = Model([
+            [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall('first', tool.name, {})),
+             ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')],
+            [ModelEvent(ModelEventType.TEXT_DELTA, text='这是改名预览，尚未执行。'),
+             ModelEvent(ModelEventType.FINISH, finish_reason='stop')],
+        ])
+        catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                               pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
+        original = await consume_events(session.run(AgentInput(message='改名', owner='owner', session_id='explain-cut')))
+        result = await consume_events(session.explain(owner='owner', session_id='explain-cut',
+                                                     plan_id=original.approval.plan_id, message='只解释这个计划'))
+        self.assertEqual(result.status, 'success')
+        self.assertEqual([request.tools for request in model.requests[1:]], [(), ()])
+        self.assertNotIn('解释残稿', str(model.requests[-1].messages))
+        saved = await state.load(owner='owner', session_id='explain-cut')
+        self.assertEqual(saved.pending_effect_plan_id, original.approval.plan_id)
+        self.assertEqual(prepared, [1])
+        self.assertEqual(writes, [])
 
 
 class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):

@@ -159,3 +159,59 @@ def test_foreground_error_still_allows_model_repair(tool_name):
         assert events[-1].payload['status'] == 'success'
         assert 'tool_execution_failed' in json.dumps(script.requests[2])
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('changed_arguments', [False, True], ids=['original-scope', 'scope-change-rejected'])
+def test_interrupted_reconstruction_keeps_resumed_read_authority_and_budget(changed_arguments):
+    async def run():
+        clock = [100]
+        candidate, parked = await park(clock, 'web.search')
+        clock[0] = 110
+
+        class Interrupted(ResultScript):
+            async def respond(self, request):
+                if not self.requests:
+                    self.requests.append(json.loads(request.content))
+                    # 真正SSE只交付正文而没有终态；native adapter抛IncompleteModelAnswer。
+                    partial = {'choices': [{'delta': {'content': 'READ续行截断残稿'}}]}
+                    return httpx.Response(200, content=('data: ' + json.dumps(partial) + '\n\n').encode(),
+                                          headers={'content-type': 'text/event-stream'})
+                response = await super().respond(request)
+                body = response.json()
+                if changed_arguments and self.steps == ['finish']:
+                    body['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = '{"query":"outside scope"}'
+                return httpx.Response(200, json=body)
+
+        script = Interrupted('web.search', resume=True)
+        runtime = runtime_for(script, clock)
+        calls = []
+
+        async def read(arguments, context):
+            calls.append(dict(arguments))
+            return {'ok': True, 'summary': '原范围核验完成'}
+
+        tool = runtime.session.catalog.get('web.search')
+        runtime.session.catalog._tools[tool.name] = replace(tool, read=read)
+        assert await runtime.session.resume_wait(candidate=candidate)
+        assert script.requests[0]['tools'] == script.requests[1]['tools']
+        assert [t['function']['name'] for t in script.requests[1]['tools']] == ['web__search']
+        assert 'READ续行截断残稿' not in json.dumps(script.requests[1]['messages'], ensure_ascii=False)
+        cold = await SQLiteKernelStore(clock=lambda: clock[0]).load(owner=OWNER, session_id='results')
+        wait = cold.metadata['read_wait']
+        assert wait['state'] == 'terminal'
+        assert wait['terminal_reason'] == ('read_resume_invalid' if changed_arguments else 'completed')
+        assert calls == ([] if changed_arguments else [{'query': 'quota fixture', 'max_results': 5, 'topic': 'general'}])
+        assert wait['budget']['model_spent'] == (5 if changed_arguments else 6)
+        assert wait['budget']['tool_spent'] == (3 if changed_arguments else 4)
+        assert len(script.requests) == (2 if changed_arguments else 3)
+        if not changed_arguments:
+            assert not script.requests[-1].get('tools')
+        old = next(r for r in parked.conversation if r.get('tool_call_id') == 'initial-3')
+        assert old in cold.conversation
+        assert 'READ续行截断残稿' not in json.dumps(cold.conversation, ensure_ascii=False)
+        before = len(script.requests)
+        assert not await runtime.session.resume_wait(candidate=candidate)
+        assert len(script.requests) == before
+        assert calls == ([] if changed_arguments else [{'query': 'quota fixture', 'max_results': 5, 'topic': 'general'}])
+
+    asyncio.run(run())
