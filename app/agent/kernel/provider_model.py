@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal, NoReturn
 from time import monotonic
 
 import httpx
@@ -75,12 +75,18 @@ class ModelProviderError(RuntimeError):
     failure: ProviderFailure | None = None
 
 
-class IncompleteModelAnswer(ModelProviderError):
-    """Provider 原生协议缺少成功终态；可有界重新汇总，不代表业务工具失败。"""
+class UncommittableModelTurn(ModelProviderError):
+    """当前原生回合不能提交；只允许 Kernel 从之前完整历史有界重建。"""
+
+    def __init__(self, message: str, *, reason: Literal["incomplete", "unreplayable_arguments"] = "incomplete") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _failure_kind(exc: BaseException | None, http_status: int | None) -> str:
     # 使用白名单类型，不记录可能包含 URL/令牌的异常消息或任意类名。
+    if isinstance(exc, UncommittableModelTurn):
+        return "incomplete_response" if exc.reason == "incomplete" else "invalid_tool_arguments"
     for kind, name in (
         (httpx.ConnectTimeout, "connect_timeout"),
         (httpx.ReadTimeout, "read_timeout"),
@@ -89,7 +95,6 @@ def _failure_kind(exc: BaseException | None, http_status: int | None) -> str:
         (httpx.ConnectError, "connection_error"),
         (httpx.TransportError, "transport_error"),
         (TimeoutError, "deadline"),
-        (IncompleteModelAnswer, "incomplete_response"),
         (ProviderStreamError, "incomplete_response"),
         (ValueError, "invalid_response"),
     ):
@@ -105,6 +110,24 @@ def _provider_state(protocol: str, model: str, endpoint: str, layout: str) -> Pr
         return ProviderState(protocol, model, endpoint, layout)
     except ValueError:
         raise ModelProviderError("Provider 私有状态超过安全上限") from None
+
+
+def _reject_unreplayable_anthropic_arguments(
+    raw_calls: Sequence[dict[str, Any]], blocks: list[Any], *, private_complete: bool = True,
+) -> NoReturn:
+    """仅校验失败回合，不生成可重放的 input，也不交付当前组的私有状态。"""
+    if not private_complete:
+        raise ModelProviderError("Provider 私有状态块未闭合")
+    try:
+        calls = [parse_native_call(raw.get("call_id"), raw.get("name"), raw.get("arguments"),
+                                   allow_argument_errors=True, require_identity=True) for raw in raw_calls]
+        validate_repair_batch(calls, [(raw.get("call_id"), raw.get("name")) for raw in raw_calls], require_identity=True)
+        layout = anthropic_private_layout(blocks)
+        if layout:
+            _provider_state("anthropic_messages", "", "", layout)
+    except ValueError:
+        raise ModelProviderError("模型工具参数或原生身份/私有状态无效") from None
+    raise UncommittableModelTurn("模型工具参数不是有效 JSON，本回合未执行", reason="unreplayable_arguments")
 
 
 _MODEL_IDLE_TIMEOUT_FLOOR_SECONDS = 30
@@ -125,6 +148,8 @@ def _stream_deadline_seconds(network_timeout_seconds: int) -> int:
 
 
 def _retryable_provider_exception(exc: BaseException) -> bool:
+    if isinstance(exc, UncommittableModelTurn) and exc.reason == "unreplayable_arguments":
+        return False
     if isinstance(exc, (httpx.TransportError, OSError)):
         return True
     if isinstance(exc, ModelProviderError):
@@ -268,6 +293,11 @@ async def iter_protocol_model_events(
                                        allow_argument_errors=normalized in {"responses", "chat_completions"},
                                        require_identity=normalized == "anthropic_messages")
         except ToolArgumentsDecodeError as exc:
+            if normalized == "anthropic_messages" and exc.reason == "invalid_json":
+                _reject_unreplayable_anthropic_arguments(
+                    list(calls.values()), [native_blocks[index] for index in sorted(native_blocks)],
+                    private_complete=not open_private_blocks,
+                )
             failure = {"too_large": "模型工具参数过大", "invalid_json": "模型工具参数不是有效 JSON",
                        "not_object": "模型工具参数必须是对象"}[exc.reason]
         except ValueError:
@@ -366,7 +396,7 @@ async def iter_protocol_model_events(
                 completed = True
                 break
             elif event_type == "response.incomplete":
-                raise IncompleteModelAnswer("Responses API 未完整结束")
+                raise UncommittableModelTurn("Responses API 未完整结束")
             elif event_type in {"response.failed", "error"}:
                 raise ModelProviderError("Responses API 未完整结束")
             continue
@@ -490,11 +520,11 @@ async def iter_protocol_model_events(
             break
 
     if not completed:
-        raise IncompleteModelAnswer("Provider 流在完成事件前中断")
+        raise UncommittableModelTurn("Provider 流在完成事件前中断")
     try:
         finish_reason = provider_finish_reason(normalized, finish_reason)
     except ProviderStreamError as exc:
-        raise IncompleteModelAnswer(str(exc)) from exc
+        raise UncommittableModelTurn(str(exc)) from exc
     if normalized in {"responses", "chat_completions", "anthropic_messages"}:
         # Validate the complete batch before emitting deferred calls. Checking
         # only previously emitted calls makes identity depend on stream order.
@@ -875,7 +905,18 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                         envelope = json.loads(raw.decode("utf-8"))
                                         turn = parse_native_tool_turn(envelope, protocol, allow_argument_errors=True)
                                     except ProviderStreamError as exc:
-                                        raise IncompleteModelAnswer(str(exc)) from exc
+                                        raise UncommittableModelTurn(str(exc)) from exc
+                                    except ToolArgumentsDecodeError as exc:
+                                        if protocol == "anthropic_messages" and exc.reason == "invalid_json":
+                                            blocks = envelope["content"]
+                                            _reject_unreplayable_anthropic_arguments(
+                                                [{"call_id": block.get("id"), "name": block.get("name"), "arguments": block.get("input")}
+                                                 for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"], blocks,
+                                            )
+                                        last_fault = exc
+                                        last_error = ModelProviderError("Provider 返回格式无效")
+                                        last_error.__cause__ = last_http_error
+                                        break
                                     except ValueError as exc:
                                         last_fault = exc
                                         last_error = ModelProviderError(
@@ -928,8 +969,8 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                             last_fault = exc
                             last_error = exc
                             if last_http_error is not None:
-                                if isinstance(exc, IncompleteModelAnswer):
-                                    last_error = IncompleteModelAnswer("Provider 流在完成事件前中断")
+                                if isinstance(exc, UncommittableModelTurn):
+                                    last_error = UncommittableModelTurn(str(exc), reason=exc.reason)
                                 else:
                                     category = next((kind.__name__ for kind in (
                                         httpx.TransportError, OSError, ValueError,

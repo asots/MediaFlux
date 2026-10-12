@@ -379,7 +379,7 @@ def test_nonnegotiation_exhaustion_stays_on_original_protocol(action, count):
     if isinstance(action, httpx.TransportError):
         assert result['error'].__cause__ is action
     if isinstance(action, dict) and action.get('data') == b'':
-        assert isinstance(result['error'], pm.IncompleteModelAnswer)
+        assert isinstance(result['error'], pm.UncommittableModelTurn)
 
 
 @pytest.mark.parametrize('action', [
@@ -1048,3 +1048,31 @@ def test_real_total_deadline_before_headers_still_stops_without_retry():
     assert result['error'].failure.kind == 'deadline'
     assert result['error'].failure.phase == 'request'
     assert result['error'].failure.http_status is None
+
+
+@pytest.mark.parametrize('prior_budget_rejection', [False, True])
+def test_anthropic_unreplayable_arguments_keep_reason_without_adapter_resend(prior_budget_rejection):
+    malformed = {
+        'content': [
+            {'type': 'thinking', 'thinking': 'private thought', 'signature': 'signed-private'},
+            {'type': 'tool_use', 'id': 'uncommitted-call', 'name': 'lookup',
+             'input': '{"query":"' + SECRET + '",'},
+        ],
+        'stop_reason': 'tool_use',
+    }
+    actions = ([http_error(400, '{"error":{"code":"context_length_exceeded"}}')]
+               if prior_budget_rejection else [])
+    actions.append(dict(status=200, data=json.dumps(malformed).encode()))
+    result = wire(actions, configured='anthropic_messages')
+    assert protocols(result) == ['anthropic_messages'] * (2 if prior_budget_rejection else 1)
+    assert not result['events']
+    error = result['error']
+    assert isinstance(error, pm.UncommittableModelTurn)
+    assert error.reason == 'unreplayable_arguments'
+    assert error.failure.kind == 'invalid_tool_arguments'
+    assert error.failure.http_status == 200 and error.failure.emitted is False
+    assert all(SECRET not in str(exc) for exc in error_chain(error))
+    if prior_budget_rejection:
+        assert any('HTTP 400' in str(exc) for exc in error_chain(error))
+        assert result['requests'][1]['body']['max_tokens'] < result['requests'][0]['body']['max_tokens']
+        assert result['requests'][1]['body']['messages'] == result['requests'][0]['body']['messages']

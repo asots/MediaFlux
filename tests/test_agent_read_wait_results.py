@@ -172,7 +172,7 @@ def test_interrupted_reconstruction_keeps_resumed_read_authority_and_budget(chan
             async def respond(self, request):
                 if not self.requests:
                     self.requests.append(json.loads(request.content))
-                    # 真正SSE只交付正文而没有终态；native adapter抛IncompleteModelAnswer。
+                    # 真正SSE只交付正文而没有终态；native adapter抛UncommittableModelTurn。
                     partial = {'choices': [{'delta': {'content': 'READ续行截断残稿'}}]}
                     return httpx.Response(200, content=('data: ' + json.dumps(partial) + '\n\n').encode(),
                                           headers={'content-type': 'text/event-stream'})

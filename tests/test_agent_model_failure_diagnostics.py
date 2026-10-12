@@ -50,7 +50,7 @@ FAILURE_FIELDS = {
 FAILURE_KINDS = {
     'connect_timeout', 'read_timeout', 'write_timeout', 'pool_timeout',
     'connection_error', 'transport_error', 'deadline', 'http_error',
-    'incomplete_response', 'invalid_response', 'provider_error',
+    'incomplete_response', 'invalid_response', 'invalid_tool_arguments', 'provider_error',
 }
 
 
@@ -373,3 +373,17 @@ def test_request_construction_type_error_remains_programming_error_not_provider_
     assert result['error'] is error
     assert not isinstance(error, pm.ModelProviderError)
     assert getattr(error, 'failure', None) is None
+
+
+def test_unreplayable_native_arguments_have_safe_classified_diagnostic(caplog):
+    envelope = {'content': [{'type': 'tool_use', 'id': 'bad-args', 'name': 'lookup',
+                            'input': '{"query":"' + FAULT_TEXT}], 'stop_reason': 'tool_use'}
+    result = wire([{'status': 200, 'data': json.dumps(envelope).encode()}],
+                  configured='anthropic_messages')
+    assert_failure(result, kind='invalid_tool_arguments', phase='response',
+                   protocol='anthropic_messages', attempts=1, emitted=False, http_status=200)
+    error = result['error']
+    assert isinstance(error, pm.UncommittableModelTurn)
+    assert error.reason == 'unreplayable_arguments'
+    assert_safe(str(error), str(error.__cause__), str(error.__context__),
+                json.dumps(asdict(error.failure)), caplog.text)

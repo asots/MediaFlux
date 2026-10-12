@@ -51,7 +51,7 @@ from .pipeline import (
     _ReadPermitRejected,
 )
 from .projection import _arguments_safe
-from .provider_model import IncompleteModelAnswer, ModelProviderError
+from .provider_model import UncommittableModelTurn, ModelProviderError
 from .provider_model import OpenAICompatibleModelAdapter
 from .session_guard import session_scope_guard
 from .state import (
@@ -151,6 +151,8 @@ async def _require_complete_inline_history(original, candidate, *, code, pipelin
 def _provider_failure_message(exc: ModelProviderError) -> str:
     """把 Provider 内部故障归一为不泄露配置的用户提示。"""
 
+    if isinstance(exc, UncommittableModelTurn) and exc.reason == "unreplayable_arguments":
+        return "模型工具参数无法解析，本次生成的调用未执行；请稍后重试。"
     diagnostic = exc.failure
     if diagnostic is not None:
         if diagnostic.emitted and diagnostic.kind in {
@@ -1210,6 +1212,7 @@ class AgentSession:
                     selected_model, context_window, output_tokens,
                 )
             recovery_round: int | None = None
+            recovery_reason = "incomplete"
             history_snapshot: tuple[str, str] = ("", "")
             async def reserve_budget(*, model: int = 0, tools: int = 0) -> None:
                 nonlocal state
@@ -1329,7 +1332,11 @@ class AgentSession:
                     )
                 if round_index == recovery_round:
                     request_system_prompt += (
+                        "\n上一轮工具参数不是有效 JSON，整个回合未执行，也未纳入完整对话历史；请按当前工具 Schema 重新生成完整参数。"
+                        if recovery_reason == "unreplayable_arguments" else
                         "\n上一轮模型回复未完整结束，残稿未纳入对话历史，该回合的工具调用也未执行。"
+                    )
+                    request_system_prompt += (
                         "从当前完整历史继续原任务；仍须遵守本轮工具窗口与预算，需要工具时重新生成完整调用。"
                         "不要续写残句或重做历史回执已经完成的操作；新的写操作仍需新的确认。"
                         "只能基于核验结果说明进展，未完成的步骤不能当作已经完成。"
@@ -1465,12 +1472,13 @@ class AgentSession:
                         elif model_event.type is ModelEventType.FINISH:
                             finish_reason = model_event.finish_reason
                             provider_state = model_event.provider_state
-                except IncompleteModelAnswer:
+                except UncommittableModelTurn as exc:
                     # 本次模型回合尚未提交调用；丢弃残稿后最多重建一次。
                     # 继续原阶段而非强制收束，旧工具事实与授权边界不变。
                     if recovery_round is not None or round_index + 1 >= self.limits.max_model_rounds:
                         raise
                     recovery_round = round_index + 1
+                    recovery_reason = exc.reason
                     continue
                 finally:
                     token.interruptible = False  # 工具阶段协作停止，保留已完成的批量结果。

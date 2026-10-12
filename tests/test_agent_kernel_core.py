@@ -3648,7 +3648,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model.requests), 1)
 
     async def scenario(self, *, recovery='success', max_rounds=5):
-        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        from app.agent.kernel.provider_model import UncommittableModelTurn
         reads, next_reads = [], []
         state = InMemorySessionStateStore()
         catalog = ToolCatalog([
@@ -3671,7 +3671,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     yield ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')
                 elif index == 2 or recovery == 'failure':
                     yield ModelEvent(ModelEventType.TEXT_DELTA, text='2. **`044')
-                    raise IncompleteModelAnswer('Provider 流在完成事件前中断')
+                    raise UncommittableModelTurn('Provider 流在完成事件前中断')
                 elif recovery == 'tool' and index == 3:
                     yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall('next-read', 'cloud.inspect_next', {}))
                     yield ModelEvent(ModelEventType.FINISH, finish_reason='tool_calls')
@@ -3739,7 +3739,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].type, AgentEventType.TURN_CANCELLED)
 
     async def test_confirmed_write_survives_reply_recovery_and_duplicate_click(self):
-        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        from app.agent.kernel.provider_model import UncommittableModelTurn
         writes = []
         tool = KernelToolSpec(
             name='cloud.change', domain='cloud', description='改名',
@@ -3753,7 +3753,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.requests.append(request)
                     if len(self.requests) == 2:
                         yield ModelEvent(ModelEventType.TEXT_DELTA, text='2. **`044')
-                        raise IncompleteModelAnswer('模型回复未完整结束')
+                        raise UncommittableModelTurn('模型回复未完整结束')
                     self_request = self.requests[-1]
                     if self_request.tools != self.requests[-2].tools:
                         raise AssertionError('恢复必须保留原工具窗口，不能自行扩权或撤走工具')
@@ -3780,7 +3780,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_recovered_followup_write_requires_a_new_confirmation(self):
-        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        from app.agent.kernel.provider_model import UncommittableModelTurn
         prepared, writes = [], []
 
         def prepare(arguments, _context):
@@ -3807,7 +3807,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 index = len(self.requests)
                 if index == 2:
                     yield ModelEvent(ModelEventType.TEXT_DELTA, text='未完成的规划残稿')
-                    raise IncompleteModelAnswer('Provider 流在完成事件前中断')
+                    raise UncommittableModelTurn('Provider 流在完成事件前中断')
                 if index in {1, 3}:
                     step = 'first' if index == 1 else 'second'
                     yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
@@ -3851,7 +3851,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_interrupted_explanation_keeps_tools_disabled_and_plan_pending(self):
-        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        from app.agent.kernel.provider_model import UncommittableModelTurn
         prepared, writes = [], []
         tool = KernelToolSpec(
             name='cloud.change', domain='cloud', description='改名',
@@ -3866,7 +3866,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 if len(self.requests) == 1:
                     self.requests.append(request)
                     yield ModelEvent(ModelEventType.TEXT_DELTA, text='解释残稿')
-                    raise IncompleteModelAnswer('Provider 流在完成事件前中断')
+                    raise UncommittableModelTurn('Provider 流在完成事件前中断')
                 async for event in super().stream(request, cancellation=cancellation):
                     yield event
 

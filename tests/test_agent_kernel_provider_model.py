@@ -788,12 +788,12 @@ class NativeAnswerCompletionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(''.join(e.text for e in events), text)
 
     async def test_native_truncation_is_still_incomplete_even_with_complete_looking_text(self):
-        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        from app.agent.kernel.provider_model import UncommittableModelTurn
         for protocol in ('chat_completions', 'responses', 'anthropic_messages'):
             for streamed in (True, False):
                 with self.subTest(protocol=protocol, streamed=streamed):
                     events, error = await self.run_adapter(protocol, streamed=streamed, complete=False)
-                    self.assertIsInstance(error, IncompleteModelAnswer)
+                    self.assertIsInstance(error, UncommittableModelTurn)
                     self.assertNotIn(ModelEventType.FINISH, [e.type for e in events])
 
     async def test_complete_native_tool_rounds_preserve_tool_calls(self):
@@ -806,12 +806,12 @@ class NativeAnswerCompletionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len([e for e in events if e.tool_call]), 1)
 
     async def test_missing_native_terminal_is_incomplete(self):
-        from app.agent.kernel.provider_model import IncompleteModelAnswer
+        from app.agent.kernel.provider_model import UncommittableModelTurn
         frames = {
             'chat_completions': [{'choices': [{'delta': {'content': '正文已输出'}, 'finish_reason': 'stop'}]}],
             'responses': [{'type': 'response.output_text.delta', 'delta': '正文已输出'}],
             'anthropic_messages': [{'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': '正文已输出'}}],
         }
         for protocol, events in frames.items():
-            with self.subTest(protocol=protocol), self.assertRaises(IncompleteModelAnswer):
+            with self.subTest(protocol=protocol), self.assertRaises(UncommittableModelTurn):
                 await collect(iter_protocol_model_events(chunks(events, split=3), protocol=protocol))
