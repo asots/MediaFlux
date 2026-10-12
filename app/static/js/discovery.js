@@ -3304,14 +3304,20 @@
         const layout = node('div', 'discovery-detail-layout');
         const poster = posterElement({...item, ...detail});
         const copy = node('div', 'discovery-detail-copy');
-        copy.append(node('span', 'discovery-detail-source', `${providerLabel(item.provider)} / ${mediaLabel(item.media_type)}`));
-        copy.append(node('h3', '', detail.title || item.title || '未命名媒体'));
-        if (detail.original_title || item.original_title) copy.append(node('p', 'discovery-detail-original', detail.original_title || item.original_title));
+        const head = node('div', 'discovery-detail-head');
+        head.append(node('span', 'discovery-detail-source', `${providerLabel(item.provider)} / ${mediaLabel(item.media_type)}`));
+        head.append(node('h3', '', detail.title || item.title || '未命名媒体'));
+        if (detail.original_title || item.original_title) head.append(node('p', 'discovery-detail-original', detail.original_title || item.original_title));
+        copy.append(head);
         copy.append(node('p', 'discovery-detail-overview', detail.overview || detail.summary || item.overview || '暂无剧情简介。'));
+        const rawRating = detail.rating ?? item.rating;
+        const formattedRating = rawRating !== undefined && rawRating !== null && rawRating !== '' && Number.isFinite(Number(rawRating))
+            ? Number(rawRating).toFixed(1)
+            : rawRating;
         const fields = node('dl', 'discovery-detail-fields');
         fields.append(
             detailField('年份', detail.year || item.year),
-            detailField('评分', detail.rating || item.rating),
+            detailField('评分', formattedRating),
             detailField('上映', detail.release_date || item.release_date),
             detailField('来源 ID', item.external_id || item.id),
         );
