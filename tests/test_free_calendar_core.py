@@ -369,9 +369,27 @@ class CalendarCoreTests(unittest.TestCase):
 
 
 class CalendarDNSTimeoutTests(unittest.TestCase):
+    def test_dns_release_contract_allows_slow_error_cache_publication(self):
+        original = DiscoveryCache.set_error
+
+        def slow_publication(cache, *args, **kwargs):
+            time.sleep(0.65)  # Storage publication is distinct from DNS cancellation.
+            return original(cache, *args, **kwargs)
+
+        with patch.object(DiscoveryCache, "set_error", slow_publication):
+            self.test_source_timeout_publishes_error_and_releases_worker_before_os_dns_returns()
+
+    def test_default_executor_join_cannot_satisfy_dns_release_contract(self):
+        def join_default_executor(service, source):
+            return asyncio.run(service._fetch(source))
+
+        with patch.object(CalendarService, "_fetch_sync", join_default_executor):
+            with self.assertRaisesRegex(AssertionError, "错误缓存未在DNS释放前发布"):
+                self.test_source_timeout_publishes_error_and_releases_worker_before_os_dns_returns()
+
     def test_source_timeout_publishes_error_and_releases_worker_before_os_dns_returns(self):
         self.enterContext(isolated_test_database())
-        entered, release, returned, closed = (threading.Event() for _ in range(4))
+        entered, release, returned, closed, published, drained = (threading.Event() for _ in range(6))
         calls, threads = [], []
         for name in ("getaddrinfo", "create_connection", "socket.connect", "socket.connect_ex"):
             self.enterContext(patch("socket." + name, side_effect=AssertionError("禁止真实网络/DNS")))
@@ -399,7 +417,17 @@ class CalendarDNSTimeoutTests(unittest.TestCase):
                 await http.get_json("https://v.qq.com/public")
                 return SourceResult((entry(),), "partial", "offline")
 
-        service = CalendarService(providers={"tencent": DNSProvider()}, metadata=RawMetadata(),
+        class Cache(DiscoveryCache):
+            def set_error(self, *args, **kwargs):
+                super().set_error(*args, **kwargs)
+                published.set()
+
+        class Service(CalendarService):
+            def _finished(self, source, future):
+                super()._finished(source, future)
+                drained.set()
+
+        service = Service(providers={"tencent": DNSProvider()}, metadata=RawMetadata(), cache=Cache(),
             source_timeout=1, http_factory=lambda hosts: HTTP(hosts, min_interval=0,
                 resolver=resolve, transport=httpx.MockTransport(handle)))
         future = None
@@ -409,7 +437,11 @@ class CalendarDNSTimeoutTests(unittest.TestCase):
             future = service._pending["tencent"]
             self.assertIsNotNone(future)
             self.assertTrue(closed.wait(2))
-            future.result(timeout=0.5)  # 不先释放DNS；旧asyncio.run会阻塞到此断言超时。
+            # HTTP关闭不等于缓存发布/队列清理已经完成。DNS始终由本测试持有，
+            # 因此按真实阶段等待仍能证伪旧asyncio.run的默认executor join。
+            self.assertTrue(published.wait(2), "错误缓存未在DNS释放前发布")
+            self.assertTrue(drained.wait(1), "刷新队列未在DNS释放前清理")
+            future.result(timeout=0)
             self.assertFalse(returned.is_set())
             self.assertEqual(calls, [])
             self.assertEqual(service._pending, {})
