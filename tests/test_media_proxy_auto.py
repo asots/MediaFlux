@@ -4852,22 +4852,41 @@ class HybridMediaProxyTests(unittest.TestCase):
         self.assertLess(second_elapsed, 0.11)
         self.assertEqual(len(QueuedProbeAsyncClient.requests), 2)
 
+    def test_native_head_deadlines_ignore_client_startup(self):
+        original_enter = TestClient.__enter__
+
+        def slow_start(client):
+            time.sleep(0.2)  # Test harness startup is outside the HTTP probe deadline.
+            return original_enter(client)
+
+        with patch.object(TestClient, "__enter__", slow_start):
+            for check in (
+                self.test_native_head_deadline_includes_client_authorization,
+                self.test_native_head_deadline_includes_signed_url_acquisition,
+            ):
+                with self.subTest(stage=check.__name__):
+                    check()
+
     def test_native_head_deadline_includes_client_authorization(self):
         entered = asyncio.Event()
+        cancelled = threading.Event()
         captured: dict[str, object] = {}
 
         async def slow_authorize(_instance, _request, **kwargs):
             captured.update(kwargs)
             entered.set()
-            await asyncio.sleep(0.2)
-            return True
+            try:
+                await asyncio.sleep(5.0)
+                return True
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
 
         class UnexpectedGuangYaClient:
             def __init__(self) -> None:
                 raise AssertionError("鉴权超时后不应初始化光鸭客户端")
 
         app = media_proxy.create_proxy_app(7)
-        started = time.monotonic()
         with (
             patch(
                 "app.modules.media_proxy.database.get_media_proxy_instance",
@@ -4891,12 +4910,11 @@ class HybridMediaProxyTests(unittest.TestCase):
                 "/playgy/auth-timeout-file/e/1/a.mkv",
                 follow_redirects=False,
             )
-            elapsed = time.monotonic() - started
 
         self.assertTrue(entered.is_set())
         self.assertEqual(response.status_code, 504)
         self.assertEqual(response.content, b"")
-        self.assertLess(elapsed, 0.15)
+        self.assertTrue(cancelled.is_set(), "HTTP deadline must cancel authorization before it succeeds")
         self.assertTrue(captured["raise_timeout"])
         self.assertTrue(callable(captured["blocking_runner"]))
 
@@ -4912,17 +4930,19 @@ class HybridMediaProxyTests(unittest.TestCase):
         )
 
         class SlowUrlClient(_FakeGuangYaClient):
+            entered = threading.Event()
+            release = threading.Event()
             finished = threading.Event()
 
             def get_download_url(self, file_id: str, **kwargs) -> str | None:
+                self.__class__.entered.set()
                 try:
-                    time.sleep(0.2)
+                    self.__class__.release.wait(timeout=5.0)
                     return super().get_download_url(file_id, **kwargs)
                 finally:
                     self.__class__.finished.set()
 
         app = media_proxy.create_proxy_app(7)
-        started = time.monotonic()
         with (
             patch(
                 "app.modules.media_proxy.database.get_media_proxy_instance",
@@ -4948,18 +4968,23 @@ class HybridMediaProxyTests(unittest.TestCase):
             ),
             TestClient(app, raise_server_exceptions=False) as client,
         ):
-            response = client.head(
-                "/Videos/slow-url-item/stream"
-                "?MediaSourceId=slow-url-source&api_key=client-token",
-                headers={"User-Agent": "Jellyfin-Android/2.6.3"},
-                follow_redirects=False,
-            )
-            elapsed = time.monotonic() - started
-            self.assertTrue(SlowUrlClient.finished.wait(timeout=1.0))
+            try:
+                response = client.head(
+                    "/Videos/slow-url-item/stream"
+                    "?MediaSourceId=slow-url-source&api_key=client-token",
+                    headers={"User-Agent": "Jellyfin-Android/2.6.3"},
+                    follow_redirects=False,
+                )
+                entered_before_return = SlowUrlClient.entered.is_set()
+                finished_before_return = SlowUrlClient.finished.is_set()
+            finally:
+                SlowUrlClient.release.set()
+                self.assertTrue(SlowUrlClient.finished.wait(timeout=1.0))
 
         self.assertEqual(response.status_code, 504)
         self.assertEqual(response.content, b"")
-        self.assertLess(elapsed, 0.15)
+        self.assertTrue(entered_before_return)
+        self.assertFalse(finished_before_return, "504 must return while URL acquisition is still blocked")
         pin_target.assert_not_called()
         self.assertEqual(_FakeAsyncClient.requests, [])
 
