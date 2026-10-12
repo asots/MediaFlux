@@ -404,11 +404,16 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="discovery.watchlist_summaries",
-            description="只读列出有界探索收藏摘要，仅含收藏编号、来源、媒体类型、标题和年份。",
+            description="只读分页列出探索收藏摘要，每页最多20项。count是本页数量，不是收藏总数；用户要求全部时，按next_before_number续页直到has_more=false。仅含收藏编号、来源、媒体类型、标题和年份。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "before_number": {
+                        "type": "integer", "minimum": 1, "maximum": 2_147_483_647,
+                        "description": "上一页返回的next_before_number；首次读取不传。",
+                    },
+                },
                 "additionalProperties": False,
             },
             handler=list_watchlist_summaries,

@@ -63,9 +63,12 @@ def _identity(provider: Any, external_id: Any, media_type: Any) -> tuple[str, st
 def watchlist_summaries_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise AgentToolError("工具参数必须是 JSON 对象")
-    if arguments:
-        raise AgentToolError("discovery.watchlist_summaries 不接受参数")
-    return {}
+    if set(arguments) - {"before_number"}:
+        raise AgentToolError("探索收藏列表仅接受翻页编号 before_number")
+    return (
+        {"before_number": _positive_id(arguments["before_number"], field="before_number")}
+        if "before_number" in arguments else {}
+    )
 
 
 def watchlist_summary_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -120,17 +123,22 @@ def _row_summary(row: Any) -> dict[str, Any]:
     }
 
 
-def list_watchlist_summaries(_arguments: dict[str, Any]) -> ToolResult:
+def list_watchlist_summaries(arguments: dict[str, Any]) -> ToolResult:
     if not config.get_bool("DISCOVERY_ENABLED"):
         return _feature_disabled()
-    rows = db.list_media_watchlist(limit=20)
-    items = [_row_summary(row) for row in rows]
+    arguments = watchlist_summaries_arguments(arguments)
+    rows = db.list_media_watchlist(limit=21, **arguments)
+    items = [_row_summary(row) for row in rows[:20]]
     count = len(items)
+    has_more = len(rows) > count
     return ToolResult(
         ok=True,
         status="success" if count else "empty",
-        summary=f"探索收藏中共有 {count} 项" if count else "探索收藏当前为空",
-        data={"count": count, "items": items},
+        summary=(f"探索收藏本页返回 {count} 项" + ("，还有下一页" if has_more else "，已到末页")),
+        data={
+            "count": count, "items": items, "has_more": has_more,
+            "next_before_number": items[-1]["watchlist_number"] if has_more else None,
+        },
         evidence=[
             Evidence(
                 "discovery_watchlist",
@@ -138,7 +146,10 @@ def list_watchlist_summaries(_arguments: dict[str, Any]) -> ToolResult:
                 _now(),
             )
         ],
-        suggestions=(["可按收藏编号查看单项，或移除明确编号的收藏。"] if count else []),
+        suggestions=(
+            ["如需全部收藏，使用 next_before_number 作为 before_number 继续读取，直到 has_more=false。"]
+            if has_more else []
+        ),
     )
 
 

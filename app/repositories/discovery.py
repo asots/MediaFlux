@@ -307,10 +307,16 @@ def delete_media_watchlist(provider: str, external_id: str, media_type: str) -> 
         return bool(cur.rowcount)
 
 
-def list_media_watchlist(limit: int = 500) -> list[sqlite3.Row]:
-    """列出单管理员媒体工作区的共享收藏。"""
+def list_media_watchlist(
+    limit: int = 500, *, before_number: int | None = None,
+) -> list[sqlite3.Row]:
+    """按编号倒序读取共享收藏；续页不受新收藏插入或前页删除影响。"""
+    where = " WHERE id < ?" if before_number is not None else ""
+    parameters = (() if before_number is None else (int(before_number),)) + (
+        max(1, min(int(limit), 1000)),
+    )
     with _database().get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM media_watchlist ORDER BY id DESC LIMIT ?",
-            (max(1, min(int(limit), 1000)),),
+            f"SELECT * FROM media_watchlist{where} ORDER BY id DESC LIMIT ?",
+            parameters,
         ).fetchall()
