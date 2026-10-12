@@ -88,12 +88,6 @@ class _SchemaCollisionError(ToolPipelineError):
         self.keys = keys
 
 
-@dataclass
-class _ArgumentRepair:
-    required_keys: set[str] = field(default_factory=set)
-    collisions: set[frozenset[str]] = field(default_factory=set)
-
-
 ProgressSink = Callable[[Mapping[str, Any]], Awaitable[None]]
 
 
@@ -117,7 +111,6 @@ class ToolCallContext:
     diagnostic_only: bool = False
     delivery_route: Mapping[str, Any] = field(default_factory=dict)
     confirmed_effect: PipelineResult | None = None
-    argument_repairs: dict[tuple[str, str], _ArgumentRepair] = field(default_factory=dict)
     current_task: dict | None = None
     user_source: str = ""
     user_history: tuple[str, ...] = ()
@@ -466,11 +459,16 @@ class ToolPipeline:
 
     async def _replace_schema_failure(self, arguments: dict[str, Any], context: ToolCallContext) -> PipelineResult:
         entry = context.schema_replacements.get(arguments["ticket"])
-        if entry is None or entry.scope != error_repair.scope(context):
+        if entry is None or not entry.offered or entry.scope != error_repair.scope(context):
             raise ToolPipelineError("修复入口无效或不属于本轮", code="repair_invalid")
         replacement = arguments["arguments"]
         if not error_repair.preserves(entry, replacement):
             raise ToolPipelineError("明确修复不能更改原有效参数", code="repair_conflict")
+        try:
+            error_repair.require_presence((entry,), replacement, ToolPipelineError)
+        except ToolPipelineError as exc:
+            exc.repair_ticket = arguments["ticket"]
+            raise
         context.schema_replacements.pop(arguments["ticket"])
         lineage = (*entry.predecessors, arguments["ticket"])
         try:
@@ -633,31 +631,14 @@ class ToolPipeline:
                 or any(type(position) is not int for position in positions)
             ):
                 raise ToolPipelineError("只能预览本次已验证的候选选择", code="selection_mismatch")
-        repair_key = (tool.name, json.dumps(
-            [raw_arguments.get(key) for key in tool.input_schema.get("required", ())], sort_keys=True, default=str,
-        ))
-        repair = context.argument_repairs.get(repair_key)
-        omitted = repair.required_keys - raw_arguments.keys() if repair else set()
-        if repair:
-            for collision in repair.collisions:
-                if not any(raw_arguments.get(key) is not None for key in collision):
-                    omitted.update(collision)
-        if omitted:
-            raise ToolPipelineError("参数修复不能省略此前已提供的字段：" + "、".join(sorted(omitted)) + "；请修正值，不要删除字段退回默认值。", code="invalid_arguments")
+        pending_repairs = error_repair.pending(tool, raw_arguments, context)
+        error_repair.require_presence(pending_repairs.values(), raw_arguments, ToolPipelineError)
         try:
             _validate_json_schema(raw_arguments, tool.input_schema)
         except ToolPipelineError as exc:
-            repair = context.argument_repairs.setdefault(repair_key, _ArgumentRepair())
             collision = exc.keys if isinstance(exc, _SchemaCollisionError) else frozenset()
-            if collision:
-                repair.collisions.add(collision)
-            # Never relax older value-error locks or the required identity fence.
-            repair.required_keys.update(
-                key for key, value in raw_arguments.items()
-                if value is not None and key in tool.input_schema.get("properties", {})
-                and (key not in collision or key in tool.input_schema.get("required", ()))
-            )
-            exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, collisions=collision)
+            exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema,
+                                                  ToolPipelineError, collisions=collision, preserve_fields=True)
             raise
         try:
             normalized = tool.validator(raw_arguments)
@@ -676,7 +657,7 @@ class ToolPipeline:
             raise ToolPipelineError(
                 "工具参数校验器返回无效结果", code="invalid_arguments"
             )
-        context.argument_repairs.pop(repair_key, None)
+        error_repair.validated(pending_repairs, context)
         resolved = await self._authorize(tool, normalized, context)
         completed = context.confirmed_effect
         plan = completed.effect_plan if completed else None

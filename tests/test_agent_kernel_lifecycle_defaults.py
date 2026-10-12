@@ -120,7 +120,8 @@ def test_noop_returns_identity_and_never_mutates_nested_payloads():
     async def check():
         pipeline, tool, prepared, value = _fixture()
         context = await _context(pipeline.state_store)
-        context.argument_repairs[("fixture", "nested")] = {"keep"}
+        from app.agent.kernel.error_repair import SchemaReplacement
+        context.schema_replacements["fixture"] = SchemaReplacement((), tool.name, {("nested",): {"keep": [True]}})
         context = replace(context, selection_arguments={"nested": [{"d": [6]}]})
         arguments = {"nested": [{"e": [7]}]}
         plan = EffectPlan(
@@ -131,7 +132,7 @@ def test_noop_returns_identity_and_never_mutates_nested_payloads():
             confirmation_contract={"nested": [{"f": [8]}]}, public_result=value,
         )
         payloads = (arguments, prepared, plan, value, context.selection_arguments,
-                    context.argument_repairs, tool.input_schema, tool.metadata)
+                    context.schema_replacements, tool.input_schema, tool.metadata)
         before = deepcopy(payloads)
         lifecycle = pipeline.effect_lifecycle
         assert lifecycle.prepared(tool=tool, arguments=arguments,

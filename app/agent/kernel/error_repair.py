@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import secrets
 from typing import Any
+
+from .capabilities import ToolEffect
 
 REPAIR_TOOL = "agent.repair"
 
@@ -17,10 +19,55 @@ class SchemaReplacement:
     locked: dict[tuple, Any]
     predecessors: tuple[str, ...] = ()
     equivalent_arguments: str = ""
+    required_keys: frozenset[str] = frozenset()
+    collision_keys: frozenset[str] = frozenset()
+    guard_key: tuple[str, str] | None = None
+    offered: bool = True
 
 
 def scope(context):
     return (context.owner, context.session_id, context.lease.generation, context.turn_id)
+
+
+def _guard_key(tool, arguments):
+    # A nonempty alternative READ mode is independent; omitting a filter or
+    # falling back to an empty/default request is not a mode switch.
+    properties = tool.input_schema.get("properties", {})
+    keys = arguments.keys() & properties.keys()
+    mode = (next(iter(keys)) if tool.effect is ToolEffect.READ and tool.input_schema.get("maxProperties") == 1
+            and len(properties) > 1 and len(keys) == 1 else "")
+    return json.dumps([arguments.get(key) for key in tool.input_schema.get("required", ())], sort_keys=True, default=str), mode
+
+
+def pending(tool, arguments, context):
+    if not context.schema_replacements:
+        return {}
+    key = _guard_key(tool, arguments)
+    return {ticket: entry for ticket, entry in context.schema_replacements.items()
+            if entry.scope == scope(context) and entry.tool == tool.name and entry.guard_key is not None
+            and entry.guard_key[0] == key[0]
+            and not (entry.guard_key[1] and key[1] and entry.guard_key[1] != key[1])}
+
+
+def require_presence(entries, arguments, error_type):
+    omitted = set()
+    for entry in entries:
+        omitted.update(entry.required_keys - arguments.keys())
+        if entry.collision_keys and not any(arguments.get(key) is not None for key in entry.collision_keys):
+            omitted.update(entry.collision_keys)
+    if omitted:
+        raise error_type("参数修复不能省略此前已提供的字段：" + "、".join(sorted(omitted))
+                         + "；请修正值，不要删除字段退回默认值。", code="invalid_arguments")
+
+
+def validated(entries, context):
+    # Admission is not completion: keep offered proof/tickets until a real
+    # successful result or an explicit replacement settles the old failure.
+    for ticket, entry in entries.items():
+        if entry.offered:
+            context.schema_replacements[ticket] = replace(entry, guard_key=None)
+        else:
+            context.schema_replacements.pop(ticket)
 
 
 def effective_schema(schema, argument_schemas=None):
@@ -33,7 +80,7 @@ def effective_schema(schema, argument_schemas=None):
     return {**schema, "properties": {**properties, **argument_schemas}}
 
 
-def issue(tool, arguments, context, validate=None, error_type=Exception, *, collisions=frozenset(), invalid_fields=(), argument_schemas=None):
+def issue(tool, arguments, context, validate=None, error_type=Exception, *, collisions=frozenset(), invalid_fields=(), argument_schemas=None, preserve_fields=False):
     locked = {}
     schema = effective_schema(tool.input_schema, argument_schemas)
     if schema is None:
@@ -94,10 +141,14 @@ def issue(tool, arguments, context, validate=None, error_type=Exception, *, coll
 
     if arguments is not None:
         visit(arguments, schema, ())
-    if not repairable or not supported:
-        return ""  # No speculative ticket when the invalid field is unknown.
+    offered = repairable and supported
+    if not offered and not preserve_fields:
+        return ""  # Unknown domain failures cannot invent repair authority.
+    required_keys = frozenset(key for key, value in (arguments or {}).items()
+                              if value is not None and key in schema.get("properties", {})
+                              and (key not in collisions or key in schema.get("required", ())))
     exact = ""
-    if equivalent != arguments:
+    if offered and equivalent != arguments:
         try:
             validate(equivalent, schema)
         except error_type:
@@ -107,8 +158,11 @@ def issue(tool, arguments, context, validate=None, error_type=Exception, *, coll
             # Missing values, changed targets and domain guesses still need explicit repair.
             exact = json.dumps(equivalent, sort_keys=True, ensure_ascii=False)
     ticket = secrets.token_urlsafe(24)
-    context.schema_replacements[ticket] = SchemaReplacement(scope(context), tool.name, locked, equivalent_arguments=exact)
-    return ticket
+    context.schema_replacements[ticket] = SchemaReplacement(
+        scope(context), tool.name, locked, equivalent_arguments=exact, required_keys=required_keys,
+        collision_keys=frozenset(collisions), guard_key=_guard_key(tool, arguments) if preserve_fields else None, offered=offered,
+    )
+    return ticket if offered else ""
 
 
 def preserves(entry, arguments):

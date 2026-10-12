@@ -4346,7 +4346,7 @@ class ArgumentRepairPreservationTests(unittest.IsolatedAsyncioTestCase):
             await pipeline.execute(tool.name, {"id": "A"}, context=context)
         fixed = await pipeline.execute(tool.name, {**invalid, "period": 4320}, context=context)
         self.assertEqual(fixed.effect_plan.arguments, {**invalid, "period": 4320})
-        self.assertFalse(context.argument_repairs)
+        self.assertFalse(any(entry.guard_key for entry in context.schema_replacements.values()))
         # 成功后不是永久锁定字段；新调用仍遵守原来的可选契约。
         fresh = await pipeline.execute(tool.name, {"id": "A"}, context=context)
         self.assertEqual(fresh.effect_plan.arguments["period"], 10080)
@@ -4357,7 +4357,7 @@ class ArgumentRepairPreservationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ToolPipelineError):
             await pipeline.execute(tool.name, invalid, context=context)
         next_lease, _ = await store.begin_turn(owner="owner", session_id="repair", request_id="next")
-        next_context = replace(context, lease=next_lease, turn_id=next_lease.turn_id, argument_repairs={})
+        next_context = replace(context, lease=next_lease, turn_id=next_lease.turn_id)
         self.assertIsNotNone((await pipeline.execute(tool.name, {"id": "A"}, context=next_context)).effect_plan)
 
     async def test_model_repair_cannot_freeze_a_defaulted_plan_before_correcting_the_field(self):

@@ -1245,7 +1245,8 @@ class AgentSession:
                     or business_tool_calls >= self.limits.max_tool_calls
                     or (round_index == self.limits.max_model_rounds - 1 and total_tool_calls > 0)
                 )
-                if tool_context.schema_replacements and not explaining and not is_read_resume:
+                if any(entry.offered and entry.scope == error_repair.scope(tool_context)
+                       for entry in tool_context.schema_replacements.values()) and not explaining and not is_read_resume:
                     repair_tool = self.catalog.get("agent.repair")
                     selected_names.add(repair_tool.name)
                     selected_model_names.add(repair_tool.model_name)
