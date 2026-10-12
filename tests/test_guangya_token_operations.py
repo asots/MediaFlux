@@ -1170,6 +1170,21 @@ class GuangYaTokenUiTests(unittest.TestCase):
         self.assertIn("document.querySelectorAll('.gy-token-action')", template)
         self.assertIn("setGyTokenControlsBusy(true", template)
         self.assertIn("setGyTokenControlsBusy(false", template)
+        for logged_out_id in (
+            "gyStatusLoggedOut",
+            "gyStepPhone",
+            "gyStepCode",
+            "gyPhone",
+            "gySendBtn",
+            "gyCodeRow",
+            "gyCode",
+            "gyMsg",
+            "gyAuthCapSdk",
+            "gyAuthCapProxy",
+            "gyAuthCapStrm",
+        ):
+            self.assertIn(f'id="{logged_out_id}"', template)
+        self.assertIn('class="gy-auth-grid"', template)
 
 
 if __name__ == "__main__":

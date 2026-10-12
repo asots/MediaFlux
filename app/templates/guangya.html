@@ -15,10 +15,299 @@
 .gy-token-action.is-danger { background:rgba(239,68,68,.12); color:var(--danger); border-color:rgba(239,68,68,.32); }
 .gy-token-operation-status { min-height:22px; margin-top:8px; color:var(--text-muted); font-size:12px; line-height:22px; }
 .gy-token-loading { min-height:220px; display:flex; align-items:center; justify-content:center; }
+
+/* 未登录态双栏认证工作台（仅作用于 #gyStatusLoggedOut） */
+.gy-auth-card {
+    padding: 0;
+    overflow: hidden;
+}
+.gy-auth-grid {
+    display: grid;
+    grid-template-columns: minmax(340px, 1.05fr) minmax(320px, 0.95fr);
+    min-height: 360px;
+}
+.gy-auth-main {
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 18px;
+    border-right: 1px solid var(--border-soft, rgba(148, 163, 184, 0.16));
+}
+.gy-auth-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+.gy-auth-Brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.gy-auth-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.24);
+    color: var(--accent, #10b981);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.gy-auth-icon svg {
+    width: 20px;
+    height: 20px;
+}
+.gy-auth-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.35;
+}
+.gy-auth-sub {
+    margin: 3px 0 0;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+.gy-auth-steps {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+.gy-auth-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--bg-elevated, rgba(148, 163, 184, 0.06));
+    border: 1px solid var(--border-soft, rgba(148, 163, 184, 0.14));
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    transition: border-color .16s ease, background-color .16s ease, color .16s ease;
+}
+.gy-auth-step b {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: var(--font-mono, monospace);
+    background: rgba(148, 163, 184, 0.14);
+    color: var(--text-secondary);
+}
+.gy-auth-step.is-active {
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: var(--text-primary);
+}
+.gy-auth-step.is-active b {
+    background: var(--accent, #10b981);
+    color: #fff;
+}
+.gy-auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.gy-auth-field {
+    margin-bottom: 0;
+}
+.gy-auth-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.gy-auth-label-row .form-label {
+    margin-bottom: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.gy-auth-hint {
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+.gy-auth-input-group {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: stretch;
+}
+.gy-auth-input-group .form-input,
+.gy-auth-code-row .form-input {
+    width: 100%;
+    max-width: none;
+    height: 40px;
+    font-size: 13.5px;
+}
+.gy-auth-btn {
+    min-width: 128px;
+    height: 40px;
+    padding: 0 16px;
+    justify-content: center;
+    white-space: nowrap;
+    font-weight: 600;
+}
+.gy-auth-code-row {
+    padding-top: 14px;
+    border-top: 1px dashed var(--border-soft, rgba(148, 163, 184, 0.2));
+}
+.gy-auth-msg {
+    min-height: 20px;
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+.gy-auth-footnote {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: var(--bg-elevated, rgba(148, 163, 184, 0.06));
+    border: 1px solid var(--border-soft, rgba(148, 163, 184, 0.12));
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+.gy-auth-footnote svg {
+    width: 15px;
+    height: 15px;
+    color: var(--accent, #10b981);
+    flex-shrink: 0;
+}
+.gy-auth-side {
+    padding: 24px 26px;
+    background: var(--bg-elevated, rgba(148, 163, 184, 0.04));
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 16px;
+}
+.gy-auth-side-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.gy-auth-side-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.01em;
+}
+.gy-auth-side-kicker {
+    font-size: 11px;
+    font-family: var(--font-mono, monospace);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.gy-auth-cap-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+.gy-auth-cap-pill {
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft, rgba(148, 163, 184, 0.15));
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.gy-auth-cap-pill span {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.gy-auth-cap-pill strong {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.gy-auth-cap-pill strong::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--text-muted);
+}
+.gy-auth-cap-pill.is-ready strong::before {
+    background: var(--success, #10b981);
+}
+.gy-auth-cap-pill.is-warn strong::before {
+    background: var(--warning, #f59e0b);
+}
+.gy-auth-features {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+.gy-auth-feature {
+    padding: 11px 12px;
+    border-radius: 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft, rgba(148, 163, 184, 0.14));
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.gy-auth-feature-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.gy-auth-feature-head svg {
+    width: 15px;
+    height: 15px;
+    color: var(--accent, #10b981);
+    flex-shrink: 0;
+}
+.gy-auth-feature p {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+@media (max-width: 900px) {
+    .gy-auth-grid {
+        grid-template-columns: 1fr;
+    }
+    .gy-auth-main {
+        border-right: none;
+        border-bottom: 1px solid var(--border-soft, rgba(148, 163, 184, 0.16));
+        padding: 20px;
+    }
+    .gy-auth-side {
+        padding: 20px;
+    }
+}
 @media (max-width:760px) {
     .gy-token-header { align-items:stretch; }
     .gy-token-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); width:100%; }
     .gy-token-action { min-width:0; width:100%; }
+    .gy-auth-input-group { grid-template-columns: 1fr; }
+    .gy-auth-btn { width: 100%; }
+    .gy-auth-cap-strip,
+    .gy-auth-features { grid-template-columns: 1fr; }
 }
 </style>
 
@@ -84,24 +373,121 @@
         </div>
     </div>
     
-    <div class="card card-pad gy-status-card" id="gyStatusLoggedOut" style="display:none; margin-bottom:18px;">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;min-height:38px;">
-            <span class="badge offline"><span class="dot"></span>未登录</span>
-            <span class="text-muted">短信验证码登录（两步）</span>
-        </div>
-        <div class="form-group">
-            <label class="form-label">手机号</label>
-            <input type="tel" inputmode="numeric" autocomplete="tel" class="form-input" id="gyPhone" placeholder="请输入手机号" style="max-width:300px;">
-        </div>
-        <button class="btn btn-primary" id="gySendBtn" style="max-width:300px;min-height:42px;" onclick="gySendSms()">发送验证码</button>
-        <div id="gyCodeRow" style="display:none;margin-top:16px;">
-            <div class="form-group">
-                <label class="form-label">验证码</label>
-                <input type="text" class="form-input" id="gyCode" placeholder="收到的短信验证码" style="max-width:300px;">
+    <div class="card gy-status-card gy-auth-card" id="gyStatusLoggedOut" style="display:none; margin-bottom:18px;">
+        <div class="gy-auth-grid">
+            <div class="gy-auth-main">
+                <div class="gy-auth-head">
+                    <div class="gy-auth-Brand">
+                        <div class="gy-auth-icon" aria-hidden="true">
+                            <i data-lucide="shield-check"></i>
+                        </div>
+                        <div>
+                            <h3 class="gy-auth-title">光鸭云盘账号授权</h3>
+                            <p class="gy-auth-sub">短信验证码两步认证，自动签发并原子托管本机访问凭证</p>
+                        </div>
+                    </div>
+                    <span class="badge offline"><span class="dot"></span>未登录</span>
+                </div>
+
+                <div class="gy-auth-steps" aria-label="登录步骤">
+                    <div class="gy-auth-step is-active" id="gyStepPhone"><b>01</b><span>验证手机号</span></div>
+                    <div class="gy-auth-step" id="gyStepCode"><b>02</b><span>短信码登录</span></div>
+                </div>
+
+                <div class="gy-auth-form">
+                    <div class="form-group gy-auth-field">
+                        <div class="gy-auth-label-row">
+                            <label class="form-label" for="gyPhone">手机号</label>
+                            <span class="gy-auth-hint">支持 11 位光鸭注册手机号</span>
+                        </div>
+                        <div class="gy-auth-input-group">
+                            <input type="tel" inputmode="numeric" autocomplete="tel" class="form-input" id="gyPhone" placeholder="请输入手机号" onkeydown="if(event.key==='Enter')gySendSms()">
+                            <button type="button" class="btn btn-primary gy-auth-btn" id="gySendBtn" onclick="gySendSms()">发送验证码</button>
+                        </div>
+                    </div>
+
+                    <div id="gyCodeRow" class="gy-auth-code-row" style="display:none;">
+                        <div class="form-group gy-auth-field">
+                            <div class="gy-auth-label-row">
+                                <label class="form-label" for="gyCode">验证码</label>
+                                <span class="gy-auth-hint">输入收到的短信验证码完成绑定</span>
+                            </div>
+                            <div class="gy-auth-input-group">
+                                <input type="text" inputmode="numeric" autocomplete="one-time-code" class="form-input" id="gyCode" placeholder="收到的短信验证码" onkeydown="if(event.key==='Enter')gyLogin()">
+                                <button type="button" class="btn btn-primary gy-auth-btn" onclick="gyLogin()">登录</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="gyMsg" class="gy-auth-msg"></div>
+                </div>
+
+                <div class="gy-auth-footnote">
+                    <i data-lucide="lock"></i>
+                    <span>Access / Refresh Token 仅以 0600 权限原子存储于本机，不经过任何第三方中转。</span>
+                </div>
             </div>
-            <button class="btn btn-primary" style="max-width:300px;min-height:42px;" onclick="gyLogin()">登录</button>
+
+            <aside class="gy-auth-side" aria-label="光鸭云盘接入能力">
+                <div>
+                    <div class="gy-auth-side-head" style="margin-bottom:10px;">
+                        <span class="gy-auth-side-title">运行环境预检</span>
+                        <span class="gy-auth-side-kicker">RUNTIME READINESS</span>
+                    </div>
+                    <div class="gy-auth-cap-strip">
+                        <div class="gy-auth-cap-pill" id="gyAuthCapSdk">
+                            <span>客户端 SDK</span>
+                            <strong>检测中</strong>
+                        </div>
+                        <div class="gy-auth-cap-pill" id="gyAuthCapProxy">
+                            <span>302 直链反代</span>
+                            <strong>检测中</strong>
+                        </div>
+                        <div class="gy-auth-cap-pill" id="gyAuthCapStrm">
+                            <span>STRM 媒体库</span>
+                            <strong>检测中</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <div class="gy-auth-side-head" style="margin-bottom:10px;">
+                        <span class="gy-auth-side-title">授权后解锁工作台能力</span>
+                        <span class="gy-auth-side-kicker">CAPABILITIES</span>
+                    </div>
+                    <div class="gy-auth-features">
+                        <div class="gy-auth-feature">
+                            <div class="gy-auth-feature-head">
+                                <i data-lucide="folder-search"></i>
+                                <span>目录浏览与在线刮削</span>
+                            </div>
+                            <p>直连云盘目录树，支持人工核对与自动匹配归档。</p>
+                        </div>
+                        <div class="gy-auth-feature">
+                            <div class="gy-auth-feature-head">
+                                <i data-lucide="refresh-cw"></i>
+                                <span>双凭证静默保活</span>
+                            </div>
+                            <p>自动轮换 Access 与 Refresh Token，保持长效在线。</p>
+                        </div>
+                        <div class="gy-auth-feature">
+                            <div class="gy-auth-feature-head">
+                                <i data-lucide="zap"></i>
+                                <span>302 直链流媒体反代</span>
+                            </div>
+                            <p>毫秒级签发云盘直链，供播放器与媒体库无感直放。</p>
+                        </div>
+                        <div class="gy-auth-feature">
+                            <div class="gy-auth-feature-head">
+                                <i data-lucide="cloud-upload"></i>
+                                <span>分享转存与 GCID 秒传</span>
+                            </div>
+                            <p>联动分享链接批量转存与 v2 清单秒传导入工作台。</p>
+                        </div>
+                    </div>
+                </div>
+            </aside>
         </div>
-        <div id="gyMsg" style="margin-top:12px;min-height:20px;font-size:13px;"></div>
     </div>
 </div>
 
@@ -166,6 +552,17 @@ function gyApi(path, opts){
 }
 
 function renderGyCapabilities(data){
+    const updatePill=(id, ready, readyText, warnText)=>{
+        const el=document.getElementById(id);
+        if(!el) return;
+        el.className=`gy-auth-cap-pill ${ready?'is-ready':'is-warn'}`;
+        const strong=el.querySelector('strong');
+        if(strong) strong.textContent=ready?readyText:warnText;
+    };
+    updatePill('gyAuthCapSdk', Boolean(data.sdk_available), '已就绪', '不可用');
+    updatePill('gyAuthCapProxy', Boolean(data.proxy_enabled), '已开启', '未开启');
+    updatePill('gyAuthCapStrm', Boolean(data.strm_configured), '已配置', '未配置');
+
     const badge=document.getElementById('gyCapabilityBadge');
     const text=document.getElementById('gyCapabilityText');
     if(!badge||!text) return;
@@ -271,6 +668,8 @@ function gySendSms(){
         btn.disabled=false; btn.textContent='重新发送验证码';
         if(d.success){
             document.getElementById('gyCodeRow').style.display='block';
+            document.getElementById('gyStepCode')?.classList.add('is-active');
+            document.getElementById('gyCode')?.focus();
             const hint = d.is_user ? '账号已注册' : '新账号';
             document.getElementById('gyMsg').innerHTML = '<span style="color:var(--success)">验证码已发送（'+hint+'，'+d.expires_in+'秒有效）</span>';
         } else {

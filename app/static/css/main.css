@@ -6982,10 +6982,11 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
     overflow: hidden;
 }
 .subscription-skeleton-stack.is-watchlist {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
     align-items: start;
 }
-.subscription-skeleton-stack.is-watchlist .subscription-skeleton { min-height: 120px; }
+.subscription-skeleton-stack.is-watchlist .subscription-skeleton { min-height: 138px; }
 .subscription-skeleton-stack.is-runs { min-height: 286px; max-height: 286px; }
 .subscription-skeleton-stack.is-candidate { min-height: 220px; max-height: 220px; }
 .subscription-skeleton > span {
@@ -7006,15 +7007,17 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
 .subscription-skeleton.is-media > span:nth-child(2) { height: 76px; margin-top: 0; }
 .subscription-skeleton.is-media > span:nth-child(3) { height: 32px; }
 .subscription-skeleton.is-watchlist {
-    min-height: 120px;
-    grid-template-columns: 64px minmax(0, 1fr) 244px;
-    align-items: center;
-    gap: 12px;
-    padding: 11px 14px;
+    min-height: 138px;
+    grid-template-columns: 76px minmax(0, 1fr);
+    grid-template-rows: 1fr auto;
+    align-items: stretch;
+    gap: 10px 14px;
+    padding: 13px 14px;
+    border-radius: 12px;
 }
-.subscription-skeleton.is-watchlist > span:first-child { width: 64px; height: 96px; }
-.subscription-skeleton.is-watchlist > span:nth-child(2) { height: 70px; margin-top: 0; }
-.subscription-skeleton.is-watchlist > span:nth-child(3) { height: 32px; }
+.subscription-skeleton.is-watchlist > span:first-child { grid-row: 1 / 3; width: 76px; height: 112px; border-radius: 8px; }
+.subscription-skeleton.is-watchlist > span:nth-child(2) { grid-column: 2; height: 64px; margin-top: 0; border-radius: 6px; }
+.subscription-skeleton.is-watchlist > span:nth-child(3) { grid-column: 2; height: 32px; border-radius: 6px; }
 .subscription-skeleton.is-runs { min-height: 82px; grid-template-columns: 34px minmax(0, 1fr) 210px; }
 @keyframes subscription-shimmer { to { background-position: -220% 0; } }
 @media (prefers-reduced-motion: reduce) {
@@ -7037,57 +7040,93 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
 .subscription-watchlist-grid {
     min-height: 286px;
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     align-content: start;
-    gap: 9px;
+    gap: 12px;
 }
 .subscription-watch-card {
     min-width: 0;
-    min-height: 120px;
+    min-height: 138px;
     display: grid;
-    grid-template-columns: 64px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
-    padding: 11px 14px;
+    grid-template-columns: 76px minmax(0, 1fr);
+    grid-template-rows: 1fr auto;
+    align-items: stretch;
+    gap: 10px 14px;
+    padding: 13px 14px;
     background: var(--bg-card);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
+    border-radius: 12px;
+    transition: background-color .16s ease, border-color .16s ease;
 }
 .subscription-watch-card:hover { border-color: var(--border-strong); background: var(--bg-card-hover); }
 .subscription-watch-poster {
-    width: 64px;
-    height: 96px;
+    grid-row: 1 / 3;
+    width: 76px;
+    height: 112px;
     display: grid;
     place-items: center;
     color: var(--text-muted);
     background: var(--control-tint);
     border: 1px solid var(--border-soft);
-    border-radius: 4px;
+    border-radius: 8px;
     overflow: hidden;
+    align-self: center;
 }
 .subscription-watch-poster img { width: 100%; height: 100%; object-fit: cover; }
-.subscription-watch-poster svg { width: 21px; height: 21px; }
-.subscription-watch-body { min-width: 0; display: flex; align-items: flex-start; flex-direction: column; gap: 6px; }
+.subscription-watch-poster svg { width: 22px; height: 22px; }
+.subscription-watch-body {
+    grid-column: 2;
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 5px;
+}
 .subscription-watch-body > a {
     max-width: 100%;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: 13.5px;
     font-weight: 700;
-    line-height: 1.4;
+    line-height: 1.35;
     text-decoration: none;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 .subscription-watch-body > a:hover { color: var(--accent); }
+.subscription-watch-meta {
+    margin-top: 1px;
+    gap: 5px;
+}
+.subscription-watch-meta span {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 6px;
+    background: var(--surface-subtle, var(--control-tint));
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.2;
+}
+.subscription-status.is-unsubscribed {
+    color: var(--text-muted);
+    background: var(--surface-subtle, var(--control-tint));
+    border-color: var(--border-soft);
+}
 .subscription-watch-actions {
+    grid-column: 2;
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: flex-start;
     gap: 5px;
     flex-wrap: nowrap;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border-soft);
 }
-.subscription-watch-primary { min-width: 92px; min-height: 32px; padding-inline: 10px; }
+.subscription-watch-primary { min-width: 92px; min-height: 32px; padding-inline: 10px; margin-right: auto; }
 .subscription-watch-icon { width: 32px; height: 32px; flex: 0 0 32px; }
 
 .subscription-run-row {
@@ -7285,6 +7324,12 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
 .subscription-candidate-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .subscription-candidate-actions .rss-btn { min-width: 92px; }
 
+@media (max-width: 1260px) {
+    .subscription-watchlist-grid,
+    .subscription-skeleton-stack.is-watchlist {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
 @media (max-width: 1160px) {
     .subscription-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .subscription-metric:nth-child(2) { border-right: 0; }
@@ -7304,9 +7349,11 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
     .subscription-skeleton.is-media { grid-template-columns: 40px minmax(0, 1fr); }
     .subscription-skeleton.is-media > span:nth-child(3) { grid-column: 2; width: min(232px, 100%); }
     .media-subscription-actions { grid-column: 2; width: 100%; justify-content: flex-start; }
-    .subscription-watch-card { grid-template-columns: 64px minmax(0, 1fr); }
+    .subscription-watchlist-grid,
+    .subscription-skeleton-stack.is-watchlist { grid-template-columns: minmax(0, 1fr); }
+    .subscription-watch-card { grid-template-columns: 68px minmax(0, 1fr); }
     .subscription-watch-actions { grid-column: 2; justify-content: flex-start; }
-    .subscription-skeleton.is-watchlist { grid-template-columns: 64px minmax(0, 1fr); }
+    .subscription-skeleton.is-watchlist { grid-template-columns: 68px minmax(0, 1fr); }
     .subscription-skeleton.is-watchlist > span:nth-child(3) { grid-column: 2; width: min(244px, 100%); }
     .subscription-run-row { grid-template-columns: 32px minmax(0, 1fr); }
     .subscription-run-counts { grid-column: 2; }
@@ -7323,11 +7370,23 @@ html[data-subscription-initial-tab="runs"] #subscriptionPanelRuns { display: blo
     .subscription-metric-note { display: none; }
     .subscription-metric-value { font-size: 20px; }
     .subscription-tabs { width: 100%; display: flex; padding: 4px; gap: 4px; border-radius: 10px; }
-    .subscription-tab { min-width: 0; flex: 1 1 0; height: 38px; min-height: 38px; justify-content: center; gap: 5px; padding-inline: 4px; font-size: 12px; }
+    .subscription-tab { min-width: 0; flex: 1 1 0; height: 38px; min-height: 38px; justify-content: center; gap: 4px; padding-inline: 4px; font-size: 11.5px; white-space: nowrap; }
     .subscription-tab svg,
-    .subscription-tab > i[data-lucide] { width: 15px; height: 15px; flex-basis: 15px; }
-    .subscription-tab b { padding-inline: 4px; height: 16px; min-width: 16px; font-size: 10px; }
+    .subscription-tab > i[data-lucide] { width: 13.5px; height: 13.5px; flex-basis: 13.5px; flex-shrink: 0; }
+    .subscription-tab b { padding-inline: 4px; height: 16px; min-width: 16px; font-size: 10px; flex-shrink: 0; }
     .subscription-panel { min-height: 330px; padding: 12px; }
+    #subscriptionPanelWatchlist > .subscription-panel-head,
+    #subscriptionPanelRuns > .subscription-panel-head {
+        flex-direction: row;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+    }
+    #subscriptionPanelWatchlist > .subscription-panel-head > .subscription-refresh,
+    #subscriptionPanelRuns > .subscription-panel-head > .subscription-refresh {
+        width: auto;
+        flex: 0 0 auto;
+    }
     .subscription-panel-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; width: 100%; align-items: center; }
     .subscription-panel-actions .form-select { grid-column: auto; width: 100%; min-width: 0; height: 38px; min-height: 38px; font-size: 12px; }
     .subscription-refresh { height: 38px; min-height: 38px; padding-inline: 10px; min-width: 0; gap: 5px; font-size: 12px; }

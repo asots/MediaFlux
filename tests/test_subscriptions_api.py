@@ -279,7 +279,8 @@ class SubscriptionAPITests(IsolatedDatabaseTestCase):
             styles,
             r'\.subscription-section-toolbar \.subscription-rss-create\s*\{[^}]*width:\s*auto',
         )
-        self.assertIn('grid-template-columns: 64px minmax(0, 1fr) auto', styles)
+        self.assertIn('grid-template-columns: repeat(3, minmax(0, 1fr))', styles)
+        self.assertIn('grid-template-columns: 76px minmax(0, 1fr)', styles)
         self.assertIn('.subscription-watch-icon { width: 32px; height: 32px;', styles)
         self.assertNotIn('repeat(auto-fill, minmax(360px, 440px))', styles)
         self.assertIn('grid-template-columns: 40px minmax(0, 1fr) auto', styles)

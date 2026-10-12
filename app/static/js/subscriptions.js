@@ -505,6 +505,10 @@
                 const badge = node('span', `subscription-status ${status.className}`);
                 badge.append(icon(status.icon), node('span', '', `已订阅 · ${status.label}`));
                 body.append(badge);
+            } else {
+                const badge = node('span', 'subscription-status is-unsubscribed');
+                badge.append(icon('bookmark'), node('span', '', '已收藏 · 待创建追更'));
+                body.append(badge);
             }
             const actions = node('div', 'subscription-watch-actions');
             const primary = node(
@@ -554,7 +558,7 @@
         const hadContent = elements.watchlist.childElementCount > 0;
         let timer = null;
         if (!hadContent || !preserve) timer = window.setTimeout(() => {
-            if (requestId === state.watchlistRequestId && !elements.watchlist.childElementCount) showSkeleton(elements.watchlist, 4, 'watchlist');
+            if (requestId === state.watchlistRequestId && !elements.watchlist.childElementCount) showSkeleton(elements.watchlist, 6, 'watchlist');
         }, 320);
         try {
             const rows = await apiJSON('/api/subscriptions/watchlist', {}, controller.signal);
