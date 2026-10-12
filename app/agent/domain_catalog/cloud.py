@@ -364,7 +364,11 @@ def register_specs(
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["list", "tree", "search", "stat"],
+                        "enum": ["list", "tree", "search", "stat", "reobserve"],
+                        "description": (
+                            "reobserve 仅用于确认失败后按服务器保留的来源重新核验；不传 path/paths/旧引用。"
+                            "按 reobservation 映射使用新 object_ref，不得用同名对象替代；新写仍须新确认。"
+                        ),
                         "default": "list",
                     },
                     "path": {"type": "string", "minLength": 1, "maxLength": 2048},
@@ -423,11 +427,15 @@ def register_specs(
                 },
                 "additionalProperties": False,
                 "anyOf": [
+                    {"required": ["operation"], "properties": {"operation": {"enum": ["reobserve"]}}},
                     {"required": ["observation_ref"]},
                     {"required": ["path"]},
                     {"required": ["paths"]},
                 ],
                 "not": {"anyOf": [
+                    {"required": ["operation"], "properties": {"operation": {"enum": ["reobserve"]}},
+                     "anyOf": [{"required": [field]} for field in
+                               ("path", "paths", "observation_ref", "query", "kinds", "max_depth", "max_items")]},
                     {"required": ["path", "paths"]},
                     {"required": ["observation_ref"], "anyOf": [
                         {"required": [field]} for field in (

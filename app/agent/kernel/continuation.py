@@ -267,6 +267,8 @@ def effect_origin(state, context, plan):
             or goal.get("role") != "user" or not str(goal.get("content") or "").strip()):
         return None
     return {"goal": deepcopy(goal), "arguments": dict(plan.arguments),
+            **({"reobservation_source": deepcopy(plan.metadata["reobservation_source"])}
+               if plan.metadata.get("reobservation_source") is not None else {}),
             "owner": state.owner, "session_id": state.session_id,
             "source_request_id": context.lease.request_id, "source_turn_id": context.lease.turn_id,
             "origin_generation": context.lease.generation, "expected_task": identity(state.metadata.get("task")),
@@ -443,7 +445,9 @@ def confirmed_result(catalog, state, record):
     seed, origin, result = payload["seed"], payload["origin"], payload["result"]
     tool = catalog.get(seed["tool"])
     plan = EffectPlan(seed["plan_id"], state.owner, state.session_id, origin["origin_generation"],
-                      tool.name, tool.effect, origin["arguments"], "", {}, 0)
+                      tool.name, tool.effect, origin["arguments"], "", {}, 0,
+                      metadata=({"reobservation_source": deepcopy(origin["reobservation_source"])}
+                                if origin.get("reobservation_source") is not None else {}))
     return PipelineResult(tool, origin["arguments"], ToolOutcome(
         model_content=json.dumps(result, ensure_ascii=False), public_content=result,
     ), effect_plan=plan)

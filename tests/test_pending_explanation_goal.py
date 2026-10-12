@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from app.agent.kernel.adapters import consume_events
-from app.agent.kernel.capabilities import ToolCatalog
+from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.pipeline import ToolPipelineError
 from app.agent.kernel.state import AgentInput
@@ -58,11 +58,11 @@ def test_continuation_plan_keeps_original_goal_after_explanation(explain):
         asyncio.run(run())
 
 
-def test_stale_refresh_keeps_original_goal_and_reply():
+def test_stale_reobservation_keeps_original_goal_and_reply():
     async def run():
         runtime = NativeRuntime()
         owner, sid = "owner", "goal-stale"
-        snapshots = []
+        snapshots, observations = [], []
         def prepare(arguments, context):
             runtime.prepares.append(dict(arguments))
             return PreparedEffect(preview={"summary": "改名一个对象"},
@@ -73,8 +73,17 @@ def test_stale_refresh_keeps_original_goal_and_reply():
                 raise ToolPipelineError("快照已变化", code="confirmation_stale")
             runtime.writes.append((dict(arguments), snapshot))
             return {"ok": True, "summary": "已改名"}
+        def inspect(arguments, context):
+            observations.append("fresh")
+            runtime.call_name = None
+            runtime.call_arguments = '{"step":1}'
+            runtime.once_call = True
+            return {"ok": True, "status": "success", "summary": "已重新读取，对象快照已变化"}
+        read = KernelToolSpec(name="cloud.inspect", domain="cloud", description="重新读取改名对象",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            effect=ToolEffect.READ, read=inspect)
         runtime.catalog = ToolCatalog([replace(runtime.catalog.get("cloud.change"),
-                                              prepare=prepare, execute_confirmed=execute)])
+                                              prepare=prepare, execute_confirmed=execute), read])
         runtime.reopen()
         first = await consume_events(runtime.session.run(AgentInput(
             message=GOAL, owner=owner, session_id=sid, reply_context=REPLY,
@@ -84,12 +93,16 @@ def test_stale_refresh_keeps_original_goal_and_reply():
             message="只解释第一张卡的影响",
         ))
         wire_count = len(runtime.wires)
+        runtime.once_call = True
+        runtime.call_name = read.model_name
+        runtime.call_arguments = '{}'
         refreshed = await consume_events(runtime.session.confirm(
             owner=owner, session_id=sid, plan_id=first.approval.plan_id,
         ))
         assert refreshed.approval is not None, refreshed
         assert refreshed.approval.plan_id != first.approval.plan_id
-        assert len(runtime.wires) == wire_count
+        assert len(runtime.wires) == wire_count + 2
+        assert observations == ["fresh"]
         assert runtime.writes == []
         assert runtime.prepares == [{"step": 1}, {"step": 1}]
         runtime.reopen()

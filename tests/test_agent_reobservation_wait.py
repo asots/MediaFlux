@@ -1,0 +1,471 @@
+"""#18：失败确认的 READ quota 路径与私有来源冷恢复，全部为离线原生回归。
+
+同步失败不凭空制造 read_wait；后台失败通过真实受理/worker/轮询形成 effect
+续行。仅控制离线 Provider、额度拒绝与时钟，不手造 wait、lease 或签名。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import socket
+from copy import deepcopy
+from dataclasses import replace
+from functools import partial
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import httpx
+import pytest
+import requests
+
+from app import database as db
+from app.agent import effect_completion as effects
+from app.agent.kernel.bootstrap import _capture_creation_binding
+from app.agent.kernel.events import AgentEventType
+from app.agent.kernel.ports import existing_actions
+from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter, ToolRateLimitError
+from app.agent.kernel.state import AgentInput
+from app.agent.models import ToolContext
+from app.agent.rate_limit import RateLimitDecision
+from app.agent.task_stop import stop_agent_session
+from app.modules import organize_tasks
+from app.repositories import organize_operation_jobs as jobs
+from tests.support import initialized_web_runtime
+from tests.test_agent_effect_admission import (
+    _OfflineClient,
+    _offline_runtime,
+    _paused_manager,
+    _preview_domain,
+    _run_real_worker,
+    _spec,
+)
+from tests.test_agent_failed_effect_followup import A, GOAL, READ, NativeCase
+from tests.test_agent_task_first_slice import NativeScript
+
+WRITE = "guangya.fs.change.execute"
+PRIVATE = "PRIVATE-REOBSERVATION-WAIT-ENTITY-2734"
+
+
+@pytest.fixture
+def native_case(tmp_path, monkeypatch):
+    def deny_network(*_args, **_kwargs):
+        raise AssertionError("#18 quota wait 回归禁止访问真实网络/Provider")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", deny_network)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", deny_network)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", deny_network)
+    for name in ("connect", "connect_ex", "sendto"):
+        monkeypatch.setattr(socket.socket, name, deny_network)
+    monkeypatch.setattr(socket, "create_connection", deny_network)
+    monkeypatch.setattr(socket, "getaddrinfo", deny_network)
+    with initialized_web_runtime():
+        case = NativeCase(tmp_path)
+        # 保留真实生命周期，仅用可推进时钟让 poll/claim 自然到期。
+        monkeypatch.setattr(effects.time, "time", lambda: case.clock[0])
+        yield case
+
+
+def source_for(case):
+    return {
+        "version": 1, "kind": "fixture_files", "owner": case.owner,
+        "session_id": case.sid, "credential_generation": 1,
+        "read": {"tool": READ, "arguments": dict(A)},
+        "baseline": {"selected": [{"identity": PRIVATE}]},
+    }
+
+
+class ReadQuota(MediaFluxToolRateLimiter):
+    """与 read_wait_lifecycle 的 Quota 一样，只拒绝尚未开始的本地 READ。"""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.denials = []
+
+    async def acquire(self, *, tool_name, **kwargs):
+        if tool_name == READ:
+            self.denials.append(tool_name)
+            raise ToolRateLimitError(RateLimitDecision(
+                False, 6, 1, 0, retry_after_seconds=10,
+                retry_at_epoch=self.clock[0] + 10, reason="quota",
+            ))
+        await super().acquire(tool_name=tool_name, **kwargs)
+
+
+def receipt(state, plan_id):
+    rows = [deepcopy(row) for row in state.conversation
+            if row.get("completion_receipt_id") == plan_id]
+    assert len(rows) == 1, "原失败 receipt 必须唯一"
+    assert json.loads(rows[0]["content"][rows[0]["content"].index("{"):])["ok"] is False
+    return rows[0]
+
+
+def assert_private(case, scripts, state):
+    events = asyncio.run(case.cold_store().list_events(owner=case.owner, session_id=case.sid))
+    exposed = json.dumps({
+        "model": [script.model_requests for script in scripts],
+        "wire": [script.requests for script in scripts],
+        "events": events, "conversation": state.conversation,
+    }, ensure_ascii=False)
+    assert PRIVATE not in exposed
+    assert "reobservation_source" not in exposed
+    for script in scripts:
+        assert len(script.requests) == len(script.model_requests)
+        for request in script.requests:
+            assert [row["content"] for row in request["messages"]
+                    if row["role"] == "user"] == [GOAL]
+
+
+@pytest.mark.parametrize("tracked_task", [False, True])
+def test_synchronous_failed_confirm_quota_does_not_invent_a_resumable_wait(native_case, tracked_task):
+    """先证明当前真实同步入口：READ 被拒，但没有可领取的续行。"""
+    case = native_case
+    source = source_for(case)
+    prepare = case.media.prepare
+
+    def freeze(arguments, context):
+        result = prepare(arguments, context)
+        return replace(result, metadata={"reobservation_source": deepcopy(source)})
+
+    case.media.prepare = freeze
+    case.build(["read_a", "finish"])
+    if tracked_task:
+        # 模型经真实 capabilities + task handler 建立 READ budget；不手写 task/read_wait。
+        case.script.steps[:0] = ["core_task_discovery", "core_task"]
+    case.session.continuation_binding = _capture_creation_binding()
+    quota = ReadQuota(case.clock)
+    case.session.pipeline.rate_limiter = quota
+
+    async def run():
+        preview = [event async for event in case.session.run(AgentInput(
+            message=GOAL, owner=case.owner, session_id=case.sid, request_id="source-turn",
+        ))]
+        case.events.extend(preview)
+        assert preview[-1].payload["status"] == "approval_required"
+        plan_id = preview[-1].payload["plan_id"]
+        initial = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+        users = case.users(initial)
+        assert users == [{"role": "user", "content": GOAL}]
+        if tracked_task:
+            assert initial.metadata["task"]["root_goal"] == GOAL
+            assert initial.metadata["read_wait"]["state"] == "idle"
+        with db.get_conn() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM agent_confirmations").fetchone()[0] == 1
+        plan = await case.session.pipeline.get_pending_plan(owner=case.owner, session_id=case.sid)
+        assert plan.metadata["reobservation_source"] == source
+        events, state = await case.confirm(plan_id)
+        assert events[-1].payload["status"] == "partial"
+        assert quota.denials == [READ]
+        assert any(event.type is AgentEventType.TOOL_FAILED
+                   and event.payload.get("code") == "rate_limited" for event in events)
+        assert (state.metadata.get("read_wait") or {}).get("state") not in {"pending", "claimed", "running"}
+        assert not state.metadata.get("effect_waits")
+        assert await case.cold_store().due_continuations() == []
+        case.assert_io(prepares=["A"], executions=["A"], reads=0, requests=5 if tracked_task else 3)
+        case.assert_source(state, users)
+        failed = [event for event in events if event.type is AgentEventType.EFFECT_FAILED]
+        assert len(failed) == 1 and failed[0].payload["plan_id"] == plan_id
+        assert failed[0].payload["result"]["ok"] is False
+        assert not any(event.type is AgentEventType.EFFECT_COMPLETED for event in events)
+        original_receipt = receipt(state, plan_id)
+        followup = case.script.requests[3 if tracked_task else 1]
+        assert any(row.get("content") == original_receipt["content"] for row in followup["messages"])
+        return state
+
+    state = asyncio.run(run())
+    assert_private(case, [case.script], state)
+
+
+class EffectScript(NativeScript):
+    """真实领域 WRITE 与本地业务 READ 的原生 HTTP 离线脚本。"""
+
+    def __init__(self, steps, prefix):
+        super().__init__("tmdb")
+        self.steps = list(steps)
+        self.prefix = prefix
+
+    async def respond(self, request):
+        body = json.loads(request.content)
+        self.requests.append(body)
+        assert self.steps, "续行不能超出原生离线脚本或重复调用模型"
+        step = self.steps.pop(0)
+        if step == "finish":
+            # 故意过度宣称：成功 READ 不能洗掉失败 write。
+            message = {"content": "诊断读取成功，所以之前的改名操作已成功完成。"}
+        else:
+            name, arguments = (WRITE, {}) if step == "preview" else (READ, A)
+            assert step in {"preview", "read"}
+            message = {"content": "", "tool_calls": [{
+                "id": self.prefix + "-" + step, "type": "function",
+                "function": {"name": name.replace(".", "__"),
+                             "arguments": json.dumps(arguments)},
+            }]}
+        return httpx.Response(200, json={"choices": [{
+            "message": message,
+            "finish_reason": "stop" if step == "finish" else "tool_calls",
+        }]})
+
+
+@pytest.fixture
+def background_case(native_case):
+    case = native_case
+    source = source_for(case)
+    observed = []
+    prepared = []
+    inspect = case.media.inspect
+    real = existing_actions.adapt_tool_spec(_spec("fs"))
+
+    def freeze(arguments, context):
+        # 只给真实领域预检附加本次私有来源，不伪造确认/受理/完成状态。
+        assert context.reobservation_source is None
+        result = real.prepare(arguments, context)
+        prepared.append(deepcopy(arguments))
+        return replace(result, metadata={**result.metadata, "reobservation_source": deepcopy(source)})
+
+    def read(arguments, context):
+        observed.append(deepcopy(context.reobservation_source))
+        adapted = existing_actions._kernel_context(context)
+        assert adapted.reobservation_source == context.reobservation_source
+        if adapted.reobservation_source is not None:
+            adapted.reobservation_source["baseline"]["selected"].clear()
+            assert context.reobservation_source["baseline"]["selected"], "领域副本不能改写冻结来源"
+        return inspect(arguments, context)
+
+    case.media.inspect = read
+    read_spec = case.media.tools()[1]
+    case.media.tools = lambda: [replace(
+        real, prepare=freeze, description="将媒体文件改名 rename 云盘 source 冻结确认",
+    ), read_spec]
+
+    class FailedWriteClient(_OfflineClient):
+        def __init__(self):
+            super().__init__()
+            self.write_calls = []
+
+        def rename(self, file_id, new_name):
+            self.write_calls.append((file_id, new_name))
+            # 不 mock 回执或 execute_confirmed：worker 的 Provider 夹具实际改名
+            # 临时媒体文件，再丢失 ack；真实领域异常处理据此形成失败终态。
+            case.media.execute(A, case.media.fingerprint("A"), None)
+            raise RuntimeError("offline Provider lost acknowledgement after actual rename")
+
+    client = FailedWriteClient()
+    with _offline_runtime(case.media.root, client) as stack, _paused_manager(), patch.object(
+        existing_actions, "wait_for_effect_completion",
+        partial(effects.wait_for_effect_completion, timeout_seconds=0),
+    ):
+        preview = _preview_domain("fs", client, ToolContext(owner=case.owner, session_id=case.sid), stack)
+        assert preview.ok, preview.to_dict()
+        yield case, source, observed, prepared, client
+
+
+def rebuild(case, steps, prefix):
+    """新 SQLite store、pipeline、session、confirmation store 和原生 HTTP adapter。"""
+    case.store = case.cold_store()
+    case.build([])
+    script = EffectScript(steps, prefix)
+    case.script = script
+    case.session.model = script.adapter
+    case.session.continuation_binding = _capture_creation_binding()
+    return case.session, script
+
+
+async def failed_background_candidate(case, prepared, client):
+    from app.agent.kernel.continuation import effect_payload
+
+    session, script = rebuild(case, ["preview"], "source")
+    events = [event async for event in session.run(AgentInput(
+        message=GOAL, owner=case.owner, session_id=case.sid, request_id="source-turn",
+    ))]
+    case.events.extend(events)
+    assert events[-1].payload["status"] == "approval_required"
+    plan_id = events[-1].payload["plan_id"]
+    assert prepared == [{}]
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM agent_confirmations").fetchone()[0] == 1
+        assert conn.execute("PRAGMA database_list").fetchone()[2] == str(db.resolve_db_path())
+    frozen = await session.pipeline.get_pending_plan(owner=case.owner, session_id=case.sid)
+    source = deepcopy(frozen.metadata["reobservation_source"])
+    confirmation, state = await case.confirm(plan_id)
+    assert confirmation[-1].payload["status"] == "waiting"
+    assert not script.steps and len(script.requests) == 1
+    assert not case.media.executed and not client.write_calls
+    assert not state.metadata.get("read_wait")
+    wait = state.metadata["effect_waits"][plan_id]
+    assert wait["continuation"]["kind"] == "effect"
+    assert wait["continuation"]["state"] == "waiting"
+    assert await case.cold_store().due_continuations() == []
+    with db.get_conn() as conn:
+        rows = conn.execute("SELECT * FROM organize_operation_jobs").fetchall()
+    assert len(rows) == 1 and rows[0]["status"] == "pending"
+    worker = _run_real_worker(jobs.claim_organize_operation_job(rows[0]["job_id"]))
+    assert jobs.get_organize_operation_job(rows[0]["job_id"])["status"] in {"failed", "partial"}
+    assert client.write_calls == [("rename", "admitted.mp4")]
+    assert case.media.executed == ["A"] and case.media.target("A").is_file()
+    assert not case.media.source("A").exists()
+    # 推进真实 next_poll_at；不修改 wait 记录或手造候选/租约。
+    case.clock[0] = wait["next_poll_at"] + 1
+    with patch.object(organize_tasks, "get_organize_manager", lambda: worker):
+        assert await effects.poll_effect_receipts(case.cold_store()) == 1
+    state = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+    original_receipt = receipt(state, plan_id)
+    wait = state.metadata["effect_waits"][plan_id]
+    assert wait["final_result"]["ok"] is False
+    assert effect_payload(state, wait["continuation"])["origin"]["reobservation_source"] == source
+    # 冷 store 只读出密文来源；公开候选与普通 state JSON 不能夹带 source。
+    assert PRIVATE not in json.dumps(state.to_payload(), ensure_ascii=False)
+    candidates = await case.cold_store().due_continuations()
+    assert len(candidates) == 1 and candidates[0]["kind"] == "effect"
+    assert candidates[0]["wait_id"] == plan_id
+    assert PRIVATE not in json.dumps(candidates, ensure_ascii=False)
+    assert case.users(state) == [{"role": "user", "content": GOAL}]
+    return plan_id, source, original_receipt, candidates[0], script
+
+
+async def park_read_quota(case, candidate, original_receipt, prefix):
+    session, script = rebuild(case, ["read"], prefix)
+    quota = ReadQuota(case.clock)
+    session.pipeline.rate_limiter = quota
+    assert await session.resume_wait(candidate=candidate)
+    state = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+    assert quota.denials == [READ] and not script.steps
+    assert len(script.requests) == 1
+    assert not state.metadata.get("read_wait"), "实际等待仍为 effect，不是 read_quota"
+    record = state.metadata["effect_waits"][candidate["wait_id"]]["continuation"]
+    assert record["kind"] == "effect" and record["state"] == "pending"
+    assert record["due_at"] == case.clock[0] + 10
+    assert record["budget"]["wait_segments"] >= 1
+    assert receipt(state, candidate["wait_id"]) == original_receipt
+    assert not case.media.reads
+    assert await case.cold_store().due_continuations() == []
+    return deepcopy(record), state, script
+
+
+def assert_one_write(case, prepared, client, plan_id, state):
+    assert prepared == [{}] and client.write_calls == [("rename", "admitted.mp4")]
+    assert case.media.executed == ["A"]
+    assert len(case.media.journal.read_text().splitlines()) == 1
+    assert case.media.target("A").read_bytes() == b"offline-media-A"
+    assert case.media.source("B").is_file() and not case.media.target("B").exists()
+    assert case.users(state) == [{"role": "user", "content": GOAL}]
+    assert not state.pending_effect_plan_id
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM organize_operation_jobs").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM agent_confirmations").fetchone()[0] == 0
+        actions = conn.execute("SELECT confirmation_id FROM agent_action_history").fetchall()
+        assert len(actions) == 1 and actions[0]["confirmation_id"].startswith(plan_id + "-")
+
+
+@pytest.mark.parametrize("quota_segments", [1, 2])
+def test_failed_effect_quota_cold_resume_preserves_private_source_and_original_receipt(
+    background_case, quota_segments,
+):
+    case, mutable_source, observed, prepared, client = background_case
+    scripts = []
+
+    async def run():
+        plan_id, source, original_receipt, candidate, script = await failed_background_candidate(
+            case, prepared, client,
+        )
+        scripts.append(script)
+        for index in range(quota_segments):
+            record, state, script = await park_read_quota(
+                case, candidate, original_receipt, f"quota-{index}",
+            )
+            scripts.append(script)
+            assert record["budget"]["wait_segments"] == index + 1
+            assert observed == [], "额度拒绝发生在业务 READ/source 恢复之前"
+            # 旧确认不能消费等待、启动模型或重放 write。
+            duplicate, unchanged = await case.confirm(plan_id)
+            assert duplicate[-1].type is AgentEventType.TURN_FAILED
+            assert unchanged.conversation == state.conversation
+            assert unchanged.metadata["effect_waits"] == state.metadata["effect_waits"]
+            assert len(script.requests) == 1
+            case.clock[0] = record["due_at"]
+            candidates = await case.cold_store().due_continuations()
+            assert len(candidates) == 1 and candidates[0]["kind"] == "effect"
+            candidate = candidates[0]
+        # 不能借测试闭包携带来源：改掉预检侧副本，恢复仍须来自已保存的密文。
+        mutable_source["baseline"]["selected"].clear()
+        session, resumed = rebuild(case, ["read", "finish"], "cold")
+        scripts.append(resumed)
+        assert await session.resume_wait(candidate=candidate)
+        state = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+        assert observed == [source]
+        assert len(case.media.reads) == 1 and not resumed.steps
+        assert len(resumed.requests) == 2
+        assert receipt(state, plan_id) == original_receipt
+        record = state.metadata["effect_waits"][plan_id]["continuation"]
+        assert record["state"] == "terminal" and record["terminal_reason"] == "partial"
+        assert record["budget"]["wait_segments"] == quota_segments
+        assert record["budget"]["wait_seconds_spent"] == quota_segments * 10
+        assert record["budget"]["model_spent"] == quota_segments + 2
+        assert record["budget"]["tool_spent"] == quota_segments + 1
+        assert await case.cold_store().due_continuations() == []
+        events = await case.cold_store().list_events(owner=case.owner, session_id=case.sid)
+        terminal = [event for event in events if event["type"] == "turn.completed"]
+        assert terminal[-1]["payload"]["status"] == "partial", "成功 READ 不能洗成 write 成功"
+        ids = [row.get("tool_call_id") for row in state.conversation if row.get("role") == "tool"]
+        assert ids.count("cold-read") == 1
+        for index in range(quota_segments):
+            assert ids.count(f"quota-{index}-read") == 1
+            old = next(row for row in state.conversation if row.get("tool_call_id") == f"quota-{index}-read")
+            assert "rate_limited" in old["content"]
+        assert_one_write(case, prepared, client, plan_id, state)
+        # terminal candidate 的重复领取同样不能重启模型或重放任何业务 IO。
+        assert not await session.resume_wait(candidate=candidate)
+        assert len(resumed.requests) == 2 and observed == [source]
+        return state
+
+    state = asyncio.run(run())
+    assert_private(case, scripts, state)
+
+
+def test_cancelled_failed_effect_quota_wait_never_restores_source_or_replays_write(background_case):
+    case, _source, observed, prepared, client = background_case
+    scripts = []
+
+    async def run():
+        plan_id, _saved_source, original_receipt, candidate, script = await failed_background_candidate(
+            case, prepared, client,
+        )
+        scripts.append(script)
+        record, before, script = await park_read_quota(case, candidate, original_receipt, "cancel-quota")
+        scripts.append(script)
+        case.clock[0] = record["due_at"]
+        candidates = await case.cold_store().due_continuations()
+        assert len(candidates) == 1 and candidates[0]["kind"] == "effect"
+        stale_candidate = candidates[0]
+        session, unused = rebuild(case, ["read", "finish"], "cancelled")
+        scripts.append(unused)
+        # request cancel 只针对运行中的普通 publication；确认续行的持久取消
+        # 使用真实会话 stop 入口，不能把 cancel=False 当作已经取消。
+        assert not await session.cancel(owner=case.owner, session_id=case.sid,
+                                        request_id=record["source_request_id"])
+        stopped = await stop_agent_session(
+            SimpleNamespace(store=case.store, session=session), case.owner, case.sid,
+        )
+        assert stopped["cancelled_continuations"] == [plan_id]
+        assert stopped["status"] == "stopped" and stopped["stopped"] is True
+        assert stopped["background_tasks"] == [], "失败 worker 已终态，不是被 stop 再执行/取消"
+        cancelled = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+        saved = cancelled.metadata["effect_waits"][plan_id]["continuation"]
+        assert saved["state"] == "cancelled" and saved["terminal_reason"] == "cancelled"
+        assert saved["budget"] == record["budget"]
+        assert cancelled.conversation == before.conversation
+        assert receipt(cancelled, plan_id) == original_receipt
+        assert await case.cold_store().due_continuations() == []
+        from app.agent.kernel import continuation
+        with patch.object(continuation, "confirmed_result", side_effect=AssertionError(
+            "已取消续行不能重建 confirmed result 或恢复私有 source",
+        )):
+            assert not await session.resume_wait(candidate=stale_candidate)
+        assert not unused.requests and not unused.model_requests
+        assert observed == [] and not case.media.reads
+        state = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+        assert state.conversation == before.conversation
+        assert receipt(state, plan_id) == original_receipt
+        assert_one_write(case, prepared, client, plan_id, state)
+        return state
+
+    state = asyncio.run(run())
+    assert_private(case, scripts, state)

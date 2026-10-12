@@ -122,6 +122,7 @@ class ToolCallContext:
     user_reply_context: Mapping[str, Any] = field(default_factory=dict)
     call_id: str = ""
     schema_replacements: dict[str, error_repair.SchemaReplacement] = field(default_factory=dict)
+    reobservation_source: Mapping[str, Any] | None = field(default=None, repr=False)
 
     def policy_context(self) -> dict[str, Any]:
         return {

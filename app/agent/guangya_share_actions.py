@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import re
 import time
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from app.agent.confirmation import confirmation_context_fingerprint
 from app.agent.errors import AgentToolError
-from app.agent.guangya_workspace_actions import latest_guangya_observation_ref
+from app.agent.guangya_workspace_actions import latest_guangya_observation_ref, validated_reobservation_source
 from app.agent.models import Evidence, ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import (
     sanitize_public_text,
@@ -137,8 +138,15 @@ def _load_share_snapshots(client: GuangYaClient) -> list[dict[str, Any]]:
 
 
 def guangya_share_list_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(arguments, dict) or set(arguments) - {"page", "page_size"}:
+    if not isinstance(arguments, dict) or set(arguments) - {"operation", "page", "page_size"}:
         raise AgentToolError("光鸭分享列表参数无效")
+    operation = arguments.get("operation", "list")
+    if not isinstance(operation, str) or operation not in {"list", "reobserve"}:
+        raise AgentToolError("operation 只能是 list 或 reobserve")
+    if operation == "reobserve":
+        if set(arguments) != {"operation"}:
+            raise AgentToolError("重新观察由原选中分享的稳定标识定位，不能附加旧页号或序号")
+        return {"operation": "reobserve"}
     page = arguments.get("page", 1)
     page_size = arguments.get("page_size", 50)
     if type(page) is not int or not 1 <= page <= 200:
@@ -151,21 +159,54 @@ def guangya_share_list_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 def list_guangya_user_shares(
     arguments: dict[str, Any], _context: ToolContext
 ) -> ToolResult:
+    source = (validated_reobservation_source(_context, kind="guangya_shares", tool="guangya.share.list")
+              if arguments.get("operation") == "reobserve" else None)
     client: GuangYaClient | None = None
     try:
         client = _open_client()
+        if source is not None and int(client.credential_generation) != source["credential_generation"]:
+            raise AgentToolError("光鸭账号凭据已变化，不能沿用旧分享选择", code="observation_scope_changed")
         snapshots = _load_share_snapshots(client)
         generation = int(client.credential_generation)
+        if source is not None and generation != source["credential_generation"]:
+            raise AgentToolError("读取期间账号凭据已变化，未发布新的分享引用", code="observation_scope_changed")
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭分享列表当前不可用") from exc
     finally:
         if client is not None:
             close_guangya_client(client)
 
-    page = int(arguments["page"])
-    page_size = int(arguments["page_size"])
-    start = (page - 1) * page_size
-    selected = snapshots[start : start + page_size]
+    comparison = None
+    if source is not None:
+        by_id: dict[str, list[dict[str, Any]]] = {}
+        for item in snapshots:
+            by_id.setdefault(item["share_id"], []).append(item)
+        selected, compared = [], []
+        for old in source["baseline"]["selected"]:
+            matches = by_id.get(str(old.get("share_id") or ""), [])
+            row = {"previous_index": old["old_index"], "title": sanitize_resource_title(old.get("title"), limit=160)}
+            if len(matches) == 1:
+                current = matches[0]
+                selected.append(current)
+                row.update(state="same_identity", index=len(selected),
+                           title=sanitize_resource_title(current.get("title"), limit=160),
+                           changed_fields=[key for key in ("title", "status", "updated_at", "expires_at", "file_count")
+                                           if old.get(key) != current.get(key)])
+            else:
+                row["state"] = "ambiguous" if len(matches) > 1 else "not_observed"
+            compared.append(row)
+        comparison = {"basis": "provider_identity", "items": compared,
+                      "complete": all(row["state"] == "same_identity" for row in compared),
+                      "read_limit": _MAX_SHARES, "possible_truncation": len(snapshots) >= _MAX_SHARES,
+                      "note": "只对应原选中的分享标识；未找到的项不按同名或旧序号替换，新撤销仍须新确认。"}
+        page, page_size, start = 1, max(1, len(selected)), 0
+        total, has_more = len(selected), False
+    else:
+        page = int(arguments["page"])
+        page_size = int(arguments["page_size"])
+        start = (page - 1) * page_size
+        selected = snapshots[start : start + page_size]
+        total, has_more = len(snapshots), start + len(selected) < len(snapshots)
     public_items = [
         _public_share(item, index=start + index)
         for index, item in enumerate(selected, 1)
@@ -173,25 +214,29 @@ def list_guangya_user_shares(
     return ToolResult(
         True,
         "found" if selected else "empty",
-        f"当前账号共有 {len(snapshots)} 条光鸭分享，本页显示 {len(selected)} 条",
+        (f"已重新核对原选中分享，{len(selected)} 条取得稳定标识对应" if source is not None
+         else f"当前账号共有 {len(snapshots)} 条光鸭分享，本页显示 {len(selected)} 条"),
         data={
             "page": page,
             "page_size": page_size,
-            "total": len(snapshots),
-            "has_more": start + len(selected) < len(snapshots),
+            "total": total,
+            "has_more": has_more,
             "items": public_items,
+            **({"reobservation": comparison} if comparison is not None else {}),
         },
         model_data={
             "page": page,
-            "total": len(snapshots),
-            "has_more": start + len(selected) < len(snapshots),
+            "total": total,
+            "has_more": has_more,
             "items": public_items,
+            **({"reobservation": comparison} if comparison is not None else {}),
         },
         references=[
             ToolReference(
                 kind="guangya_shares",
                 value={
                     "credential_generation": generation,
+                    "observed_at": _now(),
                     "page": page,
                     "page_size": page_size,
                     "items": selected,
@@ -322,6 +367,7 @@ def _file_matches(current: GuangYaFile | None, expected: dict[str, Any]) -> bool
         str(current.file_id) != str(expected.get("file_id") or "")
         or str(current.name) != str(expected.get("name") or "")
         or bool(current.is_dir) != bool(expected.get("is_dir"))
+        or str(current.parent_id) != str(expected.get("parent_id") or "0")
         or _bounded_int(current.size) != _bounded_int(expected.get("size"))
     ):
         return False
@@ -329,10 +375,101 @@ def _file_matches(current: GuangYaFile | None, expected: dict[str, Any]) -> bool
     return not etag or str(current.etag or "") in {"", etag}
 
 
+def _source_fields(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    # 私有来源也只保留比较/定位白名单，不整份复制可能含访问码或链接的 payload。
+    return {key: deepcopy(value[key]) for key in keys if key in value}
+
+
+def _file_reobservation_source(
+    arguments: dict[str, Any], context: ToolContext,
+    observation: dict[str, Any], selected: list[dict[str, Any]],
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    baseline = _source_fields(observation, (
+        "scope_path", "scope_name", "scope_names", "operation", "query", "kinds",
+        "max_depth", "recursive", "max_items", "truncated", "scanned_dirs", "scanned_items",
+        "observed_at", "created_at", "created_at_epoch", "expires_at", "expires_at_epoch",
+    ))
+    root_fields = ("file_id", "parent_id", "path", "name", "is_dir")
+    raw_roots = observation.get("roots")
+    roots = [
+        _source_fields(root, root_fields)
+        for root in raw_roots if isinstance(root, dict)
+    ] if isinstance(raw_roots, list) else []
+    baseline.update(
+        observation_ref=identity["observation_ref"], roots=roots,
+        selected=[{
+            **_source_fields(item, (
+                "file_id", "parent_id", "name", "is_dir", "size", "etag", "updated_at",
+                "parent_path", "relative_parent", "source_observation_ref",
+            )),
+            **({"source_root": _source_fields(item["source_root"], root_fields)}
+               if isinstance(item.get("source_root"), dict) else {}),
+            "old_object_ref": str(ref).strip().upper(),
+        } for ref, item in zip(arguments.get("object_refs") or (), selected)],
+    )
+    read = None
+    operation = observation.get("operation")
+    complete_roots = (
+        bool(roots) and len(roots) == len(raw_roots)
+        and all(root.get("file_id") and root.get("path") for root in roots)
+    )
+    if complete_roots and operation == "stat" and observation.get("scope_path"):
+        read = {"tool": "guangya.fs.query", "arguments": {
+            "operation": "stat", "path": observation["scope_path"],
+        }}
+    elif (complete_roots and operation in {"list", "tree", "search"}
+          and all(key in observation for key in ("query", "kinds", "max_depth", "max_items"))):
+        paths = [root["path"] for root in roots]
+        read = {"tool": "guangya.fs.query", "arguments": {
+            "operation": operation,
+            **({"path": paths[0]} if len(paths) == 1 else {"paths": paths}),
+            **_source_fields(observation, ("kinds", "max_depth", "max_items")),
+            **({"query": observation["query"]} if observation.get("query") else {}),
+        }}
+    # 旧多目录 scope_path='/' 不是原 roots；缺失时仅保留基线，不猜重查范围。
+    return {
+        "version": 1, "kind": "guangya_files", "owner": context.owner,
+        "session_id": context.session_id,
+        "credential_generation": identity["credential_generation"],
+        "available": read is not None, "read": read, "baseline": baseline,
+    }
+
+
+def _share_reobservation_source(
+    arguments: dict[str, Any], context: ToolContext,
+    collection: dict[str, Any], selected: list[dict[str, Any]],
+) -> dict[str, Any]:
+    baseline = _source_fields(collection, (
+        "page", "page_size", "observed_at", "created_at", "created_at_epoch",
+        "expires_at", "expires_at_epoch",
+    ))
+    baseline.update(
+        # Kernel resolve 会移除 *_ref；原句柄仍在同一 EffectPlan.arguments 中。
+        # 不绕读仓储或伪造 ref，父冻结层可按 ref_argument 补齐该已有参数。
+        ref=arguments.get("guangya_shares_ref"), ref_argument="guangya_shares_ref",
+        selected=[{
+            **_source_fields(item, (
+                "share_id", "title", "status", "created_at", "expires_at", "updated_at", "file_count",
+            )),
+            "old_index": index,
+        } for index, item in zip(arguments.get("indices") or (), selected)],
+    )
+    read = {"tool": "guangya.share.list", "arguments": {
+        "page": collection["page"], "page_size": collection["page_size"],
+    }} if collection.get("page") and collection.get("page_size") else None
+    return {
+        "version": 1, "kind": "guangya_shares", "owner": context.owner,
+        "session_id": context.session_id,
+        "credential_generation": _bounded_int(collection.get("credential_generation")),
+        "available": read is not None, "read": read, "baseline": baseline,
+    }
+
+
 def _create_snapshot(
     arguments: dict[str, Any], *, owner: str, verify_live: bool
-) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
-    _observation, selected, identity = _workspace_selection(
+) -> tuple[dict[str, Any], str, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    observation, selected, identity = _workspace_selection(
         arguments, owner=owner, verify_live=verify_live
     )
     title = str(arguments.get("title") or "").strip()
@@ -390,16 +527,59 @@ def _create_snapshot(
         },
         domain="guangya-share-create",
     )
-    return safe, fingerprint, selected
+    return safe, fingerprint, selected, observation, identity
+
+
+def _reobserved_selection_note(context: ToolContext, *, kind: str, generation: int,
+                               selected: list[dict[str, Any]], arguments: dict[str, Any]) -> str:
+    source = context.reobservation_source
+    if not isinstance(source, dict) or source.get("kind") != kind:
+        return ""
+    if (source.get("owner") != context.owner or source.get("session_id") != context.session_id
+            or source.get("credential_generation") != generation):
+        raise AgentToolError("观察来源的会话或账号已变化，请重新选择", code="observation_scope_changed")
+    old_items = (source.get("baseline") or {}).get("selected") or []
+    key = "file_id" if kind == "guangya_files" else "share_id"
+    old_ids = {str(item.get(key) or ""): item for item in old_items}
+    fresh = [item for item in selected if str(item.get(key) or "") not in old_ids]
+    if kind == "guangya_files":
+        if any(new.get("name") == old.get("name") and new.get("parent_id") == old.get("parent_id")
+               for new in fresh for old in old_items):
+            raise AgentToolError("发现同名但标识不同的对象，不能替代原对象；请重新明确选择", code="observation_selection_changed")
+    elif any(str(new.get(key) or "") not in old_ids and index == old.get("old_index")
+             for index, new in zip(arguments.get("indices") or (), selected) for old in old_items):
+        raise AgentToolError("旧分享序号已指向其它对象，请重新观察并使用稳定标识映射后的新序号", code="observation_selection_changed")
+    if kind == "guangya_files" and any(
+        str(item.get(key) or "") in old_ids
+        and bool(item.get("is_dir")) != bool(old_ids[str(item[key])].get("is_dir")) for item in selected
+    ):
+        raise AgentToolError("原对象类型已变化，不能当作原文件或目录继续，请重新选择", code="observation_selection_changed")
+    fields = (("name", "名称"), ("parent_id", "所在目录"), ("parent_path", "所在路径"),
+              ("size", "大小"), ("etag", "校验信息"), ("updated_at", "修改时间")) if kind == "guangya_files" else (
+              ("title", "标题"), ("status", "状态"), ("expires_at", "有效期"),
+              ("file_count", "文件数量"), ("updated_at", "修改时间"))
+    changed = sorted({label for item in selected if (old := old_ids.get(str(item.get(key) or "")))
+                      for field, label in fields if old.get(field) != item.get(field)})
+    scope_changed = kind == "guangya_files" and any(
+        tuple((old.get("source_root") or {}).get(field) for field in ("file_id", "is_dir", "parent_id"))
+        != tuple((item.get("source_root") or {}).get(field) for field in ("file_id", "is_dir", "parent_id"))
+        for item in selected if (old := old_ids.get(str(item.get(key) or "")))
+    )
+    note = ("这是不同对象的新选择，不是旧对象的刷新；本卡需要独立确认。" if fresh else
+            "对象标识相同，但观察范围已变化；这是新范围的预览，不能视为原范围重新观察成功，仍需新确认。" if scope_changed else
+            "已按稳定标识核对原选中对象；本卡使用新快照，仍需重新确认，不代表旧操作成功。")
+    return note + ("与原快照相比，以下属性有变化或对照信息不足：" + "、".join(changed) + "。" if changed else "")
 
 
 def prepare_create_guangya_share(
     arguments: dict[str, Any], context: ToolContext
 ) -> tuple[ToolResult, str]:
     try:
-        safe, fingerprint, _selected = _create_snapshot(
+        safe, fingerprint, selected, observation, identity = _create_snapshot(
             arguments, owner=context.owner, verify_live=True
         )
+        note = _reobserved_selection_note(context, kind="guangya_files", generation=identity["credential_generation"],
+                                         selected=selected, arguments=arguments)
         safe.pop("credential_generation")
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭分享创建预检失败") from exc
@@ -407,12 +587,16 @@ def prepare_create_guangya_share(
         True,
         "confirmation_required",
         f"确认后将为 {safe['count']} 个光鸭对象创建分享",
+        effect_metadata={"reobservation_source": _file_reobservation_source(
+            arguments, context, observation, selected, identity,
+        )},
         data={
             **safe,
             "effects": [
                 "只分享本次目录快照中选定的对象。",
                 "确认时会重新校验对象、登录凭据和分享策略。",
                 "创建后会向当前登录用户返回分享链接；链接不会写入模型上下文。",
+                *([note] if note else []),
             ],
         },
         evidence=[
@@ -476,7 +660,7 @@ def execute_create_guangya_share(
     arguments: dict[str, Any], expected_context: str, context: ToolContext
 ) -> ToolResult:
     try:
-        safe, fingerprint, selected = _create_snapshot(
+        safe, fingerprint, selected, _observation, _identity = _create_snapshot(
             arguments, owner=context.owner, verify_live=True
         )
         if fingerprint != str(expected_context or ""):
@@ -598,7 +782,7 @@ def _selected_shares(arguments: dict[str, Any]) -> tuple[dict[str, Any], list[di
 
 def _revoke_snapshot(
     arguments: dict[str, Any], *, verify_live: bool
-) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], str, list[dict[str, Any]], dict[str, Any]]:
     collection, selected = _selected_shares(arguments)
     client: GuangYaClient | None = None
     try:
@@ -645,14 +829,16 @@ def _revoke_snapshot(
         },
         domain="guangya-share-revoke",
     )
-    return safe, fingerprint, selected
+    return safe, fingerprint, selected, collection
 
 
 def prepare_revoke_guangya_shares(
-    arguments: dict[str, Any], _context: ToolContext
+    arguments: dict[str, Any], context: ToolContext
 ) -> tuple[ToolResult, str]:
     try:
-        safe, fingerprint, _selected = _revoke_snapshot(arguments, verify_live=True)
+        safe, fingerprint, selected, collection = _revoke_snapshot(arguments, verify_live=True)
+        note = _reobserved_selection_note(context, kind="guangya_shares", generation=safe["credential_generation"],
+                                         selected=selected, arguments=arguments)
         safe.pop("credential_generation")
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭分享撤销预检失败") from exc
@@ -660,12 +846,16 @@ def prepare_revoke_guangya_shares(
         True,
         "confirmation_required",
         f"确认后将撤销 {safe['count']} 条光鸭分享",
+        effect_metadata={"reobservation_source": _share_reobservation_source(
+            arguments, context, collection, selected,
+        )},
         data={
             **safe,
             "effects": [
                 "只撤销本次分享列表快照中选定的分享。",
                 "撤销后原分享链接将不可继续访问。",
                 "分享中的原始云盘文件不会被删除或移动。",
+                *([note] if note else []),
             ],
         },
         evidence=[
@@ -682,7 +872,7 @@ def execute_revoke_guangya_shares(
     arguments: dict[str, Any], expected_context: str, _context: ToolContext
 ) -> ToolResult:
     try:
-        safe, fingerprint, selected = _revoke_snapshot(arguments, verify_live=True)
+        safe, fingerprint, selected, _collection = _revoke_snapshot(arguments, verify_live=True)
         if fingerprint != str(expected_context or ""):
             raise AgentToolError("光鸭分享撤销计划已变化，请重新预检", code="confirmation_stale")
         expected_generation = safe.pop("credential_generation")

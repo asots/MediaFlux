@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from copy import deepcopy
 from functools import partial
 from typing import Any
 
@@ -83,6 +84,7 @@ def _kernel_context(context: ToolCallContext, *, tool: str = "") -> ToolContext:
         ),
         capability_search=context.capability_search,
         cancelled=lambda: context.cancellation.cancelled,
+        reobservation_source=deepcopy(context.reobservation_source),
     )
 
 

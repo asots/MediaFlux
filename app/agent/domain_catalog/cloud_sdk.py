@@ -167,10 +167,16 @@ def register_specs(
             parameters={
                 "type": "object",
                 "properties": {
+                    "operation": {
+                        "type": "string", "enum": ["list", "reobserve"], "default": "list",
+                        "description": "reobserve 仅用于确认失败后按服务器保留的来源重查原分享；只传此参数，使用返回的新序号，不得搬旧 index。",
+                    },
                     "page": {"type": "integer", "minimum": 1, "maximum": 200, "default": 1},
                     "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
                 },
                 "additionalProperties": False,
+                "not": {"required": ["operation"], "properties": {"operation": {"enum": ["reobserve"]}},
+                        "anyOf": [{"required": ["page"]}, {"required": ["page_size"]}]},
             },
             validator=guangya_share_list_arguments,
             context_handler=list_guangya_user_shares,

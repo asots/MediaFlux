@@ -33,15 +33,16 @@ MESSAGE = (
 class TeachingModel:
     """只替代外部模型推理，工具、数据库、确认及解析器均真实执行。"""
 
-    def __init__(self, *, save=True, arguments=None):
+    def __init__(self, *, save=True, arguments=None, reobserve_after_failure=False):
         self.save = save
+        self.reobserve_after_failure = reobserve_after_failure
         self.arguments = arguments or teaching()
         self.requests = []
 
     async def stream(self, request, *, cancellation):
         cancellation.raise_if_cancelled()
         self.requests.append(request)
-        if any("已确认操作的可信系统结果" in message.content for message in request.messages):
+        if not self.reobserve_after_failure and any("已确认操作的可信系统结果" in message.content for message in request.messages):
             yield ModelEvent(ModelEventType.TEXT_DELTA, text="发布格式已保存，样本已复核。")
             yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
             return
@@ -148,13 +149,21 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
                 message=MESSAGE, owner=self.owner, session_id="reload-session",
             )))
             self.assertIsNotNone(view.approval, view.to_dict())
-            restored = self.runtime(TeachingModel())
+            model = TeachingModel(reobserve_after_failure=True)
+            restored = self.runtime(model)
             state = await restored.store.load(owner=self.owner, session_id="reload-session")
             self.assertEqual(state.pending_effect_plan_id, view.approval.plan_id)
-            with patch.object(formats, "_PREVIEW_EPOCH", "a-different-process"):
+            with patch.object(formats, "_PREVIEW_EPOCH", "a-different-process"), patch.object(
+                formats, "preview", wraps=formats.preview,
+            ) as observed:
                 result = await consume_events(restored.session.confirm(
                     owner=self.owner, session_id="reload-session", plan_id=view.approval.plan_id,
                 ))
+            # 进程世代改变后必须先执行真实 READ，再预检；不复用旧内部参数自动出卡。
+            self.assertEqual(len(model.requests), 2)
+            self.assertEqual(observed.call_count, 2)  # READ + 新卡预检，旧卡没有自动重预检。
+            self.assertTrue(any(message.role == "tool" and message.tool_name == PREVIEW
+                                for message in model.requests[1].messages))
             self.assertEqual(result.status, "approval_required", result.to_dict())
             self.assertIsNotNone(result.approval)
             self.assertNotEqual(result.approval.plan_id, view.approval.plan_id)

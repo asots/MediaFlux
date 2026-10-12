@@ -2054,26 +2054,36 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         saved = await store.load(owner="o", session_id="s")
         self.assertTrue(any("文件已移动" in str(row) for row in saved.conversation))
 
-    async def test_changed_snapshot_refreshes_confirmation_without_replaying_write(self):
+    async def test_changed_snapshot_requires_new_read_and_confirmation_without_replaying_write(self):
         version = [1]
-        writes = []
+        writes, reads, previews = [], [], []
         def execute(_args, expected, _context):
             if expected != str(version[0]):
                 raise ToolPipelineError("回收站内容已变化", code="confirmation_stale")
             writes.append(version[0])
             return {"ok": True, "status": "success", "summary": "已完成"}
+        def prepare(_args, _context):
+            previews.append(version[0])
+            return PreparedEffect(preview={"summary": f"确认删除{version[0]}项"}, snapshot_fingerprint=str(version[0]))
+        inspect = read_tool("cloud.inspect", domain="cloud", handler=lambda *_: reads.append(version[0]) or {
+            "ok": True, "status": "success", "summary": f"实时读取到{version[0]}项",
+        })
         tool = KernelToolSpec(
             name="cloud.clear", domain="cloud", description="清空回收站",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             effect=ToolEffect.WRITE,
-            prepare=lambda _a, _c: PreparedEffect(preview={"summary": f"确认删除{version[0]}项"}, snapshot_fingerprint=str(version[0])),
+            prepare=prepare,
             execute_confirmed=execute,
         )
-        catalog = ToolCatalog([tool]); store = InMemorySessionStateStore()
+        catalog = ToolCatalog([tool, inspect]); store = InMemorySessionStateStore()
         model = ScriptedModel([[
             ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("clear", tool.name, {})),
             ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
-        ], [ModelEvent(ModelEventType.TEXT_DELTA, text="已核验完成。"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
+        ], [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("observe", inspect.name, {})),
+            ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")],
+           [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("fresh-plan", tool.name, {})),
+            ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")],
+           [ModelEvent(ModelEventType.TEXT_DELTA, text="已核验完成。"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                                pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
         preview = await consume_events(session.run(AgentInput(message="清空回收站", owner="o", session_id="s")))
@@ -2082,7 +2092,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.status, "approval_required", refreshed.to_dict())
         self.assertNotEqual(refreshed.approval.plan_id, preview.approval.plan_id)
         self.assertEqual(writes, [])
-        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(len(model.requests), 3)
+        self.assertEqual(reads, [2])
+        self.assertEqual(previews, [1, 2], "不能在新观察前额外重预检旧参数")
         old = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
         self.assertEqual(old.status, "failed")
         self.assertEqual((await store.load(owner="o", session_id="s")).pending_effect_plan_id, refreshed.approval.plan_id)

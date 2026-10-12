@@ -454,6 +454,7 @@ class AgentSession:
         explanation_plan = None
         confirmed_result: dict[str, Any] | None = None
         diagnosing_effect = False
+        reobservation_source = None
         active_calls: tuple[ModelToolCall, ...] = ()
         completed_call_ids: set[str] = set()
         started_call_id = ""
@@ -745,12 +746,13 @@ class AgentSession:
                         raise ConfirmationClaimError()
                     lease = PublicationLease(agent_input.owner, agent_input.session_id, state.generation,
                                              secrets.token_urlsafe(12), agent_input.request_id)
-                    original_plan = await self.pipeline.get_pending_plan(
+                    pending_plan = await self.pipeline.get_pending_plan(
                         owner=lease.owner, session_id=lease.session_id, scoped=True,
                     )
-                    if original_plan is None:
+                    if pending_plan is None:
                         await self.pipeline._cancel_effect_scoped(plan_id, lease=lease)
                         raise ConfirmationClaimError()
+                    reobservation_source = pending_plan.metadata.get("reobservation_source")
                     token = await self.coordinator.begin(lease, protected=True, task=asyncio.current_task())
                 messages = self._restore_messages(state)
                 plan_start = next((i for i, row in enumerate(state.conversation) if row.get("effect_plan_id") == plan_id), len(state.conversation))
@@ -915,7 +917,9 @@ class AgentSession:
                 confirmed_result = dict(result.outcome.public_content)
                 diagnosing_effect = public_result_state(confirmed_result) in {"failed", "warning", "pending"}
                 tool_context = replace(tool_context, confirmed_effect=result,
-                                       diagnostic_only=diagnosing_effect)
+                    diagnostic_only=diagnosing_effect,
+                    reobservation_source=(result.effect_plan.metadata.get("reobservation_source")
+                        if diagnosing_effect and result.effect_plan is not None else None))
             if plan_id is not None:
                 result = None
                 try:
@@ -970,35 +974,6 @@ class AgentSession:
                     })
                     return
                 if failed:
-                    # 旧快照失效时仅重新预检，不重放 execute，也不沿用旧授权。
-                    if receipt_saved and original_plan and public_result.get("status") == "confirmation_stale":
-                        confirming = False
-                        admission_token = await self.turn_admission.begin(agent_input)
-                        refreshed = None
-                        try:
-                            refreshed = await self.pipeline.execute(
-                                original_plan.tool_name, original_plan.arguments, context=tool_context,
-                            )
-                        except (asyncio.CancelledError, StalePublicationError):
-                            raise
-                        except Exception as exc:  # 预检不可用仍保留原始失败事实
-                            logger.info("Agent 更新确认预检失败 type=%s", type(exc).__name__)
-                        refreshed_plan = refreshed.effect_plan if refreshed else None
-                        if refreshed_plan and refreshed_plan.snapshot_fingerprint != original_plan.snapshot_fingerprint:
-                            answer = "原确认条件已变化。已重新预检，请核对更新后的计划并确认；没有自动执行新计划。"
-                            messages.append(ModelMessage(role="assistant", content=answer, effect_plan_id=refreshed_plan.plan_id))
-                            await persist_conversation()
-                            await publish(AgentEventType.EFFECT_APPROVAL_REQUIRED, {
-                                "tool": refreshed.tool.name, "label": public_tool_label(refreshed.tool.name),
-                                "plan": refreshed_plan.public_dict(), "result": refreshed.outcome.audit_result(),
-                            })
-                            await publish(AgentEventType.TURN_COMPLETED, {
-                                "status": "approval_required", "answer": answer, "plan_id": refreshed_plan.plan_id,
-                                "usage": {}, "model_calls": 0, "tool_calls": 1,
-                            })
-                            return
-                        if refreshed_plan:
-                            await self.pipeline.cancel_effect(refreshed_plan.plan_id, lease=lease)
                     if not receipt_saved or not last_user or stopped or public_result.get("status") in {
                             "authorization_denied", "agent_disabled", "confirmation_invalid",
                             "confirmation_not_supported", "tool_not_found"}:
@@ -1033,7 +1008,8 @@ class AgentSession:
                 confirmed_result = public_result
                 diagnosing_effect = result_state in {"failed", "warning", "pending"}
                 tool_context = replace(tool_context, lease=lease, confirmed_effect=result,
-                                       diagnostic_only=diagnosing_effect)
+                    diagnostic_only=diagnosing_effect,
+                    reobservation_source=reobservation_source if diagnosing_effect else None)
                 confirming = False
                 admission_token = await self.turn_admission.begin(agent_input)
                 checkpoint = persist_conversation
@@ -1060,7 +1036,15 @@ class AgentSession:
                 },
                 maximum=getattr(self.retriever, "maximum", 10),
             )
-            selected_tools = () if explaining else discovery.window(selection.tools)
+            source = tool_context.reobservation_source
+            source_read = source.get("read") if isinstance(source, Mapping) and source.get("available") is True else None
+            source_name = source_read.get("tool") if isinstance(source_read, Mapping) else None
+            source_spec = self.catalog.get(source_name) if isinstance(source_name, str) and self.catalog.has(source_name) else None
+            if not (diagnosing_effect and source_spec is not None and source_spec.effect is ToolEffect.READ
+                    and "reobserve" in source_spec.input_schema.get("properties", {}).get("operation", {}).get("enum", ())):
+                source_spec = None
+            # A saved source is a retrieval hint, not an availability/authorization bypass.
+            selected_tools = () if explaining else discovery.window(selection.tools, (source_spec,) if source_spec else ())
             if is_read_resume:
                 resumed_tool = self.catalog.get(state.metadata['read_wait']['anchor']['tool'])
                 if resumed_tool.effect is not ToolEffect.READ or resumed_tool.name.startswith('agent.'):
@@ -1307,6 +1291,13 @@ class AgentSession:
                         "\n前序写操作失败、部分完成或尚未核验；原回执不能被后续查询成功改成写入成功。"
                         "先用只读业务工具核对真实状态、定位阻塞，不要直接重复原写入。"
                         "核对后可为原任务中仍可推进的后续动作准备新的确认卡；新预检不等于执行，不能沿用旧授权。"
+                    )
+                if (tool_context.diagnostic_only and not final_synthesis_round
+                        and source_spec is not None and source_spec.name in selected_names):
+                    request_system_prompt += (
+                        f"\n服务端已保存原观察来源；可调用 {source_spec.name}，只传 operation=reobserve，"
+                        "由服务端重新查询并比较稳定对象标识。只用返回的新引用和对应序号；"
+                        "没有对应的旧对象不能按同名或旧序号替代。任何新写仍须新确认。"
                     )
                 if confirmed_result is not None:
                     request_system_prompt += (

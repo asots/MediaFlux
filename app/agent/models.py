@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from functools import wraps
@@ -92,6 +92,7 @@ class ToolContext:
     admit_background_operation: Callable[[Any, Any, bool], None] | None = field(
         default=None, repr=False, compare=False,
     )
+    reobservation_source: Mapping[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
 ContextualToolHandler = Callable[[dict[str, Any], ToolContext], ToolResult]

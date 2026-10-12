@@ -388,6 +388,8 @@ def _store_observation(
     owner: str,
     scope_path: str,
     scope_name: str,
+    roots: Sequence[dict[str, Any]],
+    max_items: int,
     operation: str,
     recursive: bool,
     query: str,
@@ -422,6 +424,9 @@ def _store_observation(
         "scope_path": scope_path,
         "scope_name": str(scope_name),
         "scope_names": [str(item) for item in scope_names if str(item)],
+        # 私有查询来源；展示 scope 不携带完整根身份，不能用于还原查询范围。
+        "roots": [dict(root) for root in roots],
+        "max_items": max_items,
         "operation": operation,
         "query": query,
         "kinds": sorted({str(item) for item in kinds if str(item)}),
@@ -467,6 +472,7 @@ def create_multi_directory_observation(
     kinds: Sequence[str] = (),
     max_depth: int = _MAX_DEPTH,
     operation: str = "",
+    expected_roots: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_paths = tuple(
         dict.fromkeys(_normalize_path(path, allow_root=True) for path in paths)
@@ -492,27 +498,41 @@ def create_multi_directory_observation(
         raise GuangYaWorkspaceError("目录列表不能启用递归")
     recursive = normalized_operation in {"tree", "search"} or bool(recursive)
 
-    roots: list[tuple[str, str, str]] = []
+    roots: list[dict[str, Any]] = []
+    scope_names: list[str] = []
     seen_root_ids: set[str] = set()
     for target_path in normalized_paths:
         if target_path == "/":
             target_id = "0"
             target_name = "根目录"
+            root = {"file_id": target_id, "path": target_path, "is_dir": True}
         else:
             target, _parent_path = _resolve_path(client, target_path)
             if not target.is_dir:
                 raise GuangYaWorkspaceError("通用目录观察只支持精确目录路径")
             target_id = str(target.file_id)
             target_name = str(target.name)
+            root = {
+                "file_id": target_id,
+                "path": target_path,
+                "is_dir": bool(target.is_dir),
+                "parent_id": str(target.parent_id),
+            }
+        if expected_roots is not None:
+            expected = next((item for item in expected_roots if item.get("path") == target_path), None)
+            if expected is None or any(root.get(key) != expected.get(key)
+                                       for key in ("file_id", "is_dir", "parent_id")):
+                raise GuangYaWorkspaceStale("原观察根对象已变化，未读取同名替代目录")
         if target_id in seen_root_ids:
             continue
         seen_root_ids.add(target_id)
-        roots.append((target_id, target_path, target_name))
+        roots.append(root)
+        scope_names.append(target_name)
 
     multiple = len(roots) > 1
     queue = deque(
-        (target_id, target_path, target_name if multiple else "", 0)
-        for target_id, target_path, target_name in roots
+        (root["file_id"], root["path"], name if multiple else "", 0, root)
+        for root, name in zip(roots, scope_names)
     )
     entries: list[dict[str, Any]] = []
     seen_entries: set[tuple[str, str]] = set()
@@ -520,7 +540,7 @@ def create_multi_directory_observation(
     scanned_items = 0
     truncated = False
     while queue:
-        directory_id, directory_path, relative_parent, depth = queue.popleft()
+        directory_id, directory_path, relative_parent, depth, source_root = queue.popleft()
         scanned_dirs += 1
         if scanned_dirs > _MAX_SCANNED_DIRS:
             truncated = True
@@ -545,6 +565,7 @@ def create_multi_directory_observation(
                     queue.clear()
                     break
                 seen_entries.add(entry_key)
+                entry["source_root"] = dict(source_root)
                 entries.append(entry)
             if item.is_dir and recursive and depth < safe_depth:
                 child_path = directory_path.rstrip("/") + "/" + item.name
@@ -553,12 +574,13 @@ def create_multi_directory_observation(
                     if not relative_parent
                     else f"{relative_parent} › {item.name}"
                 )
-                queue.append((str(item.file_id), child_path, child_relative, depth + 1))
+                queue.append(
+                    (str(item.file_id), child_path, child_relative, depth + 1, source_root)
+                )
             elif item.is_dir and recursive and depth >= safe_depth:
                 # Reaching the requested depth is expected and is not observation truncation.
                 continue
 
-    scope_names = [name for _target_id, _target_path, name in roots]
     return _store_observation(
         client,
         owner=owner,
@@ -567,6 +589,8 @@ def create_multi_directory_observation(
             scope_names[0] if len(scope_names) == 1 else f"{len(scope_names)} 个目录"
         ),
         scope_names=scope_names if multiple else (),
+        roots=roots,
+        max_items=safe_max,
         operation=normalized_operation,
         recursive=recursive,
         query=normalized_query,
@@ -590,6 +614,7 @@ def create_directory_observation(
     kinds: Sequence[str] = (),
     max_depth: int = _MAX_DEPTH,
     operation: str = "",
+    expected_roots: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return create_multi_directory_observation(
         client,
@@ -601,6 +626,7 @@ def create_directory_observation(
         kinds=kinds,
         max_depth=max_depth,
         operation=operation,
+        expected_roots=expected_roots,
     )
 
 
@@ -609,16 +635,34 @@ def create_path_observation(
     *,
     owner: str,
     path: str,
+    expected_roots: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """观察单个精确对象；根目录不会被包装成可写对象引用。"""
     target_path = _normalize_path(path)
     target, parent_path = _resolve_path(client, target_path)
+    if expected_roots is not None:
+        if len(expected_roots) != 1 or any(
+            actual != expected_roots[0].get(key) for key, actual in (
+                ("file_id", str(target.file_id)), ("is_dir", bool(target.is_dir)),
+                ("parent_id", str(target.parent_id)), ("path", target_path),
+            )
+        ):
+            raise GuangYaWorkspaceStale("原观察对象已变化，未读取同名替代对象")
     entry = _snapshot(target, parent_path=parent_path, relative_parent="当前对象")
+    root = {
+        "file_id": str(target.file_id),
+        "path": target_path,
+        "is_dir": bool(target.is_dir),
+        "parent_id": str(target.parent_id),
+    }
+    entry["source_root"] = dict(root)
     return _store_observation(
         client,
         owner=owner,
         scope_path=target_path,
         scope_name=str(target.name),
+        roots=[root],
+        max_items=1,
         operation="stat",
         recursive=False,
         query="",
@@ -698,6 +742,8 @@ def load_directory_observation_set(
         for handle in tuple(missing):
             observed = candidate_entries.get(handle)
             if observed is not None:
+                # 保留签名快照中该 entry 自己的 source_root；legacy 缺失时仍未知，
+                # 不能套用 primary.roots 或从展示 scope 推断为全盘范围。
                 entries[handle] = observed
                 merged_entries.append(observed)
                 missing.discard(handle)
