@@ -12,7 +12,9 @@ from typing import Any
 
 from app.agent.confirmation import confirmation_context_fingerprint
 from app.agent.errors import AgentToolError
-from app.agent.guangya_workspace_actions import latest_guangya_observation_ref
+from app.agent.guangya_workspace_actions import (
+    latest_guangya_observation_ref, bind_observation_source, reobserved_selection_note,
+)
 from app.agent.models import Evidence, ToolContext, ToolResult
 from app.agent.session_context import (
     AgentContextWriteGuard,
@@ -35,6 +37,7 @@ from app.modules.guangya_workspace import (
     GuangYaWorkspaceError,
     GuangYaWorkspaceStale,
     load_directory_observation_set,
+    observation_entry_map,
     valid_object_handle,
     valid_observation_ref,
 )
@@ -112,6 +115,9 @@ def _safe_preview(value: object) -> dict[str, Any] | None:
                 "create_directory_count",
             )
         }
+        # 新记录保留原签名中的复制计数；历史记录没有此字段时不补零改变签名。
+        if "copy_count" in value:
+            counts["copy_count"] = max(0, int(value["copy_count"] or 0))
     except (TypeError, ValueError, OverflowError):
         return None
     samples: list[str] = []
@@ -127,6 +133,7 @@ def _safe_preview(value: object) -> dict[str, Any] | None:
         "sample_changes": samples,
         "trigger_strm": bool(value.get("trigger_strm")),
         "cloud_write": False,
+        **({"observation_note": str(value["observation_note"])[:1000]} if value.get("observation_note") else {}),
     }
 
 
@@ -521,6 +528,10 @@ def preview_guangya_fs_change(
         client = GuangYaClient()
         if not client.logged_in:
             raise AgentToolError("光鸭账号尚未连接", code="precondition_failed")
+        entry_map = observation_entry_map(observation)
+        note = reobserved_selection_note(context, kind="guangya_files", generation=int(client.credential_generation),
+            selected=[entry_map[ref] for ref in _operation_object_refs(arguments["operations"]) if ref in entry_map],
+            arguments=arguments)
         plan = build_fs_change_plan(
             client,
             owner=context.owner,
@@ -552,6 +563,7 @@ def preview_guangya_fs_change(
         ],
         "trigger_strm": bool(plan.get("trigger_strm")),
         "cloud_write": False,
+        **({"observation_note": note} if note else {}),
     }
     if not preview_safe["total"]:
         if previous is not None:
@@ -645,6 +657,8 @@ def prepare_guangya_fs_change_confirmation(
         True,
         "confirmation_required",
         f"确认后将执行光鸭文件变更：{_change_summary(plan.get('stats') or {})}",
+        effect_metadata=({"reobservation_source": bind_observation_source(plan["observation_source"], context)}
+                         if isinstance(plan.get("observation_source"), dict) else {}),
         data={
             **flow.preview_safe,
             "effects": [
@@ -652,6 +666,7 @@ def prepare_guangya_fs_change_confirmation(
                 "移动、复制和改名会在写前重新检查快照与同名冲突。",
                 "trash 只调用 Provider 回收站语义，不提供永久删除。",
                 "每项写入后都会重新读取目录或对象状态验证真实结果。",
+                *([flow.preview_safe["observation_note"]] if flow.preview_safe.get("observation_note") else []),
                 *(
                     ["媒体变更成功后仅校准受影响的 STRM 来源；新建空目录不会触发。"]
                     if flow.preview_safe["trigger_strm"]

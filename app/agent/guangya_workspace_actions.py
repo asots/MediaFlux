@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -18,6 +19,7 @@ from app.agent.session_context import (
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.guangya_workspace import (
+    observation_sources, observation_query_arguments, merge_directory_observations, locate_observed_object,
     GuangYaWorkspaceError,
     GuangYaWorkspaceStale,
     create_directory_observation,
@@ -430,6 +432,8 @@ def guangya_fs_query_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_error(exc: Exception) -> AgentToolError:
+    if isinstance(exc, AgentToolError):
+        return exc
     if isinstance(exc, GuangYaWorkspaceStale):
         return AgentToolError(str(exc), code="precondition_failed")
     if isinstance(exc, GuangYaWorkspaceError):
@@ -443,6 +447,54 @@ def _public_error(exc: Exception) -> AgentToolError:
     return AgentToolError("光鸭目录观察当前不可用", code="unavailable")
 
 
+def bind_observation_source(snapshot: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    return {**deepcopy(snapshot), "version": 1, "kind": "guangya_files",
+            "owner": context.owner, "session_id": context.session_id}
+
+
+def reobserved_selection_note(context: ToolContext, *, kind: str, generation: int,
+                               selected: list[dict[str, Any]], arguments: dict[str, Any]) -> str:
+    source = context.reobservation_source
+    if not isinstance(source, dict) or source.get("kind") != kind:
+        return ""
+    if (source.get("owner") != context.owner or source.get("session_id") != context.session_id
+            or source.get("credential_generation") != generation):
+        raise AgentToolError("观察来源的会话或账号已变化，请重新选择", code="observation_scope_changed")
+    if kind == "guangya_files" and not selected:
+        return "本次为目录创建预览，没有可按对象标识对照的选中对象；仍须新确认，不代表旧操作成功。"
+    old_items = (source.get("baseline") or {}).get("selected") or []
+    key = "file_id" if kind == "guangya_files" else "share_id"
+    old_ids = {str(item.get(key) or ""): item for item in old_items}
+    fresh = [item for item in selected if str(item.get(key) or "") not in old_ids]
+    if kind == "guangya_files":
+        if any(new.get("name") == old.get("name") and new.get("parent_id") == old.get("parent_id")
+               for new in fresh for old in old_items):
+            raise AgentToolError("发现同名但标识不同的对象，不能替代原对象；请重新明确选择", code="observation_selection_changed")
+    elif any(str(new.get(key) or "") not in old_ids and index == old.get("old_index")
+             for index, new in zip(arguments.get("indices") or (), selected) for old in old_items):
+        raise AgentToolError("旧分享序号已指向其它对象，请重新观察并使用稳定标识映射后的新序号", code="observation_selection_changed")
+    if kind == "guangya_files" and any(
+        str(item.get(key) or "") in old_ids
+        and bool(item.get("is_dir")) != bool(old_ids[str(item[key])].get("is_dir")) for item in selected
+    ):
+        raise AgentToolError("原对象类型已变化，不能当作原文件或目录继续，请重新选择", code="observation_selection_changed")
+    fields = (("name", "名称"), ("parent_id", "所在目录"), ("parent_path", "所在路径"),
+              ("size", "大小"), ("etag", "校验信息"), ("updated_at", "修改时间")) if kind == "guangya_files" else (
+              ("title", "标题"), ("status", "状态"), ("expires_at", "有效期"),
+              ("file_count", "文件数量"), ("updated_at", "修改时间"))
+    changed = sorted({label for item in selected if (old := old_ids.get(str(item.get(key) or "")))
+                      for field, label in fields if old.get(field) != item.get(field)})
+    scope_changed = kind == "guangya_files" and any(
+        tuple((old.get("source_root") or {}).get(field) for field in ("file_id", "is_dir", "parent_id"))
+        != tuple((item.get("source_root") or {}).get(field) for field in ("file_id", "is_dir", "parent_id"))
+        for item in selected if (old := old_ids.get(str(item.get(key) or "")))
+    )
+    note = ("这是不同对象的新选择，不是旧对象的刷新；本卡需要独立确认。" if fresh else
+            "对象标识相同，但观察范围已变化；这是新范围的预览，不能视为原范围重新观察成功，仍需新确认。" if scope_changed else
+            "已按稳定标识核对原选中对象；本卡使用新快照，仍需重新确认，不代表旧操作成功。")
+    return note + ("与原快照相比，以下属性有变化或对照信息不足：" + "、".join(changed) + "。" if changed else "")
+
+
 def validated_reobservation_source(context: ToolContext, *, kind: str, tool: str) -> dict[str, Any]:
     """只接受已确认计划携带的私有来源；不是模型可填写的重新授权凭据。"""
     source = context.reobservation_source
@@ -450,7 +502,7 @@ def validated_reobservation_source(context: ToolContext, *, kind: str, tool: str
             or source.get("kind") != kind or source.get("available") is not True
             or not isinstance(source.get("baseline"), dict)
             or not isinstance(source["baseline"].get("selected"), list)
-            or not source["baseline"]["selected"]
+            or (kind != "guangya_files" and not source["baseline"]["selected"])
             or not isinstance(source.get("read"), dict)
             or source["read"].get("tool") != tool):
         raise AgentToolError("没有可安全重定位的观察来源，请重新提供范围或选择对象", code="observation_source_unavailable")
@@ -460,19 +512,22 @@ def validated_reobservation_source(context: ToolContext, *, kind: str, tool: str
     return source
 
 
-def _reobserved_query_arguments(client: GuangYaClient, source: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if int(client.credential_generation) != source.get("credential_generation"):
-        raise AgentToolError("光鸭账号凭据已变化，必须重新建立当前账号的观察", code="observation_scope_changed")
-    roots = source["baseline"].get("roots")
+def _reobserved_query_arguments(client: GuangYaClient, source: dict[str, Any], *, check_active) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    arguments = observation_query_arguments(source)
+    if arguments is None:
+        raise AgentToolError("原观察缺少准确查询参数，不能猜测重查范围", code="observation_source_unavailable")
+    roots = source.get("roots")
     if not isinstance(roots, list) or not roots:
         raise AgentToolError("原观察缺少准确根范围，不能扩成根目录查询", code="observation_source_unavailable")
     current_roots = []
     for original in roots:
+        check_active()
         root = dict(original)
         if root.get("file_id") == "0" and root.get("path") == "/" and root.get("is_dir") is True:
             current_roots.append(root)
             continue
         current = client.file_info(str(root.get("file_id") or ""))
+        check_active()
         if (current is None or str(current.file_id) != root.get("file_id")
                 or bool(current.is_dir) != root.get("is_dir")
                 or str(current.parent_id) != root.get("parent_id")):
@@ -481,7 +536,6 @@ def _reobserved_query_arguments(client: GuangYaClient, source: dict[str, Any]) -
         parent = str(root["path"]).rsplit("/", 1)[0]
         root["path"] = parent + "/" + str(current.name)
         current_roots.append(root)
-    arguments = dict(source["read"]["arguments"])
     arguments.pop("path", None)
     arguments.pop("paths", None)
     paths = [root["path"] for root in current_roots]
@@ -503,6 +557,56 @@ def _create_observation(client: GuangYaClient, arguments: dict[str, Any], *, own
         **({"paths": paths} if len(paths) > 1 else {"path": paths[0]}))
 
 
+def _reobserve_files(client: GuangYaClient, source: dict[str, Any], *, context: ToolContext):
+    def check_active():
+        if context.cancelled():
+            raise AgentToolError("查询已停止，未继续读取或发布新的观察", code="stopped")
+
+        if int(client.credential_generation) != source.get("credential_generation"):
+            raise AgentToolError("光鸭账号凭据已变化，必须重新建立当前账号的观察", code="observation_scope_changed")
+
+    check_active()
+    observations = {}
+    failures = {}
+    result = None
+    try:
+        for original in observation_sources(source["baseline"]):
+            check_active()
+            try:
+                arguments, roots = _reobserved_query_arguments(client, original, check_active=check_active)
+                observations[original["observation_ref"]] = _create_observation(
+                    client, arguments, owner=context.owner, expected_roots=roots)
+            except (AgentToolError, GuangYaWorkspaceError) as exc:
+                failures[original["observation_ref"]] = _public_error(exc)
+        # 查询词、类型过滤和扫描深度不定义原选中对象的身份。未命中时只按已知 ID
+        # 核对父链；必须落在刚核验过的原根，不能据此扩到其它目录选同名对象。
+        present = {str(item["file_id"]) for payload in observations.values() for item in payload["entries"]}
+        cache = {}
+        supplemented = False
+        for old in source["baseline"]["selected"]:
+            check_active()
+            payload = observations.get(old.get("source_observation_ref") or source["baseline"].get("observation_ref"))
+            if str(old["file_id"]) in present or payload is None:
+                continue
+            entry = locate_observed_object(client, old, payload["roots"], cache=cache, check_cancelled=check_active)
+            if entry is not None:
+                payload.setdefault("source_observations", observation_sources(payload))
+                entry["source_observation_ref"] = observation_sources(payload)[0]["observation_ref"]
+                payload["entries"].append(entry)
+                present.add(str(entry["file_id"]))
+                supplemented = True
+        check_active()
+        if not observations:
+            raise next(iter(failures.values())) if failures else AgentToolError("原观察没有可读取的范围", code="observation_source_unavailable")
+        result = merge_directory_observations(client, owner=context.owner, payloads=list(observations.values()),
+            force_new=supplemented, preferred_ids=frozenset(str(item["file_id"]) for item in source["baseline"]["selected"]))
+        return result, [{"observation_ref": ref, "code": error.code, "summary": str(error)} for ref, error in failures.items()]
+    finally:
+        for observation in observations.values():
+            if result is None or observation["plan_id"] != result["plan_id"]:
+                discard_observation(observation["plan_id"])
+
+
 def _compare_file_observation(source: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """只按当前账号的 file_id 与对象类型对应，不按名称猜新 OBJ。"""
     by_id: dict[tuple[str, bool], list[dict[str, Any]]] = {}
@@ -519,6 +623,8 @@ def _compare_file_observation(source: dict[str, Any], payload: dict[str, Any]) -
                        if old.get(key) != current.get(key)]
             row.update(state="same_identity", object_ref=current["handle"],
                        name=sanitize_untrusted_filename(current.get("name")), changed_fields=changed)
+            if current.get("observed_by") == "identity":
+                row["observed_by"] = "identity"
         elif len(matches) > 1:
             row["state"] = "ambiguous"
         elif any(item.get("name") == old.get("name") and item.get("parent_id") == old.get("parent_id") for item in entries):
@@ -528,7 +634,7 @@ def _compare_file_observation(source: dict[str, Any], payload: dict[str, Any]) -
         compared.append(row)
     return {"basis": "provider_identity", "items": compared,
             "complete": bool(compared) and all(item["state"] == "same_identity" for item in compared),
-            "note": "仅对应稳定对象标识并比较返回属性，不代表旧写操作成功或内容逐字节校验。"}
+            "note": "仅对应稳定对象标识并比较返回属性，不代表旧写操作成功或内容逐字节校验；未找到仅指原范围内未核验到，不代表已从云盘删除。"}
 
 
 def _read_observation_page(
@@ -541,6 +647,7 @@ def _read_observation_page(
               if arguments.get("operation") == "reobserve" else None)
     client: GuangYaClient | None = None
     new_observation = False
+    source_failures = []
     _previous_ref, guard = _begin_update(context.owner)
     update_context = True
     requested_ref = str(arguments.get("observation_ref") or "").strip().upper()
@@ -552,19 +659,22 @@ def _read_observation_page(
             if not client.logged_in:
                 raise AgentToolError("光鸭账号尚未连接", code="precondition_failed")
             if source is not None:
-                read_arguments, expected_roots = _reobserved_query_arguments(client, source)
+                payload, source_failures = _reobserve_files(client, source, context=context)
             else:
-                read_arguments, expected_roots = arguments, None
-            payload = _create_observation(client, read_arguments, owner=context.owner, expected_roots=expected_roots)
-            if source is not None and int(client.credential_generation) != source["credential_generation"]:
-                discard_observation(payload["plan_id"])
-                raise AgentToolError("读取期间账号凭据已变化，未发布新的观察", code="observation_scope_changed")
+                payload = _create_observation(client, arguments, owner=context.owner)
             new_observation = True
         page = observation_page(
             payload, page=int(arguments["page"]), page_size=int(arguments["page_size"])
         )
         if source is not None:
             page["reobservation"] = _compare_file_observation(source, payload)
+            if source_failures:
+                comparison = page["reobservation"]
+                comparison.update(complete=False, failed_sources=source_failures)
+                failed_refs = {item["observation_ref"] for item in source_failures}
+                for old, row in zip(source["baseline"]["selected"], comparison["items"]):
+                    if old.get("source_observation_ref") in failed_refs and row["state"] == "missing":
+                        row["state"] = "inconclusive"
     except AgentToolError:
         raise
     except Exception as exc:
@@ -639,10 +749,14 @@ def query_guangya_filesystem(
     }
     if "reobservation" in page:
         model_data["reobservation"] = page["reobservation"]
+    failures = (page.get("reobservation") or {}).get("failed_sources") or []
+    summary = f"光鸭{labels.get(operation, '查询')}完成：第 {page['page']} 页展示 {count} 个对象"
+    if failures:
+        summary = f"已读取部分原观察范围，{len(failures)} 个范围未能核验，不能判断其中对象不存在；当前展示 {count} 个对象"
     return ToolResult(
         True,
         "found" if count else "empty",
-        f"光鸭{labels.get(operation, '查询')}完成：第 {page['page']} 页展示 {count} 个对象",
+        summary,
         data=page,
         evidence=[
             Evidence(

@@ -77,11 +77,9 @@ class GuangYaShareGenerationTests(unittest.TestCase):
             actions,
             "load_directory_observation",
             side_effect=lambda *_args, **_kwargs: {
-                "credential_generation": self.generation
+                "plan_id": "a" * 32, "credential_generation": self.generation,
+                "entries": [{**self.entry, "handle": self.object_ref}],
             },
-        ))
-        self.enterContext(mock.patch.object(
-            actions, "observation_entry_map", return_value={self.object_ref: self.entry}
         ))
 
     def _arguments(self, operation: str):

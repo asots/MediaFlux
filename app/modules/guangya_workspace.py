@@ -11,7 +11,8 @@ import tempfile
 import time
 import uuid
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -382,6 +383,76 @@ def _handle(plan_id: str, item: dict[str, Any]) -> str:
     return "OBJ" + digest
 
 
+_SOURCE_FIELDS = (
+    "scope_path", "scope_name", "scope_names", "operation", "query", "kinds",
+    "max_depth", "recursive", "max_items", "truncated", "scanned_dirs", "scanned_items",
+    "observed_at", "created_at", "created_at_epoch", "expires_at", "expires_at_epoch",
+)
+_ROOT_FIELDS = ("file_id", "parent_id", "path", "name", "is_dir")
+
+
+def observation_sources(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """只保留实际查询来源；合并快照的展示根和过滤条件不能代替各原查询。"""
+    sources = {}
+    for original in payload.get("source_observations") or [payload]:
+        source = {key: deepcopy(original[key]) for key in _SOURCE_FIELDS if key in original}
+        source["observation_ref"] = original.get("observation_ref") or observation_ref(str(original.get("plan_id") or ""))
+        roots = original.get("roots")
+        source["roots"] = ([{key: deepcopy(root[key]) for key in _ROOT_FIELDS if key in root}
+                            for root in roots] if isinstance(roots, list) and all(isinstance(root, dict) for root in roots) else [])
+        sources[source["observation_ref"]] = source
+    if len(sources) > _MAX_OBSERVATIONS:
+        raise GuangYaWorkspaceError("观察来源过多，请缩小范围后重新读取")
+    return list(sources.values())
+
+
+def observation_query_arguments(source: dict[str, Any]) -> dict[str, Any] | None:
+    roots = source.get("roots")
+    if not roots or not all(root.get("file_id") and root.get("path") for root in roots):
+        return None
+    operation = source.get("operation")
+    if operation == "stat" and len(roots) == 1:
+        return {"operation": "stat", "path": roots[0]["path"]}
+    if operation not in {"list", "tree", "search"} or not all(
+        key in source for key in ("query", "kinds", "max_depth", "max_items")
+    ):
+        return None
+    paths = [root["path"] for root in roots]
+    return {"operation": operation, **({"path": paths[0]} if len(paths) == 1 else {"paths": paths}),
+            **{key: deepcopy(source[key]) for key in ("kinds", "max_depth", "max_items")},
+            **({"query": source["query"]} if source.get("query") else {})}
+
+
+def capture_observation_source(payload: dict[str, Any], object_refs: Sequence[str]) -> dict[str, Any]:
+    """在观察仍有效时捕获私有来源与选中身份；它不是可复用的写权限。"""
+    sources = observation_sources(payload)
+    ref = observation_ref(str(payload.get("plan_id") or ""))
+    entries = observation_entry_map(payload)
+    selected = []
+    for handle in dict.fromkeys(str(value).strip().upper() for value in object_refs):
+        if handle not in entries:
+            raise GuangYaWorkspaceStale("所选对象不属于原观察，请重新读取")
+        entry = entries[handle]
+        item = {key: deepcopy(entry[key]) for key in (
+            "file_id", "parent_id", "name", "is_dir", "size", "etag", "updated_at",
+            "parent_path", "relative_parent", "observed_by",
+        ) if key in entry}
+        if isinstance(entry.get("source_root"), dict):
+            item["source_root"] = {key: deepcopy(entry["source_root"][key]) for key in _ROOT_FIELDS if key in entry["source_root"]}
+        item.update(old_object_ref=handle, source_observation_ref=entry.get("source_observation_ref") or ref)
+        selected.append(item)
+    queries = [observation_query_arguments(source) for source in sources]
+    baseline = {key: deepcopy(payload[key]) for key in _SOURCE_FIELDS if key in payload}
+    baseline.update(observation_ref=ref,
+                    roots=[{key: deepcopy(root[key]) for key in _ROOT_FIELDS if key in root}
+                           for root in payload.get("roots") or () if isinstance(root, dict)], selected=selected,
+                    source_observations=sources)
+    available = bool(queries) and all(query is not None for query in queries)
+    return {"credential_generation": payload.get("credential_generation"), "available": available,
+            "read": ({"tool": "guangya.fs.query", "arguments": queries[0] if len(queries) == 1 else {"operation": "reobserve"}}
+                     if available else None), "baseline": baseline}
+
+
 def _store_observation(
     client: GuangYaClient,
     *,
@@ -400,6 +471,7 @@ def _store_observation(
     scanned_dirs: int,
     scanned_items: int,
     entries: list[dict[str, Any]],
+    source_observations: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     entries.sort(
         key=lambda row: (
@@ -412,6 +484,7 @@ def _store_observation(
     plan_id = uuid.uuid4().hex
     for entry in entries:
         entry["handle"] = _handle(plan_id, entry)
+        entry.setdefault("source_observation_ref", observation_ref(plan_id))
     current = time.time()
     payload = {
         "version": _OBSERVATION_VERSION,
@@ -436,6 +509,7 @@ def _store_observation(
         "scanned_dirs": max(0, int(scanned_dirs)),
         "scanned_items": max(0, int(scanned_items)),
         "entries": entries,
+        **({"source_observations": deepcopy(list(source_observations))} if source_observations else {}),
     }
     _atomic_write(payload)
     maintain_workspace_observations(preserve_plan_id=plan_id)
@@ -731,6 +805,7 @@ def load_directory_observation_set(
             continue
     candidates.sort(reverse=True)
     merged_entries = list(primary.get("entries") or ())
+    sources = {item["observation_ref"]: item for item in observation_sources(primary)}
     for _modified_at, candidate_ref in candidates:
         try:
             candidate = load_directory_observation(candidate_ref, owner=owner)
@@ -744,6 +819,8 @@ def load_directory_observation_set(
             if observed is not None:
                 # 保留签名快照中该 entry 自己的 source_root；legacy 缺失时仍未知，
                 # 不能套用 primary.roots 或从展示 scope 推断为全盘范围。
+                observed.setdefault("source_observation_ref", candidate_ref)
+                sources.update({item["observation_ref"]: item for item in observation_sources(candidate)})
                 entries[handle] = observed
                 merged_entries.append(observed)
                 missing.discard(handle)
@@ -753,7 +830,86 @@ def load_directory_observation_set(
         return primary
     merged = dict(primary)
     merged["entries"] = merged_entries
+    merged["source_observations"] = list(sources.values())
     return merged
+
+
+def locate_observed_object(client: GuangYaClient, expected: dict[str, Any], roots: Sequence[dict[str, Any]],
+                           *, cache: dict[str, GuangYaFile | None], check_cancelled: Callable[[], None]) -> dict[str, Any] | None:
+    """只追踪原选中 ID，以有界父链证明仍在原根；不搜索其它对象或全盘。"""
+    def read(file_id: str) -> GuangYaFile | None:
+        check_cancelled()
+        if file_id not in cache:
+            cache[file_id] = client.file_info(file_id)
+        check_cancelled()
+        return cache[file_id]
+
+    file_id = str(expected.get("file_id") or "")
+    current = read(file_id)
+    if current is None or str(current.file_id) != file_id or bool(current.is_dir) != bool(expected.get("is_dir")):
+        return None
+    by_id = {str(root["file_id"]): root for root in roots if root.get("is_dir") is True}
+    parent_id = str(current.parent_id or "0")
+    names = [str(current.name)]
+    visited = {file_id}
+    for _ in range(_MAX_DEPTH + 1):
+        check_cancelled()
+        if parent_id in by_id:
+            root = by_id[parent_id]
+            path = str(root["path"]).rstrip("/") + "/" + "/".join(reversed(names))
+            path = _normalize_path(path)
+            entry = _snapshot(current, parent_path=path.rsplit("/", 1)[0] or "/",
+                              relative_parent=" › ".join(reversed(names[1:])) or "当前目录")
+            entry.update(source_root=deepcopy(root), observed_by="identity")
+            return entry
+        if parent_id == "0" or parent_id in visited:
+            return None
+        visited.add(parent_id)
+        parent = read(parent_id)
+        if parent is None or str(parent.file_id) != parent_id or not parent.is_dir:
+            return None
+        names.append(str(parent.name))
+        parent_id = str(parent.parent_id or "0")
+    return None
+
+
+def merge_directory_observations(client: GuangYaClient, *, owner: str,
+                                 payloads: Sequence[dict[str, Any]], force_new: bool = False,
+                                 preferred_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """新查询结果合并成自包含的签名快照，不依赖中间 OBS 的剩余 TTL。"""
+    if not payloads:
+        raise GuangYaWorkspaceStale("没有成功重新读取的观察")
+    if len(payloads) == 1 and not force_new:
+        return payloads[0]
+    entries = {}
+    roots = {}
+    sources = {}
+    scope_names = [f"来源 {index} · {payload.get('scope_name') or '当前目录'}" for index, payload in enumerate(payloads, 1)]
+    for index, payload in enumerate(payloads):
+        if (payload.get("owner_digest") != organize_operation_owner_digest(owner)
+                or payload.get("credential_generation") != int(client.credential_generation)):
+            raise GuangYaWorkspaceStale("合并观察的会话或账号已变化")
+        for item in payload.get("entries") or ():
+            key = (str(item["file_id"]), str(item.get("parent_id") or "0"), bool(item["is_dir"]))
+            previous = entries.get(key)
+            if previous is not None and any(previous.get(field) != item.get(field)
+                    for field in ("name", "size", "etag", "updated_at")):
+                raise GuangYaWorkspaceStale("重新读取期间同一对象发生变化，请重新核对")
+            entry = deepcopy(item)
+            relative = str(entry.get("relative_parent") or "")
+            entry["relative_parent"] = scope_names[index] + (f" › {relative}" if relative not in {"", "当前目录", "当前对象"} else "")
+            entries[key] = entry
+        for root in payload.get("roots") or ():
+            roots[(str(root["file_id"]), str(root["path"]))] = root
+        sources.update({item["observation_ref"]: item for item in observation_sources(payload)})
+    return _store_observation(client, owner=owner, scope_path="/", scope_name="重新观察的范围",
+        scope_names=scope_names,
+        roots=list(roots.values()), max_items=_MAX_SCANNED_ITEMS, operation="reobserve", recursive=False, query="",
+        truncated=len(entries) > _MAX_SCANNED_ITEMS or any(payload.get("truncated") for payload in payloads),
+        scanned_dirs=sum(int(payload.get("scanned_dirs") or 0) for payload in payloads),
+        scanned_items=sum(int(payload.get("scanned_items") or 0) for payload in payloads),
+        entries=sorted(entries.values(), key=lambda item: str(item["file_id"]) not in preferred_ids)[:_MAX_SCANNED_ITEMS],
+        source_observations=list(sources.values()))
 
 
 def observation_page(

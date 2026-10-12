@@ -12,7 +12,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 from app.agent.confirmation import confirmation_context_fingerprint
 from app.agent.errors import AgentToolError
-from app.agent.guangya_workspace_actions import latest_guangya_observation_ref, validated_reobservation_source
+from app.agent.guangya_workspace_actions import (
+    latest_guangya_observation_ref, validated_reobservation_source,
+    bind_observation_source, reobserved_selection_note,
+)
 from app.agent.models import Evidence, ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import (
     sanitize_public_text,
@@ -26,6 +29,7 @@ from app.clients.guangya import (
     close_guangya_client,
 )
 from app.modules.guangya_workspace import (
+    capture_observation_source,
     GuangYaWorkspaceError,
     GuangYaWorkspaceStale,
     load_directory_observation,
@@ -380,62 +384,6 @@ def _source_fields(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, An
     return {key: deepcopy(value[key]) for key in keys if key in value}
 
 
-def _file_reobservation_source(
-    arguments: dict[str, Any], context: ToolContext,
-    observation: dict[str, Any], selected: list[dict[str, Any]],
-    identity: dict[str, Any],
-) -> dict[str, Any]:
-    baseline = _source_fields(observation, (
-        "scope_path", "scope_name", "scope_names", "operation", "query", "kinds",
-        "max_depth", "recursive", "max_items", "truncated", "scanned_dirs", "scanned_items",
-        "observed_at", "created_at", "created_at_epoch", "expires_at", "expires_at_epoch",
-    ))
-    root_fields = ("file_id", "parent_id", "path", "name", "is_dir")
-    raw_roots = observation.get("roots")
-    roots = [
-        _source_fields(root, root_fields)
-        for root in raw_roots if isinstance(root, dict)
-    ] if isinstance(raw_roots, list) else []
-    baseline.update(
-        observation_ref=identity["observation_ref"], roots=roots,
-        selected=[{
-            **_source_fields(item, (
-                "file_id", "parent_id", "name", "is_dir", "size", "etag", "updated_at",
-                "parent_path", "relative_parent", "source_observation_ref",
-            )),
-            **({"source_root": _source_fields(item["source_root"], root_fields)}
-               if isinstance(item.get("source_root"), dict) else {}),
-            "old_object_ref": str(ref).strip().upper(),
-        } for ref, item in zip(arguments.get("object_refs") or (), selected)],
-    )
-    read = None
-    operation = observation.get("operation")
-    complete_roots = (
-        bool(roots) and len(roots) == len(raw_roots)
-        and all(root.get("file_id") and root.get("path") for root in roots)
-    )
-    if complete_roots and operation == "stat" and observation.get("scope_path"):
-        read = {"tool": "guangya.fs.query", "arguments": {
-            "operation": "stat", "path": observation["scope_path"],
-        }}
-    elif (complete_roots and operation in {"list", "tree", "search"}
-          and all(key in observation for key in ("query", "kinds", "max_depth", "max_items"))):
-        paths = [root["path"] for root in roots]
-        read = {"tool": "guangya.fs.query", "arguments": {
-            "operation": operation,
-            **({"path": paths[0]} if len(paths) == 1 else {"paths": paths}),
-            **_source_fields(observation, ("kinds", "max_depth", "max_items")),
-            **({"query": observation["query"]} if observation.get("query") else {}),
-        }}
-    # 旧多目录 scope_path='/' 不是原 roots；缺失时仅保留基线，不猜重查范围。
-    return {
-        "version": 1, "kind": "guangya_files", "owner": context.owner,
-        "session_id": context.session_id,
-        "credential_generation": identity["credential_generation"],
-        "available": read is not None, "read": read, "baseline": baseline,
-    }
-
-
 def _share_reobservation_source(
     arguments: dict[str, Any], context: ToolContext,
     collection: dict[str, Any], selected: list[dict[str, Any]],
@@ -530,47 +478,6 @@ def _create_snapshot(
     return safe, fingerprint, selected, observation, identity
 
 
-def _reobserved_selection_note(context: ToolContext, *, kind: str, generation: int,
-                               selected: list[dict[str, Any]], arguments: dict[str, Any]) -> str:
-    source = context.reobservation_source
-    if not isinstance(source, dict) or source.get("kind") != kind:
-        return ""
-    if (source.get("owner") != context.owner or source.get("session_id") != context.session_id
-            or source.get("credential_generation") != generation):
-        raise AgentToolError("观察来源的会话或账号已变化，请重新选择", code="observation_scope_changed")
-    old_items = (source.get("baseline") or {}).get("selected") or []
-    key = "file_id" if kind == "guangya_files" else "share_id"
-    old_ids = {str(item.get(key) or ""): item for item in old_items}
-    fresh = [item for item in selected if str(item.get(key) or "") not in old_ids]
-    if kind == "guangya_files":
-        if any(new.get("name") == old.get("name") and new.get("parent_id") == old.get("parent_id")
-               for new in fresh for old in old_items):
-            raise AgentToolError("发现同名但标识不同的对象，不能替代原对象；请重新明确选择", code="observation_selection_changed")
-    elif any(str(new.get(key) or "") not in old_ids and index == old.get("old_index")
-             for index, new in zip(arguments.get("indices") or (), selected) for old in old_items):
-        raise AgentToolError("旧分享序号已指向其它对象，请重新观察并使用稳定标识映射后的新序号", code="observation_selection_changed")
-    if kind == "guangya_files" and any(
-        str(item.get(key) or "") in old_ids
-        and bool(item.get("is_dir")) != bool(old_ids[str(item[key])].get("is_dir")) for item in selected
-    ):
-        raise AgentToolError("原对象类型已变化，不能当作原文件或目录继续，请重新选择", code="observation_selection_changed")
-    fields = (("name", "名称"), ("parent_id", "所在目录"), ("parent_path", "所在路径"),
-              ("size", "大小"), ("etag", "校验信息"), ("updated_at", "修改时间")) if kind == "guangya_files" else (
-              ("title", "标题"), ("status", "状态"), ("expires_at", "有效期"),
-              ("file_count", "文件数量"), ("updated_at", "修改时间"))
-    changed = sorted({label for item in selected if (old := old_ids.get(str(item.get(key) or "")))
-                      for field, label in fields if old.get(field) != item.get(field)})
-    scope_changed = kind == "guangya_files" and any(
-        tuple((old.get("source_root") or {}).get(field) for field in ("file_id", "is_dir", "parent_id"))
-        != tuple((item.get("source_root") or {}).get(field) for field in ("file_id", "is_dir", "parent_id"))
-        for item in selected if (old := old_ids.get(str(item.get(key) or "")))
-    )
-    note = ("这是不同对象的新选择，不是旧对象的刷新；本卡需要独立确认。" if fresh else
-            "对象标识相同，但观察范围已变化；这是新范围的预览，不能视为原范围重新观察成功，仍需新确认。" if scope_changed else
-            "已按稳定标识核对原选中对象；本卡使用新快照，仍需重新确认，不代表旧操作成功。")
-    return note + ("与原快照相比，以下属性有变化或对照信息不足：" + "、".join(changed) + "。" if changed else "")
-
-
 def prepare_create_guangya_share(
     arguments: dict[str, Any], context: ToolContext
 ) -> tuple[ToolResult, str]:
@@ -578,7 +485,7 @@ def prepare_create_guangya_share(
         safe, fingerprint, selected, observation, identity = _create_snapshot(
             arguments, owner=context.owner, verify_live=True
         )
-        note = _reobserved_selection_note(context, kind="guangya_files", generation=identity["credential_generation"],
+        note = reobserved_selection_note(context, kind="guangya_files", generation=identity["credential_generation"],
                                          selected=selected, arguments=arguments)
         safe.pop("credential_generation")
     except Exception as exc:
@@ -587,8 +494,8 @@ def prepare_create_guangya_share(
         True,
         "confirmation_required",
         f"确认后将为 {safe['count']} 个光鸭对象创建分享",
-        effect_metadata={"reobservation_source": _file_reobservation_source(
-            arguments, context, observation, selected, identity,
+        effect_metadata={"reobservation_source": bind_observation_source(
+            capture_observation_source(observation, arguments["object_refs"]), context,
         )},
         data={
             **safe,
@@ -837,7 +744,7 @@ def prepare_revoke_guangya_shares(
 ) -> tuple[ToolResult, str]:
     try:
         safe, fingerprint, selected, collection = _revoke_snapshot(arguments, verify_live=True)
-        note = _reobserved_selection_note(context, kind="guangya_shares", generation=safe["credential_generation"],
+        note = reobserved_selection_note(context, kind="guangya_shares", generation=safe["credential_generation"],
                                          selected=selected, arguments=arguments)
         safe.pop("credential_generation")
     except Exception as exc:

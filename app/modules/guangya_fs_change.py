@@ -21,6 +21,7 @@ from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
 from app.config import PATHS
 from app.modules.guangya_journal import append_guangya_journal
 from app.modules.guangya_workspace import (
+    capture_observation_source,
     GuangYaWorkspaceStale,
     observation_entry_map,
     observation_ref,
@@ -1094,6 +1095,9 @@ def build_fs_change_plan(
         "owner_digest": _owner_digest(owner),
         "credential_generation": int(client.credential_generation),
         "observation_ref": observation_ref(str(observation.get("plan_id") or "")),
+        "observation_source": capture_observation_source(observation, [
+            item["object_ref"] for item in frozen if item.get("object_ref")
+        ]),
         "created_at": _now_iso(),
         "created_at_epoch": current,
         "expires_at_epoch": current + _PLAN_TTL_SECONDS,

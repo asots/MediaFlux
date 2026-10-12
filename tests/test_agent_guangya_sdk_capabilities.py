@@ -635,7 +635,6 @@ class GuangYaShareActionTests(unittest.TestCase):
         context = ToolContext(owner="owner", session_id="session")
         observation_ref = "OBS" + "A" * 32
         object_ref = "OBJ" + "B" * 24
-        observation = {"credential_generation": 9}
         entry = {
             "file_id": "file-1",
             "parent_id": "0",
@@ -645,6 +644,8 @@ class GuangYaShareActionTests(unittest.TestCase):
             "etag": "etag-1",
             "updated_at": 0,
         }
+        observation = {"plan_id": "a" * 32, "credential_generation": 9,
+                       "entries": [{**entry, "handle": object_ref}]}
         normalized = share_actions.guangya_share_create_arguments(
             {
                 "observation_ref": observation_ref,
@@ -660,11 +661,6 @@ class GuangYaShareActionTests(unittest.TestCase):
                 share_actions,
                 "load_directory_observation",
                 return_value=observation,
-            ),
-            mock.patch.object(
-                share_actions,
-                "observation_entry_map",
-                return_value={object_ref: entry},
             ),
             mock.patch.object(share_actions.time, "sleep", return_value=None),
         ):
@@ -727,12 +723,8 @@ class GuangYaShareActionTests(unittest.TestCase):
             mock.patch.object(
                 share_actions,
                 "load_directory_observation",
-                return_value={"credential_generation": 9},
-            ),
-            mock.patch.object(
-                share_actions,
-                "observation_entry_map",
-                return_value={object_ref: entry},
+                return_value={"plan_id": "a" * 32, "credential_generation": 9,
+                              "entries": [{**entry, "handle": object_ref}]},
             ),
         ):
             _preview, fingerprint = share_actions.prepare_create_guangya_share(
@@ -776,12 +768,8 @@ class GuangYaShareActionTests(unittest.TestCase):
             mock.patch.object(
                 share_actions,
                 "load_directory_observation",
-                return_value={"credential_generation": 9},
-            ),
-            mock.patch.object(
-                share_actions,
-                "observation_entry_map",
-                return_value={object_ref: entry},
+                return_value={"plan_id": "a" * 32, "credential_generation": 9,
+                              "entries": [{**entry, "handle": object_ref}]},
             ),
         ):
             _preview, fingerprint = share_actions.prepare_create_guangya_share(
