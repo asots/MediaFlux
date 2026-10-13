@@ -280,6 +280,116 @@ class MediaServerSearchTests(unittest.TestCase):
                     self.assertEqual(call.kwargs["params"]["ParentId"], "tv-library")
                     self.assertEqual(call.kwargs["params"]["IncludeItemTypes"], "Series,Episode")
 
+    def test_recent_media_merges_series_and_episode_using_newest_item(self):
+        payload = {"Items": [
+            {"Id": "series-a", "Name": "测试剧甲", "Type": "Series",
+             "DateCreated": "2026-10-11T12:00:00Z"},
+            {"Id": "episode-b", "Name": "旧单集", "Type": "Episode", "SeriesId": "series-b",
+             "SeriesName": "测试剧乙", "DateCreated": "2026-10-10T12:00:00Z"},
+            {"Id": "series-b", "Name": "测试剧乙", "Type": "Series",
+             "DateCreated": "2026-10-12T12:00:00Z"},
+            {"Id": "episode-a", "Name": "新单集", "Type": "Episode", "SeriesId": "series-a",
+             "SeriesName": "测试剧甲", "DateCreated": "2026-10-13T12:00:00Z"},
+        ]}
+        for client_type in (JellyfinClient, EmbyClient):
+            for media_type in ("all", "tv"):
+                with self.subTest(client=client_type.__name__, media_type=media_type), client_type("http://media.invalid", "token") as client:
+                    client._cached_user_id = "user-1"
+                    if isinstance(client, EmbyClient):
+                        client._cached_server_info = {"ProductName": "Emby", "Version": "4.9"}
+                    with patch.object(client, "_request", return_value=payload):
+                        items = client.recent_media(limit=5, media_type=media_type)
+                    self.assertEqual(
+                        [(item.id, item.series_id, item.type, item.date_added) for item in items],
+                        [("episode-a", "series-a", "Episode", "2026-10-13T12:00:00Z"),
+                         ("series-b", "series-b", "Series", "2026-10-12T12:00:00Z")],
+                    )
+
+    def test_recent_media_fills_distinct_results_across_mixed_series_pages(self):
+        rows = [
+            {"Id": "episode-a", "Name": "单集甲", "Type": "Episode", "SeriesId": "series-a",
+             "DateCreated": "2026-10-13T12:00:00Z"},
+            {"Id": "series-b", "Name": "测试剧乙", "Type": "Series",
+             "DateCreated": "2026-10-12T12:00:00Z"},
+            {"Id": "episode-c", "Name": "单集丙", "Type": "Episode", "SeriesId": "series-c",
+             "DateCreated": "2026-10-11T12:00:00Z"},
+            {"Id": "episode-d", "Name": "单集丁", "Type": "Episode", "SeriesId": "series-d",
+             "DateCreated": "2026-10-10T12:00:00Z"},
+            {"Id": "series-d", "Name": "测试剧丁", "Type": "Series",
+             "DateCreated": "2026-10-09T12:00:00Z"},
+        ] + [
+            {"Id": f"episode-d-{i}", "Name": f"旧单集{i}", "Type": "Episode", "SeriesId": "series-d",
+             "DateCreated": f"2026-10-08T12:00:{59-i:02}Z"}
+            for i in range(25)
+        ] + [{"Id": "series-e", "Name": "测试剧戊", "Type": "Series",
+              "DateCreated": "2026-10-07T12:00:00Z"}]
+        for client_type in (JellyfinClient, EmbyClient):
+            with self.subTest(client=client_type.__name__), client_type("http://media.invalid", "token") as client:
+                client._cached_user_id = "user-1"
+                if isinstance(client, EmbyClient):
+                    client._cached_server_info = {"ProductName": "Emby", "Version": "4.9"}
+                def page(_path, *, params):
+                    offset = params["StartIndex"]
+                    return {"Items": rows[offset:offset + params["Limit"]]}
+                with patch.object(client, "_request", side_effect=page) as request:
+                    items = client.recent_media(limit=5, parent_id="tv-library", media_type="tv")
+                self.assertEqual([item.series_id for item in items], ["series-a", "series-b", "series-c", "series-d", "series-e"])
+                self.assertEqual([item.id for item in items], ["episode-a", "series-b", "episode-c", "episode-d", "series-e"])
+                self.assertEqual(request.call_count, 2)
+                self.assertEqual([call.kwargs["params"]["StartIndex"] for call in request.call_args_list], [0, 30])
+                self.assertEqual([call.kwargs["params"]["Limit"] for call in request.call_args_list], [30, 200])
+                for call in request.call_args_list:
+                    self.assertEqual(call.args[0], "/Users/user-1/Items")
+                    self.assertEqual(call.kwargs["params"]["ParentId"], "tv-library")
+                    self.assertEqual(call.kwargs["params"]["IncludeItemTypes"], "Series,Episode")
+                    self.assertEqual(call.kwargs["params"]["SortBy"], "DateCreated")
+                    self.assertEqual(call.kwargs["params"]["SortOrder"], "Descending")
+
+    def test_recent_media_keeps_same_named_series_with_distinct_ids(self):
+        payload = {"Items": [
+            {"Id": "series-a", "Name": "同名剧", "Type": "Series",
+             "DateCreated": "2026-10-13T12:00:00Z"},
+            {"Id": "series-b", "Name": "同名剧", "Type": "Series",
+             "DateCreated": "2026-10-12T12:00:00Z"},
+            {"Id": "episode-c", "Name": "第1集", "Type": "Episode", "SeriesId": "series-c",
+             "SeriesName": "同名剧", "DateCreated": "2026-10-11T12:00:00Z"},
+            {"Id": "episode-d", "Name": "第1集", "Type": "Episode", "SeriesId": "series-d",
+             "SeriesName": "同名剧", "DateCreated": "2026-10-10T12:00:00Z"},
+        ]}
+        for client_type in (JellyfinClient, EmbyClient):
+            with self.subTest(client=client_type.__name__), client_type("http://media.invalid", "token") as client:
+                client._cached_user_id = "user-1"
+                if isinstance(client, EmbyClient):
+                    client._cached_server_info = {"ProductName": "Emby", "Version": "4.9"}
+                with patch.object(client, "_request", return_value=payload):
+                    items = client.recent_media(limit=5)
+                self.assertEqual([item.id for item in items], ["series-a", "series-b", "episode-c", "episode-d"])
+                self.assertEqual([item.series_id for item in items], ["series-a", "series-b", "series-c", "series-d"])
+
+    def test_recent_media_deduplicates_episodes_without_series_id_by_item_id(self):
+        payload = {"Items": [
+            {"Id": "series-a", "Name": "同名剧", "Type": "Series",
+             "DateCreated": "2026-10-13T12:00:00Z"},
+            {"Id": "episode-a", "Name": "第1集", "Type": "Episode", "SeriesName": "同名剧",
+             "DateCreated": "2026-10-12T12:00:00Z"},
+            {"Id": "episode-b", "Name": "第1集", "Type": "Episode", "SeriesName": "同名剧",
+             "SeriesId": "", "DateCreated": "2026-10-11T12:00:00Z"},
+            {"Id": "episode-c", "Name": "第1集", "Type": "Episode", "SeriesName": "同名剧",
+             "SeriesId": None, "DateCreated": "2026-10-10T12:00:00Z"},
+            {"Id": "episode-a", "Name": "旧单集", "Type": "Episode", "SeriesName": "同名剧",
+             "DateCreated": "2026-10-09T12:00:00Z"},
+        ]}
+        for client_type in (JellyfinClient, EmbyClient):
+            with self.subTest(client=client_type.__name__), client_type("http://media.invalid", "token") as client:
+                client._cached_user_id = "user-1"
+                if isinstance(client, EmbyClient):
+                    client._cached_server_info = {"ProductName": "Emby", "Version": "4.9"}
+                with patch.object(client, "_request", return_value=payload):
+                    items = client.recent_media(limit=5)
+                self.assertEqual([item.id for item in items], ["series-a", "episode-a", "episode-b", "episode-c"])
+                self.assertEqual([item.series_id for item in items], ["series-a", "", "", ""])
+                self.assertEqual(items[1].date_added, "2026-10-12T12:00:00Z")
+
     def test_recent_media_has_bounded_scan_and_surfaces_next_page_failure(self):
         for client_type in (JellyfinClient, EmbyClient):
             with self.subTest(client=client_type.__name__), client_type("http://media.invalid", "token") as client:
@@ -288,6 +398,7 @@ class MediaServerSearchTests(unittest.TestCase):
                     client._cached_server_info = {"ProductName": "Emby", "Version": "4.9"}
                 def page(_path, *, params):
                     return {"Items": [
+                        {"Id": "series-a", "Name": "同一部剧", "Type": "Series"} if i == 0 else
                         {"Id": str(i), "Name": "同一部剧", "Type": "Episode", "SeriesId": "series-a"}
                         for i in range(params.get("StartIndex", 0), params.get("StartIndex", 0) + params["Limit"])
                     ]}

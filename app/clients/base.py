@@ -1138,7 +1138,7 @@ class MediaServerClient:
         }
         if str(parent_id or "").strip():
             params["ParentId"] = str(parent_id).strip()
-        # 单集先去重再补页；普通首屏仍只请求一次，不为最近入库遍历整库。
+        # 按作品 ID 去重再补页；普通首屏仍只请求一次，不为最近入库遍历整库。
         recent: dict[str, dict[str, Any]] = {}
         offset = 0
         while offset < 2000 and len(recent) < normalized_limit:
@@ -1146,7 +1146,7 @@ class MediaServerClient:
             data = self._request(f"/Users/{uid}/Items", params={**params, "StartIndex": offset, "Limit": page_size})
             raw_items, _total = self._items_payload(data)
             for raw in sorted(raw_items, key=lambda row: str(row.get("DateCreated") or ""), reverse=True):
-                key = (f"episode-series:{raw['SeriesId']}"
+                key = (str(raw['SeriesId'])
                        if str(raw.get("Type") or "").casefold() == "episode" and raw.get("SeriesId")
                        else str(raw.get("Id") or ""))
                 if key:
