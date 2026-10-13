@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from copy import deepcopy
@@ -121,6 +122,19 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             return workspace_actions.query_guangya_filesystem(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
+
+    def _create_observation(self, owner="owner"):
+        payload = guangya_workspace.create_directory_observation(
+            FakeWorkspaceClient(),
+            owner=owner,
+            path="/a",
+            recursive=False,
+            max_items=10,
+        )
+        return (
+            guangya_workspace.observation_ref(payload["plan_id"]),
+            guangya_workspace._plan_path(payload["plan_id"]),
+        )
 
     def test_directory_observation_returns_names_and_opaque_refs_without_ids(self):
         result = self._query(FakeWorkspaceClient())
@@ -340,49 +354,179 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             )
 
     def test_expired_observation_is_removed_by_maintenance(self):
-        client = FakeWorkspaceClient()
-        with mock.patch.object(guangya_workspace.time, "time", return_value=1000.0):
-            observed = self._query(client)
-        plan_id = guangya_workspace.observation_plan_id(
-            observed.data["observation_ref"]
-        )
-        self.assertTrue(guangya_workspace._plan_path(plan_id).is_file())
         with mock.patch.object(
-            guangya_workspace.time,
-            "time",
-            return_value=1000.0 + guangya_workspace._OBSERVATION_TTL_SECONDS + 1,
-        ):
-            result = guangya_workspace.maintain_workspace_observations()
-        self.assertEqual(result["removed"], 1)
-        self.assertEqual(result["remaining"], 0)
-        self.assertFalse(guangya_workspace._plan_path(plan_id).exists())
+            guangya_workspace.time, "time", return_value=1000.0
+        ) as clock:
+            observations = [self._create_observation(), self._create_observation()]
+            stored = {path: path.read_bytes() for _ref, path in observations}
+            expiry = 1000.0 + 10 * 60  # 固定 10 分钟 TTL，维护不能续期。
+            clock.return_value = expiry - 1
+            result = guangya_workspace.maintain_workspace_observations(
+                preserve_plan_id=observations[-1][1].stem
+            )
+            self.assertEqual(result["removed"], 0)
+            for ref, path in observations:
+                payload = guangya_workspace.load_directory_observation(
+                    ref, owner="owner"
+                )
+                self.assertEqual(payload["expires_at_epoch"], expiry)
+                self.assertEqual(path.read_bytes(), stored[path])
+
+            clock.return_value = expiry
+            ref, path = observations[0]
+            with self.assertRaisesRegex(
+                guangya_workspace.GuangYaWorkspaceStale, "已过期"
+            ):
+                guangya_workspace.load_directory_observation(ref, owner="owner")
+            self.assertFalse(path.exists())
+            # 保留标记只豁免容量淘汰，不能延长 TTL。
+            result = guangya_workspace.maintain_workspace_observations(
+                preserve_plan_id=observations[-1][1].stem
+            )
+            self.assertEqual(result, {"removed": 1, "remaining": 0, "bytes": 0})
+            self.assertFalse(observations[-1][1].exists())
 
     def test_observation_capacity_is_fair_per_owner(self):
-        client = FakeWorkspaceClient()
-        owner_a_refs = []
-        for _ in range(guangya_workspace._MAX_OBSERVATIONS_PER_OWNER + 2):
-            payload = guangya_workspace.create_directory_observation(
-                client, owner="owner-a", path="/a", recursive=False, max_items=10
+        with mock.patch.object(
+            guangya_workspace.time, "time", return_value=1000.0
+        ) as clock:
+            owner_b_ref, owner_b_path = self._create_observation("owner-b")
+            clock.return_value = 1001.0
+            old_a_ref, old_a_path = self._create_observation("owner-a")
+            clock.return_value = 1002.0
+            new_a_ref, new_a_path = self._create_observation("owner-a")
+            owner_budget = max(old_a_path.stat().st_size, new_a_path.stat().st_size)
+            global_budget = sum(
+                path.stat().st_size for path in (owner_b_path, old_a_path, new_a_path)
             )
-            owner_a_refs.append(guangya_workspace.observation_ref(payload["plan_id"]))
-        owner_b = guangya_workspace.create_directory_observation(
-            client, owner="owner-b", path="/a", recursive=False, max_items=10
-        )
-        owner_b_ref = guangya_workspace.observation_ref(owner_b["plan_id"])
-        self.assertEqual(
-            guangya_workspace.load_directory_observation(owner_b_ref, owner="owner-b")[
-                "plan_id"
-            ],
-            owner_b["plan_id"],
-        )
-        remaining_a = 0
-        for ref in owner_a_refs:
-            try:
-                guangya_workspace.load_directory_observation(ref, owner="owner-a")
-            except guangya_workspace.GuangYaWorkspaceError:
-                continue
-            remaining_a += 1
-        self.assertLessEqual(remaining_a, guangya_workspace._MAX_OBSERVATIONS_PER_OWNER)
+            with (
+                mock.patch.object(
+                    guangya_workspace, "_MAX_OWNER_STORAGE_BYTES", owner_budget
+                ),
+                mock.patch.object(
+                    guangya_workspace, "_MAX_STORAGE_BYTES", global_budget
+                ),
+            ):
+                result = guangya_workspace.maintain_workspace_observations()
+
+            self.assertEqual(
+                result,
+                {
+                    "removed": 1,
+                    "remaining": 2,
+                    "bytes": owner_b_path.stat().st_size + new_a_path.stat().st_size,
+                },
+            )
+            with self.assertRaises(guangya_workspace.GuangYaWorkspaceError):
+                guangya_workspace.load_directory_observation(old_a_ref, owner="owner-a")
+            # owner-b 的观察更老，但仅 owner-a 超出字节预算，不能牵连其它 owner。
+            for ref, path, owner in (
+                (owner_b_ref, owner_b_path, "owner-b"),
+                (new_a_ref, new_a_path, "owner-a"),
+            ):
+                self.assertEqual(
+                    guangya_workspace.load_directory_observation(ref, owner=owner)[
+                        "plan_id"
+                    ],
+                    path.stem,
+                )
+            self.assertLessEqual(new_a_path.stat().st_size, owner_budget)
+
+    def test_global_byte_budget_evicts_oldest_observation_across_owners(self):
+        with mock.patch.object(
+            guangya_workspace.time, "time", return_value=1000.0
+        ) as clock:
+            observations = []
+            for index, owner in enumerate(("owner-a", "owner-b", "owner-c")):
+                clock.return_value = 1000.0 + index
+                observations.append((owner, *self._create_observation(owner)))
+            total_bytes = sum(
+                path.stat().st_size for _owner, _ref, path in observations
+            )
+            budget = sum(path.stat().st_size for _owner, _ref, path in observations[1:])
+            with (
+                mock.patch.object(
+                    guangya_workspace, "_MAX_OWNER_STORAGE_BYTES", total_bytes
+                ),
+                mock.patch.object(guangya_workspace, "_MAX_STORAGE_BYTES", budget),
+            ):
+                result = guangya_workspace.maintain_workspace_observations()
+                self.assertEqual(
+                    result, {"removed": 1, "remaining": 2, "bytes": budget}
+                )
+                self.assertEqual(
+                    guangya_workspace.maintain_workspace_observations(),
+                    {"removed": 0, "remaining": 2, "bytes": budget},
+                )
+            owner, ref, path = observations[0]
+            self.assertFalse(path.exists())
+            with self.assertRaises(guangya_workspace.GuangYaWorkspaceError):
+                guangya_workspace.load_directory_observation(ref, owner=owner)
+            for owner, ref, path in observations[1:]:
+                self.assertEqual(
+                    guangya_workspace.load_directory_observation(ref, owner=owner)[
+                        "plan_id"
+                    ],
+                    path.stem,
+                )
+
+    def test_new_observation_is_preserved_under_byte_pressure(self):
+        for limit in ("_MAX_OWNER_STORAGE_BYTES", "_MAX_STORAGE_BYTES"):
+            with (
+                self.subTest(limit=limit),
+                mock.patch.object(
+                    guangya_workspace, "_directory", return_value=self.obs_dir / limit
+                ),
+                mock.patch.object(
+                    guangya_workspace.time, "time", return_value=1001.0
+                ) as clock,
+            ):
+                _old_ref, old_path = self._create_observation()
+                budget = old_path.stat().st_size
+                # 模拟时钟回拨：刚写入的观察排序更老，仍必须被 preserve 保护。
+                clock.return_value = 1000.0
+                with mock.patch.object(guangya_workspace, limit, budget):
+                    new_ref, new_path = self._create_observation()
+                self.assertFalse(old_path.exists())
+                self.assertEqual(list(new_path.parent.glob("*.json")), [new_path])
+                self.assertEqual(
+                    guangya_workspace.load_directory_observation(
+                        new_ref, owner="owner"
+                    )["plan_id"],
+                    new_path.stem,
+                )
+
+    def test_maintenance_keeps_valid_signatures_and_removes_tampered_observations(self):
+        with mock.patch.object(guangya_workspace.time, "time", return_value=1000.0):
+            valid_ref, valid_path = self._create_observation()
+            tampered_ref, tampered_path = self._create_observation()
+            original = valid_path.read_bytes()
+            tampered = json.loads(tampered_path.read_text(encoding="utf-8"))
+            tampered["entries"][0]["name"] = "tampered.mp4"
+            # 不重新签名，确保维护后的读取仍校验内容完整性。
+            tampered_path.write_text(
+                json.dumps(tampered, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                guangya_workspace.GuangYaWorkspaceError, "校验失败"
+            ):
+                guangya_workspace.load_directory_observation(
+                    tampered_ref, owner="owner"
+                )
+            result = guangya_workspace.maintain_workspace_observations(
+                preserve_plan_id=tampered_path.stem
+            )
+            self.assertEqual(
+                result, {"removed": 1, "remaining": 1, "bytes": len(original)}
+            )
+            self.assertFalse(tampered_path.exists())
+            self.assertEqual(valid_path.read_bytes(), original)
+            self.assertEqual(
+                guangya_workspace.load_directory_observation(valid_ref, owner="owner")[
+                    "plan_id"
+                ],
+                valid_path.stem,
+            )
 
     def test_stale_observation_save_discards_only_new_snapshot(self):
         client = FakeWorkspaceClient()

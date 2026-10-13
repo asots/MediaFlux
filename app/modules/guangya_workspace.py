@@ -35,8 +35,8 @@ _MAX_SCANNED_DIRS = 500
 _MAX_DEPTH = 12
 _MAX_PLAN_BYTES = 8 * 1024 * 1024
 _MAX_STORAGE_BYTES = 64 * 1024 * 1024
-_MAX_OBSERVATIONS = 32
-_MAX_OBSERVATIONS_PER_OWNER = 4
+_MAX_OWNER_STORAGE_BYTES = 32 * 1024 * 1024
+_MAX_OBSERVATION_SOURCES = 32
 _MAX_PAGE_SIZE = 50
 _SAFE_PLAN_ID = re.compile(r"^[0-9a-f]{32}$")
 _SAFE_OBSERVATION_REF = re.compile(r"^OBS[0-9A-F]{32}$")
@@ -258,20 +258,17 @@ def maintain_workspace_observations(
         total_bytes = max(0, total_bytes - size)
         removed += 1
 
-    owner_digests = {row[3] for row in rows if row[3]}
-    for owner_digest in owner_digests:
-        owner_rows = [row for row in rows if row[3] == owner_digest]
-        while len(owner_rows) > _MAX_OBSERVATIONS_PER_OWNER:
-            victim = next(
-                (row for row in owner_rows if row[1] != preserved),
-                None,
-            )
-            if victim is None:
-                break
-            remove_row(victim)
-            owner_rows.remove(victim)
+    # 查询数量不等于占用：连续 list/stat 的小观察仍可能被后续计划引用。
+    # 在原有 10 分钟 TTL 内按实际字节回收，单 owner 不挤占全局预算。
+    owner_bytes: dict[str, int] = {}
+    for row in rows:
+        owner_bytes[row[3]] = owner_bytes.get(row[3], 0) + row[2]
+    for row in tuple(rows):
+        if row[1] != preserved and owner_bytes[row[3]] > _MAX_OWNER_STORAGE_BYTES:
+            owner_bytes[row[3]] -= row[2]
+            remove_row(row)
 
-    while rows and (len(rows) > _MAX_OBSERVATIONS or total_bytes > _MAX_STORAGE_BYTES):
+    while rows and total_bytes > _MAX_STORAGE_BYTES:
         victim = next((row for row in rows if row[1] != preserved), None)
         if victim is None:
             break
@@ -401,7 +398,7 @@ def observation_sources(payload: dict[str, Any]) -> list[dict[str, Any]]:
         source["roots"] = ([{key: deepcopy(root[key]) for key in _ROOT_FIELDS if key in root}
                             for root in roots] if isinstance(roots, list) and all(isinstance(root, dict) for root in roots) else [])
         sources[source["observation_ref"]] = source
-    if len(sources) > _MAX_OBSERVATIONS:
+    if len(sources) > _MAX_OBSERVATION_SOURCES:
         raise GuangYaWorkspaceError("观察来源过多，请缩小范围后重新读取")
     return list(sources.values())
 

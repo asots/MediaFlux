@@ -1282,6 +1282,32 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(result.status, "confirmation_required")
         self.assertEqual(result.data["total"], 1)
 
+    def test_eight_directory_reads_keep_earlier_refs_for_one_combined_plan(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(GuangYaFile("backup", "backup", True, parent_id="0", etag="b"))
+        client.directories["backup"] = []
+        client.directories["trash"] = [GuangYaFile("deep", "deep", True, parent_id="trash", etag="d")]
+        client.directories["deep"] = [GuangYaFile("draft", "draft.txt", False, parent_id="deep", size=10, etag="f")]
+        reads = [self._query(client, path=path) for path in
+                 ("/", "/source", "/backup", "/source/垃圾残余", "/target", "/source", "/source/垃圾残余/deep", "/source/垃圾残余/deep")]
+        source_ref = reads[1].data["scope_objects"][0]["object_ref"]
+        raw_ref = next(x["object_ref"] for x in reads[1].data["entries"] if x["object_name"] == "垃圾残余")
+        file_ref = reads[-1].data["entries"][0]["object_ref"]
+        for primary in (reads[1], reads[-1]):
+            with self.subTest(primary=primary.data["scope"]):
+                arguments = change_actions.guangya_fs_change_arguments({
+                    "observation_ref": primary.data["observation_ref"], "trigger_strm": False,
+                    "operations": [{"op": "copy", "object_ref": raw_ref, "target_path": "/backup"},
+                                   {"op": "rename", "object_ref": file_ref, "new_name": "final.txt"},
+                                   {"op": "move", "object_ref": source_ref, "target_path": "/target"}]})
+                with mock.patch.object(change_actions, "GuangYaClient", return_value=client):
+                    result, _ = change_actions.prepare_guangya_fs_change_confirmation(arguments, ToolContext(owner="owner", session_id="session"))
+                self.assertTrue(result.ok)
+                self.assertEqual(result.status, "confirmation_required")
+                self.assertEqual(result.data["total"], 3)
+        self.assertEqual(client.file_info("draft").name, "draft.txt", "预览不能写入")
+        self.assertEqual(client.file_info("source").parent_id, "0")
+
     def test_preview_arguments_accept_full_season_batch(self):
         operations = [
             {
