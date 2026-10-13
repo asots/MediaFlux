@@ -441,6 +441,40 @@ class AgentKernelBrowserTests(unittest.TestCase):
                 self.assertTrue(any("查询进行中" in text for text in snapshots))
                 self.assertEqual(page.locator(".agent-narrative").inner_text(), "完整回答已取得")
 
+    def test_tool_boundary_flushes_buffered_markdown_with_animation_frames_paused(self) -> None:
+        page = self.make_page({"sessions": {"sessions": []}, "queryDelayMs": 80, "queryEvents": [
+            _event(1, "turn.started", {"kind": "query"}),
+            _event(2, "model.started", {"round": 1}),
+            _event(3, "model.delta", {"round": 1, "delta": "**工具前"}),
+            _event(4, "model.delta", {"round": 1, "delta": "的正文"}),
+            _event(5, "model.tool_call", {"call_id": "call-1", "tool": "library.search", "label": "工具阶段：媒体库查询"}),
+            _event(6, "tool.started", {"call_id": "call-1", "tool": "library.search", "label": "工具阶段：媒体库查询"}),
+            _event(7, "model.started", {"round": 2}),
+            _event(8, "model.delta", {"round": 2, "delta": "新一轮草稿"}),
+            _event(9, "turn.completed", {"status": "success", "answer": "权威最终答案"}),
+        ]})
+        page.evaluate("""() => {
+            const frames = new Map(); let next = 0;
+            window.requestAnimationFrame = callback => { frames.set(++next, callback); return next; };
+            window.cancelAnimationFrame = id => frames.delete(id);
+            window.__resumeFrames = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(performance.now())); };
+            window.__boundaryBodies = [];
+            new MutationObserver(() => {
+                const card = document.querySelector('.agent-result-card');
+                if (card?.querySelector('.agent-stream-head')?.textContent.includes('工具阶段：媒体库查询')) {
+                    window.__boundaryBodies.push(card.querySelector('.agent-stream-text')?.textContent || '');
+                }
+            }).observe(document.querySelector('#agentTranscript'), {childList: true, characterData: true, subtree: true});
+        }""")
+        page.locator("#agentPrompt").fill("查询媒体库")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.wait_for_function("() => document.querySelector('.agent-narrative')?.textContent === '权威最终答案'", polling=20)
+        snapshots = page.evaluate("window.__boundaryBodies")
+        self.assertTrue(snapshots)
+        self.assertTrue(all(body.strip() == "工具前的正文" for body in snapshots), snapshots)
+        page.evaluate("window.__resumeFrames()")
+        self.assertEqual(page.locator(".agent-narrative").inner_text(), "权威最终答案")
+
     def test_tool_call_preserves_streamed_body_until_terminal_replaces_draft(self) -> None:
         events = [
             _event(1, "turn.started", {"kind": "query"}),

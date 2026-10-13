@@ -813,7 +813,7 @@
             const shouldFollow = transcriptNearBottom();
             turn.markdownTimer = null;
             turn.markdownFrame = null;
-            replaceRichText(turn.text, immediate ? turn.pendingMarkdown : normalizeStreamingMarkdown(turn.pendingMarkdown));
+            replaceRichText(turn.text, normalizeStreamingMarkdown(turn.pendingMarkdown));
             turn.lastMarkdownRender = performance.now();
             if (shouldFollow) scrollToBottom(true);
         };
@@ -869,6 +869,10 @@
 
     function setTurnStatus(turn, label, iconName = 'loader-circle') {
         if (!turn?.head) return;
+        // 阶段切换先提交已收到的正文；正文不能依赖可能暂停的动画帧才追上状态。
+        if (turn.markdownTimer !== null || turn.markdownFrame !== null) {
+            renderTurnMarkdown(turn, turn.pendingMarkdown, {immediate: true});
+        }
         if (!turn.headText?.isConnected) {
             turn.head.replaceChildren(icon(iconName), element('span', '', label));
             turn.headText = turn.head.querySelector('span');
