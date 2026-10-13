@@ -1488,7 +1488,7 @@ def _apply_fs_operation(
                 client.move([str(source["file_id"])], _directory_id(item, created_targets))
             elif action == "copy":
                 task_id = client.copy([str(source["file_id"])], _directory_id(item, created_targets))
-                if source["is_dir"] and task_id:
+                if task_id:
                     copy_tasks[str(outcome["position"])] = task_id
                     checkpoint()  # 保留已受理任务；中断恢复仅读查询，不再次复制。
 
@@ -1582,11 +1582,13 @@ def _reconcile_fs_operations(client, operations, outcomes, created_targets, stat
         # 新建/复制的同名对象不是身份凭据；原位置消失也不证明已进回收站。
         verifiable &= item["op"] != "create_directory" or bool(created_id)
         copy_task_id = copy_tasks.get(str(outcome["position"]), "")
-        directory_copy = item["op"] == "copy" and (item.get("source") or {}).get("is_dir")
-        verifiable = bool(copy_task_id) if directory_copy else verifiable
+        if item["op"] == "copy":
+            # 旧同步回执可核验；未知复制只有已落盘的任务编号才能追踪，不能凭同名副本补认成功。
+            verifiable = bool(copy_task_id) or status == "completed"
         try:
             verified = verifiable and _verify_after(client, item, created_id, created_targets=created_targets,
-                                                   copy_task_id=copy_task_id, cancel_check=cancel_check)
+                                                   copy_task_id=copy_task_id if status != "completed" else "",
+                                                   cancel_check=cancel_check)
         except GuangYaFSCopyPending:
             waiting_copies.add(outcome["position"])
             verified = False
@@ -1982,7 +1984,7 @@ def execute_fs_change_plan(
                 # provider 可能在连接中断前已经接受写入。若冻结后置条件成立，
                 # 则不能再把它算成“失败后可重试”；trash 同时标记审计缺口。
                 applied = False
-                if provider_write_started and (op != "copy" or not source.get("is_dir") or copy_tasks.get(str(index))):
+                if provider_write_started and (op != "copy" or copy_tasks.get(str(index))):
                     try:
                         applied = _verify_after(
                             client,

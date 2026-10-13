@@ -202,68 +202,87 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
         from app.repositories.organize_operation_jobs import CLOUD_COPY_PENDING_CODE
         from tests.test_agent_guangya_fs_gateway import FakeGatewayClient
 
-        client = FakeGatewayClient()
-        with mock.patch.object(workspace, "_directory", return_value=Path(self.temp.name) / "observations"):
-            observation = workspace.create_directory_observation(client, owner="queue-owner", path="/", recursive=True)
-            refs = {row["file_id"]: row["handle"] for row in observation["entries"]}
-            plan = guangya_fs_change.build_fs_change_plan(client, owner="queue-owner", observation=observation,
-                operations=[{"op": "copy", "object_ref": refs["trash"], "target_path": "/target"},
-                            {"op": "move", "object_ref": refs["source"], "target_path": "/target"}], trigger_strm=False)
-        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="queue-owner", expected_fingerprint=plan["fingerprint"])
-        queued, _ = self._enqueue(plan)
-        job_id = queued["job_id"]
-        public_ref = organize_operation_public_ref(job_id)
-        payload = json.loads(queued["payload_json"])
-        first_manager = None
+        for source_id in ("trash", "move"):
+            with self.subTest(object_type="directory" if source_id == "trash" else "file"):
+                client = FakeGatewayClient()
+                with mock.patch.object(workspace, "_directory", return_value=Path(self.temp.name) / "observations"):
+                    observation = workspace.create_directory_observation(client, owner="queue-owner", path="/", recursive=True)
+                    refs = {row["file_id"]: row["handle"] for row in observation["entries"]}
+                    plan = guangya_fs_change.build_fs_change_plan(client, owner="queue-owner", observation=observation,
+                        operations=[{"op": "copy", "object_ref": refs[source_id], "target_path": "/target"},
+                                    {"op": "move", "object_ref": refs["source"], "target_path": "/target"}], trigger_strm=False)
+                guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="queue-owner", expected_fingerprint=plan["fingerprint"])
+                queued, _ = self._enqueue(plan)
+                job_id = queued["job_id"]
+                public_ref = organize_operation_public_ref(job_id)
+                payload = json.loads(queued["payload_json"])
 
-        def run(row):
-            manager = OrganizeTaskManager()
-            manager._lock = threading.Lock()
-            manager._lock.acquire()
-            manager._worker = object()
-            manager._task = {"id": job_id, "status": "running", "durable": True, "owner_digest": row["owner_digest"]}
-            with mock.patch.object(manager, "_wake_download_tracker"), \
-                 mock.patch.object(manager, "_execute_durable_operation", side_effect=lambda _row:
-                     guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=row["lease_generation"])):
-                manager._run_durable_operation(dict(row))
-            self.assertIsNone(manager._worker)
-            self.assertTrue(manager._lock.acquire(blocking=False), "waiting must release the organizer write lock")
-            manager._lock.release()
-            return manager
+                def run(row):
+                    manager = OrganizeTaskManager()
+                    manager._lock = threading.Lock()
+                    manager._lock.acquire()
+                    manager._worker = object()
+                    manager._task = {"id": job_id, "status": "running", "durable": True, "owner_digest": row["owner_digest"]}
+                    with mock.patch.object(manager, "_wake_download_tracker"), \
+                         mock.patch.object(manager, "_execute_durable_operation", side_effect=lambda _row:
+                             guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=row["lease_generation"])):
+                        manager._run_durable_operation(dict(row))
+                    self.assertIsNone(manager._worker)
+                    self.assertTrue(manager._lock.acquire(blocking=False), "waiting must release the organizer write lock")
+                    manager._lock.release()
+                    return manager
 
-        with mock.patch.object(client, "copy", wraps=client.copy) as copied, \
-             mock.patch.object(client, "task_status", return_value={"data": {"status": 1}}) as task_status, \
-             mock.patch.object(guangya_fs_change, "_COPY_FOREGROUND_ATTEMPTS", 1):
-            first_manager = run(claim_organize_operation_job(job_id))
-            waiting = get_organize_operation_job(job_id)
-            self.assertEqual(waiting["status"], "pending")
-            self.assertEqual(waiting["error_code"], CLOUD_COPY_PENDING_CODE)
-            self.assertIsNone(waiting["finished_at"])
-            self.assertEqual(waiting["expires_at"], queued["expires_at"])
-            self.assertEqual(waiting["payload_json"], queued["payload_json"])
-            self.assertIsNone(claim_organize_operation_job())
-            self.assertEqual(first_manager.task_result(public_ref, owner="queue-owner")["status"], "queued")
-            # 复制在云端运行时，另一个普通任务可以领取，不被等待队首占锁。
-            other, _ = enqueue_organize_operation_job(job_kind="directory_scrape", owner="queue-owner",
-                operation="independent", reference="", payload={}, dedupe_key="independent")
-            claimed_other = claim_organize_operation_job()
-            self.assertEqual(claimed_other["job_id"], other["job_id"])
-            finish_organize_operation_job(other["job_id"], expected_lease_generation=claimed_other["lease_generation"], status="completed")
-            for generation in (2, 3):
-                with database.get_conn() as conn:
-                    conn.execute("UPDATE organize_operation_jobs SET updated_at='2000-01-01 00:00:00' WHERE job_id=?", (job_id,))
-                if generation == 3: task_status.return_value = {"data": {"status": 2}}
-                claimed = claim_organize_operation_job(job_id)
-                self.assertEqual(claimed["lease_generation"], generation)
-                run(claimed)
-            copied.assert_called_once_with(["trash"], "target")
-        finished = get_organize_operation_job(job_id)
-        self.assertEqual(finished["status"], "completed")
-        self.assertEqual(client.file_info("source").parent_id, "target")
-        self.assertEqual(json.loads(finished["result_json"])["stats"]["copied"], 1)
-        # 原manager的queued缓存不能遮住另一worker已落盘的终态。
-        self.assertEqual(first_manager.task_result(public_ref, owner="queue-owner")["status"], "completed")
-        self.assertNotIn("copy-task-", finished["result_json"])
+                with mock.patch.object(client, "copy", wraps=client.copy) as copied, \
+                     mock.patch.object(client, "move", wraps=client.move) as moved, \
+                     mock.patch.object(client, "task_status", return_value={"data": {"status": 1}}) as task_status, \
+                     mock.patch.object(guangya_fs_change, "_COPY_FOREGROUND_ATTEMPTS", 1):
+                    first_manager = run(claim_organize_operation_job(job_id))
+                    waiting = get_organize_operation_job(job_id)
+                    self.assertEqual(waiting["status"], "pending")
+                    self.assertEqual(waiting["error_code"], CLOUD_COPY_PENDING_CODE)
+                    self.assertIsNone(waiting["finished_at"])
+                    self.assertEqual(waiting["expires_at"], queued["expires_at"])
+                    self.assertEqual(waiting["payload_json"], queued["payload_json"])
+                    self.assertEqual(json.loads(waiting["result_json"])["stats"]["copied"], 0)
+                    self.assertEqual(client.file_info("source").parent_id, "0")
+                    moved.assert_not_called()
+                    checkpoint = guangya_fs_change._read_fs_checkpoints(guangya_fs_change._read(plan["plan_id"]))
+                    task_id = checkpoint["copy_tasks"]["1"]
+                    self.assertTrue(task_id)
+                    task_status.assert_called_with(task_id)
+                    self.assertIsNone(claim_organize_operation_job())
+                    self.assertEqual(first_manager.task_result(public_ref, owner="queue-owner")["status"], "queued")
+                    # 复制在云端运行时，另一个普通任务可以领取，不被等待队首占锁。
+                    other, _ = enqueue_organize_operation_job(job_kind="directory_scrape", owner="queue-owner",
+                        operation="independent", reference="", payload={}, dedupe_key=f"independent:{source_id}")
+                    claimed_other = claim_organize_operation_job()
+                    self.assertEqual(claimed_other["job_id"], other["job_id"])
+                    finish_organize_operation_job(other["job_id"], expected_lease_generation=claimed_other["lease_generation"], status="completed")
+                    for generation in (2, 3):
+                        with database.get_conn() as conn:
+                            conn.execute("UPDATE organize_operation_jobs SET updated_at='2000-01-01 00:00:00' WHERE job_id=?", (job_id,))
+                        if generation == 3: task_status.return_value = {"data": {"status": 2}}
+                        claimed = claim_organize_operation_job(job_id)
+                        self.assertEqual(claimed["lease_generation"], generation)
+                        run(claimed)
+                        if generation == 2:
+                            still_waiting = get_organize_operation_job(job_id)
+                            self.assertEqual(still_waiting["status"], "pending")
+                            self.assertEqual(still_waiting["error_code"], CLOUD_COPY_PENDING_CODE)
+                            self.assertIsNone(still_waiting["finished_at"])
+                            self.assertEqual(json.loads(still_waiting["result_json"])["stats"]["copied"], 0)
+                            moved.assert_not_called()
+                    copied.assert_called_once_with([source_id], "target")
+                    moved.assert_called_once_with(["source"], "target")
+                    self.assertGreaterEqual(task_status.call_count, 3)
+                    self.assertTrue(all(call.args == (task_id,) for call in task_status.call_args_list))
+                finished = get_organize_operation_job(job_id)
+                self.assertEqual(finished["status"], "completed")
+                self.assertEqual(client.file_info("source").parent_id, "target")
+                self.assertEqual(json.loads(finished["result_json"])["stats"]["copied"], 1)
+                # 原manager的queued缓存不能遮住另一worker已落盘的终态。
+                self.assertEqual(first_manager.task_result(public_ref, owner="queue-owner")["status"], "completed")
+                self.assertNotIn("copy-task-", finished["result_json"])
 
     def test_owner_purge_cannot_be_undone_by_running_or_finished_worker_cache(self):
         queued, _ = self._enqueue(self._confirmed_plan())
