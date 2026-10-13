@@ -51,6 +51,9 @@ async def execute(schema, arguments, trace):
 
 
 @pytest.mark.parametrize("name,arguments", [
+    ("discovery.watchlist_summaries", {"mode": "statistics", "before_number": 12}),
+    ("discovery.watchlist_summaries", {"mode": "statistics", "before_number": None}),
+    ("discovery.watchlist_summaries", {"mode": "stats"}),
     ("agent.capabilities", {"query": "status", "tool_names": ["library.status"]}),
     ("rss.refresh_subscriptions", {"subscription_ids": [1], "scope": "all_configured"}),
     ("library.check_updates", {}),
@@ -77,6 +80,11 @@ def test_actual_catalog_rejects_before_domain_or_execution(name, arguments):
 
 
 @pytest.mark.parametrize("name,arguments", [
+    ("discovery.watchlist_summaries", {}),
+    ("discovery.watchlist_summaries", {"mode": "statistics"}),
+    ("discovery.watchlist_summaries", {"mode": "list"}),
+    ("discovery.watchlist_summaries", {"before_number": 12}),
+    ("discovery.watchlist_summaries", {"mode": "list", "before_number": 12}),
     ("agent.capabilities", {}),
     ("agent.capabilities", {"query": "status"}),
     ("rss.refresh_subscriptions", {"subscription_ids": [1]}),

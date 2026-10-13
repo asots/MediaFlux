@@ -320,3 +320,17 @@ def list_media_watchlist(
             f"SELECT * FROM media_watchlist{where} ORDER BY id DESC LIMIT ?",
             parameters,
         ).fetchall()
+
+
+def get_media_watchlist_statistics() -> list[sqlite3.Row]:
+    """单次只读查询计算全库及各类型数量，并取各类型编号最新的三项。"""
+    with _database().get_conn() as conn:
+        return conn.execute(
+            "SELECT id,provider,media_type,title,year,total,type_count FROM ("
+            "SELECT id,provider,media_type,title,year,"
+            "COUNT(*) OVER () AS total,"
+            "COUNT(*) OVER (PARTITION BY media_type) AS type_count,"
+            "ROW_NUMBER() OVER (PARTITION BY media_type ORDER BY id DESC) AS type_rank "
+            "FROM media_watchlist"
+            ") WHERE type_rank <= 3 ORDER BY media_type,id DESC"
+        ).fetchall()

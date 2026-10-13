@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from app import database as db
@@ -57,11 +58,13 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         agent_rate_limiter.reset()
 
     @staticmethod
-    def _insert(*, external_id: str = "100", title: str = "收藏影片") -> int:
+    def _insert(
+        *, external_id: str = "100", title: str = "收藏影片", media_type: str = "movie"
+    ) -> int:
         db.add_media_watchlist(
-            "tmdb", external_id, "movie", title, "2026", "PRIVATE_POSTER_KEY"
+            "tmdb", external_id, media_type, title, "2026", "PRIVATE_POSTER_KEY"
         )
-        row = db.get_media_watchlist("tmdb", external_id, "movie")
+        row = db.get_media_watchlist("tmdb", external_id, media_type)
         return int(row["id"])
 
     def test_read_summaries_only_expose_public_fields(self) -> None:
@@ -167,8 +170,11 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
     def test_watchlist_cursor_contract_is_exposed_and_validated(self) -> None:
         service = get_agent_service()
         tool = service.pipeline.catalog.get("discovery.watchlist_summaries")
-        self.assertEqual(set(tool.input_schema["properties"]), {"before_number"})
+        self.assertEqual(set(tool.input_schema["properties"]), {"mode", "before_number"})
         self.assertFalse(tool.input_schema["additionalProperties"])
+        self.assertEqual(tool.input_schema["properties"]["mode"]["enum"], ["list", "statistics"])
+        self.assertEqual(tool.input_schema["properties"]["mode"]["default"], "list")
+        self.assertIn("不需要逐页统计", tool.description)
         cursor_description = tool.input_schema["properties"]["before_number"]["description"]
         for description in (tool.description, cursor_description):
             self.assertIn("已返回", description)
@@ -181,6 +187,233 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         for arguments in ({"before_number": True}, {"before_number": 0}, {"before_number": "12"}, {"before_number": None}, {"offset": 20}):
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
                 watchlist_summaries_arguments(arguments)
+
+    def test_watchlist_statistics_arguments_match_schema(self) -> None:
+        from app.agent.kernel.pipeline import ToolPipelineError, _validate_json_schema
+
+        schema = get_agent_service().pipeline.catalog.get("discovery.watchlist_summaries").input_schema
+        for arguments in (
+            {}, {"mode": "list"}, {"before_number": 12},
+            {"mode": "list", "before_number": 12}, {"mode": "statistics"},
+        ):
+            with self.subTest(arguments=arguments):
+                _validate_json_schema(arguments, schema)
+                self.assertEqual(watchlist_summaries_arguments(arguments), arguments)
+        invalid_arguments = [
+            {"mode": "statistics", "before_number": value}
+            for value in (12, True, 0, "12", None)
+        ] + [
+            {"mode": value} for value in ("stats", " statistics ", "STATISTICS", "", True, 1, None, [], {})
+        ] + [
+            {"mode": "statistics", "limit": 3}, {"before_number": 2_147_483_648},
+            {"before_number": True}, {"before_number": None}, {"before_number": "12"},
+            {"before_number": 0}, {"offset": 20},
+        ]
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(AgentToolError):
+                    watchlist_summaries_arguments(arguments)
+                with self.assertRaises(ToolPipelineError) as error:
+                    _validate_json_schema(arguments, schema)
+                self.assertEqual(error.exception.code, "invalid_arguments")
+
+    def test_watchlist_statistics_empty_database(self) -> None:
+        self.assertEqual(db.get_media_watchlist_statistics(), [])
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            result = list_watchlist_summaries({"mode": "statistics"})
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "empty")
+        self.assertEqual(result.data, {"total": 0, "by_media_type": []})
+
+    def test_watchlist_statistics_single_type_counts_all_and_limits_latest(self) -> None:
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            ids = [self._insert(external_id=str(index)) for index in range(2)]
+            first = list_watchlist_summaries({"mode": "statistics"})
+            ids.extend(self._insert(external_id=str(index)) for index in range(2, 7))
+            second = list_watchlist_summaries({"mode": "statistics"})
+        for result, expected_ids in ((first, ids[:2]), (second, ids)):
+            with self.subTest(total=len(expected_ids)):
+                self.assertEqual(result.status, "success")
+                self.assertEqual(result.data["total"], len(expected_ids))
+                self.assertEqual(len(result.data["by_media_type"]), 1)
+                group = result.data["by_media_type"][0]
+                self.assertEqual(group["media_type"], "movie")
+                self.assertEqual(group["count"], len(expected_ids))
+                self.assertEqual(
+                    [item["watchlist_number"] for item in group["latest"]],
+                    list(reversed(expected_ids))[:3],
+                )
+
+    def test_watchlist_statistics_sparse_ids_and_historical_types_are_not_omitted(self) -> None:
+        rows = [
+            (3, "movie"), (19, "tv"), (47, "movie"), (89, "tv"),
+            (144, "movie"), (233, "movie"), (610, "episode"), (987, ""),
+            (1597, "historical_type_a"), (2584, "historical_type_b"),
+        ]
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO media_watchlist(id,provider,external_id,media_type,title,created_at) "
+                "VALUES(?,'tmdb',?,?,?,?)",
+                [(number, f"PRIVATE_EXTERNAL_{number}", kind, f"收藏 {number}", f"PRIVATE_TIME_{3000-number}")
+                 for number, kind in rows],
+            )
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            result = list_watchlist_summaries({"mode": "statistics"})
+        groups = result.data["by_media_type"]
+        self.assertEqual(result.data["total"], len(rows))
+        self.assertEqual(sum(group["count"] for group in groups), len(rows))
+        self.assertEqual(len(groups), len({kind for _, kind in rows}))
+        # 类型文本按既有规范截断后相同，也不能覆盖掉历史分组的计数。
+        self.assertEqual(sum(group["media_type"] == "historical_t" for group in groups), 2)
+        for group, kind in zip(groups, sorted({kind for _, kind in rows}), strict=True):
+            expected_ids = sorted((number for number, media_type in rows if media_type == kind), reverse=True)
+            self.assertEqual(group["count"], len(expected_ids))
+            self.assertEqual([item["watchlist_number"] for item in group["latest"]], expected_ids[:3])
+
+    def test_watchlist_statistics_over_repository_page_limit_uses_one_read_query(self) -> None:
+        rows = [(index * 7 + 10, "tv" if index % 3 == 0 else "movie") for index in range(1207)]
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO media_watchlist(id,provider,external_id,media_type,title,year,poster_key,created_at) "
+                "VALUES(?,'tmdb',?,?,'收藏','2026','PRIVATE_POSTER_KEY','PRIVATE_CREATED_AT')",
+                [(number, f"PRIVATE_EXTERNAL_{number}", kind) for number, kind in rows],
+            )
+        queries = []
+        real_conn = db.get_conn
+
+        @contextmanager
+        def traced():
+            with real_conn() as conn:
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_trace_callback(queries.append)
+                yield conn
+
+        with patch.object(db, "get_conn", traced), patch(
+            "app.agent.discovery_watchlist_actions.config.get_bool", return_value=True
+        ):
+            result = list_watchlist_summaries({"mode": "statistics"})
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(queries[0].count("COUNT(*) OVER"), 2)
+        self.assertIn("ROW_NUMBER() OVER", queries[0])
+        self.assertNotIn("SELECT *", queries[0])
+        self.assertEqual(result.data["total"], len(rows))
+        for group in result.data["by_media_type"]:
+            expected_ids = [number for number, kind in reversed(rows) if kind == group["media_type"]]
+            self.assertEqual(group["count"], len(expected_ids))
+            self.assertEqual([item["watchlist_number"] for item in group["latest"]], expected_ids[:3])
+            for item in group["latest"]:
+                self.assertEqual(set(item), {"watchlist_number", "provider", "media_type", "title", "year"})
+        serialized = json.dumps(result.to_dict(), ensure_ascii=False)
+        for forbidden in ("poster", "external_id", "created_at", "PRIVATE_", "next_before_number", "has_more"):
+            self.assertNotIn(forbidden, serialized)
+            self.assertNotIn(forbidden, queries[0])
+
+    def test_watchlist_statistics_insert_update_and_delete_are_reflected(self) -> None:
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            movie = self._insert(external_id="movie")
+            self._insert(external_id="tv", media_type="tv")
+            first = list_watchlist_summaries({"mode": "statistics"})
+            self.assertEqual(first.data["total"], 2)
+            self.assertTrue(db.delete_media_watchlist("tmdb", "movie", "movie"))
+            remaining = list_watchlist_summaries({"mode": "statistics"})
+            self.assertEqual(remaining.data["total"], 1)
+            self.assertEqual(remaining.data["by_media_type"][0]["media_type"], "tv")
+            replacement = self._insert(external_id="replacement", title="新收藏")
+            self._insert(external_id="replacement", title="更新标题")
+            latest = list_watchlist_summaries({"mode": "statistics"})
+            self.assertEqual(latest.data["total"], 2)
+            group = next(group for group in latest.data["by_media_type"] if group["media_type"] == "movie")
+            self.assertEqual(group["count"], 1)
+            self.assertEqual(group["latest"][0]["watchlist_number"], replacement)
+            self.assertGreater(replacement, movie)
+            self.assertEqual(group["latest"][0]["title"], "更新标题")
+            db.delete_media_watchlist("tmdb", "replacement", "movie")
+            db.delete_media_watchlist("tmdb", "tv", "tv")
+            self.assertEqual(list_watchlist_summaries({"mode": "statistics"}).data, {"total": 0, "by_media_type": []})
+
+    def test_watchlist_statistics_counts_and_latest_share_snapshot_during_writes(self) -> None:
+        rows = [(number, "movie" if number % 2 == 0 else "tv") for number in range(1, 65)]
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO media_watchlist(id,provider,external_id,media_type,title,created_at) "
+                "VALUES(?,'tmdb',?,?,'收藏','PRIVATE_TIME')",
+                [(number, str(number), kind) for number, kind in rows],
+            )
+        real_conn = db.get_conn
+        queries = []
+        mutated = False
+
+        def mutate_during_read():
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                with real_conn() as writer:
+                    writer.execute("DELETE FROM media_watchlist WHERE id=?", (rows[-1][0],))
+                    writer.executemany(
+                        "INSERT INTO media_watchlist(id,provider,external_id,media_type,title,created_at) "
+                        "VALUES(?,'tmdb',?,'movie','新增','PRIVATE_TIME')",
+                        [(number, str(number)) for number in (200, 201)],
+                    )
+            return 0
+
+        @contextmanager
+        def traced():
+            with real_conn() as reader:
+                reader.execute("PRAGMA query_only=ON")
+                reader.set_trace_callback(queries.append)
+                reader.set_progress_handler(mutate_during_read, 1000)
+                try:
+                    yield reader
+                finally:
+                    reader.set_progress_handler(None, 0)
+
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            with patch.object(db, "get_conn", traced):
+                snapshot = list_watchlist_summaries({"mode": "statistics"})
+            fresh = list_watchlist_summaries({"mode": "statistics"})
+        self.assertTrue(mutated)
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(snapshot.data["total"], len(rows))
+        for group in snapshot.data["by_media_type"]:
+            expected_ids = [number for number, kind in reversed(rows) if kind == group["media_type"]]
+            self.assertEqual(group["count"], len(expected_ids))
+            self.assertEqual([item["watchlist_number"] for item in group["latest"]], expected_ids[:3])
+        self.assertEqual(fresh.data["total"], len(rows) + 1)
+        movie_group = next(group for group in fresh.data["by_media_type"] if group["media_type"] == "movie")
+        self.assertEqual(movie_group["count"], len(rows) // 2 + 1)
+        self.assertEqual([item["watchlist_number"] for item in movie_group["latest"]], [201, 200, rows[-3][0]])
+
+    def test_watchlist_statistics_native_pipeline_and_explicit_list(self) -> None:
+        movie = self._insert(external_id="movie", title="  Ａ\t收藏\x00  ")
+        tv = self._insert(external_id="tv", media_type="tv")
+        service = get_agent_service()
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            statistics = service.invoke("discovery.watchlist_summaries", {"mode": "statistics"})["result"]
+            default = service.invoke("discovery.watchlist_summaries", {})["result"]
+            explicit = service.invoke("discovery.watchlist_summaries", {"mode": "list"})["result"]
+        self.assertTrue(statistics["ok"])
+        self.assertEqual(statistics["status"], "success")
+        self.assertEqual(statistics["data"]["total"], 2)
+        self.assertEqual(
+            [(group["media_type"], group["count"], group["latest"][0]["watchlist_number"])
+             for group in statistics["data"]["by_media_type"]],
+            [("movie", 1, movie), ("tv", 1, tv)],
+        )
+        self.assertEqual(statistics["data"]["by_media_type"][0]["latest"][0]["title"], "A 收藏")
+        self.assertEqual(default["data"], explicit["data"])
+        self.assertEqual(default["summary"], explicit["summary"])
+        self.assertEqual(set(default["data"]), {"count", "items", "has_more", "next_before_number"})
+        serialized = json.dumps(statistics, ensure_ascii=False)
+        for forbidden in ("PRIVATE_", "poster_key", "external_id", "created_at"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_watchlist_statistics_keeps_discovery_feature_switch(self) -> None:
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=False):
+            for arguments in ({}, {"mode": "list"}, {"mode": "statistics"}):
+                result = list_watchlist_summaries(arguments)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status, "disabled")
+                self.assertEqual(result.data, {})
 
     def test_add_prepare_confirm_replay_and_owner_isolation(self) -> None:
         service = get_agent_service()

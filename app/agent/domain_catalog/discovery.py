@@ -405,16 +405,23 @@ def register_specs(
         ToolSpec(
             name="discovery.watchlist_summaries",
             description=(
-                "只读分页列出探索收藏摘要，每页最多20项。count是本页数量，不是收藏总数；"
+                "只读探索收藏摘要。统计总数、各类型数量或各类型最新3项时使用mode=statistics，"
+                "单次查询返回全库total及by_media_type（各类型count和latest），包含历史未知类型，"
+                "不需要逐页统计，不能提供before_number。"
+                "默认mode=list分页列出摘要，每页最多20项。count是本页数量，不是收藏总数；"
                 "next_before_number是本页已返回的末项收藏编号；"
                 "下一页仅返回编号严格小于该游标的收藏，不含游标本身。"
-                "用户要求全部时，将next_before_number作为before_number续页直到has_more=false。"
+                "需要完整收藏明细时，将next_before_number作为before_number续页直到has_more=false。"
                 "仅含收藏编号、来源、媒体类型、标题和年份。"
             ),
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
                 "properties": {
+                    "mode": {
+                        "type": "string", "enum": ["list", "statistics"], "default": "list",
+                        "description": "list 为默认分页；statistics 统计全库及各类型最新3项，与 before_number 互斥。",
+                    },
                     "before_number": {
                         "type": "integer", "minimum": 1, "maximum": 2_147_483_647,
                         "description": (
@@ -422,6 +429,10 @@ def register_specs(
                             "仅返回编号严格小于before_number的收藏，不含游标本身；首次读取不传。"
                         ),
                     },
+                },
+                "not": {
+                    "required": ["mode", "before_number"],
+                    "properties": {"mode": {"enum": ["statistics"]}},
                 },
                 "additionalProperties": False,
             },

@@ -7,6 +7,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime
+from itertools import groupby
 from typing import Any
 
 from app import config
@@ -63,12 +64,20 @@ def _identity(provider: Any, external_id: Any, media_type: Any) -> tuple[str, st
 def watchlist_summaries_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise AgentToolError("工具参数必须是 JSON 对象")
-    if set(arguments) - {"before_number"}:
-        raise AgentToolError("探索收藏列表仅接受翻页编号 before_number")
-    return (
+    if set(arguments) - {"mode", "before_number"}:
+        raise AgentToolError("探索收藏摘要仅接受 mode 和翻页编号 before_number")
+    mode = arguments.get("mode", "list")
+    if mode not in ("list", "statistics"):
+        raise AgentToolError("mode 仅支持 list 或 statistics")
+    if mode == "statistics" and "before_number" in arguments:
+        raise AgentToolError("statistics 模式不能提供 before_number")
+    normalized: dict[str, Any] = (
         {"before_number": _positive_id(arguments["before_number"], field="before_number")}
         if "before_number" in arguments else {}
     )
+    if "mode" in arguments:
+        normalized["mode"] = mode
+    return normalized
 
 
 def watchlist_summary_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -127,6 +136,30 @@ def list_watchlist_summaries(arguments: dict[str, Any]) -> ToolResult:
     if not config.get_bool("DISCOVERY_ENABLED"):
         return _feature_disabled()
     arguments = watchlist_summaries_arguments(arguments)
+    if arguments.pop("mode", "list") == "statistics":
+        rows = db.get_media_watchlist_statistics()
+        total = int(rows[0]["total"]) if rows else 0
+        by_media_type = []
+        for media_type, group in groupby(rows, key=lambda row: row["media_type"]):
+            latest = list(group)
+            by_media_type.append({
+                "media_type": _safe_text(media_type, 12),
+                "count": int(latest[0]["type_count"]),
+                "latest": [_row_summary(row) for row in latest],
+            })
+        return ToolResult(
+            ok=True,
+            status="success" if total else "empty",
+            summary=f"探索收藏全库共 {total} 项，已统计各媒体类型数量及各类型最新至多3项",
+            data={"total": total, "by_media_type": by_media_type},
+            evidence=[
+                Evidence(
+                    "discovery_watchlist",
+                    "单次只读查询统计全部类型；最新项仅含编号、来源、类型、标题和年份。",
+                    _now(),
+                )
+            ],
+        )
     rows = db.list_media_watchlist(limit=21, **arguments)
     items = [_row_summary(row) for row in rows[:20]]
     count = len(items)

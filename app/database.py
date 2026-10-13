@@ -4304,6 +4304,7 @@ from app.repositories.discovery import (  # noqa: E402,F401
     get_media_external_id,
     get_media_watchlist,
     get_media_watchlist_by_id,
+    get_media_watchlist_statistics,
     list_media_external_ids,
     list_media_watchlist,
     list_media_watchlist_keys,
