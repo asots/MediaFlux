@@ -398,7 +398,9 @@ def test_local_read_quota_parks_effect_followup_without_asking_user_again(tmp_pa
             now[0] += 6
             next_candidate, = await store.due_continuations()
             assert next_candidate['budget']['wait_segments'] == 1
-            resumed = _session(store, FollowScript(resume=True), client, reads)
+            summary = FollowScript(resume=True)
+            summary.steps = ["finish"]
+            resumed = _session(store, summary, client, reads)
             assert await resumed.resume_wait(candidate=next_candidate)
             assert reads == ['admitted.mp4'] and await store.due_continuations() == []
             final = await store.load(owner=OWNER, session_id=SID)

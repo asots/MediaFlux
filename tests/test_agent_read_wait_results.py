@@ -74,7 +74,8 @@ def test_resumed_read_result_branches(mode, tmp_path):
         tool_name = 'config.explain_component' if observing else 'web.search'
         candidate, parked = await park(clock, tool_name)
         clock[0] = 110
-        script = ResultScript(tool_name, resume=True, retry=not success)
+        script = ResultScript(tool_name, resume=True)
+        script.steps = ["finish"]
         runtime = runtime_for(script, clock)
         tool = runtime.session.catalog.get(tool_name)
         calls = []
@@ -100,7 +101,7 @@ def test_resumed_read_result_branches(mode, tmp_path):
         assert len(calls) == 1, 'a started READ must not authorize a second automatic handler'
         assert wait['state'] == 'terminal'
         assert wait['budget']['tool_spent'] == 4
-        assert wait['budget']['model_spent'] == (5 if success else 4)
+        assert wait['budget']['model_spent'] == (4 if success else 3)
         assert wait['budget']['wait_seconds_spent'] == 10
         assert wait['expected_task'] == identity(task)
         assert task['revision'] == (2 if observing else 1)
@@ -108,28 +109,29 @@ def test_resumed_read_result_branches(mode, tmp_path):
         rows = {r.get('tool_call_id'): r for r in cold.conversation if r.get('role') == 'tool'}
         old = next(r for r in parked.conversation if r.get('tool_call_id') == 'initial-3')
         assert rows['initial-3'] == old
-        assert [t['function']['name'] for t in script.requests[0]['tools']] == [tool_name.replace('.', '__')]
+        resumed = [row for key, row in rows.items() if key not in {r.get('tool_call_id') for r in parked.conversation}]
+        assert len(resumed) == 1
+        result = resumed[0]
         events = await runtime.store.list_events(owner=OWNER, session_id='results')
         if success:
-            assert len(script.requests) == 2
-            assert not script.requests[1].get('tools'), 'successful observation must switch to tools-off summary'
-            assert wait['terminal_reason'] == 'completed'
-            assert rows['resumed-1']['content'] in [r.get('content') for r in script.requests[1]['messages']]
-            if observing:
-                assert any(f['call_id'] == 'resumed-1' for f in task['verified_facts'])
-        else:
             assert len(script.requests) == 1
+            assert wait['terminal_reason'] == 'completed'
+            assert result['content'] in [r.get('content') for r in script.requests[0]['messages']]
+            if observing:
+                assert any(f['call_id'] == result['tool_call_id'] for f in task['verified_facts'])
+        else:
+            assert len(script.requests) == 0
             assert wait['terminal_reason'] == code
-            assert code in rows['resumed-1']['content']
+            assert code in result['content']
             assert not task['verified_facts']
             assert events[-1]['type'] == 'turn.failed'
             assert events[-1]['payload']['code'] == code
             assert events[-1]['payload']['turn_status'] == 'failed'
             assert events[-1]['payload']['task']['status'] != 'completed'
             if mode != 'invalid_observation':
-                assert 'offline started READ failed' in rows['resumed-1']['content']
+                assert 'offline started READ failed' in result['content']
             assert not await runtime.session.resume_wait(candidate=candidate)
-            assert len(script.requests) == 1
+            assert len(script.requests) == 0
     asyncio.run(run())
 
 
@@ -161,8 +163,7 @@ def test_foreground_error_still_allows_model_repair(tool_name):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('changed_arguments', [False, True], ids=['original-scope', 'scope-change-rejected'])
-def test_interrupted_reconstruction_keeps_resumed_read_authority_and_budget(changed_arguments):
+def test_interrupted_synthesis_does_not_repeat_completed_resumed_read():
     async def run():
         clock = [100]
         candidate, parked = await park(clock, 'web.search')
@@ -178,11 +179,10 @@ def test_interrupted_reconstruction_keeps_resumed_read_authority_and_budget(chan
                                           headers={'content-type': 'text/event-stream'})
                 response = await super().respond(request)
                 body = response.json()
-                if changed_arguments and self.steps == ['finish']:
-                    body['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = '{"query":"outside scope"}'
                 return httpx.Response(200, json=body)
 
         script = Interrupted('web.search', resume=True)
+        script.steps = ['finish']
         runtime = runtime_for(script, clock)
         calls = []
 
@@ -194,24 +194,21 @@ def test_interrupted_reconstruction_keeps_resumed_read_authority_and_budget(chan
         runtime.session.catalog._tools[tool.name] = replace(tool, read=read)
         assert await runtime.session.resume_wait(candidate=candidate)
         assert script.requests[0]['tools'] == script.requests[1]['tools']
-        assert [t['function']['name'] for t in script.requests[1]['tools']] == ['web__search']
         assert 'READ续行截断残稿' not in json.dumps(script.requests[1]['messages'], ensure_ascii=False)
         cold = await SQLiteKernelStore(clock=lambda: clock[0]).load(owner=OWNER, session_id='results')
         wait = cold.metadata['read_wait']
         assert wait['state'] == 'terminal'
-        assert wait['terminal_reason'] == ('read_resume_invalid' if changed_arguments else 'completed')
-        assert calls == ([] if changed_arguments else [{'query': 'quota fixture', 'max_results': 5, 'topic': 'general'}])
-        assert wait['budget']['model_spent'] == (5 if changed_arguments else 6)
-        assert wait['budget']['tool_spent'] == (3 if changed_arguments else 4)
-        assert len(script.requests) == (2 if changed_arguments else 3)
-        if not changed_arguments:
-            assert not script.requests[-1].get('tools')
+        assert wait['terminal_reason'] == 'completed'
+        assert calls == [{'query': 'quota fixture', 'max_results': 5, 'topic': 'general'}]
+        assert wait['budget']['model_spent'] == 5
+        assert wait['budget']['tool_spent'] == 4
+        assert len(script.requests) == 2
         old = next(r for r in parked.conversation if r.get('tool_call_id') == 'initial-3')
         assert old in cold.conversation
         assert 'READ续行截断残稿' not in json.dumps(cold.conversation, ensure_ascii=False)
         before = len(script.requests)
         assert not await runtime.session.resume_wait(candidate=candidate)
         assert len(script.requests) == before
-        assert calls == ([] if changed_arguments else [{'query': 'quota fixture', 'max_results': 5, 'topic': 'general'}])
+        assert calls == [{'query': 'quota fixture', 'max_results': 5, 'topic': 'general'}]
 
     asyncio.run(run())

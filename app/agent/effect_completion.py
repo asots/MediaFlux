@@ -631,16 +631,14 @@ def _next_effect_poll(state: SessionState) -> None:
         state.metadata.pop(_EFFECT_NEXT_POLL_KEY, None)
 
 
-def _effect_seed(result: ToolResult, tracker: _CompletionTracker, tool: str,
+def _effect_seed(result: Mapping[str, Any], tracker: _CompletionTracker | None, tool: str,
                  scope: EffectCompletionScope) -> dict[str, Any]:
-    from app.agent.kernel.projection import DefaultProjector
-
     return {
         "owner": scope.lease.owner, "session_id": scope.lease.session_id,
         "request_id": scope.lease.request_id, "turn_id": scope.lease.turn_id,
         "plan_id": scope.plan_id, "channel": scope.channel, "tool": str(tool),
-        "tracker": {"kind": tracker.kind, "value": tracker.value},
-        "result": dict(DefaultProjector().project(result).public_content),
+        **({"tracker": {"kind": tracker.kind, "value": tracker.value}} if tracker else {}),
+        "result": deepcopy(dict(result)),
         **({"origin": scope.origin} if scope.origin else {}),
     }
 
@@ -656,11 +654,11 @@ def _seed_result(seed: Mapping[str, Any]) -> ToolResult:
 
 
 def _effect_wait_registration(
-    result: ToolResult, tracker: _CompletionTracker, tool: str,
+    result: Mapping[str, Any], tracker: _CompletionTracker | None, tool: str,
     scope: EffectCompletionScope, *, existing_only: bool,
 ) -> Callable[[SessionState], bool]:
-    """同一记录构造/身份核验供事务准入和前台等待使用。"""
-    from app.agent.kernel.state import StalePublicationError, publication_matches
+    """后台受理与同步失败共用身份、密文和幂等登记；不虚构 tracker。"""
+    from app.agent.kernel.state import StalePublicationError, commit_conversation, publication_matches
 
     now = time.time()
     seed = _effect_seed(result, tracker, tool, scope)
@@ -673,11 +671,22 @@ def _effect_wait_registration(
         if not publication_matches(scope.lease, generation=state.generation,
                                    confirmed=state.metadata.get("confirmed_publication")):
             raise StalePublicationError("确认回合已变化，未注册新的结果跟踪")
+        if tracker is None:
+            if ((state.owner, state.session_id) != (scope.lease.owner, scope.lease.session_id)
+                    or state.pending_effect_plan_id or state.metadata.get("confirmed_publication") != {
+                        "generation": scope.lease.generation, "turn_id": scope.lease.turn_id, "plan_id": scope.plan_id}):
+                raise StalePublicationError("同步失败不属于当前已消费确认")
+            if state.metadata.get("stop_requested_generation") == scope.lease.generation:
+                return False
         waits = state.metadata.setdefault(_EFFECT_WAITS_KEY, {})
         if scope.plan_id in waits:
             previous = json.loads(cipher.decrypt(waits[scope.plan_id]["sealed"].encode()))
+            if tracker is None and previous.get("tracker") is not None:
+                return False  # 真实后台任务仍由原 tracker 结算，不能用同步错误覆盖。
             if any(previous.get(key) != seed[key] for key in seed if key != "result"):
                 raise StalePublicationError("后台任务跟踪不属于当前确认计划")
+            if tracker is None:
+                return waits[scope.plan_id].get("final_result") == seed["result"]
             # 补充领域受理明细，不改变已登记的期限、进度或投递状态。
             waits[scope.plan_id]["sealed"] = sealed
         else:
@@ -688,14 +697,59 @@ def _effect_wait_registration(
                 "next_poll_at": now + _EFFECT_POLL_SECONDS, "delivered": False,
                 "state": "pending", "last_status": "", "read_errors": 0,
             }
-        from app.agent.kernel.continuation import register_effect
-        register_effect(waits[scope.plan_id], scope, now)
+        from app.agent.kernel.continuation import register_effect, release_effect
+        row = waits[scope.plan_id]
+        register_effect(row, scope, now)
+        if tracker is None:
+            row.update(state="terminal", last_status=str(result["status"]), final_result=seed["result"],
+                       foreground_final=True, next_poll_at=now, receipt_message=_late_receipt(seed, seed["result"]))
+            # 回执、原 native tool 结果、可领取状态同事务落盘，冷启动不见旧预览事实。
+            commit_conversation(state, state.conversation)
+            release_effect(row, now)
         if (state.metadata.get("stop_requested_generation") == scope.lease.generation
                 and waits[scope.plan_id].get("continuation")):
             waits[scope.plan_id]["continuation"].update(state="cancelled", terminal_reason="cancelled")
         _next_effect_poll(state)
         return True
     return register
+
+
+async def register_terminal_failure(
+    scope: EffectCompletionScope, *, tool: str, result: Mapping[str, Any],
+) -> bool:
+    """登记已消费确认的真实失败，复用 effect 续行；不是新的写授权。"""
+    from app.agent.public_view import public_result_state
+
+    origin = scope.origin
+    status = str(result.get("status") or "").strip().casefold()
+    blocked = {"authorization_denied", "authorization_required", "authorization_failed", "agent_disabled",
+               "confirmation_invalid", "confirmation_not_supported",
+               "tool_not_found", "cancelled", "stopped"}
+    active = _WAITABLE_STATUSES | {"pending", "submitted", "waiting", "stopping"}
+    data = result.get("data")
+    background = data.get("background_job") if isinstance(data, Mapping) else None
+    if (result.get("ok") is not False or not status or status in blocked | active
+            or public_result_state(result) != "failed"
+            or (isinstance(background, Mapping) and str(background.get("status") or "").casefold() in active)
+            or not isinstance(origin, dict)
+            or any(key not in origin for key in ("arguments", "expected_task", "admission_fence", "effective_digest",
+                                                 "model_policy", "model_limit", "tool_limit", "delivery_route"))
+            or not isinstance(origin.get("goal"), dict)
+            or origin["goal"].get("role") != "user" or not str(origin["goal"].get("content") or "").strip()):
+        return False
+    source = origin.get("reobservation_source")
+    if (not isinstance(source, Mapping) or (source.get("owner"), source.get("session_id")) != (
+            scope.lease.owner, scope.lease.session_id)
+            or any(origin.get(key) != expected for key, expected in {
+                "owner": scope.lease.owner, "session_id": scope.lease.session_id,
+                "origin_generation": scope.lease.generation, "source_turn_id": scope.lease.turn_id,
+                "source_request_id": scope.lease.request_id, "channel": scope.channel,
+            }.items())):
+        return False
+    return await scope.store.update_effect_state(
+        owner=scope.lease.owner, session_id=scope.lease.session_id,
+        change=_effect_wait_registration(result, None, tool, scope, existing_only=False),
+    ) is True
 
 
 def admit_organize_operation(conn, row, replayed: bool, *, tool: str, scope: EffectCompletionScope) -> None:
@@ -714,7 +768,9 @@ def admit_organize_operation(conn, row, replayed: bool, *, tool: str, scope: Eff
     if row["job_kind"] == "agent_guangya_fs_change":
         result.data["operation"] = "filesystem_change"
     tracker = _CompletionTracker("guangya_operation", {"operation_ref": result.data["operation_ref"]})
-    registration = _effect_wait_registration(result, tracker, tool, scope, existing_only=replayed)
+    from app.agent.kernel.projection import DefaultProjector
+    registration = _effect_wait_registration(DefaultProjector().project(result).public_content,
+                                             tracker, tool, scope, existing_only=replayed)
 
     def register(state):
         if state.generation != scope.lease.generation or state.metadata.get("confirmed_publication") != {
@@ -733,11 +789,12 @@ def admit_organize_operation(conn, row, replayed: bool, *, tool: str, scope: Eff
 async def _register_effect_wait(result: ToolResult, tracker: _CompletionTracker, tool: str,
                                 scope: EffectCompletionScope) -> None:
     from app.agent.kernel.state import StalePublicationError
+    from app.agent.kernel.projection import DefaultProjector
 
     registered = await scope.store.update_effect_state(
         owner=scope.lease.owner, session_id=scope.lease.session_id,
-        change=_effect_wait_registration(result, tracker, tool, scope,
-                                         existing_only=tracker.kind == "guangya_operation"),
+        change=_effect_wait_registration(DefaultProjector().project(result).public_content,
+                                         tracker, tool, scope, existing_only=tracker.kind == "guangya_operation"),
     )
     if registered is not True:
         raise StalePublicationError("原会话已清理，未重建结果跟踪")
@@ -786,6 +843,10 @@ async def remember_effect_receipt(store, *, owner, session_id, plan_id, message)
         row = (state.metadata.get(_EFFECT_WAITS_KEY) or {}).get(plan_id)
         if row and row.get("state") == "terminal":
             row["receipt_template"] = dict(message)
+            if row.get("receipt_message") is not None:
+                from app.agent.kernel.state import commit_conversation
+                row["receipt_message"] = dict(message)
+                commit_conversation(state, state.conversation)
             return True
         return False
     return await store.update_effect_state(owner=owner, session_id=session_id, change=remember)

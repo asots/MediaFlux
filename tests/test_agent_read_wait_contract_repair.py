@@ -59,11 +59,10 @@ def test_tool_budget_precedes_model_without_precharging(limit):
             assert record['budget']['tool_spent'] == 3
             assert record['terminal_reason'] == 'task_budget_exceeded'
         else:
-            assert len(calls) == 1 and len(script.requests) == 2
-            assert not script.requests[1].get('tools')
-            assert at_wire[0]['tool_spent'] == 3  # Checked, not charged before tool.
+            assert len(calls) == 1 and len(script.requests) == 1
+            assert at_wire[0]['tool_spent'] == 4  # The executor completed the pending READ before asking the model.
             assert at_wire[0]['model_spent'] == 4
-            assert record['budget']['model_spent'] == 5
+            assert record['budget']['model_spent'] == 4
             assert record['budget']['tool_spent'] == 4
             assert record['terminal_reason'] == 'completed'
     asyncio.run(run())
@@ -105,7 +104,7 @@ def test_telegram_issued_model_policy_is_not_rerouted(changed):
                 assert record['state'] == 'terminal'
                 assert record['terminal_reason'] == 'model_policy_changed'
             else:
-                assert len(calls) == 1 and len(script.requests) == 2
+                assert len(calls) == 1 and len(script.requests) == 1
                 assert {r['model'] for r in script.requests} == {'original-model'}
                 assert record['terminal_reason'] == 'completed'
     asyncio.run(run())
@@ -157,7 +156,7 @@ def test_history_anchor_validation_is_durable(missing):
         record = (await fresh.store.load(owner=OWNER, session_id='wait-control')).metadata['read_wait']
         assert record['state'] == 'terminal'
         assert record['terminal_reason'] == ('history_unavailable' if missing else 'completed')
-        assert len(script.requests) == (0 if missing else 2)
+        assert len(script.requests) == (0 if missing else 1)
         assert len(calls) == (0 if missing else 1)
     asyncio.run(run())
 

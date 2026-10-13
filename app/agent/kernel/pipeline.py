@@ -897,6 +897,20 @@ class ToolPipeline:
                 ))
             raise ConfirmationClaimError() from exc
 
+        from app.agent.effect_completion import EffectCompletionScope, register_terminal_failure
+        from .continuation import effect_origin
+
+        completion_scope = None
+
+        async def remember_failure(result):
+            if completion_scope is None:
+                return
+            try:
+                await register_terminal_failure(completion_scope, tool=plan.tool_name, result=result)
+            except Exception as exc:  # 登记故障不能覆盖已经成立的原始失败事实/code。
+                from app.logger import get_logger
+                get_logger(__name__).warning("确认失败续行登记未完成 type=%s", type(exc).__name__)
+
         try:
             # 只有真实领到票据才接管同 generation 的发布权。该标记在原状态
             # JSON 内持久化，使锁释放/进程结束后旧读回合仍无法覆盖确认回执。
@@ -931,19 +945,17 @@ class ToolPipeline:
                 raise ToolPipelineError(
                     "确认计划风险类型不匹配", code="confirmation_invalid"
                 )
-            resolved_arguments = await self._authorize(tool, dict(plan.arguments), context, confirmation=True)
             if tool.execute_confirmed is None:  # pragma: no cover - ToolSpec 已校验
                 raise ToolPipelineError(
                     "工具不支持确认执行", code="confirmation_not_supported"
                 )
-            from app.agent.effect_completion import EffectCompletionScope
-            from .continuation import effect_origin
-
-            context = replace(context, completion_scope=EffectCompletionScope(
+            completion_scope = EffectCompletionScope(
                 store=self.state_store, lease=context.lease,
                 plan_id=plan.plan_id, channel=context.channel,
                 origin=effect_origin(current, context, plan),
-            ))
+            )
+            context = replace(context, completion_scope=completion_scope)
+            resolved_arguments = await self._authorize(tool, dict(plan.arguments), context, confirmation=True)
             value = await _invoke(
                 tool.execute_confirmed,
                 resolved_arguments,
@@ -970,6 +982,7 @@ class ToolPipeline:
                 "failed", plan=plan, code=exc.code,
                 elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
             )
+            await remember_failure({"ok": False, "status": exc.code, "summary": str(exc)})
             raise
         except BaseException:
             self._notify_effect("interrupted", plan=plan)
@@ -985,6 +998,7 @@ class ToolPipeline:
         updates = tuple(outcome.state_updates)
         outcome = replace(outcome, effect_plan=plan)
         await self._commit_updates(context.lease, updates)
+        await remember_failure(outcome.public_content)
         return PipelineResult(
             tool=tool,
             arguments=dict(plan.arguments),

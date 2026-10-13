@@ -30,7 +30,7 @@ def isolated_database(tmp_path):
 class WaitScript(NativeScript):
     def __init__(self, resume=False):
         super().__init__('tmdb')
-        self.steps = ['read', 'finish'] if resume else ['discover', 'create', 'read']
+        self.steps = ['finish'] if resume else ['discover', 'create', 'read']
         self.prefix = 'resume' if resume else 'initial'
 
     async def respond(self, request):
@@ -132,9 +132,8 @@ def test_scheduler_cold_native_resume_uses_new_id_and_one_read():
     scheduler._continuation_runtime_factory = factory
     assert getattr(scheduler, '_run_due_continuation_once', lambda: 0)() == 1
     assert len(handlers) == 1
-    assert len(resumed.requests) == 2
-    assert [t['function']['name'] for t in resumed.requests[0]['tools']] == ['web__search']
-    assert not resumed.requests[1].get('tools')
+    assert len(resumed.requests) == 1
+    assert any('fixture READ complete' in str(row.get('content', '')) for row in resumed.requests[0]['messages'])
     old_wire = [r for r in resumed.requests[0]['messages'] if r.get('tool_call_id') == 'initial-read']
     assert len(old_wire) == 1 and 'rate_limited' in old_wire[0]['content']
     async def verify():
@@ -142,52 +141,39 @@ def test_scheduler_cold_native_resume_uses_new_id_and_one_read():
         assert state.metadata['read_wait']['state'] == 'terminal'
         assert state.metadata['read_wait']['terminal_reason'] == 'completed'
         budget = state.metadata['read_wait']['budget']
-        assert budget['model_spent'] == 5 and budget['tool_spent'] == 4
+        assert budget['model_spent'] == 4 and budget['tool_spent'] == 4
         assert budget['wait_seconds_spent'] == 10
         results = {r.get('tool_call_id'): r for r in state.conversation if r.get('role') == 'tool'}
         assert 'rate_limited' in results['initial-read']['content']
-        assert 'fixture READ complete' in results['resume-read']['content']
-        assert results['initial-read'] != results['resume-read']
+        resumed_results = [row for key, row in results.items() if key != 'initial-read' and 'fixture READ complete' in row.get('content', '')]
+        assert len(resumed_results) == 1
     asyncio.run(verify())
     assert scheduler._run_due_continuation_once() == 0
 
 
-@pytest.mark.parametrize('bad', ['write', 'arguments', 'old_id', 'empty', 'multiple'])
-def test_illegal_resume_is_terminal_without_business_io(bad):
+def test_restored_read_runs_before_model_without_regenerating_arguments():
     async def run():
         timer = [100]
         _, candidate = await parked_runtime(timer)
         timer[0] = 110
-        class Invalid(WaitScript):
-            async def respond(self, request):
-                response = await super().respond(request)
-                body = response.json()
-                message = body['choices'][0]['message']
-                if self.steps == ['finish']:
-                    call = message['tool_calls'][0]
-                    if bad == 'write':
-                        call['function']['name'] = 'ingest__submit'
-                    elif bad == 'arguments':
-                        call['function']['arguments'] = '{"query":"different"}'
-                    elif bad == 'old_id':
-                        call['id'] = 'initial-read'
-                    elif bad == 'multiple':
-                        message['tool_calls'].append({**call, 'id': 'extra'})
-                    elif bad == 'empty':
-                        message.clear()
-                        message['content'] = 'I am done'
-                return httpx.Response(200, json=body)
-        script = Invalid(True)
+        script = WaitScript(True)
         runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: timer[0]))
         runtime.session.continuation_binding = _capture_creation_binding()
-        async def forbidden(*args, **kwargs):
-            raise AssertionError('business I/O forbidden')
-        with patch.object(runtime.session.pipeline, 'execute', side_effect=forbidden):
-            assert await runtime.session.resume_wait(candidate=candidate)
-        state = await runtime.store.load(owner=OWNER, session_id='wait-control')
-        assert state.metadata['read_wait']['state'] == 'terminal'
-        assert state.metadata['read_wait']['terminal_reason'] == 'read_resume_invalid'
+        invoked = []
+        async def read(arguments, context):
+            assert not script.requests, 'pending READ must run before model synthesis'
+            invoked.append(arguments)
+            return {'ok': True, 'summary': 'trusted pending READ completed'}
+        tool = runtime.session.catalog.get('web.search')
+        runtime.session.catalog._tools['web.search'] = replace(tool, read=read)
+        assert await runtime.session.resume_wait(candidate=candidate)
+        assert invoked == [{'query': 'quota fixture', 'max_results': 5, 'topic': 'general'}]
         assert len(script.requests) == 1
+        state = await runtime.store.load(owner=OWNER, session_id='wait-control')
+        assert state.metadata['read_wait']['terminal_reason'] == 'completed'
+        assert state.metadata['read_wait']['budget']['model_spent'] == 4
+        assert not await runtime.session.resume_wait(candidate=candidate)
+        assert len(invoked) == 1
     asyncio.run(run())
 
 
@@ -341,7 +327,7 @@ def test_cancel_during_journal_io_cannot_publish_late_tool_event():
         entered, release = threading.Event(), threading.Event()
         original = store._append_event_sync
         def delayed(event, owner, *args):
-            if event.type.value == 'tool.completed' and event.payload.get('call_id') == 'resume-read':
+            if event.type.value == 'tool.completed' and event.payload.get('tool') == 'web.search':
                 entered.set()
                 assert release.wait(5), 'journal release timeout'
             return original(event, owner, *args)
@@ -354,8 +340,8 @@ def test_cancel_during_journal_io_cannot_publish_late_tool_event():
                 release.set()
                 await asyncio.wait_for(worker, 5)
                 events = await cold.store.list_events(owner=OWNER, session_id='wait-control')
-                assert not any(e['type'] == 'tool.completed' and e['payload'].get('call_id') == 'resume-read' for e in events)
-                assert len(script.requests) == 1
+                assert not any(e['type'] == 'tool.completed' and e['payload'].get('tool') == 'web.search' for e in events)
+                assert len(script.requests) == 0
             finally:
                 release.set()
                 worker.cancel()
@@ -418,7 +404,7 @@ def test_cold_cancel_blocks_handler_start_and_late_reference(phase):
             with db.get_conn() as conn:
                 assert conn.execute("SELECT count(*) FROM agent_kernel_refs WHERE kind='late_ref'").fetchone()[0] == 0
             assert (await cold.store.load(owner=OWNER, session_id='wait-control')) == stopped
-            assert len(script.requests) == 1
+            assert len(script.requests) == 0
         finally:
             release.set()
             worker.cancel()

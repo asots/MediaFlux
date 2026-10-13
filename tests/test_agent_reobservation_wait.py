@@ -116,11 +116,22 @@ def assert_private(case, scripts, state):
 
 
 @pytest.mark.parametrize("tracked_task", [False, True])
-def test_synchronous_failed_confirm_quota_does_not_invent_a_resumable_wait(native_case, tracked_task):
-    """先证明当前真实同步入口：READ 被拒，但没有可领取的续行。"""
+def test_synchronous_failed_confirm_uses_effect_wait_with_or_without_task(native_case, tracked_task):
+    """普通用户也能恢复确认后的诊断，不要求手工先建任务清单。"""
     case = native_case
     source = source_for(case)
+    frozen_source = deepcopy(source)
     prepare = case.media.prepare
+    inspect = case.media.inspect
+    observed = []
+
+    def read(arguments, context):
+        assert context.diagnostic_only
+        assert context.reobservation_source == frozen_source
+        observed.append(deepcopy(context.reobservation_source))
+        return inspect(arguments, context)
+
+    case.media.inspect = read
 
     def freeze(arguments, context):
         result = prepare(arguments, context)
@@ -153,14 +164,18 @@ def test_synchronous_failed_confirm_quota_does_not_invent_a_resumable_wait(nativ
         plan = await case.session.pipeline.get_pending_plan(owner=case.owner, session_id=case.sid)
         assert plan.metadata["reobservation_source"] == source
         events, state = await case.confirm(plan_id)
-        assert events[-1].payload["status"] == "partial"
+        assert events[-1].payload["status"] == "waiting"
         assert quota.denials == [READ]
         assert any(event.type is AgentEventType.TOOL_FAILED
                    and event.payload.get("code") == "rate_limited" for event in events)
         assert (state.metadata.get("read_wait") or {}).get("state") not in {"pending", "claimed", "running"}
-        assert not state.metadata.get("effect_waits")
+        row = state.metadata["effect_waits"][plan_id]
+        record = deepcopy(row["continuation"])
+        assert row["state"] == "terminal" and row["final_result"]["ok"] is False
+        assert record["state"] == "pending" and record["kind"] == "effect"
+        assert record["budget"]["wait_segments"] == 1
         assert await case.cold_store().due_continuations() == []
-        case.assert_io(prepares=["A"], executions=["A"], reads=0, requests=5 if tracked_task else 3)
+        case.assert_io(prepares=["A"], executions=["A"], reads=0, requests=4 if tracked_task else 2)
         case.assert_source(state, users)
         failed = [event for event in events if event.type is AgentEventType.EFFECT_FAILED]
         assert len(failed) == 1 and failed[0].payload["plan_id"] == plan_id
@@ -169,10 +184,25 @@ def test_synchronous_failed_confirm_quota_does_not_invent_a_resumable_wait(nativ
         original_receipt = receipt(state, plan_id)
         followup = case.script.requests[3 if tracked_task else 1]
         assert any(row.get("content") == original_receipt["content"] for row in followup["messages"])
-        return state
+        duplicate, unchanged = await case.confirm(plan_id)
+        assert duplicate[-1].type is AgentEventType.TURN_FAILED
+        assert unchanged.metadata["effect_waits"][plan_id] == row
+        source["baseline"]["selected"].clear()
+        case.clock[0] = record["due_at"]
+        candidate, = await case.cold_store().due_continuations()
+        assert candidate["kind"] == "effect"
+        session, resumed = rebuild(case, ["finish"], "sync-effect-cold")
+        assert await session.resume_wait(candidate=candidate)
+        restored = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+        assert receipt(restored, plan_id) == original_receipt
+        assert case.media.executed == ["A"] and len(case.media.reads) == 1
+        assert observed == [frozen_source]
+        assert restored.metadata["effect_waits"][plan_id]["continuation"]["state"] == "terminal"
+        assert not await session.resume_wait(candidate=candidate)
+        return restored, [case.script, resumed]
 
-    state = asyncio.run(run())
-    assert_private(case, [case.script], state)
+    state, scripts = asyncio.run(run())
+    assert_private(case, scripts, state)
 
 
 class EffectScript(NativeScript):
@@ -322,13 +352,14 @@ async def failed_background_candidate(case, prepared, client):
 
 
 async def park_read_quota(case, candidate, original_receipt, prefix):
-    session, script = rebuild(case, ["read"], prefix)
+    direct = bool(candidate.get("anchor"))
+    session, script = rebuild(case, [] if direct else ["read"], prefix)
     quota = ReadQuota(case.clock)
     session.pipeline.rate_limiter = quota
     assert await session.resume_wait(candidate=candidate)
     state = await case.cold_store().load(owner=case.owner, session_id=case.sid)
     assert quota.denials == [READ] and not script.steps
-    assert len(script.requests) == 1
+    assert len(script.requests) == (0 if direct else 1)
     assert not state.metadata.get("read_wait"), "实际等待仍为 effect，不是 read_quota"
     record = state.metadata["effect_waits"][candidate["wait_id"]]["continuation"]
     assert record["kind"] == "effect" and record["state"] == "pending"
@@ -379,41 +410,38 @@ def test_failed_effect_quota_cold_resume_preserves_private_source_and_original_r
             assert duplicate[-1].type is AgentEventType.TURN_FAILED
             assert unchanged.conversation == state.conversation
             assert unchanged.metadata["effect_waits"] == state.metadata["effect_waits"]
-            assert len(script.requests) == 1
+            assert len(script.requests) == (1 if index == 0 else 0)
             case.clock[0] = record["due_at"]
             candidates = await case.cold_store().due_continuations()
             assert len(candidates) == 1 and candidates[0]["kind"] == "effect"
             candidate = candidates[0]
         # 不能借测试闭包携带来源：改掉预检侧副本，恢复仍须来自已保存的密文。
         mutable_source["baseline"]["selected"].clear()
-        session, resumed = rebuild(case, ["read", "finish"], "cold")
+        session, resumed = rebuild(case, ["finish"], "cold")
         scripts.append(resumed)
         assert await session.resume_wait(candidate=candidate)
         state = await case.cold_store().load(owner=case.owner, session_id=case.sid)
         assert observed == [source]
         assert len(case.media.reads) == 1 and not resumed.steps
-        assert len(resumed.requests) == 2
+        assert len(resumed.requests) == 1
         assert receipt(state, plan_id) == original_receipt
         record = state.metadata["effect_waits"][plan_id]["continuation"]
         assert record["state"] == "terminal" and record["terminal_reason"] == "partial"
         assert record["budget"]["wait_segments"] == quota_segments
         assert record["budget"]["wait_seconds_spent"] == quota_segments * 10
-        assert record["budget"]["model_spent"] == quota_segments + 2
+        assert record["budget"]["model_spent"] == 2
         assert record["budget"]["tool_spent"] == quota_segments + 1
         assert await case.cold_store().due_continuations() == []
         events = await case.cold_store().list_events(owner=case.owner, session_id=case.sid)
         terminal = [event for event in events if event["type"] == "turn.completed"]
         assert terminal[-1]["payload"]["status"] == "partial", "成功 READ 不能洗成 write 成功"
-        ids = [row.get("tool_call_id") for row in state.conversation if row.get("role") == "tool"]
-        assert ids.count("cold-read") == 1
-        for index in range(quota_segments):
-            assert ids.count(f"quota-{index}-read") == 1
-            old = next(row for row in state.conversation if row.get("tool_call_id") == f"quota-{index}-read")
-            assert "rate_limited" in old["content"]
+        tool_rows = [row for row in state.conversation if row.get("role") == "tool"]
+        assert len({row["tool_call_id"] for row in tool_rows}) == len(tool_rows)
+        assert sum("rate_limited" in row["content"] for row in tool_rows) == quota_segments
         assert_one_write(case, prepared, client, plan_id, state)
         # terminal candidate 的重复领取同样不能重启模型或重放任何业务 IO。
         assert not await session.resume_wait(candidate=candidate)
-        assert len(resumed.requests) == 2 and observed == [source]
+        assert len(resumed.requests) == 1 and observed == [source]
         return state
 
     state = asyncio.run(run())

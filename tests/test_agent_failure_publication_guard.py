@@ -1,6 +1,8 @@
 """Cold cancellation fences executor failures at journal and delivery boundaries."""
 import asyncio
 import threading
+from dataclasses import replace
+from app.agent.kernel.pipeline import ToolPipelineError
 from contextlib import suppress
 from unittest.mock import patch
 
@@ -20,10 +22,13 @@ def test_cold_cancel_blocks_late_terminal_failure(phase):
         _, candidate = await parked_runtime(clock)
         clock[0] = 110
         script = WaitScript(True)
-        script.prefix = "initial"  # Real adapter returns the forbidden old native ID.
         store = SQLiteKernelStore(clock=lambda: clock[0])
         runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
         runtime.session.continuation_binding = _capture_creation_binding()
+        async def failed_read(arguments, context):
+            raise ToolPipelineError("fixture READ failure", code="fixture_read_error")
+        tool = runtime.session.catalog.get('web.search')
+        runtime.session.catalog._tools['web.search'] = replace(tool, read=failed_read)
         entered, release = threading.Event(), threading.Event()
         append = store._append_event_sync
         delivered = []

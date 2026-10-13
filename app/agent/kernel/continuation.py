@@ -135,8 +135,6 @@ def apply_actions(state, lease, updates, now, conn=None):
         if operation == "reserve":
             budget["model_limit"] = min(budget["model_limit"], value["model_limit"])
             budget["tool_limit"] = min(budget["tool_limit"], value["tool_limit"])
-            if value.get("require_tool") and budget["tool_spent"] >= budget["tool_limit"]:
-                raise ValueError("cumulative task tool budget exhausted")
             for counter, limit in (("model_spent", "model_limit"), ("tool_spent", "tool_limit")):
                 amount = value.get(counter, 0)
                 if type(amount) is not int or amount < 0 or budget[counter] + amount > budget[limit]:
@@ -405,9 +403,10 @@ def apply_effect_action(state, lease, update, now, conn):
                 or budget["wait_seconds_spent"] + due - now > MAX_WAIT_SECONDS):
             raise ValueError("effect continuation wait budget exhausted")
         # Only an acquire refusal is resumable; no started external call is retried here.
+        anchor = anchor_for(state, value["call_id"], permit.tool_name)
         budget["wait_segments"] += 1
         budget["wait_seconds_spent"] += due - now
-        record.update(state="pending", due_at=due, claim_until=0, last_checked_at=now)
+        record.update(state="pending", anchor=anchor, due_at=due, claim_until=0, last_checked_at=now)
     elif value["operation"] == "finish":
         record.update(state="terminal", terminal_reason=value["reason"])
         if value.get("delivery_view") is not None and record.get("channel") == "telegram":

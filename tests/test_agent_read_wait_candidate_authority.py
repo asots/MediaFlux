@@ -37,9 +37,9 @@ def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
         assert new['wait_id'] == stale['wait_id']
         assert new['publication_generation'] > stale['publication_generation']
         assert new['claim_id'] != stale['claim_id']
-        assert new['anchor']['call_id'] == 'second-segment-read'
+        assert new['anchor']['call_id'] != stale['anchor']['call_id']
         assert new['budget']['wait_segments'] == 2 and new['state'] == 'pending'
-        assert len(script.requests) == 1 and reads == []
+        assert len(script.requests) == 0 and reads == []
         with db.get_conn() as conn:
             actual = conn.execute('PRAGMA database_list').fetchall()[0][2]
         assert Path(actual).resolve() == db.resolve_db_path().resolve()
@@ -102,7 +102,7 @@ def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
             outcome = await fresh.session.resume_wait(candidate=new if mode == 'fresh_control' else stale)
         after = await SQLiteKernelStore(clock=lambda: clock[0]).load(owner=OWNER, session_id='wait-control')
         if mode == 'fresh_control':
-            assert outcome and len(last_script.requests) == 2 and len(last_reads) == 1
+            assert outcome and len(last_script.requests) == 1 and len(last_reads) == 1
             assert after.metadata['read_wait']['terminal_reason'] == 'completed'
             assert last_script.requests[0]['messages'][0] is not None
         else:

@@ -182,7 +182,7 @@ def test_legacy_policy_absence_never_infers_telegram_authority(tg_config, telegr
         await fresh.session.resume_wait(candidate=candidate)
         record = (await store.load(owner=owner, session_id=sid)).metadata['read_wait']
         assert record['terminal_reason'] == ('model_policy_changed' if telegram else 'completed')
-        assert len(script.requests) == (0 if telegram else 2)
+        assert len(script.requests) == (0 if telegram else 1)
         assert len(reads) == (0 if telegram else 1)
     asyncio.run(run())
 
