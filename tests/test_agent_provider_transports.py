@@ -10,6 +10,7 @@ from app.agent.providers.media_server import MediaServerProviderTransport
 from app.agent.providers.qbittorrent import QBittorrentProviderTransport
 from app.clients.base import (
     MediaItem,
+    MediaSearchResult,
     MediaRecommendationCandidate,
     MediaRecommendationInventory,
     SeriesCandidate,
@@ -71,7 +72,7 @@ class _FakeMediaClient:
     def search_media(self, query, limit=12):
         assert query == "暗芝居"
         assert limit == 5
-        return [
+        return MediaSearchResult(items=[
             MediaItem(
                 id="item-1",
                 name="暗芝居",
@@ -79,7 +80,7 @@ class _FakeMediaClient:
                 year="2013",
                 web_url=self.media_web_url("item-1"),
             )
-        ]
+        ], total=1, has_more=False, limit=limit)
 
     def recent_media(self, limit=8):
         assert limit == 4
