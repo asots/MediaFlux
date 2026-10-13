@@ -353,16 +353,17 @@ def _preview_lines(
 
 def _task_summary(task: Any) -> str:
     status = classify_public_task(task)
+    if status == "untracked":
+        return ""
     labels = {
         "complete": "已声明检查项已核验",
         "partial": "已声明检查项尚未全部核验",
         "blocked": "存在阻塞",
         "cancelled": "会话声明任务已取消",
-        "untracked": "未建立任务验收清单",
         "unknown": "任务验收状态未知",
     }
     lines = ["会话声明任务快照：" + labels[status]]
-    if status in {"untracked", "unknown"}:
+    if status == "unknown":
         return lines[0]
 
     def safe(value: str) -> str:
@@ -402,7 +403,10 @@ def _render_turn(view: TurnView) -> str:
         body = "等待确认。"
     else:
         body = _safe_text(view.answer or "本轮处理已结束。")
-    return render_telegram_markdown(body + "\n\n" + _task_summary(view.task))
+    summary = _task_summary(view.task)
+    if summary:
+        body += "\n\n" + summary
+    return render_telegram_markdown(body)
 
 
 def _render_approval_turn(view: TurnView) -> str:

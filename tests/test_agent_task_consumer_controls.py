@@ -2,16 +2,19 @@
 
 import asyncio
 import copy
+from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
 import subprocess
 
 import pytest
+from app.agent.kernel.adapters import TurnView
 from app.agent.kernel.events import AgentEventType, EventFactory
 from app.agent.kernel.metrics import KernelMetrics, TurnMeasurement
 from app.agent.kernel.task_state import classify_public_task
-from app.bot.agent_adapter import _task_summary
+from app.bot.agent_adapter import _render_turn, _task_summary
+from app.bot.telegram_markdown import render_telegram_markdown
 
 
 def shape():
@@ -108,6 +111,40 @@ def test_python_javascript_public_shape_table():
         check=True,
     )
     assert json.loads(result.stdout) == expected
+
+
+@pytest.mark.parametrize(("task", "status"), shape_cases())
+def test_telegram_task_summary_only_for_present_snapshots(task, status):
+    rendered = _task_summary(task)
+    if status == "untracked":
+        assert rendered == ""
+    elif status == "unknown":
+        assert rendered == "会话声明任务快照：任务验收状态未知"
+    else:
+        assert "会话声明任务快照" in rendered
+        assert "目标：" + task["root_goal"] in rendered
+
+
+@pytest.mark.parametrize("status", ["success", "partial", "effect_completed", "cancelled", "failed"])
+@pytest.mark.parametrize("has_receipt", [False, True])
+def test_telegram_task_footer_preserves_turn_body_and_receipts(status, has_receipt):
+    view = TurnView(
+        session_id="s", turn_id="t", request_id="r", status=status,
+        answer="**本轮答复**", error_message="处理失败",
+        effect_result={"ok": True, "summary": "前项已执行"} if has_receipt else {},
+    )
+    rendered = _render_turn(view)
+    assert "会话声明任务快照" not in rendered
+    assert "未建立任务验收清单" not in rendered
+    assert rendered == rendered.rstrip()
+    if has_receipt:
+        assert rendered.count("前项已执行") == 1
+    if status in {"success", "partial"}:
+        assert "<b>本轮答复</b>" in rendered
+    for task in ({}, shape()):
+        assert _render_turn(replace(view, task=task)) == (
+            rendered + "\n\n" + render_telegram_markdown(_task_summary(task))
+        )
 
 
 def test_telegram_new_text_is_sanitized_before_display_budget():

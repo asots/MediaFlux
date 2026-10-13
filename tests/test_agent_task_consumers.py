@@ -16,6 +16,7 @@ from app.agent.kernel.state import AgentInput
 from app.agent.kernel.adapters import TurnViewBuilder
 from app.agent.kernel.metrics import KernelMetrics
 from app.bot.agent_adapter import _render_turn
+from app.bot.telegram_markdown import render_telegram_markdown
 from app.routes import agent_api
 
 
@@ -96,7 +97,8 @@ def native_snapshots():
     return result
 
 
-def test_telegram_approval_callers_preserve_buttons_and_html(native_snapshots):
+@pytest.mark.parametrize("task_mode", ["tracked", "untracked", "unknown"])
+def test_telegram_approval_callers_preserve_buttons_and_html(native_snapshots, task_mode):
     from dataclasses import replace
     from types import SimpleNamespace
     from app.bot import agent_adapter as adapter
@@ -121,11 +123,13 @@ def test_telegram_approval_callers_preserve_buttons_and_html(native_snapshots):
         confirmation={"action": "创建订阅"},
     )
     base = native_snapshots[0]["view"]
+    task = {"tracked": base.task, "untracked": None, "unknown": {}}[task_mode]
     for confirm in (False, True):
         view = replace(
             base,
             status="approval_required",
             approval=approval,
+            task=task,
             effect_result={"ok": True, "summary": "前项已执行"} if confirm else {},
             error_code="confirmation_stale" if confirm else "",
         )
@@ -162,8 +166,14 @@ def test_telegram_approval_callers_preserve_buttons_and_html(native_snapshots):
                 )
         bodies = [e[0] for e in bot.edits if e[0]] + [e[1] for e in bot.sent]
         body = "\n".join(bodies)
-        assert "已声明检查项尚未全部核验" in body
-        assert "观察配置 qbittorrent" in body
+        if task_mode == "tracked":
+            assert "已声明检查项尚未全部核验" in body
+            assert "观察配置 qbittorrent" in body
+        elif task_mode == "unknown":
+            assert "会话声明任务快照：任务验收状态未知" in body
+        else:
+            assert "会话声明任务快照" not in body
+            assert "未建立任务验收清单" not in body
         assert "<b>" in body and "&lt;测试&gt;" in body
         assert "&lt;b&gt;" not in body
         if confirm:
@@ -235,7 +245,11 @@ def test_native_untracked_qa_keeps_turn_success():
         for event in events:
             builder.apply(event)
         assert metrics.snapshot()["recent"][-1].get("task_status") == "untracked"
-        assert "未建立任务验收清单" in _render_turn(builder.build())
+        view = builder.build()
+        rendered = _render_turn(view)
+        assert rendered == render_telegram_markdown(view.answer)
+        assert "会话声明任务快照" not in rendered
+        assert "未建立任务验收清单" not in rendered
 
     with isolated_test_database("consumer-qa.db"):
         asyncio.run(run())
