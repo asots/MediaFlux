@@ -141,12 +141,12 @@
                     <label class="form-label" for="f_interval">自动刷新周期</label>
                     <select class="form-select" id="f_interval">
                         <option value="0">不自动刷新</option>
-                        <option value="5">每 5 分钟</option>
-                        <option value="15">每 15 分钟</option>
                         <option value="30">每 30 分钟</option>
                         <option value="60">每 1 小时</option>
                         <option value="180">每 3 小时</option>
                         <option value="360">每 6 小时</option>
+                        <option value="720">每 12 小时</option>
+                        <option value="1440">每 24 小时</option>
                     </select>
                 </div>
             </div>
@@ -473,7 +473,9 @@ function openSubForm(id,trigger){
     document.getElementById('f_urls').value='';
     document.getElementById('f_exclude').value='';
     document.getElementById('f_action').value='subscribe';
-    document.getElementById('f_interval').value='0';
+    const intervalSelect=document.getElementById('f_interval');
+    intervalSelect.querySelectorAll('[data-current-interval]').forEach(option=>option.remove());
+    intervalSelect.value='0';
     document.getElementById('f_method').value='';
     document.getElementById('f_qb_path').value='';
     renderRssTarget('','');
@@ -485,7 +487,13 @@ function openSubForm(id,trigger){
             document.getElementById('f_urls').value=s.urls;
             document.getElementById('f_exclude').value=s.exclude_keywords||'';
             document.getElementById('f_action').value=s.action;
-            document.getElementById('f_interval').value=String(s.refresh_interval_minutes||0);
+            const interval=String(s.refresh_interval_minutes||0);
+            if(!Array.from(intervalSelect.options).some(option=>option.value===interval)){
+                const option=new Option(`每 ${interval} 分钟（当前设置）`,interval);
+                option.dataset.currentInterval='true';
+                intervalSelect.add(option);
+            }
+            intervalSelect.value=interval;
             document.getElementById('f_method').value=s.download_method||'';
             document.getElementById('f_qb_path').value=s.qb_save_path||'';
             renderRssTarget(s.gy_target_dir||'',s.gy_target_dir_name||'');

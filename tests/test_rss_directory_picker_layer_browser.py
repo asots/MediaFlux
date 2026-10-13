@@ -148,6 +148,25 @@ class RssDirectoryPickerLayerBrowserTests(unittest.TestCase):
                 self.assertGreaterEqual(rect["y"], 0)
                 self.assertLessEqual(rect["y"] + rect["height"], page.viewport_size["height"] + 1)
 
+    def test_refresh_intervals_and_legacy_edit_values(self):
+        for viewport in ((1280, 900), (390, 844)):
+            with self.subTest(viewport=viewport):
+                page, _ = self.make_page(viewport)
+                expected = ["0", "30", "60", "180", "360", "720", "1440"]
+                page.evaluate("openSubForm()")
+                select = page.locator("#f_interval")
+                self.assertEqual(select.locator("option").evaluate_all("nodes => nodes.map(n => n.value)"), expected)
+                self.assertEqual(select.locator('option[value="720"]').text_content(), "每 12 小时")
+                self.assertEqual(select.locator('option[value="1440"]').text_content(), "每 24 小时")
+                for minutes in (720, 1440, 5, 15, 10):
+                    page.evaluate("minutes => {closeSubForm(); subscriptions[0].refresh_interval_minutes=minutes; openSubForm(7);}", minutes)
+                    self.assertEqual(select.input_value(), str(minutes))
+                    self.assertEqual(select.locator("[data-current-interval]").count(), int(minutes < 30))
+                page.evaluate("closeSubForm(); openSubForm()")
+                self.assertEqual(select.input_value(), "0")
+                self.assertEqual(select.locator("option").evaluate_all("nodes => nodes.map(n => n.value)"), expected)
+                self.assert_no_overflow(page)
+
     def test_picker_hit_testing_expansion_selection_and_cancel_at_all_widths(self):
         for viewport in VIEWPORTS:
             with self.subTest(viewport=viewport):

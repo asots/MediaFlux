@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -226,6 +227,36 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
             response = client.get("/api/rss/stats")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["pending_total"], 1)
+
+    def test_long_refresh_intervals_roundtrip_and_due_boundaries(self) -> None:
+        with TestClient(create_app(start_background=False)) as client:
+            csrf = self._csrf(client.get("/login").text)
+            login = client.post("/login", data={
+                "username": "admin", "password": "123456", "csrf_token": csrf,
+            }, follow_redirects=False)
+            self.assertEqual(login.status_code, 302)
+            headers = {"X-CSRF-Token": self._csrf(client.get("/rss").text)}
+            with patch("app.routes.rss_api.wake_rss_scheduler"):
+                for initial, updated in ((720, 1440), (1440, 720)):
+                    with self.subTest(initial=initial, updated=updated):
+                        created = client.post("/api/rss/subscriptions", headers=headers, json={
+                            "name": f"interval-{initial}", "urls": "https://example.invalid/feed",
+                            "refresh_interval_minutes": initial,
+                        })
+                        self.assertEqual(created.status_code, 200, created.text)
+                        sid = created.json()["id"]
+                        self.assertEqual(db.get_rss_subscription(sid)["refresh_interval_minutes"], initial)
+                        changed = client.put(f"/api/rss/subscriptions/{sid}", headers=headers,
+                                             json={"refresh_interval_minutes": updated})
+                        self.assertEqual(changed.status_code, 200, changed.text)
+                        saved = next(row for row in client.get("/api/rss/subscriptions").json() if row["id"] == sid)
+                        self.assertEqual(saved["refresh_interval_minutes"], updated)
+                        base = datetime(2026, 10, 14, 8, tzinfo=timezone(timedelta(hours=8)))
+                        db.update_rss_subscription(sid, {"last_refreshed_at": base.strftime("%Y-%m-%d %H:%M:%S")})
+                        due = base + timedelta(minutes=updated)
+                        before = (due - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+                        self.assertNotIn(sid, [row["id"] for row in db.list_due_rss_subscriptions(before)])
+                        self.assertIn(sid, [row["id"] for row in db.list_due_rss_subscriptions(due.strftime("%Y-%m-%d %H:%M:%S"))])
 
     def test_subscription_enabled_api_directly_pauses_and_resumes_scheduled_refresh(self) -> None:
         subscription_id = db.add_rss_subscription(
