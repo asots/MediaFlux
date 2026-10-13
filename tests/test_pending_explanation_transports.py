@@ -258,7 +258,7 @@ def test_web_security_cold_confirm_and_tool_rejection(monkeypatch):
             assert runtime.writes == [({"step": 1}, "frozen-1")]
             assert len(runtime.prepares) == 1
             final_system = runtime.wires[-1]["messages"][0]["content"]
-            assert "原任务目标（后续解释问题不是新任务）：改名一个对象" in final_system
+            assert '原任务目标（后续解释问题不是新任务）："改名一个对象"' in final_system
 
 
 def test_telegram_actual_callback_preserves_card(monkeypatch):

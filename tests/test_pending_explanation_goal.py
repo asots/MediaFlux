@@ -1,6 +1,7 @@
 """Trusted task goal survives explanation, successor cards and cold confirmation."""
 
 import asyncio
+import json
 from dataclasses import replace
 
 import pytest
@@ -17,13 +18,14 @@ GOAL = "改名一个对象，然后处理第二个对象"
 REPLY = {"text": "原引用：对象甲和对象乙"}
 
 
+@pytest.mark.parametrize("goal", [GOAL, "把 /source/test.txt 改名后继续处理第二个对象"])
 @pytest.mark.parametrize("explain", [False, True])
-def test_continuation_plan_keeps_original_goal_after_explanation(explain):
+def test_continuation_plan_keeps_original_goal_after_explanation(explain, goal):
     async def run():
         runtime = NativeRuntime()
         owner, sid = "owner", "goal-chain"
         first = await consume_events(runtime.session.run(AgentInput(
-            message=GOAL, owner=owner, session_id=sid, reply_context=REPLY,
+            message=goal, owner=owner, session_id=sid, reply_context=REPLY,
         )))
         assert first.approval is not None
         if explain:
@@ -47,9 +49,9 @@ def test_continuation_plan_keeps_original_goal_after_explanation(explain):
         assert final.approval is None
         assert runtime.writes == [({"step": 1}, "frozen-1"), ({"step": 2}, "frozen-1")]
         assert runtime.prepares == [{"step": 1}, {"step": 2}]
-        assert state.metadata["pending_effect_goal"]["content"] == GOAL
+        assert state.metadata["pending_effect_goal"]["content"] == goal
         assert state.metadata["pending_effect_goal"]["reply_context"] == REPLY
-        assert "原任务目标（后续解释问题不是新任务）：改名一个对象,然后处理第二个对象" in system
+        assert "原任务目标（后续解释问题不是新任务）：" + json.dumps(goal, ensure_ascii=False) in system
         assert any(REPLY["text"] in row.get("content", "") and "<reply_context" in row["content"]
                    for row in runtime.wires[-1]["messages"] if row["role"] == "user")
         cleared = await runtime.store.load(owner=owner, session_id=sid)
@@ -115,7 +117,7 @@ def test_stale_reobservation_keeps_original_goal_and_reply():
         assert runtime.writes == [({"step": 1}, "fresh")]
         assert state.metadata["pending_effect_goal"]["content"] == GOAL
         assert state.metadata["pending_effect_goal"]["reply_context"] == REPLY
-        assert "原任务目标（后续解释问题不是新任务）：改名一个对象,然后处理第二个对象" in system
+        assert "原任务目标（后续解释问题不是新任务）：" + json.dumps(GOAL, ensure_ascii=False) in system
         assert any(REPLY["text"] in row.get("content", "") and "<reply_context" in row["content"]
                    for row in runtime.wires[-1]["messages"] if row["role"] == "user")
     with isolated_test_database("goal-stale.db"):
@@ -154,9 +156,9 @@ def test_ordinary_new_request_uses_its_own_goal_and_reply():
         assert state.metadata["pending_effect_goal"]["content"] == "改名第三个对象"
         assert state.metadata["pending_effect_goal"]["reply_context"] == {"text": "新引用：对象丙"}
         system = runtime.wires[-1]["messages"][0]["content"]
-        assert "原任务目标（后续解释问题不是新任务）：改名第三个对象" in system
+        assert '原任务目标（后续解释问题不是新任务）："改名第三个对象"' in system
         assert any("新引用：对象丙" in row.get("content", "") and "<reply_context" in row["content"]
                    for row in runtime.wires[-1]["messages"] if row["role"] == "user")
-        assert "原任务目标（后续解释问题不是新任务）：改名一个对象" not in system
+        assert '原任务目标（后续解释问题不是新任务）："改名一个对象' not in system
     with isolated_test_database("goal-replace.db"):
         asyncio.run(run())

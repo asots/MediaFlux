@@ -1284,7 +1284,8 @@ class AgentSession:
                         )
                     if confirmed_result is not None:
                         request_system_prompt += (
-                            "\n当前回合是用户点击确认后的续行，不是原预览请求的重放。"
+                            "\n原任务目标（后续解释问题不是新任务）：" + json.dumps(agent_input.message, ensure_ascii=False)
+                            + "\n当前回合是用户点击确认后的续行，不是原预览请求的重放。"
                             "上一张冻结计划已获授权并已消费；对话末尾的可信系统结果是本次真实执行回执。"
                             "历史中的‘只预览/等待确认/approval_required’描述的是授权前状态，不能覆盖新回执。"
                             "系统会展示本次可信回执，不要原样或改写复述；请继续处理原任务剩余步骤，只补充新的核验结果或下一步阻塞。"
