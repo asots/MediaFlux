@@ -69,7 +69,7 @@ async def _context(
 
 
 class KernelPrivacyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tool_arguments_are_redacted_in_persistence_and_not_published(self) -> None:
+    async def test_credentials_are_redacted_and_input_paths_stay_private_for_replay(self) -> None:
         secret = "rss-passkey-very-secret"
         private_path = "/home/aio/private/downloads"
         tool = KernelToolSpec(
@@ -149,7 +149,6 @@ class KernelPrivacyTests(unittest.IsolatedAsyncioTestCase):
         persisted = await state.load(owner="owner-1", session_id="session-1")
         serialized_state = json.dumps(persisted.conversation, ensure_ascii=False)
         self.assertNotIn(secret, serialized_state)
-        self.assertNotIn(private_path, serialized_state)
         assistant_call = next(
             item
             for item in persisted.conversation
@@ -158,7 +157,8 @@ class KernelPrivacyTests(unittest.IsolatedAsyncioTestCase):
         arguments = assistant_call["tool_calls"][0]["arguments"]
         self.assertIn("url", arguments)
         self.assertIn("********", arguments["url"])
-        self.assertNotEqual(arguments["path"], private_path)
+        # 已提交的输入路径须保真供私有续跑使用；上方仍断言凭据脱敏、事件不发布路径。
+        self.assertEqual(arguments["path"], private_path)
 
 
 class EffectPlanStoreSafetyTests(unittest.TestCase):
