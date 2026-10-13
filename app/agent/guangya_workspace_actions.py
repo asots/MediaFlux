@@ -29,6 +29,7 @@ from app.modules.guangya_workspace import (
     discard_owner_observations,
     load_directory_observation,
     observation_page,
+    observation_entry_map,
     valid_observation_ref,
 )
 
@@ -580,7 +581,7 @@ def _reobserve_files(client: GuangYaClient, source: dict[str, Any], *, context: 
                 failures[original["observation_ref"]] = _public_error(exc)
         # 查询词、类型过滤和扫描深度不定义原选中对象的身份。未命中时只按已知 ID
         # 核对父链；必须落在刚核验过的原根，不能据此扩到其它目录选同名对象。
-        present = {str(item["file_id"]) for payload in observations.values() for item in payload["entries"]}
+        present = {str(item["file_id"]) for payload in observations.values() for item in observation_entry_map(payload).values()}
         cache = {}
         supplemented = False
         for old in source["baseline"]["selected"]:
@@ -610,7 +611,7 @@ def _reobserve_files(client: GuangYaClient, source: dict[str, Any], *, context: 
 def _compare_file_observation(source: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """只按当前账号的 file_id 与对象类型对应，不按名称猜新 OBJ。"""
     by_id: dict[tuple[str, bool], list[dict[str, Any]]] = {}
-    entries = payload.get("entries") or []
+    entries = list(observation_entry_map(payload).values())
     for item in entries:
         by_id.setdefault((str(item["file_id"]), bool(item["is_dir"])), []).append(item)
     compared = []
@@ -715,38 +716,28 @@ def query_guangya_filesystem(
     operation = str(page.get("operation") or "list")
     labels = {"list": "列表", "tree": "递归观察", "search": "搜索", "stat": "对象详情"}
     scopes = tuple(str(item) for item in page.get("scopes") or ())
-    scope_aliases = {name: f"S{index}" for index, name in enumerate(scopes, 1)}
 
     def compact_location(value: object) -> str:
         location = str(value or "")
-        for name, alias in scope_aliases.items():
-            if location == name:
-                return alias
-            prefix = name + " › "
-            if location.startswith(prefix):
-                return alias + " › " + location[len(prefix) :]
+        for index, name in enumerate(scopes, 1):
+            if location == name or location.startswith(name + " › "):
+                return f"S{index}" + location[len(name):]
         return location
 
-    model_data = {
-        "observation_ref": page["observation_ref"],
-        "scope": page["scope"],
-        "scopes": [{"at": scope_aliases[name], "name": name} for name in scopes],
-        "page": page["page"],
-        "total": page["total"],
-        "has_more": page["has_more"],
-        "truncated": page["truncated"],
-        "entries": [
-            {
-                "ref": item["object_ref"],
-                "name": item["object_name"],
-                "kind": item["kind"],
-                "size": item["size"],
-                "extension": item["extension"],
-                "at": compact_location(item.get("location")),
-            }
-            for item in page["entries"]
-        ],
-    }
+    def model_object(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ref": item["object_ref"], "name": item["object_name"], "kind": item["kind"],
+            "size": item["size"], "extension": item["extension"],
+            "at": compact_location(item.get("location")),
+        }
+
+    model_data = {key: page[key] for key in (
+        "observation_ref", "operation", "scope", "page", "total", "has_more", "truncated")}
+    model_data.update(
+        scopes=[{"at": f"S{index}", "name": name} for index, name in enumerate(scopes, 1)],
+        scope_objects=[model_object(item) for item in page["scope_objects"]],
+        entries=[model_object(item) for item in page["entries"]],
+    )
     if "reobservation" in page:
         model_data["reobservation"] = page["reobservation"]
     failures = (page.get("reobservation") or {}).get("failed_sources") or []
@@ -765,13 +756,8 @@ def query_guangya_filesystem(
                 _now(),
             )
         ],
-        suggestions=[
-            *(
-                ["还有更多对象，可以使用 observation_ref 继续分页。"]
-                if page["has_more"]
-                else []
-            ),
-            "如需改名、移动、移入回收站或新建目录，请先生成通用光鸭文件变更冻结预览。",
-        ],
+        suggestions=(
+            ["还有更多对象，可以使用 observation_ref 继续分页。"] if page["has_more"] else []
+        ) + ["如需变更，调用 guangya.fs.change.execute 准备确认卡，确认后才执行。"],
         model_data=model_data,
     )

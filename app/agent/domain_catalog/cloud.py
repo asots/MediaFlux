@@ -353,6 +353,8 @@ def register_specs(
                 "完整云端路径、凭据或签名 URL。path 查询单目录；paths 可把 1–32 个已确认的发布组目录合并为"
                 "同一观察快照。支持 kinds 按 directory/video/subtitle/image/metadata/other 过滤，并可用 max_depth "
                 "限制递归深度；跨发布组剧集规整应优先只取 video，避免花絮与字幕占满分页。"
+                "scope_objects 返回查询目录本身的可操作引用；entries 只含目录内的匹配子项（stat 为精确对象）。"
+                "复制、移动或改名整个目录应选目录本身，不要选目录里的文件；账户根目录没有可操作引用。"
                 "查看目录、列出第一层子目录或回答具体文件夹名称时必须使用本工具。"
                 "只要提供 query，list/tree 会等价归一化为 search；继续分页只传 observation_ref、page 和 page_size。"
             ),

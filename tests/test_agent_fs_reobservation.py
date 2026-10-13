@@ -211,7 +211,7 @@ def test_single_directory_plan_reobserves_after_original_obs_is_unusable(case, o
     assert workspace.observation_entry_map(saved)[item["object_ref"]]["file_id"] == NESTED
     assert (saved["operation"], saved["query"], saved["kinds"], saved["max_depth"], saved["max_items"]) == (
         "list", "", [], 0, 17)
-    assert saved["roots"] == [FILMS]
+    assert [{k: root[k] for k in FILMS} for root in saved["roots"]] == [FILMS]
     assert [row["id"] for row in case.provider.trace if row["method"] == "list_dir"] == [
         "0", FILMS["parent_id"], FILMS["file_id"]]
     assert source == frozen and frozen_plan(case) == plan
@@ -307,7 +307,7 @@ def test_create_directory_only_retains_original_diagnostic_scope_without_object_
     case.provider.trace.clear()
     renewed = read(case, {"operation": "reobserve"}, source=source)
     saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner)
-    assert saved["roots"] == [FILMS]
+    assert [{k: root[k] for k in FILMS} for root in saved["roots"]] == [FILMS]
     assert (saved["operation"], saved["query"], saved["kinds"], saved["max_depth"], saved["max_items"]) == (
         "search", "Movie", ["video"], 0, 7)
     assert renewed.data["cloud_write"] is False
@@ -419,7 +419,7 @@ def test_missing_one_root_retains_other_observation_but_reports_failed_selection
     assert items[refs[0]]["state"] == "same_identity" and items[refs[0]]["object_ref"] != refs[0]
     assert items[refs[1]]["state"] == "inconclusive" and "object_ref" not in items[refs[1]]
     saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner)
-    assert saved["roots"] == [FILMS]
+    assert [{k: root[k] for k in FILMS} for root in saved["roots"]] == [FILMS]
     scanned = [row["id"] for row in case.provider.trace if row["method"] == "list_dir"]
     assert set(scanned) == {"0", FILMS["parent_id"], FILMS["file_id"]}
     assert source == frozen
@@ -625,7 +625,8 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
         assert selected["source_root"] == FILMS, "身份补充只能归属已经核验的原根，不能扩展来源"
         assert selected["is_dir"] is False
         assert selected["parent_id"] == (NESTED if change == "deeper_inside" else FILMS["file_id"])
-        assert {entry["file_id"] for entry in entries.values()} == {MOVIE}, "point 读取不得带出未选中对象"
+        assert {entry["file_id"] for entry in saved["entries"]} == {MOVIE}, "point 读取不得带出未选中的内容对象"
+        assert {entry["file_id"] for entry in entries.values()} == {MOVIE, FILMS["file_id"]}
         info_ids = {row["id"] for row in current.provider.trace if row["method"] == "file_info"}
         assert MOVIE in info_ids
         if change == "deeper_inside":
@@ -673,7 +674,8 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
         continued_saved = workspace.load_directory_observation(
             continued.data["observation_ref"], owner=current.context.owner)
         continued_entries = workspace.observation_entry_map(continued_saved)
-        assert {entry["file_id"] for entry in continued_entries.values()} == {MOVIE}
+        assert {entry["file_id"] for entry in continued_saved["entries"]} == {MOVIE}
+        assert {entry["file_id"] for entry in continued_entries.values()} == {MOVIE, FILMS["file_id"]}
         continued_selected = continued_entries[continued_item["object_ref"]]
         for key in ("file_id", "name", "is_dir", "etag", "parent_id", "parent_path", "source_root", "observed_by"):
             assert continued_selected[key] == selected[key]

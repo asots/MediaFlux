@@ -19,7 +19,7 @@ FILMS = {"file_id": "private-provider-films-shared", "path": "/Films/Shared", "i
 SHOWS = {"file_id": "private-provider-shows-shared", "path": "/Shows/Shared", "is_dir": True,
          "parent_id": "private-provider-shows"}
 PAGE_KEYS = {"observation_ref", "scope", "scopes", "operation", "query", "kinds", "max_depth", "recursive",
-             "page", "page_size", "total", "scanned_items", "has_more", "truncated", "entries", "cloud_write"}
+             "page", "page_size", "total", "scanned_items", "has_more", "truncated", "entries", "scope_objects", "cloud_write"}
 ENTRY_KEYS = {"object_ref", "object_name", "kind", "extension", "size", "location"}
 
 
@@ -75,7 +75,10 @@ def assert_public_unchanged(payload):
     for entry in legacy["entries"]:
         entry.pop("source_root", None)
     public = workspace.observation_page(payload, page_size=999)
-    assert public == workspace.observation_page(legacy, page_size=999)
+    old_public = workspace.observation_page(legacy, page_size=999)
+    assert {k: v for k, v in public.items() if k != "scope_objects"} == {
+        k: v for k, v in old_public.items() if k != "scope_objects"}
+    assert old_public["scope_objects"] == []
     assert set(public) == PAGE_KEYS and public["page_size"] == 50
     assert all(set(entry) == ENTRY_KEYS for entry in public["entries"])
     encoded = json.dumps(public)
@@ -91,7 +94,7 @@ def test_single_root_persists_resolved_identity_and_actual_query_limit(provider,
     payload = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared",
                 operation=operation, query="Movie" if operation == "search" else "", max_items=17, max_depth=2)
     loaded = persisted(payload)
-    assert loaded["roots"] == [FILMS]
+    assert [{k: root[k] for k in FILMS} for root in loaded["roots"]] == [FILMS]
     assert loaded["max_items"] == 17 != len(loaded["entries"])
     assert loaded["max_depth"] == 2 and loaded["operation"] == operation
     assert all(entry["source_root"] == FILMS for entry in loaded["entries"])
@@ -104,8 +107,8 @@ def test_same_basename_roots_and_recursive_entries_keep_distinct_origins(provide
     payload = workspace.create_multi_directory_observation(provider, owner=OWNER,
                 paths=["/Films/Shared", "/Shows/Shared", "/Films/Shared"], recursive=True, max_items=23)
     loaded = persisted(payload)
-    assert loaded["scope_path"] == "/" and loaded["scope_names"] == ["Shared", "Shared"]
-    assert loaded["roots"] == [FILMS, SHOWS] and loaded["max_items"] == 23
+    assert loaded["scope_path"] == "/" and loaded["scope_names"] == ["目录 1 · Shared", "目录 2 · Shared"]
+    assert [{k: root[k] for k in FILMS} for root in loaded["roots"]] == [FILMS, SHOWS] and loaded["max_items"] == 23
     for entry in loaded["entries"]:
         expected = SHOWS if entry["file_id"] == "private-provider-episode" else FILMS
         assert entry["source_root"] == expected
@@ -153,10 +156,11 @@ def test_merge_preserves_each_entry_signed_source_not_primary_root(provider, can
     wanted = candidate["entries"][0]
     merged = workspace.load_directory_observation_set(ref(primary), owner=OWNER, object_refs=[wanted["handle"]])
     entries = workspace.observation_entry_map(merged)
-    assert len(entries) == 2
+    assert len(merged["entries"]) == 2
+    assert len(entries) == 3  # 两个内容对象 + 主观察的目录本身
     assert entries[primary["entries"][0]["handle"]]["source_root"] == FILMS
     assert entries[wanted["handle"]] == wanted
-    assert entries[wanted["handle"]]["source_root"] == candidate["roots"][0] != FILMS
+    assert entries[wanted["handle"]]["source_root"] == {k: candidate["roots"][0][k] for k in FILMS} != FILMS
     # 合并是读取视图，不伪造一次新查询，也不续签主/候选观察 TTL。
     assert merged["roots"] == primary["roots"] and merged["max_items"] == primary["max_items"]
     assert merged["expires_at_epoch"] == primary["expires_at_epoch"]
@@ -169,7 +173,7 @@ def test_merge_preserves_each_entry_signed_source_not_primary_root(provider, can
 @pytest.mark.parametrize("field", ["roots", "max_items", "source_root"])
 def test_new_private_source_metadata_is_authenticated(provider, field):
     payload = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared")
-    assert payload["roots"] == [FILMS]
+    assert [{k: root[k] for k in FILMS} for root in payload["roots"]] == [FILMS]
     path = workspace._plan_path(payload["plan_id"])
     tampered = json.loads(path.read_text())
     if field == "roots":
@@ -222,7 +226,11 @@ def test_legacy_multiroot_payload_remains_pageable_without_inferred_whole_disk_s
     assert "roots" not in loaded and "max_items" not in loaded
     assert all("source_root" not in entry for entry in loaded["entries"])
     before = workspace._plan_path(legacy["plan_id"]).read_bytes()
-    assert workspace.observation_page(loaded, page=2, page_size=1) == workspace.observation_page(original, page=2, page_size=1)
+    old_page = workspace.observation_page(loaded, page=2, page_size=1)
+    new_page = workspace.observation_page(original, page=2, page_size=1)
+    assert old_page["scope_objects"] == []
+    assert {k: v for k, v in old_page.items() if k != "scope_objects"} == {
+        k: v for k, v in new_page.items() if k != "scope_objects"}
     assert workspace.observation_page(loaded, page=2, page_size=1)["entries"]
     assert workspace._plan_path(legacy["plan_id"]).read_bytes() == before
     assert loaded["expires_at_epoch"] == original["expires_at_epoch"]
@@ -246,7 +254,7 @@ def test_merge_with_legacy_keeps_missing_source_unknown(provider, legacy_primary
         assert "source_root" not in entries[primary["entries"][0]["handle"]]
         assert entries[wanted["handle"]]["source_root"] == SHOWS
     else:
-        assert merged["roots"] == [FILMS]
+        assert [{k: root[k] for k in FILMS} for root in merged["roots"]] == [FILMS]
         assert "source_root" not in entries[wanted["handle"]]
     assert_public_unchanged(merged)
 

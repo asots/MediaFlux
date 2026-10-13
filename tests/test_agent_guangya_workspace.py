@@ -136,6 +136,70 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             self.assertNotIn("parent_id", item)
             self.assertNotIn("path", item)
 
+    def test_directory_itself_is_selectable_without_changing_content_pagination(self):
+        client = FakeWorkspaceClient()
+        result = self._query(client, operation="list", page_size=1)
+        self.assertEqual(result.model_data["operation"], "list")
+        self.assertEqual(result.data["total"], 3)
+        self.assertTrue(result.data["has_more"])
+        self.assertEqual(len(result.data["entries"]), 1)
+        root = result.model_data["scope_objects"][0]
+        self.assertEqual((root["name"], root["kind"]), ("a", "directory"))
+        self.assertNotIn(root["ref"], [item["ref"] for item in result.model_data["entries"]])
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        selected = guangya_workspace.observation_entry_map(payload)[root["ref"]]
+        self.assertEqual((selected["file_id"], selected["parent_id"], selected["parent_path"]), ("a", "0", "/"))
+        source = guangya_workspace.capture_observation_source(payload, [root["ref"]])
+        self.assertTrue(source["available"])
+        self.assertEqual(source["baseline"]["selected"][0]["file_id"], "a")
+        calls = list(client.list_calls)
+        following = workspace_actions.query_guangya_filesystem(
+            workspace_actions.guangya_fs_query_arguments({"observation_ref": result.data["observation_ref"], "page": 2, "page_size": 1}),
+            ToolContext(owner="owner", session_id="session"))
+        self.assertEqual(following.data["scope_objects"], result.data["scope_objects"])
+        self.assertEqual(client.list_calls, calls)  # 不为目录引用增加云端读取
+        self.assertEqual(following.data["total"], 3)
+
+    def test_empty_or_filtered_directory_is_not_a_matching_child(self):
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                client = FakeWorkspaceClient()
+                if empty:
+                    client.directories["a"] = []
+                result = self._query(client, operation="search", query="no-such-video", kinds=["video"])
+                self.assertEqual(result.data["total"], 0)
+                self.assertEqual(result.data["entries"], [])
+                self.assertEqual(result.status, "empty")
+                self.assertEqual(result.model_data["scope_objects"][0]["kind"], "directory")
+                self.assertFalse(result.data["has_more"])
+
+    def test_account_root_and_legacy_roots_do_not_gain_writable_handles(self):
+        result = self._query(FakeWorkspaceClient(), operation="list", path="/")
+        self.assertEqual(result.data["scope_objects"], [])
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        self.assertNotIn("0", [entry["file_id"] for entry in guangya_workspace.observation_entry_map(payload).values()])
+        # 已保存的旧快照只有来源身份，不推测或拼凑可写对象。
+        result = self._query(FakeWorkspaceClient(), operation="list")
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        payload["roots"] = [{key: root[key] for key in ("file_id", "parent_id", "path", "is_dir")} for root in payload["roots"]]
+        guangya_workspace._atomic_write(payload)
+        old = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        self.assertEqual(guangya_workspace.observation_page(old)["scope_objects"], [])
+        self.assertEqual(len(guangya_workspace.observation_entry_map(old)), len(old["entries"]))
+
+    def test_overlapping_root_and_child_share_one_identity(self):
+        with mock.patch.object(workspace_actions, "GuangYaClient", return_value=FakeWorkspaceClient()):
+            result = workspace_actions.query_guangya_filesystem(
+                workspace_actions.guangya_fs_query_arguments({"paths": ["/a", "/a/spam.example.com"], "operation": "tree"}),
+                ToolContext(owner="owner", session_id="session"))
+        self.assertEqual(result.data["total"], 4)
+        roots = result.model_data["scope_objects"]
+        self.assertEqual([root["name"] for root in roots], ["a", "spam.example.com"])
+        child = next(entry for entry in result.model_data["entries"] if entry["name"] == "spam.example.com")
+        self.assertEqual(roots[1]["ref"], child["ref"])
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        self.assertEqual(len(guangya_workspace.observation_entry_map(payload)), 5)
+
     def test_default_page_size_supports_large_model_observations(self):
         client = FakeWorkspaceClient()
         client.directories["a"] = [

@@ -481,8 +481,10 @@ def _store_observation(
             str(row.get("file_id") or ""),
         )
     )
+    roots = deepcopy(list(roots))
     plan_id = uuid.uuid4().hex
-    for entry in entries:
+    # 目录本身与子项共用对象身份；旧快照的来源根没有完整快照，不伪造可写引用。
+    for entry in [*entries, *(root for root in roots if root.get("media_kind") == "directory")]:
         entry["handle"] = _handle(plan_id, entry)
         entry.setdefault("source_observation_ref", observation_ref(plan_id))
     current = time.time()
@@ -498,7 +500,7 @@ def _store_observation(
         "scope_name": str(scope_name),
         "scope_names": [str(item) for item in scope_names if str(item)],
         # 私有查询来源；展示 scope 不携带完整根身份，不能用于还原查询范围。
-        "roots": [dict(root) for root in roots],
+        "roots": roots,
         "max_items": max_items,
         "operation": operation,
         "query": query,
@@ -581,17 +583,14 @@ def create_multi_directory_observation(
             target_name = "根目录"
             root = {"file_id": target_id, "path": target_path, "is_dir": True}
         else:
-            target, _parent_path = _resolve_path(client, target_path)
+            target, parent_path = _resolve_path(client, target_path)
             if not target.is_dir:
                 raise GuangYaWorkspaceError("通用目录观察只支持精确目录路径")
             target_id = str(target.file_id)
             target_name = str(target.name)
-            root = {
-                "file_id": target_id,
-                "path": target_path,
-                "is_dir": bool(target.is_dir),
-                "parent_id": str(target.parent_id),
-            }
+            root = _snapshot(target, parent_path=parent_path, relative_parent="查询目录本身")
+            root["path"] = target_path
+            root["source_root"] = {key: root[key] for key in ("file_id", "path", "is_dir", "parent_id")}
         if expected_roots is not None:
             expected = next((item for item in expected_roots if item.get("path") == target_path), None)
             if expected is None or any(root.get(key) != expected.get(key)
@@ -604,6 +603,11 @@ def create_multi_directory_observation(
         scope_names.append(target_name)
 
     multiple = len(roots) > 1
+    if len(set(scope_names)) != len(scope_names):
+        scope_names = [f"目录 {index} · {name}" for index, name in enumerate(scope_names, 1)]
+    for root, name in zip(roots, scope_names):
+        if root["file_id"] != "0":
+            root["relative_parent"] = name if multiple else "查询目录本身"
     queue = deque(
         (root["file_id"], root["path"], name if multiple else "", 0, root)
         for root, name in zip(roots, scope_names)
@@ -639,7 +643,7 @@ def create_multi_directory_observation(
                     queue.clear()
                     break
                 seen_entries.add(entry_key)
-                entry["source_root"] = dict(source_root)
+                entry["source_root"] = dict(source_root.get("source_root") or source_root)
                 entries.append(entry)
             if item.is_dir and recursive and depth < safe_depth:
                 child_path = directory_path.rstrip("/") + "/" + item.name
@@ -860,7 +864,7 @@ def locate_observed_object(client: GuangYaClient, expected: dict[str, Any], root
             path = _normalize_path(path)
             entry = _snapshot(current, parent_path=path.rsplit("/", 1)[0] or "/",
                               relative_parent=" › ".join(reversed(names[1:])) or "当前目录")
-            entry.update(source_root=deepcopy(root), observed_by="identity")
+            entry.update(source_root=deepcopy(root.get("source_root") or root), observed_by="identity")
             return entry
         if parent_id == "0" or parent_id in visited:
             return None
@@ -882,6 +886,7 @@ def merge_directory_observations(client: GuangYaClient, *, owner: str,
     if len(payloads) == 1 and not force_new:
         return payloads[0]
     entries = {}
+    objects = {}
     roots = {}
     sources = {}
     scope_names = [f"来源 {index} · {payload.get('scope_name') or '当前目录'}" for index, payload in enumerate(payloads, 1)]
@@ -889,18 +894,23 @@ def merge_directory_observations(client: GuangYaClient, *, owner: str,
         if (payload.get("owner_digest") != organize_operation_owner_digest(owner)
                 or payload.get("credential_generation") != int(client.credential_generation)):
             raise GuangYaWorkspaceStale("合并观察的会话或账号已变化")
-        for item in payload.get("entries") or ():
+        contents = payload.get("entries") or []
+        for position, item in enumerate([*contents, *(root for root in payload.get("roots") or () if root.get("media_kind") == "directory")]):
             key = (str(item["file_id"]), str(item.get("parent_id") or "0"), bool(item["is_dir"]))
-            previous = entries.get(key)
+            previous = objects.get(key)
             if previous is not None and any(previous.get(field) != item.get(field)
                     for field in ("name", "size", "etag", "updated_at")):
                 raise GuangYaWorkspaceStale("重新读取期间同一对象发生变化，请重新核对")
             entry = deepcopy(item)
             relative = str(entry.get("relative_parent") or "")
             entry["relative_parent"] = scope_names[index] + (f" › {relative}" if relative not in {"", "当前目录", "当前对象"} else "")
-            entries[key] = entry
+            objects[key] = entry
+            if position < len(contents):
+                entries[key] = entry
         for root in payload.get("roots") or ():
-            roots[(str(root["file_id"]), str(root["path"]))] = root
+            roots[(str(root["file_id"]), str(root["path"]))] = {
+                **root, "relative_parent": scope_names[index] + " › " + str(root.get("relative_parent") or "查询目录本身")}
+
         sources.update({item["observation_ref"]: item for item in observation_sources(payload)})
     return _store_observation(client, owner=owner, scope_path="/", scope_name="重新观察的范围",
         scope_names=scope_names,
@@ -920,8 +930,8 @@ def observation_page(
     entries = list(payload.get("entries") or [])
     start = (safe_page - 1) * safe_size
     selected = entries[start : start + safe_size]
-    public_entries = [
-        {
+    def public_object(item: dict[str, Any]) -> dict[str, Any]:
+        return {
             "object_ref": str(item.get("handle") or ""),
             "object_name": str(item.get("name") or "")[:255],
             "kind": str(item.get("media_kind") or "other"),
@@ -929,8 +939,7 @@ def observation_page(
             "size": max(0, int(item.get("size") or 0)),
             "location": str(item.get("relative_parent") or "当前目录")[:240],
         }
-        for item in selected
-    ]
+
     return {
         "observation_ref": observation_ref(str(payload.get("plan_id") or "")),
         "scope": str(payload.get("scope_name") or "当前目录")[:120],
@@ -948,14 +957,16 @@ def observation_page(
         "scanned_items": max(0, int(payload.get("scanned_items") or len(entries))),
         "has_more": start + len(selected) < len(entries),
         "truncated": bool(payload.get("truncated")),
-        "entries": public_entries,
+        "scope_objects": [public_object(root) for root in payload.get("roots") or ()
+                          if valid_object_handle(root.get("handle"))],
+        "entries": [public_object(item) for item in selected],
         "cloud_write": False,
     }
 
 
 def observation_entry_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    for raw in payload.get("entries") or []:
+    for raw in [*(payload.get("entries") or ()), *(payload.get("roots") or ())]:
         if not isinstance(raw, dict):
             continue
         handle = str(raw.get("handle") or "").strip().upper()

@@ -331,8 +331,8 @@ def test_same_basename_roots_keep_query_filter_depth_and_count_bounds(case):
     case.provider.trace.clear()
     result = case.file_read({"operation": "reobserve"}, source=source)
     loaded = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
-    assert loaded["roots"] == [FILMS, SHOWS]
-    assert loaded["scope_names"] == ["Shared", "Shared"]
+    assert [{k: root[k] for k in FILMS} for root in loaded["roots"]] == [FILMS, SHOWS]
+    assert loaded["scope_names"] == ["目录 1 · Shared", "目录 2 · Shared"]
     assert (loaded["operation"], loaded["query"], loaded["kinds"], loaded["max_items"], loaded["max_depth"]) == (
         "search", "Movie", ["video"], 2, 0)
     assert len(loaded["entries"]) == 2 and all(entry["media_kind"] == "video" for entry in loaded["entries"])
