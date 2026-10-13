@@ -298,28 +298,6 @@ class JellyfinClient(MediaServerClient):
             genres=genres,
         )
 
-    def search_media(self, query: str, limit: int = 12) -> list[MediaItem]:
-        user_id = self._user_id()
-        normalized_limit = max(1, min(int(limit or 12), 50))
-        data = self._request(
-            f"/Users/{user_id}/Items",
-            params={
-                "SearchTerm": str(query or "").strip(),
-                "Recursive": "true",
-                "Limit": normalized_limit,
-                "IncludeItemTypes": "Movie,Series,Episode",
-                "Fields": (
-                    "DateCreated,Overview,SeriesId,SeriesName,IndexNumber,"
-                    "ParentIndexNumber,ImageTags,SeriesPrimaryImageTag,"
-                    "ProductionYear,RunTimeTicks,Genres,UserData"
-                ),
-                "SortBy": "SortName",
-                "SortOrder": "Ascending",
-            },
-        )
-        raw_items, _total = self._items_payload(data)
-        return [self._media_item(item) for item in raw_items if isinstance(item, dict)]
-
     def _recent_played_from_activity(
         self, user_id: str, normalized_limit: int,
     ) -> list[MediaItem]:

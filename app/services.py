@@ -13,6 +13,7 @@ from typing import Any
 from app import database as db
 from app.clients.base import (
     DashboardData,
+    MediaSearchResult,
     MediaServerClient,
     close_media_server_client,
 )
@@ -356,19 +357,40 @@ def build_recent_media(*, limit: int = 72) -> list[dict]:
     return results
 
 
-def search_media_servers(query: str, *, limit: int = 8) -> list[dict]:
-    """并发搜索所有已配置 Jellyfin / Emby 服务器。"""
+def _media_search_source_payload(
+    server_type: str, server_name: str, web_url: str,
+    client: MediaServerClient, query: str, options: dict[str, Any],
+) -> dict:
+    result = MediaSearchResult(**options)
+    error = ""
+    try:
+        result = client.search_media(query, **options)
+    except Exception as exc:
+        logger.warning("媒体服务器搜索失败 server=%s type=%s", server_type, type(exc).__name__)
+        error = "媒体服务器暂时不可用"
+    return {
+        "server_type": server_type, "server_name": server_name, "web_url": web_url,
+        "items": result.items, **result.metadata(), "error": error,
+    }
+
+
+def search_media_servers(
+    query: str, *, limit: int = 8, offset: int = 0,
+    search_by: str = "title", media_type: str = "all", count_only: bool = False,
+) -> list[dict]:
+    """并发搜索，offset/limit 按服务器应用；总数是记录数，不跨服务器去重。"""
     normalized_limit = max(1, min(int(limit or 8), 50))
+    options = {
+        "limit": normalized_limit, "offset": offset, "search_by": search_by,
+        "media_type": media_type, "count_only": count_only,
+    }
     jobs: list[Callable[[], dict]] = []
     for server_type, server_name, web_url, client in _configured_media_sources():
         jobs.append(
             lambda server_type=server_type, server_name=server_name, web_url=web_url, client=client: _run_owned_media_source_job(
                 client,
-                lambda: _media_source_payload(
-                    server_type,
-                    server_name,
-                    web_url,
-                    lambda: client.search_media(query, normalized_limit),
+                lambda: _media_search_source_payload(
+                    server_type, server_name, web_url, client, query, options,
                 ),
             )
         )

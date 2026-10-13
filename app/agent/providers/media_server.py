@@ -411,12 +411,18 @@ class MediaServerProviderTransport:
                     )
                 if operation == "media.items.search":
                     limit = int(arguments.get("limit", 12))
-                    items = client.search_media(str(arguments["query"]), limit=limit)
+                    result = client.search_media(
+                        str(arguments["query"]), limit=limit,
+                        **{key: arguments[key] for key in ("offset", "search_by", "media_type", "count_only") if key in arguments},
+                    )
+                    total_label = f"匹配 {result.total} 条媒体记录" if result.total is not None else "匹配总数未知"
                     return ProviderPayload(
-                        summary=f"{profile.label} 搜索到 {len(items)} 个媒体条目",
+                        summary=f"{profile.label} {total_label}，本次返回 {len(result.items)} 条",
+                        status="partial" if result.total is None else "success",
                         data={
-                            "items": [self._media_item(resolve_link, item) for item in items],
-                            "count": len(items),
+                            "items": [self._media_item(resolve_link, item) for item in result.items],
+                            "count": len(result.items),
+                            **result.metadata(),
                         },
                         source=f"{profile.server_type}_api",
                     )

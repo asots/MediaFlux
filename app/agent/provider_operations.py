@@ -211,7 +211,14 @@ def build_provider_catalog() -> ProviderCatalog:
         ProviderOperationSpec(
             operation_id="media.items.search",
             provider="media",
-            description="使用媒体服务器原生搜索查询电影、剧集或单集，并返回可用的已校验 open_url。",
+            description=(
+                "原生媒体搜索、分页或统计，返回 total/returned/has_more/next_offset 和已校验 open_url。"
+                "count=returned 是当前页条数；total=null 表示未知，不能用返回数推算总量。"
+                "演员作品统计用 search_by=actor、count_only=true；"
+                "仅按精确人物元数据和 Actor 关联，不以标题包含替代；all 默认包含电影/剧集、不计单集。"
+                "media_type 可限定统计类型；total 是该服务器记录数，不是去重作品数。"
+                "人物缺失、候选不全或歧义时总数未知，不能宣称零作品。"
+            ),
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -219,13 +226,17 @@ def build_provider_catalog() -> ProviderCatalog:
                 "properties": {
                     "query": {"type": "string", "minLength": 1, "maxLength": 120},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 12},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "search_by": {"type": "string", "enum": ["title", "actor"]},
+                    "media_type": {"type": "string", "enum": ["all", "movie", "series", "episode"]},
+                    "count_only": {"type": "boolean"},
                 },
                 "additionalProperties": False,
             },
             result_kind="media_items",
             max_items=24,
             domains=("media_library",),
-            examples=("在 Jellyfin 搜索暗芝居", "媒体库里有没有这部剧"),
+            examples=("在 Jellyfin 搜索暗芝居", "媒体库里有没有这部剧", "统计某演员的电影数量"),
         ),
         ProviderOperationSpec(
             operation_id="media.series.search",

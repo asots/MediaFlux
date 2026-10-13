@@ -36,7 +36,7 @@ class MediaServerSearchTests(unittest.TestCase):
         method = getattr(client, "search_media", None)
         self.assertIsNotNone(method, "JellyfinClient 缺少 search_media")
         with patch.object(client, "_request", return_value=self._payload()) as request:
-            items = method("Dune", limit=8)
+            items = method("Dune", limit=8).items
 
         self.assertEqual(items[0].name, "Dune: Part Two")
         self.assertEqual(
@@ -118,7 +118,7 @@ class MediaServerSearchTests(unittest.TestCase):
         method = getattr(client, "search_media", None)
         self.assertIsNotNone(method, "EmbyClient 缺少 search_media")
         with patch.object(client, "_request", return_value=self._payload()) as request:
-            items = method("Dune", limit=6)
+            items = method("Dune", limit=6).items
 
         self.assertEqual(items[0].primary_image, f"/media-image/emby/{_ITEM_ID}")
         self.assertIn(f"id={_ITEM_ID}", items[0].web_url)
@@ -139,7 +139,7 @@ class MediaServerSearchTests(unittest.TestCase):
             with self.subTest(client=type(client).__name__), patch.object(
                 client, "_request", return_value=payload
             ):
-                items = client.search_media("Dune", limit=6)
+                items = client.search_media("Dune", limit=6).items
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].name, "Dune: Part Two")
             self.assertEqual(items[0].runtime, 12)
@@ -167,7 +167,7 @@ class MediaServerSearchTests(unittest.TestCase):
                 with self.subTest(value=value, client=type(client).__name__), patch.object(
                     client, "_request", return_value=payload
                 ):
-                    items = client.search_media("Dune", limit=6)
+                    items = client.search_media("Dune", limit=6).items
                 self.assertEqual(items[0].progress, expected)
 
     def test_search_media_normalizes_invalid_runtime_ticks(self):
@@ -191,7 +191,7 @@ class MediaServerSearchTests(unittest.TestCase):
                 with self.subTest(value=value, client=type(client).__name__), patch.object(
                     client, "_request", return_value=payload
                 ):
-                    items = client.search_media("Dune", limit=6)
+                    items = client.search_media("Dune", limit=6).items
                 self.assertEqual(items[0].runtime, expected)
 
     def test_search_media_tolerates_non_dict_user_data(self):
@@ -205,7 +205,7 @@ class MediaServerSearchTests(unittest.TestCase):
             with self.subTest(client=type(client).__name__), patch.object(
                 client, "_request", return_value=payload
             ):
-                items = client.search_media("Dune", limit=6)
+                items = client.search_media("Dune", limit=6).items
             self.assertEqual(items[0].progress, 0.0)
 
     def test_search_media_rejects_malformed_top_level_payload(self):

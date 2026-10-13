@@ -30,7 +30,7 @@ class MediaListPayloadContractTests(unittest.TestCase):
     def readers(client):
         return {
             "resume": lambda: client.continue_watching("viewer"),
-            "search": lambda: client.search_media("Film"),
+            "search": lambda: client.search_media("Film").items,
             "recent": client.recent_media,
             "history": lambda: client.recently_played("viewer"),
             "libraries": client._libraries,

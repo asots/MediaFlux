@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.clients.base import DashboardData, MediaServerClient, SeriesSearchResult
+from app.clients.base import DashboardData, MediaSearchResult, MediaServerClient, SeriesSearchResult
 
 
 class MediaServerClientLifecycleTests(unittest.TestCase):
@@ -102,7 +102,7 @@ class MediaServerClientLifecycleTests(unittest.TestCase):
         cases.append(("recent", recent_client, lambda: services.build_recent_media()))
 
         search_client = MagicMock()
-        search_client.search_media.return_value = []
+        search_client.search_media.return_value = MediaSearchResult()
         cases.append(("search", search_client, lambda: services.search_media_servers("test")))
 
         identity_client = MagicMock()

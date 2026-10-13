@@ -10,6 +10,7 @@ import requests
 from app.clients.base import (
     Library,
     MediaItem,
+    MediaSearchResult,
     MediaServerClient,
     normalize_explicit_media_user_id,
     normalize_playback_progress,
@@ -226,27 +227,15 @@ class EmbyClient(MediaServerClient):
             genres=genres,
         )
 
-    def search_media(self, query: str, limit: int = 12) -> list[MediaItem]:
+    def search_media(
+        self, query: str, limit: int = 12, *, offset: int = 0,
+        search_by: str = "title", media_type: str = "all", count_only: bool = False,
+    ) -> MediaSearchResult:
         self._prime_product_identity()
-        uid = self._user_id()
-        normalized_limit = max(1, min(int(limit or 12), 50))
-        data = self._request(
-            f"/Users/{uid}/Items",
-            params={
-                "SearchTerm": str(query or "").strip(),
-                "Recursive": "true",
-                "Limit": normalized_limit,
-                "IncludeItemTypes": "Movie,Series,Episode",
-                "Fields": (
-                    "DateCreated,Overview,SeriesId,SeriesName,IndexNumber,"
-                    "ParentIndexNumber,ImageTags,ProductionYear,RunTimeTicks,Genres,UserData"
-                ),
-                "SortBy": "SortName",
-                "SortOrder": "Ascending",
-            },
+        return super().search_media(
+            query, limit, offset=offset, search_by=search_by,
+            media_type=media_type, count_only=count_only,
         )
-        raw_items, _total = self._items_payload(data)
-        return [self._media_item(item) for item in raw_items if isinstance(item, dict)]
 
     def _total_items(self) -> int:
         uid = self._user_id()

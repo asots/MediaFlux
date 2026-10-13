@@ -9,6 +9,7 @@ import logging
 import math
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Optional
@@ -110,6 +111,47 @@ class MediaItem:
         if self.episode_number is None:
             return ""
         return f"第 {self.episode_number} 集"
+
+
+@dataclass
+class MediaSearchResult:
+    """单个服务器的搜索页；未知总数不得用当前页长度补齐。"""
+
+    items: list[MediaItem] = field(default_factory=list)
+    total: int | None = None
+    has_more: bool | None = None
+    offset: int = 0
+    limit: int = 12
+    next_offset: int | None = None
+    count_only: bool = False
+    search_by: str = "title"
+    media_type: str = "all"
+    person_match: str = ""
+    total_source: str = "unknown"
+
+    @property
+    def included_item_types(self) -> list[str]:
+        if self.media_type != "all":
+            return [self.media_type]
+        return ["movie", "series"] + (["episode"] if self.search_by == "title" else [])
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "returned": len(self.items),
+            "has_more": self.has_more,
+            "offset": self.offset,
+            "limit": self.limit,
+            "next_offset": self.next_offset,
+            "count_only": self.count_only,
+            "search_by": self.search_by,
+            "media_type": self.media_type,
+            "included_item_types": self.included_item_types,
+            "match_basis": "actor_metadata" if self.search_by == "actor" else "title_search",
+            "person_match": self.person_match,
+            "total_source": self.total_source,
+            "count_scope": "server_records",
+        }
 
 
 @dataclass(frozen=True)
@@ -484,9 +526,102 @@ class MediaServerClient:
         del user_id
         return items
 
-    def search_media(self, query: str, limit: int = 12) -> list[MediaItem]:
-        """按标题搜索媒体服务器内容。"""
-        raise NotImplementedError
+    @staticmethod
+    def _search_record_count(data: Any, *, minimum: int = 0) -> int | None:
+        """只接受服务器明确给出的、与当前页不矛盾的记录总数。"""
+        value = data.get("TotalRecordCount") if isinstance(data, dict) else None
+        if isinstance(value, str) and value.isascii() and value.isdecimal():
+            value = int(value)
+        if type(value) is not int or value < minimum:
+            return None
+        return value
+
+    def search_media(
+        self,
+        query: str,
+        limit: int = 12,
+        *,
+        offset: int = 0,
+        search_by: str = "title",
+        media_type: str = "all",
+        count_only: bool = False,
+    ) -> MediaSearchResult:
+        """统一原生搜索：标题或精确演员身份，分页与统计共用同一过滤条件。"""
+        if search_by not in ("title", "actor"):
+            raise ValueError("search_by 必须是 title 或 actor")
+        item_types = {"movie": "Movie", "series": "Series", "episode": "Episode"}
+        if media_type not in ("all", *item_types):
+            raise ValueError("media_type 无效")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset 必须是非负整数")
+        if type(count_only) is not bool:
+            raise ValueError("count_only 必须是布尔值")
+        normalized_limit = max(1, min(int(limit or 12), 50))
+        result = MediaSearchResult(
+            offset=offset, limit=normalized_limit, count_only=count_only,
+            search_by=search_by, media_type=media_type,
+        )
+        user_id = self._user_id()
+        params: dict[str, Any] = {
+            "Recursive": "true",
+            "StartIndex": offset,
+            "Limit": 0 if count_only else normalized_limit,
+            "EnableTotalRecordCount": "true",
+            "IncludeItemTypes": ",".join(kind.title() for kind in result.included_item_types),
+            "Fields": (
+                "DateCreated,Overview,SeriesId,SeriesName,IndexNumber,ParentIndexNumber,"
+                f"ImageTags,{self._RECENT_EXTRA_FIELDS}ProductionYear,RunTimeTicks,Genres,UserData"
+            ),
+            "SortBy": "SortName",
+            "SortOrder": "Ascending",
+        }
+        if search_by == "actor":
+            people_data = self._request(
+                "/Persons",
+                params={
+                    "UserId": user_id, "SearchTerm": str(query or "").strip(),
+                    "PersonTypes": "Actor", "StartIndex": 0, "Limit": 50,
+                    "EnableImages": "false", "EnableTotalRecordCount": "true",
+                },
+            )
+            people, _ = self._items_payload(people_data)
+            people_total = self._search_record_count(people_data, minimum=len(people))
+            def normalize_name(name: Any) -> str:
+                return unicodedata.normalize("NFKC", str(name or "")).strip().casefold()
+
+            exact = [person for person in people if normalize_name(person.get("Name")) == normalize_name(query)]
+            if len(exact) > 1:
+                result.person_match = "ambiguous"
+                return result
+            if people_total is None or people_total > len(people):
+                result.person_match = "incomplete"
+                return result
+            if not exact:
+                result.person_match = "not_found"
+                return result
+            person = exact[0]
+            if not str(person.get("Id") or "").strip():
+                result.person_match = "incomplete"
+                return result
+            result.person_match = "exact"
+            params.update({
+                "PersonIds": str(person["Id"]),
+                "PersonTypes": "Actor",
+            })
+        else:
+            params["SearchTerm"] = str(query or "").strip()
+        data = self._request(f"/Users/{user_id}/Items", params=params)
+        raw_items, _ = self._items_payload(data)
+        page_size = len(data.get("Items", [])) if isinstance(data, dict) else len(data)
+        result.total = self._search_record_count(data, minimum=offset + page_size if page_size else 0)
+        if result.total is not None:
+            result.total_source = "TotalRecordCount"
+            result.has_more = offset + page_size < result.total
+        if not count_only:
+            result.items = [self._media_item(item) for item in raw_items]
+            if page_size and result.has_more is not False:
+                result.next_offset = offset + page_size
+        return result
 
     def _user_id(self, *, deadline_at: float | None = None) -> str:
         """返回当前 API 用户 ID；由 Jellyfin / Emby 客户端实现。"""

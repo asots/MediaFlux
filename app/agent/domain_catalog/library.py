@@ -54,12 +54,11 @@ from app.agent.models import (
 )
 from app.agent.update_actions import check_library_updates
 
-from .library_search import search_library
+from .library_search import library_search_arguments, search_library
 from .shared import (
     _episode_audit_arguments,
     _library_episode_audit_arguments,
     _library_update_arguments,
-    _search_arguments,
 )
 
 
@@ -112,8 +111,12 @@ def register_specs(
         ToolSpec(
             name="library.search",
             description=(
-                "在已配置的 Jellyfin / Emby 媒体库中搜索一个具体标题；适合单片核对，"
-                "并在可用时返回已校验的 open_url。"
+                "在已配置的 Jellyfin / Emby 中按标题或演员元数据搜索、分页或统计。"
+                "演员作品数量用 search_by=actor、count_only=true；只问数量无需再拉明细。可用 media_type 限定电影或剧集。"
+                "total 是服务器匹配记录总数，returned 只是本次返回数，不能据它推算总量。"
+                "total=null 表示无法确认；has_more/next_offset 用于继续分页，offset 按服务器应用。"
+                "演员模式精确解析人物元数据，不以标题包含当演员作品；all 默认不计单集。"
+                "多服务器数量按记录累加，不是去重作品数；可用时返回已校验的 open_url。"
                 "已有 TMDB 身份清单核对存在性用 library.batch_presence；"
                 "多部剧更新核对直接用 library.check_updates 的 queries，不要逐部重复搜索。"
             ),
@@ -132,15 +135,20 @@ def register_specs(
                         "maximum": 50,
                         "default": 8,
                     },
+                    "offset": {"type": "integer", "minimum": 0},
+                    "search_by": {"type": "string", "enum": ["title", "actor"]},
+                    "media_type": {"type": "string", "enum": ["all", "movie", "series", "episode"]},
+                    "count_only": {"type": "boolean"},
                 },
                 "additionalProperties": False,
             },
             handler=search_library,
             parallel_read=True,
-            validator=_search_arguments,
+            validator=library_search_arguments,
             examples=(
                 "媒体库里有没有《某片》",
                 "在 Jellyfin 或 Emby 搜索这个标题",
+                "统计媒体库中某演员的电影数量",
             ),
         )
     )
