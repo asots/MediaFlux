@@ -1556,10 +1556,11 @@ def _apply_fs_operation(
                 )
             else:
                 raise GuangYaFSChangeError("光鸭变更计划包含未知操作")
+            # 写入已返回；trash 的成功审计也已落盘。后续失败属于回读，不是审计丢失。
+            outcome["reason"] = "verification_pending"
             verified, stage_source = _verify_fs_stage(client, item, action, created_id, created_targets, cancel_check,
                 copy_tasks.get(str(outcome["position"]), "") if not stage_source else "", stage_source)
             if not verified:
-                outcome["reason"] = "verification_pending"
                 raise GuangYaFSChangeError("写入后的云端状态尚未核验，未执行后续操作")
             if stage_source is not None:
                 stage_sources[str(outcome["position"])] = stage_source
@@ -2028,13 +2029,11 @@ def execute_fs_change_plan(
                 status = "failed"
             except Exception as exc:  # noqa: BLE001 - 单项失败需收束为可审计部分完成
                 created_id = str(getattr(exc, "fs_created_id", created_id))
-                if outcome.get("reason") == "verification_pending":
-                    stats["verification_failed"] += 1
                 if cancel_check is not None:
                     cancel_check()
                 error_type = type(exc).__name__
                 # provider 可能在连接中断前已经接受写入。若冻结后置条件成立，
-                # 则不能再把它算成“失败后可重试”；trash 同时标记审计缺口。
+                # 则不能再把它算成“失败后可重试”；仅审计尚未完成的 trash 保留审计缺口。
                 applied = False
                 if provider_write_started and (op != "copy" or copy_tasks.get(str(index))):
                     try:
@@ -2048,8 +2047,6 @@ def execute_fs_change_plan(
                             stage_source=stage_sources.get(str(index)),
                         )
                     except GuangYaFSCopyPending as waiting:
-                        if outcome.get("reason") == "verification_pending":
-                            stats["verification_failed"] -= 1
                         outcome["reason"] = "verification_pending"
                         waiting.position = index
                         raise
@@ -2057,14 +2054,17 @@ def execute_fs_change_plan(
                         applied = False
                 if applied:
                     outcome.update(status="completed", completed_actions=list(_operation_actions(item)))
-                    outcome.pop("reason", None)
                     stats[stat_key] += 1
                     status = "completed"
-                    if op == "trash":
+                    if op == "trash" and outcome.get("reason") != "verification_pending":
                         stats["audit_failures"] += 1
                         persistence_uncertain = True
                         outcome["reason"] = "audit_unavailable"
+                    else:
+                        outcome.pop("reason", None)
                 else:
+                    if outcome.get("reason") == "verification_pending":
+                        stats["verification_failed"] += 1
                     outcome.update(status="unknown" if provider_write_started else "failed")
                     outcome.setdefault("reason", "write_outcome_unknown" if provider_write_started else "execution_error")
                     stats["failed"] += 1

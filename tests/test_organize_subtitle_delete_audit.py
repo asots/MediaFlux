@@ -519,6 +519,23 @@ class DeleteAuditPersistenceTests(IsolatedDatabaseTestCase):
         self.assertEqual(row["provider"], "guangya")
         self.assertIn("回收站", row["provider_result"])
 
+    def test_missing_audit_update_is_not_a_successful_delete_receipt(self):
+        for provider_fails in (False, True):
+            with self.subTest(provider_fails=provider_fails):
+                calls = []
+                class Client:
+                    def delete(self, file_ids):
+                        calls.append(file_ids)
+                        if provider_fails:
+                            raise RuntimeError("provider unavailable")
+                        return True
+                with patch.object(db, "update_organize_delete_audit", return_value=False), \
+                     self.assertRaisesRegex(RuntimeError, "删除审计记录更新失败"):
+                    execute_recycle_bin_delete(Client(), trigger="manual", reason="测试已确认",
+                        candidate=DeleteCandidate("old", "empty", "parent"))
+                self.assertEqual(calls, [["old"]], "审计失败不能重发 Provider 删除")
+                self.assertEqual(db.list_organize_delete_audits(limit=1)[0]["status"], "pending")
+
     def test_provider_failure_redacts_secrets_signed_url_and_limits_persisted_text(self):
         secret_token = "task12-secret-token"
         secret_signature = "task12-secret-signature"

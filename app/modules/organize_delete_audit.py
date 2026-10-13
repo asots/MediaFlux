@@ -71,7 +71,7 @@ def execute_recycle_bin_delete(client, *, trigger: str, reason: str,
         provider_not_called = bool(
             getattr(exc, "provider_write_not_started", False)
         )
-        db.update_organize_delete_audit(
+        if not db.update_organize_delete_audit(
             audit_id,
             status="blocked" if provider_not_called else "failed",
             error=safe_error,
@@ -82,12 +82,14 @@ def execute_recycle_bin_delete(client, *, trigger: str, reason: str,
                     f"光鸭回收站调用失败：{safe_error}"
                 )[:500]
             ),
-        )
+        ):
+            raise RuntimeError("删除审计记录更新失败") from exc
         if provider_not_called:
             raise
         raise RuntimeError(safe_error) from exc
-    db.update_organize_delete_audit(
+    if not db.update_organize_delete_audit(
         audit_id, status="success", error="",
         provider_result="光鸭 provider 已接收，文件已移入回收站",
-    )
+    ):
+        raise RuntimeError("删除审计记录更新失败")
     return {"audit_id": audit_id, "status": "success"}

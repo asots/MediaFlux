@@ -3010,6 +3010,73 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(audited.call_args.kwargs["candidate"].file_id, "trash")
         self.assertEqual(audited.call_args.kwargs["trigger"], "agent_guangya_fs_change")
 
+    def test_successful_delete_audit_and_recovered_readback_do_not_stop_parent_archival(self):
+        for transient in ("timeout", "delayed_visibility"):
+            with self.subTest(transient=transient):
+                client, plan = self._nested_archive_plan()
+                verify = guangya_fs_change._verify_after
+                attempts = 0
+                def readback(provider, item, *args, **kwargs):
+                    nonlocal attempts
+                    if item["op"] == "trash" and item["source"]["file_id"] == "leaf":
+                        attempts += 1
+                        row = next(row for row in db.list_organize_delete_audits(limit=20) if row["file_id"] == "leaf")
+                        self.assertEqual(row["status"], "success")
+                        if transient == "timeout" and attempts == 1:
+                            raise TimeoutError("readback response lost")
+                        if transient == "delayed_visibility" and attempts <= 21:
+                            return False
+                    return verify(provider, item, *args, **kwargs)
+                with mock.patch.object(guangya_fs_change, "_verify_after", side_effect=readback), \
+                     mock.patch("app.clients.guangya.sleep"), \
+                     mock.patch.object(client, "delete_empty_directory", wraps=client.delete_empty_directory) as delete:
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                self.assertFalse(result["partial"])
+                self.assertFalse(result["requires_manual"])
+                self.assertEqual(result["stats"]["audit_failures"], 0)
+                self.assertEqual(result["stats"]["verification_failed"], 0)
+                self.assertEqual(delete.call_count, 2, "回读恢复不能重发删除")
+                self.assertEqual(client.file_info("work").parent_id, "target")
+                self.assertTrue(all(item["status"] == "completed" for item in result["operation_items"]))
+
+    def test_unavailable_readback_remains_unknown_without_claiming_missing_audit(self):
+        client, plan = self._nested_archive_plan()
+        verify = guangya_fs_change._verify_after
+        def readback(provider, item, *args, **kwargs):
+            if item["op"] == "trash":
+                raise TimeoutError("readback unavailable")
+            return verify(provider, item, *args, **kwargs)
+        with mock.patch.object(guangya_fs_change, "_verify_after", side_effect=readback), \
+             mock.patch.object(client, "delete_empty_directory", wraps=client.delete_empty_directory) as delete:
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertTrue(result["partial"] and result["requires_manual"])
+        self.assertEqual(result["stats"]["audit_failures"], 0)
+        self.assertEqual(result["stats"]["verification_failed"], 1)
+        self.assertEqual(delete.call_count, 1)
+        self.assertEqual(client.file_info("work").parent_id, "source")
+        self.assertIn("unknown", [item["status"] for item in result["operation_items"]])
+
+    def test_actual_delete_success_audit_failure_stops_without_replaying_delete(self):
+        for mode in ("exception", "missing_row"):
+            with self.subTest(mode=mode):
+                client, plan = self._nested_archive_plan()
+                update = db.update_organize_delete_audit
+                def write(audit_id, **fields):
+                    if fields.get("status") == "success":
+                        if mode == "exception":
+                            raise OSError("audit storage failed")
+                        return False
+                    return update(audit_id, **fields)
+                with mock.patch.object(db, "update_organize_delete_audit", side_effect=write), \
+                     mock.patch.object(client, "delete_empty_directory", wraps=client.delete_empty_directory) as delete:
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                self.assertTrue(result["partial"] and result["requires_manual"])
+                self.assertEqual(result["stats"]["audit_failures"], 1)
+                self.assertEqual(result["stats"]["trashed"], 1)
+                self.assertEqual(delete.call_count, 1)
+                self.assertEqual(client.file_info("work").parent_id, "source")
+                self.assertTrue(any(item["status"] == "not_started" for item in result["operation_items"]))
+
     def test_entire_plan_keeps_unstarted_items_after_audit_failure_or_cancel(self):
         from app.repositories.organize_operation_jobs import OrganizeOperationCancelled
         for stop in ("audit", "cancel"):
