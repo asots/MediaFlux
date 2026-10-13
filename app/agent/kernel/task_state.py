@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from app.agent.public_safety import sanitize_public_text
+from app.sensitive_data import contains_sensitive_credential
 
 COMPONENTS = frozenset({"tmdb", "qbittorrent"})
 IDENTITY = ("task_id", "epoch", "revision")
@@ -75,9 +75,12 @@ def _object(value: Any, keys: set[str]) -> dict:
 
 
 def _text(value: Any, maximum: int = 512) -> str:
-    if type(value) is not str or not value or len(value) > maximum:
+    # 任务声明可引用用户的路径/链接和多行原话；不是对外工具摘要。
+    # source是否来自获准用户仍由proposal核对，文字不产生文件操作授权。
+    if type(value) is not str or not value.strip() or len(value) > maximum:
         raise ValueError("invalid task text")
-    if not sanitize_public_text(value, limit=maximum):
+    if (contains_sensitive_credential(value)
+            or any((ord(char) < 32 and char not in "\n\r\t") or ord(char) == 127 for char in value)):
         raise ValueError("unsafe task text")
     return value
 

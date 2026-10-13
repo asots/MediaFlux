@@ -638,3 +638,39 @@ def test_small_window_inherited_exact_discovery_characterization(isolated_db, tm
         "loaded": ["config.explain_component"],
         "window": ["agent.capabilities", "agent.task", "config.explain_component"],
     }
+
+
+def test_admitted_multiline_file_goal_is_task_data_not_a_public_summary_filter():
+    from types import SimpleNamespace
+    from app.agent.kernel.task_state import proposal as make_patch, reduce_task
+
+    source = '为 /临时验收/test.txt 准备一天分享。\n先建立任务清单，未经确认不得分享。'
+    args = {
+        'operation': 'create', 'expected': None, 'source': source,
+        'root_goal': '为 /临时验收/test.txt 准备分享确认卡',
+        'constraints': ['只操作 /临时验收/test.txt', '未经用户确认不分享'],
+        'obligations': [{'id': 'prepare', 'description': '核对 /临时验收/test.txt 并生成确认卡',
+                         'required': True, 'acceptance': {
+                             'kind': 'plan_prepared', 'criterion': '/临时验收/test.txt 的预览等待人工确认'}}],
+    }
+    context = SimpleNamespace(request_id='task-file-goal', user_source=source)
+    task = reduce_task(None, make_patch(args, context), owner=OWNER, session_id='file-goal')
+    assert task['source_quote'] == source
+    assert task['root_goal'] == args['root_goal']
+    assert task['status'] == 'blocked', '允许登记不等于伪造通用验收完成'
+    assert task['verified_facts'] == []
+    public = task_projection(task)
+    assert public['root_goal'] == args['root_goal']
+    assert public['constraints'] == args['constraints']
+    with pytest.raises(ValueError, match='source must be'):
+        make_patch(args, SimpleNamespace(request_id='other-source', user_source='另外一个用户目标'))
+
+
+@pytest.mark.parametrize('unsafe', ['api_key=sk_live_ABCDEF1234567890Secret', 'token=actualPrivateCredential987654321', '目标\x00秘密', '目标\x1b[31m秘密', '目标\x7f秘密'])
+def test_task_text_still_rejects_credentials_and_terminal_controls(unsafe):
+    from app.agent.kernel.task_state import validate_proposal
+    args = proposal()
+    for field in ('source', 'root_goal'):
+        changed = {**args, field: unsafe}
+        with pytest.raises(ValueError):
+            validate_proposal(changed)
