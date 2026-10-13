@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from app.agent.media_links import sanitize_media_open_url
@@ -35,6 +36,15 @@ _SENSITIVE_KEYS = frozenset(
 )
 
 
+# 原始Provider DTO里的不透明值不能因公开回复保留文件名而放行。
+# 只有明确的name字段走文件名投影；其余字段继续隐藏点号/多段ID。
+_PROVIDER_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+(?![A-Za-z0-9_])"
+    r"|(?<![A-Za-z0-9_-])[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+
+
 def _safe_key(value: Any) -> str:
     return str(value or "").strip()[:64]
 
@@ -63,7 +73,7 @@ def project_provider_value(
     if isinstance(value, float):
         return round(value, 4) if math.isfinite(value) else 0.0
     if isinstance(value, str):
-        return sanitize_public_text(value, limit=500)
+        return _PROVIDER_IDENTIFIER_RE.sub("内部检查", sanitize_public_text(value, limit=500))
     if isinstance(value, (list, tuple)):
         return [
             project_provider_value(
@@ -98,4 +108,4 @@ def project_provider_value(
                     allow_open_url=allow_open_url,
                 )
         return projected
-    return sanitize_public_text(value, limit=160)
+    return _PROVIDER_IDENTIFIER_RE.sub("内部检查", sanitize_public_text(value, limit=160))
