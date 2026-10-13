@@ -16,6 +16,13 @@ from app.sensitive_data import contains_sensitive_credential
 
 COMPONENTS = frozenset({"tmdb", "qbittorrent"})
 IDENTITY = ("task_id", "epoch", "revision")
+# 同一字段集合用于模型 Schema 和领域校验，不能再出现“模型可选、执行必填”。
+_OPERATION_FIELDS = {
+    "create": ("source", "root_goal", "constraints", "obligations"),
+    "checkpoint": ("evidence_ids", "blockers"),
+    "revise": ("source", "root_goal", "constraints", "obligations"),
+    "cancel": ("source",),
+}
 
 
 def classify_public_task(task: Any = None) -> str:
@@ -101,16 +108,9 @@ def identity(task: dict | None) -> dict | None:
 
 def validate_proposal(value: dict) -> dict:
     operation = value.get("operation")
-    keys = {"operation", "expected"}
-    if operation in {"create", "revise"}:
-        keys |= {"source", "root_goal", "constraints", "obligations"}
-    elif operation == "cancel":
-        keys |= {"source"}
-    elif operation == "checkpoint":
-        keys |= {"evidence_ids", "blockers"}
-    else:
+    if operation not in _OPERATION_FIELDS:
         raise ValueError("invalid task operation")
-    _object(value, keys)
+    _object(value, {"operation", "expected", *_OPERATION_FIELDS[operation]})
     expected = value["expected"]
     if expected is not None:
         _object(expected, set(IDENTITY))
@@ -412,6 +412,87 @@ def task_projection(task: dict | None) -> dict | None:
     return result
 
 
+def _task_input_schema() -> dict:
+    text = {"type": "string", "minLength": 1}
+    properties = {
+        "operation": {"type": "string", "enum": list(_OPERATION_FIELDS)},
+        "expected": {
+            "type": ["object", "null"],
+            "properties": {
+                "task_id": {**text, "maxLength": 64},
+                **{key: {"type": "integer", "minimum": 1} for key in ("epoch", "revision")},
+            },
+            "required": list(IDENTITY), "additionalProperties": False,
+            "description": "null only for first create; otherwise exact committed task_id/epoch/revision.",
+        },
+        "source": {
+            **text, "maxLength": 2048,
+            "description": "Exact user quote. Create accepts original user history; revise/cancel require current user text.",
+        },
+        "root_goal": {**text, "maxLength": 2048},
+        "constraints": {
+            "type": "array", "maxItems": 8, "uniqueItems": True,
+            "items": {**text, "maxLength": 512},
+        },
+        "obligations": {
+            "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": True,
+            "items": {
+                "type": "object", "required": ["id", "description", "required", "acceptance"],
+                "additionalProperties": False,
+                "properties": {
+                    "id": {**text, "maxLength": 64},
+                    "description": {**text, "maxLength": 512},
+                    "required": {"type": "boolean", "enum": [True]},
+                    "acceptance": {
+                        "type": "object",
+                        "description": "Only observed_component is verifiable from configuration; other goals remain blocked.",
+                        "oneOf": [
+                            {
+                                "properties": {
+                                    "kind": {"enum": ["observed_component"]},
+                                    "component": {"type": "string", "enum": sorted(COMPONENTS)},
+                                },
+                                "required": ["kind", "component"], "additionalProperties": False,
+                            },
+                            {
+                                "properties": {
+                                    "kind": {**text, "maxLength": 64, "not": {"enum": ["observed_component"]}},
+                                    "criterion": {**text, "maxLength": 512},
+                                },
+                                "required": ["kind", "criterion"], "additionalProperties": False,
+                            },
+                        ],
+                    },
+                },
+            },
+        },
+        "evidence_ids": {
+            "type": "array", "maxItems": 32, "uniqueItems": True,
+            "items": {**text, "maxLength": 64},
+        },
+        "blockers": {
+            "type": "array", "maxItems": 16, "uniqueItems": True,
+            "items": {**text, "maxLength": 512},
+        },
+    }
+    return {
+        "type": "object", "properties": properties,
+        "required": ["operation", "expected"], "additionalProperties": False,
+        "oneOf": [
+            {
+                "properties": {
+                    **{key: {} for key in ("expected", *fields)},
+                    "operation": {"enum": [operation]},
+                    **({"expected": {"type": "object"}} if operation != "create" else {}),
+                },
+                "required": ["operation", "expected", *fields],
+                "additionalProperties": False,
+            }
+            for operation, fields in _OPERATION_FIELDS.items()
+        ],
+    }
+
+
 def task_tool():
     from .capabilities import KernelToolSpec, ToolEffect
 
@@ -429,60 +510,7 @@ def task_tool():
             "expected=null only for first create, otherwise exact committed task_id/epoch/revision."
         ),
         examples=("持久任务清单 检查点 剩余义务 恢复", "persistent task checklist checkpoint resume remaining obligations"),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["create", "checkpoint", "revise", "cancel"],
-                },
-                "expected": {
-                    "description": "null for first create; otherwise {task_id:string,epoch:integer,revision:integer} exactly from committed task."
-                },
-                "source": {
-                    "type": "string",
-                    "maxLength": 2048,
-                    "description": "Nonempty exact user quote; create also accepts preserved original user history, not legacy notes or tool/assistant text. Revise/cancel require current user text.",
-                },
-                "root_goal": {"type": "string", "maxLength": 2048},
-                "constraints": {
-                    "type": "array",
-                    "maxItems": 8,
-                    "items": {"type": "string", "maxLength": 512},
-                },
-                "obligations": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 16,
-                    "items": {
-                        "type": "object",
-                        "required": ["id", "description", "required", "acceptance"],
-                        "additionalProperties": False,
-                        "properties": {
-                            "id": {"type": "string", "maxLength": 64},
-                            "description": {"type": "string", "maxLength": 512},
-                            "required": {"type": "boolean", "enum": [True]},
-                            "acceptance": {
-                                "type": "object",
-                                "description": "{kind:observed_component,component:tmdb|qbittorrent}; other goals use {kind:<name>,criterion:<text>} and remain blocked; never claim repairs or network reachability from configuration observations.",
-                            },
-                        },
-                    },
-                },
-                "evidence_ids": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": {"type": "string", "maxLength": 64},
-                },
-                "blockers": {
-                    "type": "array",
-                    "maxItems": 16,
-                    "items": {"type": "string", "maxLength": 512},
-                },
-            },
-            "required": ["operation", "expected"],
-            "additionalProperties": False,
-        },
+        input_schema=_task_input_schema(),
         validator=validate_proposal,
         read=proposal,
         metadata={"kernel_utility": True, "query_discoverable": True},

@@ -674,3 +674,48 @@ def test_task_text_still_rejects_credentials_and_terminal_controls(unsafe):
         changed = {**args, field: unsafe}
         with pytest.raises(ValueError):
             validate_proposal(changed)
+
+
+@pytest.mark.parametrize('operation', ['create', 'revise', 'checkpoint', 'cancel'])
+def test_task_published_schema_matches_operation_required_and_allowed_fields(operation):
+    from app.agent.kernel.pipeline import _validate_json_schema, ToolPipelineError
+    from app.agent.kernel.task_state import task_tool, validate_proposal
+    expected = {'task_id': 'existing-task', 'epoch': 1, 'revision': 35}
+    if operation in {'create', 'revise'}:
+        args = {**proposal(), 'operation': operation, 'expected': None if operation == 'create' else expected}
+    elif operation == 'checkpoint':
+        args = {'operation': operation, 'expected': expected, 'evidence_ids': ['known-proof'], 'blockers': []}
+    else:
+        args = {'operation': operation, 'expected': expected, 'source': GOAL}
+    schema = task_tool().input_schema
+    _validate_json_schema(args, schema)
+    assert validate_proposal(args) == args
+    for missing in args:
+        incomplete = {key: value for key, value in args.items() if key != missing}
+        with pytest.raises(ToolPipelineError):
+            _validate_json_schema(incomplete, schema)
+    extra = 'source' if operation == 'checkpoint' else 'evidence_ids'
+    with pytest.raises(ToolPipelineError):
+        _validate_json_schema({**args, extra: GOAL if extra == 'source' else []}, schema)
+    for bad_expected in ('not-an-identity', {}, {'task_id': 'task', 'epoch': 0, 'revision': 1}):
+        with pytest.raises(ToolPipelineError):
+            _validate_json_schema({**args, 'expected': bad_expected}, schema)
+    if operation != 'create':
+        with pytest.raises(ToolPipelineError):
+            _validate_json_schema({**args, 'expected': None}, schema)
+
+
+@pytest.mark.parametrize('acceptance', [
+    {'kind': 'observed_component'},
+    {'kind': 'observed_component', 'component': 'unknown'},
+    {'kind': 'observed_component', 'component': 'tmdb', 'criterion': 'extra'},
+    {'kind': 'network_reachable'},
+    {'kind': 'network_reachable', 'criterion': ''},
+])
+def test_task_published_schema_rejects_invalid_acceptance_shape(acceptance):
+    from app.agent.kernel.pipeline import _validate_json_schema, ToolPipelineError
+    from app.agent.kernel.task_state import task_tool
+    args = proposal()
+    args['obligations'][0]['acceptance'] = acceptance
+    with pytest.raises(ToolPipelineError):
+        _validate_json_schema(args, task_tool().input_schema)
