@@ -310,7 +310,6 @@ def test_resource_titles_keep_filename_punctuation(raw, expected):
 @pytest.mark.parametrize("name", [
     "test.txt", "changed.txt", "Film.Name_2026.mkv", "Spider-Man-No-Way-Home.mkv",
     "requestId.txt", "mf-ordinary-file.txt", "library.search.mkv", "Film_Name.mkv",
-    "Spider-Man-No-Way-Home",
 ])
 def test_public_explanation_preserves_whole_business_names(name):
     text = f"当前文件 `{name}`,分享尚未创建。"
@@ -345,3 +344,9 @@ def test_partial_failure_keeps_actual_filename_and_failed_receipt():
 ])
 def test_business_names_do_not_bypass_whole_text_secret_and_path_checks(unsafe):
     assert sanitize_public_text(unsafe) == ""
+
+
+def test_bare_opaque_identifier_is_not_a_filename():
+    assert sanitize_public_text("mf-private-snapshot") == "内部检查"
+    assert sanitize_public_text("DO-NOT-PUBLISH") == "内部检查"
+    assert sanitize_public_text("mf-private-snapshot.txt") == "mf-private-snapshot.txt"

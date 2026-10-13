@@ -40,7 +40,7 @@ _INTERNAL_CAMEL_RE = re.compile(
     r"[A-Z][A-Za-z0-9]*(?![A-Za-z0-9_.-])"
 )
 _INTERNAL_KEBAB_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])mf-[a-z0-9]+(?:-[a-z0-9]+)+(?![A-Za-z0-9_.-])",
+    r"(?<![A-Za-z0-9_.-])[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}(?![A-Za-z0-9_.-])",
     re.IGNORECASE,
 )
 _INTERNAL_FIELD_RE = re.compile(
