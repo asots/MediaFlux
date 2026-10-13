@@ -438,3 +438,73 @@ def test_native_failed_observation_is_atomic_and_object_scoped(tmp_path, failure
         asyncio.run(run())
     finally:
         db.configure_database(previous[0], test_mode=previous[1])
+
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_native_snapshot_capacity_failure_and_cold_recovery(tmp_path, checkpoint):
+    from app.agent import config_explain_actions as domain
+    from app.agent.rate_limit import AgentRateLimiter
+
+    previous = db.DB_PATH, bool(getattr(db, "_configured_test_mode", False))
+    db.configure_database(tmp_path / "snapshots.db", test_mode=True)
+    db.init_db()
+    original = domain.component_configuration
+    session_id = "snapshot-recovery"
+    clock = [0.0]
+
+    def broken(component):
+        if component == "qbittorrent":
+            raise RuntimeError("synthetic query failure")
+        return original(component)
+
+    async def turn(component, *, create=False, accept=False, fail=False):
+        clock[0] += 3600  # 各回合跨过限流窗口，不扩大任何配额。
+        script = NativeScript(component, create)
+        script.steps = ["discover"] + (["create"] if create else []) + ["observe"] + (["checkpoint"] if accept else []) + ["finish"]
+        store = SQLiteKernelStore(secret_provider=lambda: "task-test-only")
+        runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
+        with patch.object(domain, "component_configuration", broken if fail else original):
+            events = [event async for event in runtime.session.run(AgentInput(
+                message=GOAL if create else "继续", owner=OWNER, session_id=session_id,
+            ))]
+        cold = await SQLiteKernelStore(secret_provider=lambda: "task-test-only").load(owner=OWNER, session_id=session_id)
+        failures = [event for event in events if event.type.value == "tool.failed"]
+        if fail:
+            assert any(
+                event.payload.get("tool") in {"config.explain_component", "config__explain_component"}
+                and event.payload.get("code") == "tool_execution_failed"
+                for event in failures
+            ), [(event.type.value, dict(event.payload)) for event in failures]
+        else:
+            assert not failures
+        return cold.metadata["task"]
+
+    async def run():
+        for index in range(32):
+            task = await turn("tmdb", create=index == 0, accept=checkpoint)
+            assert len(task["verified_facts"]) == 1
+            assert task["status"] == "partial"
+            assert task["obligations"][0]["state"] == ("verified" if checkpoint else "pending")
+            assert task["obligations"][0]["evidence_ids"] == ([task["verified_facts"][0]["evidence_id"]] if checkpoint else [])
+            assert task["obligations"][1]["state"] == "pending"
+        if not checkpoint:
+            task = await turn("tmdb", accept=True)
+        accepted = task["verified_facts"][0]
+        task = await turn("qbittorrent", fail=True)
+        assert task["status"] == "blocked" and task["verified_facts"] == [accepted]
+        assert task["blockers"] == [{"origin": "query", "component": "qbittorrent", "epoch": task["epoch"], "text": "query:qbittorrent"}]
+        task = await turn("qbittorrent")
+        assert task["blockers"] == [] and task["status"] == "partial"
+        assert task["verified_facts"][0] == accepted
+        assert task["obligations"][1]["state"] == "pending" and task["obligations"][1]["evidence_ids"] == []
+        task = await turn("qbittorrent", accept=True)
+        assert task["status"] == "complete" and task["blockers"] == []
+        assert task["verified_facts"][0] == accepted and len(task["verified_facts"]) == 2
+        assert [o["evidence_ids"] for o in task["obligations"]] == [[f["evidence_id"]] for f in task["verified_facts"]]
+
+    try:
+        with patch("app.agent.rate_limit.agent_rate_limiter", AgentRateLimiter(clock=lambda: clock[0], shared=False)):
+            asyncio.run(run())
+    finally:
+        db.configure_database(previous[0], test_mode=previous[1])

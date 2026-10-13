@@ -1,6 +1,7 @@
 """Small same-generation CAS, lifecycle and strict evidence controls."""
 
 import asyncio
+import json
 import multiprocessing
 from copy import deepcopy
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from app.agent.kernel.task_state import (
     observation_patch,
     proposal,
     reduce_task,
+    task_projection,
     validate_proposal,
 )
 from tests.test_agent_task_first_slice import GOAL, OWNER, declaration
@@ -36,6 +38,26 @@ def control(args):
 
 def command(task, operation, **extra):
     return control({"operation": operation, "expected": identity(task), **extra})
+
+
+def observe(task, component="tmdb", *, success=True, owner=OWNER):
+    fact = {
+        "component": component, "status": "not_configured", "enabled": False,
+        "probe_mode": "configuration_only", "network_accessed": False,
+    } if success else None
+    return observation_patch(
+        task, owner=owner, session_id="cas", tool="config.explain_component",
+        call_id="call", component=component, fact=fact,
+    )
+
+
+def legacy_observations(task, *, owner=OWNER):
+    # 模拟旧 reducer 已持久化的合法满容量快照，不放宽现行配额。
+    task = deepcopy(task)
+    for _ in range(32):
+        task["verified_facts"].append(observe(task, owner=owner).payload["fact"])
+        task["revision"] += 1
+    return task
 
 
 def cas_worker(database, lease, task_patch, marker, ready, start, committed, results):
@@ -322,3 +344,200 @@ def test_blocker_origins_coexist_and_remain_bounded():
     revised = declaration()
     revised.update(operation="revise", expected=identity(task))
     assert apply(task, control(revised))["blockers"] == []
+
+
+
+def test_unassociated_observations_keep_latest_component_snapshots():
+    def apply(task, patch):
+        return reduce_task(task, patch, owner=OWNER, session_id="cas")
+
+    task = apply(None, control(declaration()))
+    task = apply(task, observe(task, "qbittorrent"))
+    other = deepcopy(task["verified_facts"][0])
+    first = None
+    for _ in range(32):
+        patch = observe(task)
+        first = first or patch.payload["fact"]["evidence_id"]
+        task = apply(task, patch)
+        assert task["verified_facts"] == [other, patch.payload["fact"]]
+        assert task["status"] == "partial"
+        assert all(o["state"] == "pending" and o["evidence_ids"] == [] for o in task["obligations"])
+    assert task_projection(task)["remaining_obligation_ids"] == ["tmdb", "qbittorrent"]
+    before = deepcopy(task)
+    with pytest.raises(ValueError, match="invalid evidence scope"):
+        apply(task, command(task, "checkpoint", evidence_ids=[first], blockers=[]))
+    assert task == before
+
+
+def test_explicit_checkpoints_replace_evidence_and_preserve_reported_blockers():
+    def apply(task, patch):
+        return reduce_task(task, patch, owner=OWNER, session_id="cas")
+
+    task = apply(None, control(declaration()))
+    previous = None
+    for _ in range(32):
+        patch = observe(task)
+        latest = patch.payload["fact"]["evidence_id"]
+        task = apply(task, patch)
+        assert task["obligations"][0]["evidence_ids"] == ([previous] if previous else [])
+        assert len(task["verified_facts"]) == (2 if previous else 1)
+        # 参数顺序故意与登记顺序相反，最新显式证据不能由参数排序决定。
+        selected = [latest, previous] if previous else [latest]
+        task = apply(task, command(task, "checkpoint", evidence_ids=selected, blockers=["query:tmdb"]))
+        assert task["obligations"][0]["evidence_ids"] == [latest]
+        assert task["verified_facts"] == [patch.payload["fact"]]
+        assert task["blockers"] == [{"origin": "reported", "text": "query:tmdb"}]
+        previous = latest
+
+    accepted = deepcopy(task["verified_facts"][0])
+    task = apply(task, observe(task, "qbittorrent", success=False))
+    task = apply(task, observe(task, "qbittorrent"))
+    assert task["verified_facts"][0] == accepted
+    assert task["obligations"][1]["state"] == "pending"
+    assert task["blockers"] == [{"origin": "reported", "text": "query:tmdb"}]
+    evidence = task["verified_facts"][-1]["evidence_id"]
+    task = apply(task, command(task, "checkpoint", evidence_ids=[evidence], blockers=["query:tmdb"]))
+    assert all(o["state"] == "verified" for o in task["obligations"])
+    assert task["status"] == "blocked"
+    task = apply(task, command(task, "checkpoint", evidence_ids=[], blockers=[]))
+    assert task["status"] == "complete"
+    assert [o["evidence_ids"] for o in task["obligations"]] == [[previous], [evidence]]
+
+
+@pytest.mark.parametrize("key", ["owner", "session_id", "task_id", "epoch"])
+def test_checkpoint_replacement_rejects_invalid_selected_and_existing_scope(key):
+    def apply(task, patch):
+        return reduce_task(task, patch, owner=OWNER, session_id="cas")
+
+    task = apply(None, control(declaration()))
+    task = apply(task, observe(task))
+    task = apply(task, command(task, "checkpoint", evidence_ids=[task["verified_facts"][0]["evidence_id"]], blockers=[]))
+    task = apply(task, observe(task))
+    latest = task["verified_facts"][-1]["evidence_id"]
+    for index, error in ((0, "invalid linked evidence"), (1, "invalid evidence scope")):
+        corrupt = deepcopy(task)
+        corrupt["verified_facts"][index]["scope"][key] = 999 if key == "epoch" else "another"
+        before = deepcopy(corrupt)
+        with pytest.raises(ValueError, match=error):
+            apply(corrupt, command(corrupt, "checkpoint", evidence_ids=[latest], blockers=[]))
+        assert corrupt == before
+    patch = observe(task)
+    patch.payload["fact"]["scope"][key] = 999 if key == "epoch" else "another"
+    before = deepcopy(task)
+    with pytest.raises(ValueError, match="invalid observation evidence"):
+        apply(task, patch)
+    assert task == before
+
+
+def test_snapshot_reclamation_keeps_cas_and_epoch_fences():
+    def apply(task, patch):
+        return reduce_task(task, patch, owner=OWNER, session_id="cas")
+
+    task = apply(None, control(declaration()))
+    stale = observe(task)
+    task = apply(task, observe(task))
+    evidence = task["verified_facts"][0]["evidence_id"]
+    before = deepcopy(task)
+    with pytest.raises(TaskConflict):
+        apply(task, stale)
+    assert task == before
+    revised = declaration()
+    revised.update(operation="revise", expected=identity(task))
+    task = apply(task, control(revised))
+    before = deepcopy(task)
+    with pytest.raises(ValueError, match="invalid evidence scope"):
+        apply(task, command(task, "checkpoint", evidence_ids=[evidence], blockers=[]))
+    old_epoch = observe(task)
+    old_epoch.payload["fact"]["epoch"] -= 1
+    with pytest.raises(ValueError, match="invalid observation evidence"):
+        apply(task, old_epoch)
+    assert task == before
+
+
+def test_snapshot_reclamation_does_not_relax_fact_or_byte_capacity():
+    task = reduce_task(None, control(declaration()), owner=OWNER, session_id="cas")
+    before = deepcopy(task)
+    with pytest.raises(ValueError, match="invalid task array"):
+        command(task, "checkpoint", evidence_ids=[str(i) for i in range(33)], blockers=[])
+    assert task == before
+    oversized = declaration()
+    oversized.update(root_goal="G" * 2048, constraints=[str(i) + "C" * 511 for i in range(8)])
+    oversized["obligations"] = [
+        {**deepcopy(oversized["obligations"][0]), "id": str(i), "description": "D" * 512}
+        for i in range(16)
+    ]
+    with pytest.raises(ValueError, match="task capacity exceeded"):
+        reduce_task(None, control(oversized), owner=OWNER, session_id="cas")
+
+
+@pytest.mark.parametrize("linked_history", [False, True])
+def test_sqlite_legacy_snapshot_recovers_after_cold_read(task_store, linked_history):
+    owner = "review"  # 短 owner 使旧版 32 条合法事实仍满足 16 KiB 配额。
+
+    async def run():
+        lease, state = await task_store.begin_turn(owner=owner, session_id="cas", request_id="request")
+        state = await task_store.commit(lease, task_patch=control(declaration()))
+        task = legacy_observations(state.metadata["task"], owner=owner)
+        latest = deepcopy(task["verified_facts"][-1])
+        accepted = latest if linked_history else deepcopy(task["verified_facts"][0])
+        retired = task["verified_facts"][1]["evidence_id"]
+        # 旧关联列表故意逆序；规范化须按事实登记顺序，而不是模型列表顺序。
+        existing_ids = [f["evidence_id"] for f in reversed(task["verified_facts"])] if linked_history else [accepted["evidence_id"]]
+        task["obligations"][0].update(state="verified", evidence_ids=existing_ids)
+        task.update(status="blocked", blockers=[
+            {"origin": "query", "component": "qbittorrent", "epoch": task["epoch"], "text": "query:qbittorrent"},
+            {"origin": "reported", "text": "query:qbittorrent"},
+        ])
+        state.metadata["task"] = task
+        assert len(json.dumps(task, ensure_ascii=False, separators=(",", ":")).encode()) <= 16 * 1024
+        # 通过真实签名仓储写入旧版快照，仅使用 fixture 的临时数据库。
+        with db.get_conn() as conn:
+            task_store._write_state(conn, state)
+        other = SQLiteKernelStore(secret_provider=lambda: "task-test-only")
+        cold = await other.load(owner=owner, session_id="cas")
+        assert cold.metadata["task"] == task and len(task["verified_facts"]) == 32
+        bad = observe(task, "qbittorrent", owner=owner)
+        bad.payload["fact"]["scope"]["owner"] = "another"
+        with pytest.raises(ValueError, match="invalid observation evidence"):
+            await other.commit(lease, task_patch=bad)
+        assert (await other.load(owner=owner, session_id="cas")).to_payload() == cold.to_payload()
+        recovery = observe(task, "qbittorrent", owner=owner)
+        state = await other.commit(lease, task_patch=recovery)
+        recovered = state.metadata["task"]
+        expected = [accepted] if linked_history else [accepted, latest]
+        assert recovered["verified_facts"] == [*expected, recovery.payload["fact"]]
+        assert recovered["obligations"][0]["evidence_ids"] == [accepted["evidence_id"]]
+        assert recovered["blockers"] == [{"origin": "reported", "text": "query:qbittorrent"}]
+        assert recovered["obligations"][1]["state"] == "pending"
+        assert task_projection(recovered)["remaining_obligation_ids"] == ["qbittorrent"]
+        with pytest.raises(TaskConflict):
+            await other.commit(lease, task_patch=command(task, "checkpoint", evidence_ids=[], blockers=[]))
+        with pytest.raises(ValueError, match="invalid evidence scope"):
+            await other.commit(lease, task_patch=command(recovered, "checkpoint", evidence_ids=[retired], blockers=[]))
+        assert (await other.load(owner=owner, session_id="cas")).to_payload() == state.to_payload()
+        evidence = recovery.payload["fact"]["evidence_id"]
+        state = await other.commit(lease, task_patch=command(recovered, "checkpoint", evidence_ids=[evidence], blockers=["query:qbittorrent"]))
+        assert state.metadata["task"]["status"] == "blocked"
+        state = await other.commit(lease, task_patch=command(state.metadata["task"], "checkpoint", evidence_ids=[], blockers=[]))
+        assert state.metadata["task"]["status"] == "complete"
+        final = await SQLiteKernelStore(secret_provider=lambda: "task-test-only").load(owner=owner, session_id="cas")
+        assert final.to_payload() == state.to_payload()
+
+    asyncio.run(run())
+
+
+
+def test_legacy_link_normalization_validates_every_old_reference():
+    owner = "review"
+    task = reduce_task(None, control(declaration()), owner=owner, session_id="cas")
+    task = legacy_observations(task, owner=owner)
+    task["obligations"][0].update(
+        state="verified", evidence_ids=[f["evidence_id"] for f in reversed(task["verified_facts"])],
+    )
+    for index in (0, 31):
+        corrupt = deepcopy(task)
+        corrupt["verified_facts"][index]["scope"]["owner"] = "another"
+        before = deepcopy(corrupt)
+        with pytest.raises(ValueError, match="invalid linked evidence"):
+            reduce_task(corrupt, observe(corrupt, "qbittorrent", owner=owner), owner=owner, session_id="cas")
+        assert corrupt == before

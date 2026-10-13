@@ -268,6 +268,7 @@ def reduce_task(
     if identity(current) != patch.expected:
         raise TaskConflict("task revision changed")
     operation, args = patch.operation, patch.payload
+    checkpoint_evidence: dict[str, str] = {}
     if operation == "create":
         if current is not None and current["status"] != "cancelled":
             raise TaskConflict("cancel existing task before create")
@@ -329,21 +330,19 @@ def reduce_task(
                 fact, task, owner=owner, session_id=session_id
             ):
                 raise ValueError("invalid evidence scope")
-            for obligation in task["obligations"]:
-                if obligation["acceptance"] == {
-                    "kind": "observed_component",
-                    "component": fact["component"],
-                }:
-                    if evidence_id not in obligation["evidence_ids"]:
-                        obligation["evidence_ids"].append(evidence_id)
+        checkpoint_evidence = {
+            fact["component"]: fact["evidence_id"]
+            for fact in task["verified_facts"]
+            if fact["evidence_id"] in args["evidence_ids"]
+        }
         task["blockers"] = [
             b for b in task["blockers"] if b["origin"] == "query"
         ] + [{"origin": "reported", "text": text} for text in args["blockers"]]
     else:
         raise ValueError("invalid patch")
     if task["status"] != "cancelled":
+        facts = {f["evidence_id"]: f for f in task["verified_facts"]}
         for obligation in task["obligations"]:
-            facts = {f["evidence_id"]: f for f in task["verified_facts"]}
             for evidence_id in obligation["evidence_ids"]:
                 fact = facts.get(evidence_id)
                 if (
@@ -353,6 +352,13 @@ def reduce_task(
                     != {"kind": "observed_component", "component": fact["component"]}
                 ):
                     raise ValueError("invalid linked evidence")
+            # 先完整校验旧关联，再按登记顺序规范化；不能自动关联新观察。
+            existing = set(obligation["evidence_ids"])
+            obligation["evidence_ids"] = [eid for eid in facts if eid in existing][-1:]
+            if obligation["acceptance"]["kind"] == "observed_component":
+                evidence_id = checkpoint_evidence.get(obligation["acceptance"]["component"])
+                if evidence_id:
+                    obligation["evidence_ids"] = [evidence_id]
             obligation["state"] = (
                 "blocked"
                 if obligation["acceptance"]["kind"] != "observed_component"
@@ -368,6 +374,13 @@ def reduce_task(
             if all(o["state"] == "verified" for o in task["obligations"])
             else "partial"
         )
+        # 状态快照不是审计日志：保留所有义务引用和每个组件最新登记的观察。
+        linked = {eid for o in task["obligations"] for eid in o["evidence_ids"]}
+        latest = {f["component"]: f["evidence_id"] for f in task["verified_facts"]}
+        task["verified_facts"] = [
+            f for f in task["verified_facts"]
+            if f["evidence_id"] in linked or f["evidence_id"] == latest[f["component"]]
+        ]
     task["revision"] += 1
     _array(task["verified_facts"], 32)
     _array(task["blockers"], 16)
