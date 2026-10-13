@@ -1364,12 +1364,12 @@ def _preflight_operation(
             raise GuangYaFSChangeStale("目标目录中已有同名对象，请重新预览")
 
 
-def _written_source(client, item, created_targets):
+def _written_source(client, item, created_targets, directory_cache=None):
     source = item.get("source") or {}
     rename = item["op"] == "rename"
     parent_id = str(source.get("parent_id") or "0") if rename else _directory_id(item, created_targets)
     name = str(item["new_name"] if item["op"] in {"rename", "relocate"} else source.get("name") or "")
-    return next((row for row in client.list_dir(parent_id)
+    return next((row for row in _list_map(client, parent_id, directory_cache if directory_cache is not None else {}).values()
                  if str(row.file_id) == str(source.get("file_id") or "") and row.name == name), None)
 
 
@@ -1382,13 +1382,15 @@ def _verify_after(
     copy_task_id: str = "",
     cancel_check: Callable[[], None] | None = None,
     stage_source: dict[str, Any] | None = None,
+    directory_cache: dict[str, dict[str, GuangYaFile]] | None = None,
 ) -> bool:
     op = str(item.get("op") or "")
+    directory_cache = directory_cache if directory_cache is not None else {}
     if op == "create_directory":
         parent_id = _directory_id(item, created_targets, role="parent")
         matches = [
             row
-            for row in client.list_dir(parent_id)
+            for row in _list_map(client, parent_id, directory_cache).values()
             if row.is_dir and row.name == str(item.get("name") or "")
         ]
         return len(matches) == 1 and (
@@ -1399,10 +1401,10 @@ def _verify_after(
     if op == "trash":
         return all(
             str(row.file_id) != file_id
-            for row in client.list_dir(str(source.get("parent_id") or "0"))
+            for row in _list_map(client, str(source.get("parent_id") or "0"), directory_cache).values()
         )
     if op in {"rename", "move", "relocate"}:
-        return _written_source(client, item, created_targets) is not None
+        return _written_source(client, item, created_targets, directory_cache) is not None
     if op == "copy":
         if len(_operation_actions(item)) == 2 and not stage_source:
             return False
@@ -1425,6 +1427,15 @@ def _verified_copy(client, item, created_targets, task_id, cancel_check, *, name
     source = item["source"]
     if not _snapshot_matches(_find_current(client, source), source):
         return None
+    copied = _copy_output(client, item, created_targets, cancel_check, name=name, copied_id=copied_id)
+    if copied is not None and source["is_dir"] and _copy_tree_snapshot(client, source["file_id"], cancel_check) != item["copy_snapshot"]:
+        return None
+    return copied
+
+
+def _copy_output(client, item, created_targets, cancel_check, *, name, copied_id=""):
+    """按冻结内容核对副本；已完成复制的源可以被同一计划后续合法修改。"""
+    source = item["source"]
     matches = [row for row in client.list_dir(_directory_id(item, created_targets))
                if row.name == name and row.is_dir == bool(source["is_dir"])]
     if len(matches) != 1 or matches[0].file_id == source["file_id"]:
@@ -1435,8 +1446,7 @@ def _verified_copy(client, item, created_targets, task_id, cancel_check, *, name
     if copied.is_dir:
         expected = item.get("copy_snapshot")
         valid = (isinstance(expected, dict)
-                 and _copy_tree_snapshot(client, copied.file_id, cancel_check)["content"] == expected["content"]
-                 and _copy_tree_snapshot(client, source["file_id"], cancel_check) == expected)
+                 and _copy_tree_snapshot(client, copied.file_id, cancel_check)["content"] == expected["content"])
     else:
         size = max(0, int(source.get("size") or 0))
         valid = ((not size or int(copied.size or 0) == size)
@@ -2025,6 +2035,8 @@ def execute_fs_change_plan(
         completed_objects = {str((item.get("source") or {}).get("file_id") or item["created_path"])
             for item, outcome in zip(operations, outcomes) if outcome["status"] == "completed"}
         successful_operations = [item for item, outcome in zip(operations, outcomes) if outcome["status"] == "completed"]
+        operations_by_object = {str((item.get("source") or {}).get("file_id") or item["created_path"]): (str(i), item)
+                                for i, item in enumerate(operations, 1)}
         for index, item in enumerate(operations, start=1):
             if persistence_uncertain:
                 break
@@ -2050,6 +2062,24 @@ def execute_fs_change_plan(
                     source_snapshot=stage_sources.get(str(index)) if index in resumable else None,
                     cancel_check=cancel_check,
                 )
+                # 完成回执是历史事实，不保证子项此刻仍在原位。父目录变更前重新核对
+                # 批准的前置结果；共享本次核对的目录快照，不为每个文件重复列目录。
+                directory_cache: dict[str, dict[str, GuangYaFile]] = {}
+                for dependency in item.get("rename_dependencies") or ():
+                    if cancel_check is not None:
+                        cancel_check()
+                    position, predecessor = operations_by_object[dependency]
+                    predecessor_id = str((created_targets.get(predecessor.get("created_path")) or {}).get("file_id") or "")
+                    if predecessor["op"] == "copy":
+                        valid = _copy_output(client, predecessor, created_targets, cancel_check,
+                            name=str(predecessor.get("new_name") or predecessor["source"]["name"]),
+                            copied_id=str((stage_sources.get(position) or {}).get("file_id") or "")) is not None
+                    else:
+                        valid = _verify_after(client, predecessor, predecessor_id, created_targets=created_targets,
+                            cancel_check=cancel_check, stage_source=stage_sources.get(position), directory_cache=directory_cache)
+                    if not valid:
+                        completed_objects.discard(dependency)
+                        raise GuangYaFSChangeStale("前置子项结果已变化，未执行父目录操作，请重新核对")
                 provider_write_started = True
                 created_id = _apply_fs_operation(client, item, outcome, created_targets, cancel_check, checkpoint, stage_sources, copy_tasks)
                 needs_checkpoint = False  # 正常末阶段已持久化；异常核对/拒绝需要补记。

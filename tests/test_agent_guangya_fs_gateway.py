@@ -3579,6 +3579,93 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertIsNone(client.file_info("mid"))
         self.assertIsNone(client.file_info("leaf"))
 
+    def test_parent_change_rechecks_completed_child_before_archival(self):
+        for drift in ("move", "rename", "read_failure", "none"):
+            with self.subTest(drift=drift):
+                client, plan = self._nested_archive_plan()
+                payload = self._queued_payload(plan)
+                original_journal = guangya_fs_change._append_journal
+                original_list = client.list_dir
+                parent_position = next(i for i,op in enumerate(plan["operations"],1) if op["source"]["file_id"] == "mid")
+                drifted = False
+                def after_checkpoint(plan_id, record):
+                    nonlocal drifted
+                    original_journal(plan_id, record)
+                    row = (record.get("data") or {}).get("operation_item") or {}
+                    if not drifted and row.get("position") == parent_position and row.get("status") == "completed":
+                        drifted = True
+                        if drift == "move":
+                            client.move(["video"], "source")
+                        elif drift == "rename":
+                            client.rename("video", "Changed.mp4")
+                def listing(parent_id="0"):
+                    if drifted and drift == "read_failure" and parent_id == "work":
+                        raise TimeoutError("provider unavailable")
+                    return original_list(parent_id)
+                with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=after_checkpoint), \
+                        mock.patch.object(client, "list_dir", side_effect=listing):
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                self.assertEqual(result["partial"], drift != "none")
+                self.assertEqual(client.file_info("work").parent_id, "target" if drift == "none" else "source")
+                if drift == "move":
+                    self.assertEqual(client.file_info("video").parent_id, "source", "不能自动撤销外部移动")
+                if drift == "rename":
+                    self.assertEqual(client.file_info("video").name, "Changed.mp4", "不能自动撤销外部改名")
+
+    def test_backup_output_survives_planned_source_changes_but_detects_replica_drift(self):
+        for drift in (False, True):
+            with self.subTest(replica_drift=drift):
+                client = FakeGatewayClient()
+                client.directories["0"].append(GuangYaFile("archive", "archive", True, parent_id="0", etag="a"))
+                client.directories["archive"] = []
+                client.directories["trash"] = [GuangYaFile("nested", "Old.mkv", False, parent_id="trash", size=10, etag="n")]
+                observation = guangya_workspace.create_directory_observation(client, owner="owner", path="/source", recursive=True, max_items=100)
+                refs = {item["file_id"]: ref for ref,item in guangya_workspace.observation_entry_map(observation).items()}
+                plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation, trigger_strm=False,
+                    operations=[{"op": "copy", "object_ref": refs["trash"], "target_path": "/target"},
+                                {"op": "rename", "object_ref": refs["nested"], "new_name": "New.mkv"},
+                                {"op": "move", "object_ref": refs["source"], "target_path": "/archive"}])
+                guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+                original_journal = guangya_fs_change._append_journal
+                def after_rename(plan_id, record):
+                    original_journal(plan_id, record)
+                    row = (record.get("data") or {}).get("operation_item") or {}
+                    if drift and row.get("position") == 2 and row.get("status") == "completed":
+                        copied = client.list_dir("target")[0]
+                        client.rename(client.list_dir(copied.file_id)[0].file_id, "External.mkv")
+                with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=after_rename):
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                self.assertEqual(result["partial"], drift)
+                self.assertEqual(client.file_info("source").parent_id, "0" if drift else "archive")
+                self.assertEqual(client.file_info("nested").name, "New.mkv")
+                backup = client.list_dir("target")[0]
+                self.assertEqual(client.list_dir(backup.file_id)[0].name, "External.mkv" if drift else "Old.mkv")
+
+    def test_parent_dependency_readback_lists_shared_directory_once(self):
+        client = FakeGatewayClient()
+        client.directories["source"] = [GuangYaFile(f"f{i}", f"Old-{i}.mkv", False, parent_id="source", size=10, etag=str(i)) for i in range(40)]
+        observation = guangya_workspace.create_directory_observation(client, owner="owner", path="/source", recursive=True, max_items=100)
+        refs = {item["file_id"]: ref for ref,item in guangya_workspace.observation_entry_map(observation).items()}
+        operations = [{"op": "rename", "object_ref": refs[f"f{i}"], "new_name": f"New-{i}.mkv"} for i in range(40)]
+        operations.append({"op": "move", "object_ref": refs["source"], "target_path": "/target"})
+        plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation, operations=operations, trigger_strm=False)
+        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        original_verify = guangya_fs_change._verify_after
+        dependency_reads = []
+        def verify(*args, **kwargs):
+            if "directory_cache" not in kwargs:
+                return original_verify(*args, **kwargs)
+            with mock.patch.object(client, "list_dir", wraps=client.list_dir) as listing:
+                result = original_verify(*args, **kwargs)
+            dependency_reads.append(listing.call_count)
+            return result
+        with mock.patch.object(guangya_fs_change, "_verify_after", side_effect=verify):
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["renamed"], 40)
+        self.assertEqual(len(dependency_reads), 40)
+        self.assertEqual(sum(dependency_reads), 1, "新增的40项依赖核对不能发送40次同目录请求")
+
     def test_nested_video_extraction_empty_cleanup_and_folder_archival_share_one_plan(self):
         client, plan = self._nested_archive_plan()
         order = [item['source']['file_id'] for item in plan['operations']]
