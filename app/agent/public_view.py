@@ -14,6 +14,7 @@ from typing import Any
 from app.agent.model_context_budget import decode_tool_content
 from app.agent.public_safety import (
     public_tool_label,
+    replace_internal_identifiers,
     sanitize_public_text,
     sanitize_resource_title,
 )
@@ -410,34 +411,44 @@ def _download_progress_request(
     return number
 
 
-# 只判断操作状态/授权断言，不用整个正文的固定句型白名单代替模型分析。
+# 完成、运行状态和否定判断共享同一组操作词，避免各自漏掉创建/发送等动作。
+_OPERATION = r"(?:创建|生成|保存|发送|分享|上传|下载|删除|清空|移动|复制|改名|重命名|归档|入库|同步|启用|停用|修改|更新|订阅|执行|提交|写入|操作|处理|整理)"
+_COMPLETION = r"(?:完成|成功|完毕|搞定|好了|就绪)"
+_EN_COMPLETION = r"(?:created|generated|saved|sent|shared|uploaded|downloaded|deleted|cleared|moved|copied|renamed|archived|synced|enabled|disabled|updated|subscribed|executed)"
 _COMPLETION_CLAIM = re.compile(
-    r"^(?:任务)?已(?:经)?完成(?=[，。！？,.!]|$)|(?:全部|所有|一切|整批|都).{0,12}(?:完成|成功|搞定|好了)|处理完成|"
-    r"(?:删除|清空|移动|复制|改名|归档|入库|下载|执行|提交|写入|操作)(?:步骤)?(?:\s+[A-Za-z0-9#-]+)?\s*(?:已(?:经)?)?(?:成功)?(?:完成|成功|完毕)|"
-    r"已(?:经)?(?:清空|删除|改名|归档|入库|生成|同步)|已(?:经)?全部完成|"
-    r"\b(?:all (?:writes|tasks).{0,12}(?:finished|done|complete)|the write is done|nothing remains to do)\b",
+    rf"^(?:任务)?已(?:经)?({_COMPLETION})(?=[，。！？,.!]|$)|"
+    rf"(?:全部|所有|一切|整批|都).{{0,12}}({_COMPLETION})|"
+    rf"{_OPERATION}(?:步骤)?(?:\s+[A-Za-z0-9#-]+)?\s*(?:已(?:经)?)?(?:成功)?({_COMPLETION})|"
+    rf"已(?:经)?(?:成功)?({_OPERATION})|(?<![\w.-])({_EN_COMPLETION})(?![\w-]|\.\w)|"
+    r"\b(?:all (?:writes|tasks).{0,12}|the write is )(finished|done|completed?)\b|"
+    r"\b(nothing remains to do)\b",
     re.IGNORECASE,
 )
 _STATE_CLAIM = re.compile(
-    r"请求\s*#?\d+|(?:已|正在|仍|当前|目前|状态|处于).{0,12}(?:提交|受理|执行|下载|归档|入库|移动|清空|改名)|"
-    r"(?:文件变更|第\d+项)|(?:提交|删除|改名|执行|归档|入库)(?:成功|完成)|"
-    r"(?:完成(?:了)?|剩余|还剩)\s*\d+\s*(?:项|个)|"
+    rf"请求\s*#?\d+|(?:已|正在|仍|当前|目前|状态|处于)[^，,；;。.!?]{{0,12}}(?:受理|{_OPERATION})|"
+    r"(?:文件变更|第\d+项)|(?:完成(?:了)?|剩余|还剩)\s*\d+\s*(?:项|个)|"
     r"\b(?:request\s*#?\d+|submitted|downloading|executing)\b", re.IGNORECASE,
 )
 _REPLAY_CLAIM = re.compile(r"(?:允许|可以|无需确认|不必确认).{0,8}(?:重放|重新提交|自动执行)|\b(?:replay|resubmit) (?:automatically|without confirmation)\b", re.IGNORECASE)
-_EXPLANATION = re.compile(r"说明|意味着|原因|建议|如果|若|需要|应当|不应|不能把|不代表|不能确认|无法确认|不同阶段|\b(?:means|recommend|suggest|if|should|need)\b", re.IGNORECASE)
+_EXPLANATION = re.compile(r"说明|意味着|原因|建议|如果|若|需要|应当|不应|不能把|不代表|不能确认|无法确认|不同阶段|尚未|未能|没有|\b(?:means|recommend|suggest|if|should|need)\b", re.IGNORECASE)
 _NEGATED_COMPLETION = re.compile(
-    r"(?:(?:尚不能|不能|无法|尚未|未能|未|没有)(?:确认|证明)?(?:已)?|不代表(?:已(?:经)?)?)"
-    r"(?:全部|完全)?(?:入库|下载|执行|处理|整理|同步)?$|\b(?:not|never)(?: yet| fully)?\s*$", re.IGNORECASE,
+    rf"(?:(?:尚不能|不能|无法|尚未|未能|未|没有)(?:确认|证明)?(?:已(?:经)?)?|不代表(?:已(?:经)?)?)"
+    rf"(?:全部|完全)?(?:{_OPERATION})?$|(?:不能|无法|尚未|未能|没有)(?:确认|证明).*$|不代表.*$|"
+    r"\b(?:not|never)(?: yet| fully| been| already)*\s*$", re.IGNORECASE,
 )
-_COMPLETION_PREDICATE = re.compile(r"完成|成功|搞定|好了|清空|删除|改名|归档|入库|生成|同步|finished|done|complete", re.IGNORECASE)
+_CONDITIONAL_COMPLETION = re.compile(
+    r"^\s*(?:如果|若|假如|一旦|假设|只有|(?:if|when|once)\b)|"
+    r"\b(?:will|would|can|could|should|must|may|might)(?: already)?(?: be| have been)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _asserted_completion(clause: str) -> bool:
     for match in _COMPLETION_CLAIM.finditer(clause):
-        predicates = list(_COMPLETION_PREDICATE.finditer(match[0]))
-        position = match.start() + (predicates[-1].start() if predicates else 0)
-        if not _NEGATED_COMPLETION.search(clause[max(0, position - 24):position]):
+        # 最后命中的捕获组就是动作/完成谓词，不再逐词二次扫描同一匹配。
+        position = match.start(match.lastindex or 0)
+        prefix = re.split(r"[，,；;。.!?]|但是|但|然而|不过|却|\b(?:but|however)\b", clause[:position], flags=re.IGNORECASE)[-1]
+        if not (_NEGATED_COMPLETION.search(prefix) or _CONDITIONAL_COMPLETION.search(prefix)):
             return True
     return False
 
@@ -493,8 +504,8 @@ def _model_analysis(content, result, results, *, write_attempted=False) -> str:
     request = _download_progress_request(result, results)
     locked = write_attempted or result is not None
     kept = []
-    # 句末闭括号/引号随所属句处理，过滤一句时不会留下孤立的“）”。
-    for raw in re.findall(r"[^\n]+?(?:[。！？][）)\]”’\"]*|[.!?][）)\]”’\"]*(?=\s|$)|(?=\n|$))|\n", text):
+    # 句末闭括号/引号/Markdown闭标记随所属句处理，不留下孤立的格式标记。
+    for raw in re.findall(r"[^\n]+?(?:[。！？][）)\]”’\"*`_]*|[.!?][）)\]”’\"*`_]*(?=\s|$)|(?=\n|$))|\n", text):
         if not raw:
             continue
         if not raw.strip():
@@ -505,21 +516,23 @@ def _model_analysis(content, result, results, *, write_attempted=False) -> str:
                 or re.search(r"忽略(?:此前|之前|以上)结果", clause)):
             continue
         safe = sanitize_public_text(clause, limit=max(1, len(clause) * 3), preserve_format=True)
-        if (not safe or safe.strip(" #*`，。,.!?！？…") in {"内部检查", "内部状态"}
-                or _REPLAY_CLAIM.search(clause)):
+        # 展示保留排版，判定必须使用相同安全边界的解码/NFKC文本，不能被全角或转义绕过。
+        canonical = replace_internal_identifiers(safe)
+        if (not canonical or canonical.strip(" #*`，。,.!?！？…") in {"内部检查", "内部状态"}
+                or _REPLAY_CLAIM.search(canonical)):
             continue
-        semantic = re.sub(r"《[^》]*》|[*`]", "", clause).lstrip("#- ")
+        semantic = re.sub(r"《[^》]*》|`[^`\n]+\.[A-Za-z0-9]{1,12}`|[*`]", "", canonical).lstrip("#- ")
         proven = _file_change_clause(semantic, file_evidence)
         # 绑定同一请求的实际下载阶段；普通解释不必与某一句模板逐字相等。
         progress = bool(request and re.search(rf"请求\s*#?{request}(?!\d)", semantic)
                         and re.search(r"正在下载|下载中|下载阶段", semantic)
                         and not re.search(r"删除|清空|改名|移动|复制", semantic)
                         and re.findall(r"\d+", semantic) == [str(request)])
-        if _asserted_completion(semantic) and not proven:
+        unverified_state = (locked and _STATE_CLAIM.search(semantic) and not (proven or progress)
+                            and (not _EXPLANATION.search(semantic)
+                                 or re.search(r"请求\s*#?\d+|文件变更|第\d+项", semantic)))
+        if unverified_state or (_asserted_completion(semantic) and not proven):
             continue
-        if locked and _STATE_CLAIM.search(semantic) and not (proven or progress):
-            if not _EXPLANATION.search(semantic) or re.search(r"请求\s*#?\d+|文件变更|第\d+项", semantic):
-                continue
         kept.append(raw if safe == clause else raw.replace(clause, safe))
     return "".join(kept).strip()
 

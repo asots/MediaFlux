@@ -568,6 +568,137 @@ class AgentKernelPublicViewTests(unittest.TestCase):
         )
 
 
+class PublicCompletionClaimRegressionTests(unittest.TestCase):
+    _ENTRYPOINTS = ("format_partial_progress", "sanitize_confirmed_answer")
+    _UNCONFIRMED_RECEIPTS = (
+        {"ok": False, "status": "failed", "summary": "分享创建失败"},
+        {"ok": True, "status": "pending", "summary": "分享创建尚未完成"},
+    )
+    _COMPLETION_SENTENCES = (
+        "分享已经创建。",
+        "**分享已经创建。**",
+        "文件已经分享。",
+        "文件已经保存。",
+        "消息已经发送。",
+        "分享创建成功。",
+        "文件分享成功。",
+        "文件保存成功。",
+        "消息发送成功。",
+        "The share has been created.",
+        "The file has been shared.",
+        "The file has been saved.",
+        "The message has been sent.",
+    )
+
+    def _project(self, entrypoint: str, answer: str, result: dict[str, object]) -> str:
+        if entrypoint == "format_partial_progress":
+            return format_partial_progress(
+                "后续查询未完成", [], confirmed_result=result, analysis_text=answer,
+            )
+        return sanitize_confirmed_answer(answer, result)
+
+    def test_unconfirmed_receipts_do_not_leak_write_completion_claims(self) -> None:
+        for result in self._UNCONFIRMED_RECEIPTS:
+            for answer in self._COMPLETION_SENTENCES:
+                for entrypoint in self._ENTRYPOINTS:
+                    with self.subTest(entrypoint=entrypoint, status=result["status"], answer=answer):
+                        public = self._project(entrypoint, answer, result)
+                        self.assertIn(format_public_result(result), public)
+                        self.assertNotIn(answer.rstrip("。.").casefold(), public.casefold())
+                        self.assertFalse(any(line.strip() in {"**", "__", "`"} for line in public.splitlines()))
+
+    def test_unconfirmed_receipts_keep_negation_and_next_steps(self) -> None:
+        cases = (
+            ("分享尚未创建，需要核验失败原因。", ("尚未创建", "核验失败原因")),
+            ("**执行未完成：原确认卡已失效，未创建任何分享。**", ("**执行未完成", "未创建任何分享。**")),
+            ("未能确认创建成功，请先核验实际状态。", ("未能确认创建成功", "核验实际状态")),
+            ("未能确认这个分享已经创建，因此需要重新核验。", ("未能确认这个分享已经创建", "重新核验")),
+            ("确认后再创建分享，不会自动重试。", ("确认后再创建", "不会自动重试")),
+            ("The share has not been created yet. Please verify the result.",
+             ("not been created", "verify the result")),
+            ("Create the share after confirmation.", ("Create the share", "after confirmation")),
+        )
+        for result in self._UNCONFIRMED_RECEIPTS:
+            for answer, retained in cases:
+                for entrypoint in self._ENTRYPOINTS:
+                    with self.subTest(entrypoint=entrypoint, status=result["status"], answer=answer):
+                        public = self._project(entrypoint, answer, result)
+                        self.assertIn(format_public_result(result), public)
+                        for fragment in retained:
+                            self.assertIn(fragment, public)
+
+    def test_negated_chinese_clause_does_not_license_later_success_claims(self) -> None:
+        cases = (
+            ("分享尚未创建，但文件已经保存。", ("文件已经保存",)),
+            ("未能确认创建成功，不过分享已经创建。", ("分享已经创建",)),
+            ("确认后再创建，消息已经发送。", ("消息已经发送",)),
+            ("不能确认前一步但分享已经创建。", ("分享已经创建",)),
+            ("分享尚未创建；文件已经分享。", ("文件已经分享",)),
+            ("分享尚未创建，但分享已经创建，文件保存成功。", ("分享已经创建", "文件保存成功")),
+        )
+        for result in self._UNCONFIRMED_RECEIPTS:
+            for answer, forbidden in cases:
+                for entrypoint in self._ENTRYPOINTS:
+                    with self.subTest(entrypoint=entrypoint, status=result["status"], answer=answer):
+                        # 既有契约以整句为单位；不从自相矛盾的一句话中拼接半句。
+                        # 保留相邻的正常说明，但不能因前半句是否定就放行后半句。
+                        safe_sentence = "建议核对实际文件状态。"
+                        public = self._project(entrypoint, safe_sentence + answer, result)
+                        self.assertIn(format_public_result(result), public)
+                        self.assertIn(safe_sentence, public)
+                        for claim in forbidden:
+                            self.assertNotIn(claim, public)
+
+    def test_unconfirmed_receipts_keep_filenames_and_quoted_names(self) -> None:
+        cases = (
+            ("目标文件是 Blue.Streak.S01E01.mkv，分享尚未创建。",
+             ("Blue.Streak.S01E01.mkv", "尚未创建"), ()),
+            ("《创建成功》是片名，确认后再创建分享。",
+             ("《创建成功》", "确认后再创建"), ()),
+            ("待发送文件是 notes.saved.txt，确认后再发送。",
+             ("notes.saved.txt", "确认后再发送"), ()),
+            ("目标文件是 Blue.Streak.S01E01.mkv。分享已经创建。",
+             ("Blue.Streak.S01E01.mkv",), ("分享已经创建",)),
+        )
+        for result in self._UNCONFIRMED_RECEIPTS:
+            for answer, retained, forbidden in cases:
+                for entrypoint in self._ENTRYPOINTS:
+                    with self.subTest(entrypoint=entrypoint, status=result["status"], answer=answer):
+                        public = self._project(entrypoint, answer, result)
+                        self.assertIn(format_public_result(result), public)
+                        for fragment in retained:
+                            self.assertIn(fragment, public)
+                        for claim in forbidden:
+                            self.assertNotIn(claim, public)
+
+    def test_completion_guard_checks_the_text_that_will_actually_be_displayed(self) -> None:
+        from urllib.parse import quote, unquote
+        cases = ((quote("分享已经创建。", safe=""), "分享已经创建"),
+                 ("Ｔｈｅ ｓｈａｒｅ ｈａｓ ｂｅｅｎ ｃｒｅａｔｅｄ.", "The share has been created"))
+        for raw, canonical in cases:
+            for entrypoint in self._ENTRYPOINTS:
+                with self.subTest(entrypoint=entrypoint, raw=raw):
+                    public = self._project(entrypoint, raw, self._UNCONFIRMED_RECEIPTS[0])
+                    self.assertNotIn(canonical, public)
+                    self.assertNotIn(raw.rstrip("。."), public)
+        for entrypoint in self._ENTRYPOINTS:
+            public = self._project(entrypoint, quote("分享尚未创建。", safe=""), self._UNCONFIRMED_RECEIPTS[0])
+            self.assertIn("尚未创建", unquote(public))
+
+    def test_success_receipts_keep_normal_completion_and_followup(self) -> None:
+        for status in ("success", "completed"):
+            result = {"ok": True, "status": status, "summary": "操作已核验完成"}
+            for completion in self._COMPLETION_SENTENCES:
+                answer = completion + "\n可继续核对文件信息与分享有效期。"
+                for entrypoint in self._ENTRYPOINTS:
+                    with self.subTest(entrypoint=entrypoint, status=status, answer=answer):
+                        public = self._project(entrypoint, answer, result)
+                        self.assertIn(completion.rstrip("。."), public)
+                        self.assertIn("核对文件信息与分享有效期", public)
+                        if entrypoint == "format_partial_progress":
+                            self.assertIn(format_public_result(result), public)
+
+
 if __name__ == "__main__":
     unittest.main()
 
