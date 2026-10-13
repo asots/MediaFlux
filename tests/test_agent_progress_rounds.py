@@ -96,3 +96,15 @@ def test_repeats_failures_and_discovery_do_not_earn_more_observation_rounds(mode
     _events, requests, _attempted, _read = run_pages(pages=99, mode=mode, status=status)
     assert len(requests) <= ceiling
     assert not requests[-1].tools
+
+
+@pytest.mark.parametrize("mode,status,expected", [
+    ("pages", "success", 3), ("repeat", "success", 1),
+    ("alias_repeat", "success", 1), ("exception", "success", 0),
+    ("pages", "failed", 0), ("pages", "partial", 0), ("discovery", "success", 0),
+])
+def test_model_sees_observation_progress_separate_from_attempt_budget(mode, status, expected):
+    _events, requests, _attempted, _read = run_pages(pages=3, mode=mode, status=status)
+    assert f"已完整取得并落盘 {expected} 个不同的成功业务只读观察" in requests[-1].system_prompt
+    assert "调用尝试次数不是成功查询数、已读页数或记录总数" in requests[-1].system_prompt
+    assert "不含历史回合" in requests[-1].system_prompt

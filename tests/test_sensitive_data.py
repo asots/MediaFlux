@@ -10,6 +10,16 @@ from app.sensitive_data import (
 
 
 class SensitiveDataTests(unittest.TestCase):
+    def test_ascii_credential_keys_adjacent_to_chinese_are_not_hidden(self):
+        from app.agent.public_safety import sanitize_public_text
+        for prefix in ("凭据", "提示：", "状态描述"):
+            value = prefix + "access_token=AbCd1234testCredential9876。"
+            with self.subTest(prefix=prefix):
+                self.assertTrue(contains_sensitive_credential(value))
+                self.assertNotIn("AbCd1234", redact_sensitive_text(value))
+                self.assertEqual(sanitize_public_text(value, preserve_format=True), "")
+        self.assertFalse(contains_sensitive_credential("媒体字段title=合法片名"))
+
     def test_detects_environment_style_and_transport_credentials(self):
         cases = (
             "TG_BOT_TOKEN=123456:abcdefghijklmnopqrstuvwxyzABCDE",

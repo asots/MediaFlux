@@ -11,7 +11,7 @@ from urllib.parse import unquote
 _ASSIGNMENT_RE = re.compile(
     r'''(?ix)
     (?P<prefix>
-        (?<![\w-])["']?
+        (?<![A-Za-z0-9_-])["']?
         (?P<label>[a-z][a-z0-9_-]{0,80})
         ["']?\s*(?::|=|\bis\b)\s*["']?(?!//)
     )

@@ -1,0 +1,374 @@
+{
+  "provenance": {
+    "kind": "sanitized_minimal_reconstruction_not_raw",
+    "source_directory": ".superpowers/tmp/agent-progress-budget-20261013/live-baseline/evidence",
+    "frozen_commit": "2c0e7c980edee8cb8e457429e7284a9c2df00aa6",
+    "source_sha256": {
+      "timeline.jsonl": "4bb46d15b6234a2724954974c9b5bcd04dbce7aad588d1e3fcbafee4dbbcb0ef",
+      "model-events-5.json": "6b1b6cf259dc8a6f2a7ef5609aec44095c4a6893a3449fffb781ff1d9541cc93",
+      "natural-request.json": "61e3802b9c414120485bd0f52522060c577acab92426a114b81bf50af64a7264",
+      "final-view.json": "67775e0f871c551185c0fe5bf2661ac5daa33e7def570603c8d82163ec3b9629"
+    },
+    "analysis_text_utf8_sha256": "c39239c77f650d3743231c8bce0f425b4c1d94f4522d5e47ca019a4c22a6124d",
+    "baseline_public_answer_utf8_sha256": "7a1a26fa1a4938152c6709aae539a8c6a2369616f2c8b55522ec334ee3d6ba47",
+    "transformation": "自包含脱敏最小 fixture，非 raw 原件。成功 DTO 只裁剪保存的 ok/status/summary/data 和实际 160 条公开 items；去除时间、进程、owner/session、opaque refs/handles、传输与模型元数据。失败重构为保存的公开 message 与已确认 rate_limited code；不重建异常类链。第 5 轮公开 text_delta 正文及原最终公开 answer 均逐字保留；合成 call_id/owner/session 仅在测试运行时生成。未读取或引入 oracle、SQLite 预取第 161 项或任何未返回页。"
+  },
+  "tool": "discovery.watchlist_summaries",
+  "request_text": "请基于全部探索收藏，分别统计电影和剧集的数量，再各列出最新收藏的3部。不要只统计前面一页，不查询媒体库或资源站。",
+  "calls": [
+    {
+      "round": 1,
+      "arguments": {},
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 241, "provider": "tmdb", "media_type": "tv", "title": "测试收藏241", "year": "2026"},
+            {"watchlist_number": 240, "provider": "tmdb", "media_type": "movie", "title": "测试收藏240", "year": "2026"},
+            {"watchlist_number": 239, "provider": "tmdb", "media_type": "tv", "title": "测试收藏239", "year": "2026"},
+            {"watchlist_number": 238, "provider": "tmdb", "media_type": "movie", "title": "测试收藏238", "year": "2026"},
+            {"watchlist_number": 237, "provider": "tmdb", "media_type": "tv", "title": "测试收藏237", "year": "2026"},
+            {"watchlist_number": 236, "provider": "tmdb", "media_type": "movie", "title": "测试收藏236", "year": "2026"},
+            {"watchlist_number": 235, "provider": "tmdb", "media_type": "tv", "title": "测试收藏235", "year": "2026"},
+            {"watchlist_number": 234, "provider": "tmdb", "media_type": "movie", "title": "测试收藏234", "year": "2026"},
+            {"watchlist_number": 233, "provider": "tmdb", "media_type": "tv", "title": "测试收藏233", "year": "2026"},
+            {"watchlist_number": 232, "provider": "tmdb", "media_type": "movie", "title": "测试收藏232", "year": "2026"},
+            {"watchlist_number": 231, "provider": "tmdb", "media_type": "tv", "title": "测试收藏231", "year": "2026"},
+            {"watchlist_number": 230, "provider": "tmdb", "media_type": "movie", "title": "测试收藏230", "year": "2026"},
+            {"watchlist_number": 229, "provider": "tmdb", "media_type": "tv", "title": "测试收藏229", "year": "2026"},
+            {"watchlist_number": 228, "provider": "tmdb", "media_type": "movie", "title": "测试收藏228", "year": "2026"},
+            {"watchlist_number": 227, "provider": "tmdb", "media_type": "tv", "title": "测试收藏227", "year": "2026"},
+            {"watchlist_number": 226, "provider": "tmdb", "media_type": "movie", "title": "测试收藏226", "year": "2026"},
+            {"watchlist_number": 225, "provider": "tmdb", "media_type": "tv", "title": "测试收藏225", "year": "2026"},
+            {"watchlist_number": 224, "provider": "tmdb", "media_type": "movie", "title": "测试收藏224", "year": "2026"},
+            {"watchlist_number": 223, "provider": "tmdb", "media_type": "tv", "title": "测试收藏223", "year": "2026"},
+            {"watchlist_number": 222, "provider": "tmdb", "media_type": "movie", "title": "测试收藏222", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 222
+        }
+      }
+    },
+    {
+      "round": 2,
+      "arguments": {
+        "before_number": 222
+      },
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 221, "provider": "tmdb", "media_type": "tv", "title": "测试收藏221", "year": "2026"},
+            {"watchlist_number": 220, "provider": "tmdb", "media_type": "movie", "title": "测试收藏220", "year": "2026"},
+            {"watchlist_number": 219, "provider": "tmdb", "media_type": "tv", "title": "测试收藏219", "year": "2026"},
+            {"watchlist_number": 218, "provider": "tmdb", "media_type": "movie", "title": "测试收藏218", "year": "2026"},
+            {"watchlist_number": 217, "provider": "tmdb", "media_type": "tv", "title": "测试收藏217", "year": "2026"},
+            {"watchlist_number": 216, "provider": "tmdb", "media_type": "movie", "title": "测试收藏216", "year": "2026"},
+            {"watchlist_number": 215, "provider": "tmdb", "media_type": "tv", "title": "测试收藏215", "year": "2026"},
+            {"watchlist_number": 214, "provider": "tmdb", "media_type": "movie", "title": "测试收藏214", "year": "2026"},
+            {"watchlist_number": 213, "provider": "tmdb", "media_type": "tv", "title": "测试收藏213", "year": "2026"},
+            {"watchlist_number": 212, "provider": "tmdb", "media_type": "movie", "title": "测试收藏212", "year": "2026"},
+            {"watchlist_number": 211, "provider": "tmdb", "media_type": "tv", "title": "测试收藏211", "year": "2026"},
+            {"watchlist_number": 210, "provider": "tmdb", "media_type": "movie", "title": "测试收藏210", "year": "2026"},
+            {"watchlist_number": 209, "provider": "tmdb", "media_type": "tv", "title": "测试收藏209", "year": "2026"},
+            {"watchlist_number": 208, "provider": "tmdb", "media_type": "movie", "title": "测试收藏208", "year": "2026"},
+            {"watchlist_number": 207, "provider": "tmdb", "media_type": "tv", "title": "测试收藏207", "year": "2026"},
+            {"watchlist_number": 206, "provider": "tmdb", "media_type": "movie", "title": "测试收藏206", "year": "2026"},
+            {"watchlist_number": 205, "provider": "tmdb", "media_type": "tv", "title": "测试收藏205", "year": "2026"},
+            {"watchlist_number": 204, "provider": "tmdb", "media_type": "movie", "title": "测试收藏204", "year": "2026"},
+            {"watchlist_number": 203, "provider": "tmdb", "media_type": "tv", "title": "测试收藏203", "year": "2026"},
+            {"watchlist_number": 202, "provider": "tmdb", "media_type": "movie", "title": "测试收藏202", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 202
+        }
+      }
+    },
+    {
+      "round": 3,
+      "arguments": {
+        "before_number": 202
+      },
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 201, "provider": "tmdb", "media_type": "tv", "title": "测试收藏201", "year": "2026"},
+            {"watchlist_number": 200, "provider": "tmdb", "media_type": "movie", "title": "测试收藏200", "year": "2026"},
+            {"watchlist_number": 199, "provider": "tmdb", "media_type": "tv", "title": "测试收藏199", "year": "2026"},
+            {"watchlist_number": 198, "provider": "tmdb", "media_type": "movie", "title": "测试收藏198", "year": "2026"},
+            {"watchlist_number": 197, "provider": "tmdb", "media_type": "tv", "title": "测试收藏197", "year": "2026"},
+            {"watchlist_number": 196, "provider": "tmdb", "media_type": "movie", "title": "测试收藏196", "year": "2026"},
+            {"watchlist_number": 195, "provider": "tmdb", "media_type": "tv", "title": "测试收藏195", "year": "2026"},
+            {"watchlist_number": 194, "provider": "tmdb", "media_type": "movie", "title": "测试收藏194", "year": "2026"},
+            {"watchlist_number": 193, "provider": "tmdb", "media_type": "tv", "title": "测试收藏193", "year": "2026"},
+            {"watchlist_number": 192, "provider": "tmdb", "media_type": "movie", "title": "测试收藏192", "year": "2026"},
+            {"watchlist_number": 191, "provider": "tmdb", "media_type": "tv", "title": "测试收藏191", "year": "2026"},
+            {"watchlist_number": 190, "provider": "tmdb", "media_type": "movie", "title": "测试收藏190", "year": "2026"},
+            {"watchlist_number": 189, "provider": "tmdb", "media_type": "tv", "title": "测试收藏189", "year": "2026"},
+            {"watchlist_number": 188, "provider": "tmdb", "media_type": "movie", "title": "测试收藏188", "year": "2026"},
+            {"watchlist_number": 187, "provider": "tmdb", "media_type": "tv", "title": "测试收藏187", "year": "2026"},
+            {"watchlist_number": 186, "provider": "tmdb", "media_type": "movie", "title": "测试收藏186", "year": "2026"},
+            {"watchlist_number": 185, "provider": "tmdb", "media_type": "tv", "title": "测试收藏185", "year": "2026"},
+            {"watchlist_number": 184, "provider": "tmdb", "media_type": "movie", "title": "测试收藏184", "year": "2026"},
+            {"watchlist_number": 183, "provider": "tmdb", "media_type": "tv", "title": "测试收藏183", "year": "2026"},
+            {"watchlist_number": 182, "provider": "tmdb", "media_type": "movie", "title": "测试收藏182", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 182
+        }
+      }
+    },
+    {
+      "round": 3,
+      "arguments": {
+        "before_number": 182
+      },
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 181, "provider": "tmdb", "media_type": "tv", "title": "测试收藏181", "year": "2026"},
+            {"watchlist_number": 180, "provider": "tmdb", "media_type": "movie", "title": "测试收藏180", "year": "2026"},
+            {"watchlist_number": 179, "provider": "tmdb", "media_type": "tv", "title": "测试收藏179", "year": "2026"},
+            {"watchlist_number": 178, "provider": "tmdb", "media_type": "movie", "title": "测试收藏178", "year": "2026"},
+            {"watchlist_number": 177, "provider": "tmdb", "media_type": "tv", "title": "测试收藏177", "year": "2026"},
+            {"watchlist_number": 176, "provider": "tmdb", "media_type": "movie", "title": "测试收藏176", "year": "2026"},
+            {"watchlist_number": 175, "provider": "tmdb", "media_type": "tv", "title": "测试收藏175", "year": "2026"},
+            {"watchlist_number": 174, "provider": "tmdb", "media_type": "movie", "title": "测试收藏174", "year": "2026"},
+            {"watchlist_number": 173, "provider": "tmdb", "media_type": "tv", "title": "测试收藏173", "year": "2026"},
+            {"watchlist_number": 172, "provider": "tmdb", "media_type": "movie", "title": "测试收藏172", "year": "2026"},
+            {"watchlist_number": 171, "provider": "tmdb", "media_type": "tv", "title": "测试收藏171", "year": "2026"},
+            {"watchlist_number": 170, "provider": "tmdb", "media_type": "movie", "title": "测试收藏170", "year": "2026"},
+            {"watchlist_number": 169, "provider": "tmdb", "media_type": "tv", "title": "测试收藏169", "year": "2026"},
+            {"watchlist_number": 168, "provider": "tmdb", "media_type": "movie", "title": "测试收藏168", "year": "2026"},
+            {"watchlist_number": 167, "provider": "tmdb", "media_type": "tv", "title": "测试收藏167", "year": "2026"},
+            {"watchlist_number": 166, "provider": "tmdb", "media_type": "movie", "title": "测试收藏166", "year": "2026"},
+            {"watchlist_number": 165, "provider": "tmdb", "media_type": "tv", "title": "测试收藏165", "year": "2026"},
+            {"watchlist_number": 164, "provider": "tmdb", "media_type": "movie", "title": "测试收藏164", "year": "2026"},
+            {"watchlist_number": 163, "provider": "tmdb", "media_type": "tv", "title": "测试收藏163", "year": "2026"},
+            {"watchlist_number": 162, "provider": "tmdb", "media_type": "movie", "title": "测试收藏162", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 162
+        }
+      }
+    },
+    {
+      "round": 3,
+      "arguments": {
+        "before_number": 162
+      },
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 161, "provider": "tmdb", "media_type": "tv", "title": "测试收藏161", "year": "2026"},
+            {"watchlist_number": 160, "provider": "tmdb", "media_type": "movie", "title": "测试收藏160", "year": "2026"},
+            {"watchlist_number": 159, "provider": "tmdb", "media_type": "tv", "title": "测试收藏159", "year": "2026"},
+            {"watchlist_number": 158, "provider": "tmdb", "media_type": "movie", "title": "测试收藏158", "year": "2026"},
+            {"watchlist_number": 157, "provider": "tmdb", "media_type": "tv", "title": "测试收藏157", "year": "2026"},
+            {"watchlist_number": 156, "provider": "tmdb", "media_type": "movie", "title": "测试收藏156", "year": "2026"},
+            {"watchlist_number": 155, "provider": "tmdb", "media_type": "tv", "title": "测试收藏155", "year": "2026"},
+            {"watchlist_number": 154, "provider": "tmdb", "media_type": "movie", "title": "测试收藏154", "year": "2026"},
+            {"watchlist_number": 153, "provider": "tmdb", "media_type": "tv", "title": "测试收藏153", "year": "2026"},
+            {"watchlist_number": 152, "provider": "tmdb", "media_type": "movie", "title": "测试收藏152", "year": "2026"},
+            {"watchlist_number": 151, "provider": "tmdb", "media_type": "tv", "title": "测试收藏151", "year": "2026"},
+            {"watchlist_number": 150, "provider": "tmdb", "media_type": "movie", "title": "测试收藏150", "year": "2026"},
+            {"watchlist_number": 149, "provider": "tmdb", "media_type": "tv", "title": "测试收藏149", "year": "2026"},
+            {"watchlist_number": 148, "provider": "tmdb", "media_type": "movie", "title": "测试收藏148", "year": "2026"},
+            {"watchlist_number": 147, "provider": "tmdb", "media_type": "tv", "title": "测试收藏147", "year": "2026"},
+            {"watchlist_number": 146, "provider": "tmdb", "media_type": "movie", "title": "测试收藏146", "year": "2026"},
+            {"watchlist_number": 145, "provider": "tmdb", "media_type": "tv", "title": "测试收藏145", "year": "2026"},
+            {"watchlist_number": 144, "provider": "tmdb", "media_type": "movie", "title": "测试收藏144", "year": "2026"},
+            {"watchlist_number": 143, "provider": "tmdb", "media_type": "tv", "title": "测试收藏143", "year": "2026"},
+            {"watchlist_number": 142, "provider": "tmdb", "media_type": "movie", "title": "测试收藏142", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 142
+        }
+      }
+    },
+    {
+      "round": 3,
+      "arguments": {
+        "before_number": 142
+      },
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 141, "provider": "tmdb", "media_type": "tv", "title": "测试收藏141", "year": "2026"},
+            {"watchlist_number": 140, "provider": "tmdb", "media_type": "movie", "title": "测试收藏140", "year": "2026"},
+            {"watchlist_number": 139, "provider": "tmdb", "media_type": "tv", "title": "测试收藏139", "year": "2026"},
+            {"watchlist_number": 138, "provider": "tmdb", "media_type": "movie", "title": "测试收藏138", "year": "2026"},
+            {"watchlist_number": 137, "provider": "tmdb", "media_type": "tv", "title": "测试收藏137", "year": "2026"},
+            {"watchlist_number": 136, "provider": "tmdb", "media_type": "movie", "title": "测试收藏136", "year": "2026"},
+            {"watchlist_number": 135, "provider": "tmdb", "media_type": "tv", "title": "测试收藏135", "year": "2026"},
+            {"watchlist_number": 134, "provider": "tmdb", "media_type": "movie", "title": "测试收藏134", "year": "2026"},
+            {"watchlist_number": 133, "provider": "tmdb", "media_type": "tv", "title": "测试收藏133", "year": "2026"},
+            {"watchlist_number": 132, "provider": "tmdb", "media_type": "movie", "title": "测试收藏132", "year": "2026"},
+            {"watchlist_number": 131, "provider": "tmdb", "media_type": "tv", "title": "测试收藏131", "year": "2026"},
+            {"watchlist_number": 130, "provider": "tmdb", "media_type": "movie", "title": "测试收藏130", "year": "2026"},
+            {"watchlist_number": 129, "provider": "tmdb", "media_type": "tv", "title": "测试收藏129", "year": "2026"},
+            {"watchlist_number": 128, "provider": "tmdb", "media_type": "movie", "title": "测试收藏128", "year": "2026"},
+            {"watchlist_number": 127, "provider": "tmdb", "media_type": "tv", "title": "测试收藏127", "year": "2026"},
+            {"watchlist_number": 126, "provider": "tmdb", "media_type": "movie", "title": "测试收藏126", "year": "2026"},
+            {"watchlist_number": 125, "provider": "tmdb", "media_type": "tv", "title": "测试收藏125", "year": "2026"},
+            {"watchlist_number": 124, "provider": "tmdb", "media_type": "movie", "title": "测试收藏124", "year": "2026"},
+            {"watchlist_number": 123, "provider": "tmdb", "media_type": "tv", "title": "测试收藏123", "year": "2026"},
+            {"watchlist_number": 122, "provider": "tmdb", "media_type": "movie", "title": "测试收藏122", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 122
+        }
+      }
+    },
+    {
+      "round": 3,
+      "arguments": {
+        "before_number": 122
+      },
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 121, "provider": "tmdb", "media_type": "tv", "title": "测试收藏121", "year": "2026"},
+            {"watchlist_number": 120, "provider": "tmdb", "media_type": "movie", "title": "测试收藏120", "year": "2026"},
+            {"watchlist_number": 119, "provider": "tmdb", "media_type": "tv", "title": "测试收藏119", "year": "2026"},
+            {"watchlist_number": 118, "provider": "tmdb", "media_type": "movie", "title": "测试收藏118", "year": "2026"},
+            {"watchlist_number": 117, "provider": "tmdb", "media_type": "tv", "title": "测试收藏117", "year": "2026"},
+            {"watchlist_number": 116, "provider": "tmdb", "media_type": "movie", "title": "测试收藏116", "year": "2026"},
+            {"watchlist_number": 115, "provider": "tmdb", "media_type": "tv", "title": "测试收藏115", "year": "2026"},
+            {"watchlist_number": 114, "provider": "tmdb", "media_type": "movie", "title": "测试收藏114", "year": "2026"},
+            {"watchlist_number": 113, "provider": "tmdb", "media_type": "tv", "title": "测试收藏113", "year": "2026"},
+            {"watchlist_number": 112, "provider": "tmdb", "media_type": "movie", "title": "测试收藏112", "year": "2026"},
+            {"watchlist_number": 111, "provider": "tmdb", "media_type": "tv", "title": "测试收藏111", "year": "2026"},
+            {"watchlist_number": 110, "provider": "tmdb", "media_type": "movie", "title": "测试收藏110", "year": "2026"},
+            {"watchlist_number": 109, "provider": "tmdb", "media_type": "tv", "title": "测试收藏109", "year": "2026"},
+            {"watchlist_number": 108, "provider": "tmdb", "media_type": "movie", "title": "测试收藏108", "year": "2026"},
+            {"watchlist_number": 107, "provider": "tmdb", "media_type": "tv", "title": "测试收藏107", "year": "2026"},
+            {"watchlist_number": 106, "provider": "tmdb", "media_type": "movie", "title": "测试收藏106", "year": "2026"},
+            {"watchlist_number": 105, "provider": "tmdb", "media_type": "tv", "title": "测试收藏105", "year": "2026"},
+            {"watchlist_number": 104, "provider": "tmdb", "media_type": "movie", "title": "测试收藏104", "year": "2026"},
+            {"watchlist_number": 103, "provider": "tmdb", "media_type": "tv", "title": "测试收藏103", "year": "2026"},
+            {"watchlist_number": 102, "provider": "tmdb", "media_type": "movie", "title": "测试收藏102", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 102
+        }
+      }
+    },
+    {
+      "round": 3,
+      "arguments": {
+        "before_number": 102
+      },
+      "result": {
+        "ok": true,
+        "status": "success",
+        "summary": "探索收藏本页返回 20 项，还有下一页",
+        "data": {
+          "count": 20,
+          "items": [
+            {"watchlist_number": 101, "provider": "tmdb", "media_type": "tv", "title": "测试收藏101", "year": "2026"},
+            {"watchlist_number": 100, "provider": "tmdb", "media_type": "movie", "title": "测试收藏100", "year": "2026"},
+            {"watchlist_number": 99, "provider": "tmdb", "media_type": "tv", "title": "测试收藏099", "year": "2026"},
+            {"watchlist_number": 98, "provider": "tmdb", "media_type": "movie", "title": "测试收藏098", "year": "2026"},
+            {"watchlist_number": 97, "provider": "tmdb", "media_type": "tv", "title": "测试收藏097", "year": "2026"},
+            {"watchlist_number": 96, "provider": "tmdb", "media_type": "movie", "title": "测试收藏096", "year": "2026"},
+            {"watchlist_number": 95, "provider": "tmdb", "media_type": "tv", "title": "测试收藏095", "year": "2026"},
+            {"watchlist_number": 94, "provider": "tmdb", "media_type": "movie", "title": "测试收藏094", "year": "2026"},
+            {"watchlist_number": 93, "provider": "tmdb", "media_type": "tv", "title": "测试收藏093", "year": "2026"},
+            {"watchlist_number": 92, "provider": "tmdb", "media_type": "movie", "title": "测试收藏092", "year": "2026"},
+            {"watchlist_number": 91, "provider": "tmdb", "media_type": "tv", "title": "测试收藏091", "year": "2026"},
+            {"watchlist_number": 90, "provider": "tmdb", "media_type": "movie", "title": "测试收藏090", "year": "2026"},
+            {"watchlist_number": 89, "provider": "tmdb", "media_type": "tv", "title": "测试收藏089", "year": "2026"},
+            {"watchlist_number": 88, "provider": "tmdb", "media_type": "movie", "title": "测试收藏088", "year": "2026"},
+            {"watchlist_number": 87, "provider": "tmdb", "media_type": "tv", "title": "测试收藏087", "year": "2026"},
+            {"watchlist_number": 86, "provider": "tmdb", "media_type": "movie", "title": "测试收藏086", "year": "2026"},
+            {"watchlist_number": 85, "provider": "tmdb", "media_type": "tv", "title": "测试收藏085", "year": "2026"},
+            {"watchlist_number": 84, "provider": "tmdb", "media_type": "movie", "title": "测试收藏084", "year": "2026"},
+            {"watchlist_number": 83, "provider": "tmdb", "media_type": "tv", "title": "测试收藏083", "year": "2026"},
+            {"watchlist_number": 82, "provider": "tmdb", "media_type": "movie", "title": "测试收藏082", "year": "2026"}
+          ],
+          "has_more": true,
+          "next_before_number": 82
+        }
+      }
+    },
+    {
+      "round": 4,
+      "arguments": {
+        "before_number": 82
+      },
+      "error": {
+        "code": "rate_limited",
+        "message": "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；请稍后重试，不能据此判断后端故障或没有数据。"
+      }
+    },
+    {
+      "round": 4,
+      "arguments": {
+        "before_number": 62
+      },
+      "error": {
+        "code": "rate_limited",
+        "message": "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；请稍后重试，不能据此判断后端故障或没有数据。"
+      }
+    },
+    {
+      "round": 4,
+      "arguments": {
+        "before_number": 42
+      },
+      "error": {
+        "code": "rate_limited",
+        "message": "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；请稍后重试，不能据此判断后端故障或没有数据。"
+      }
+    },
+    {
+      "round": 4,
+      "arguments": {
+        "before_number": 22
+      },
+      "error": {
+        "code": "rate_limited",
+        "message": "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；请稍后重试，不能据此判断后端故障或没有数据。"
+      }
+    },
+    {
+      "round": 4,
+      "arguments": {
+        "before_number": 2
+      },
+      "error": {
+        "code": "rate_limited",
+        "message": "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；请稍后重试，不能据此判断后端故障或没有数据。"
+      }
+    }
+  ],
+  "analysis_text": "已按分页顺序连续读取本地探索收藏（共读取前 **8 页、160 条**记录，对应收藏编号 **#241 至 #82**）。在继续读取 `before_number=82`（即编号 **#82 之前**的更早收藏）时，触发了 `discovery.watchlist_summaries` 的本地调用频率上限（`rate_limited`），因此更早分页暂未完成读取。\n\n以下为基于已核验结果的统计与明细：\n\n---\n\n### 一、已读取范围的数量统计（编号 #241 ～ #82，共 160 部）\n- **电影（movie）**：已核验 **80 部**（当前已读范围内所有偶数编号 #240、#238 … #82）\n- **剧集（tv）**：已核验 **80 部**（当前已读范围内所有奇数编号 #241、#239 … #83）\n- **未完成补充查询范围**：第 8 页返回 `has_more: true`、`next_before_number: 82`；编号 **#82 之前**的更早收藏因本地调用频率限制未读取，暂不推断其具体数量。\n\n---\n\n### 二、最新收藏的 3 部电影与 3 部剧集（已完整核验）\n由于探索收藏按收藏编号从新到旧排序，最新收藏的前 3 部电影和前 3 部剧集已由第 1 页完整确认：\n\n#### 1. 最新收藏的 3 部电影（movie）\n1. **测试收藏240**（2026）— 收藏编号：`#240`｜来源：`tmdb`\n2. **测试收藏238**（2026）— 收藏编号：`#238`｜来源：`tmdb`\n3. **测试收藏236**（2026）— 收藏编号：`#236`｜来源：`tmdb`\n\n#### 2. 最新收藏的 3 部剧集（tv）\n1. **测试收藏241**（2026）— 收藏编号：`#241`｜来源：`tmdb`\n2. **测试收藏239**（2026）— 收藏编号：`#239`｜来源：`tmdb`\n3. **测试收藏237**（2026）— 收藏编号：`#237`｜来源：`tmdb`",
+  "baseline_public_answer": "部分完成：仍有工具调用受到频率限制:MediaFlux 对该能力的本地调用频率已达上限,本次未访问后端;请稍后重试,不能据此判断后端故障或没有数据。\n\n已取得的部分内容（尚未完成全部筛选/核对）：\n1. 测试收藏241（2026 · 剧集）\n2. 测试收藏240（2026 · 电影）\n3. 测试收藏239（2026 · 剧集）\n4. 测试收藏238（2026 · 电影）\n5. 测试收藏237（2026 · 剧集）\n6. 测试收藏236（2026 · 电影）\n7. 测试收藏235（2026 · 剧集）\n8. 测试收藏234（2026 · 电影）\n9. 测试收藏233（2026 · 剧集）\n10. 测试收藏232（2026 · 电影）\n11. 测试收藏231（2026 · 剧集）\n12. 测试收藏230（2026 · 电影）\n本轮共取得 160 项去重内容，此处展示前 12 项。\n\n未完成的查询：MediaFlux 对该能力的本地调用频率已达上限,本次未访问后端;请稍后重试,不能据此判断后端故障或没有数据。\n\n以上仅代表已成功取得的结果；未完成的查询不能据此判断没有内容。"
+}

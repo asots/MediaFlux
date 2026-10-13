@@ -58,7 +58,13 @@ _INTERNAL_TOOL_GUIDANCE_RE = re.compile(
     r"[^。！？!?\n]{0,160}[。！？!?]?",
     re.IGNORECASE,
 )
+_PRIVATE_VALUE_RE = re.compile(r"(?:私密(?:值|标识)|private[_ -]?(?:id|value))\s*[:：=]?\s*[a-z0-9_-]+", re.IGNORECASE)
 _TRANSFER_RATE_RE = re.compile(r"(?i)\b(?:\d+(?:\.\d+)?\s*)?(?:[kmgt]?i?b|b)/s\b")
+# Slash-joined public media types are classifications, not file paths.
+_MEDIA_TYPES_RE = re.compile(
+    r"(?<![\w./\\~-])(?:movie|tv|series|episode)(?:/(?:movie|tv|series|episode))+(?![\w./\\~-])",
+    re.IGNORECASE,
+)
 
 _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "activity.search": "活动查询",
@@ -398,15 +404,15 @@ def sanitize_untrusted_filename(value: object, *, limit: int = 255) -> str:
     return text[: max(1, int(limit))].rstrip()
 
 
-def sanitize_public_text(value: object, *, limit: int = 600) -> str:
+def sanitize_public_text(value: object, *, limit: int = 600, preserve_format: bool = False) -> str:
     decoded = _decode_text(value)
     # 必须在字段名转换前检查凭据；不能先把 access_token 改成“内部状态”再漏过其值。
-    if contains_sensitive_credential(decoded):
+    if contains_sensitive_credential(decoded) or _PRIVATE_VALUE_RE.search(decoded):
         return ""
     text = _replace_internal_identifiers_in_text(decoded)
     if not text:
         return ""
-    path_scan_text = _TRANSFER_RATE_RE.sub("传输速度", text)
+    path_scan_text = _MEDIA_TYPES_RE.sub("媒体类型", _TRANSFER_RATE_RE.sub("传输速度", text))
     if (
         _CONTROL_RE.search(text)
         or _URI_RE.search(text)
@@ -414,11 +420,11 @@ def sanitize_public_text(value: object, *, limit: int = 600) -> str:
         or _WINDOWS_PATH_RE.search(path_scan_text)
         or _UNIX_PATH_RE.search(path_scan_text)
         or _RELATIVE_PATH_RE.search(path_scan_text)
-        or _CONTEXTUAL_PATH_RE.search(path_scan_text)
+        or _CONTEXTUAL_PATH_RE.search(text)
         or _UNICODE_FILE_PATH_RE.search(path_scan_text)
     ):
         return ""
-    return text[: max(1, int(limit))].rstrip()
+    return (str(value) if preserve_format and text == decoded else text)[: max(1, int(limit))].rstrip()
 
 
 def sanitize_resource_title(value: object, *, limit: int = 300) -> str:

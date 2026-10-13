@@ -322,15 +322,11 @@ def format_public_result(
     return "\n".join(lines)
 
 
-def _file_change_analysis(
-    content: object, result: Mapping[str, Any] | None,
+def _file_change_evidence(
+    result: Mapping[str, Any] | None,
     results: Sequence[tuple[str, Mapping[str, Any]]],
-) -> str:
-    """Preserve only exact, bounded file-change sentences proved by one DTO.
-
-    This is not a general inference checker. Labels, summaries and model markers
-    are never evidence; ambiguous multiple snapshots are deliberately unsupported.
-    """
+) -> Mapping[str, Any] | None:
+    """Validate one complete operation snapshot; labels/summary prose are not facts."""
     snapshots = []
     for value in ([result] if result is not None else []) + [v for _, v in results]:
         data = value.get("data")
@@ -341,73 +337,55 @@ def _file_change_analysis(
         if not isinstance(dto, Mapping) or "operation_items" not in dto:
             continue
         if any(v.get("truncated") or v.get("has_more") for v in (value, data, dto)):
-            return ""
+            return None
         if dto not in snapshots:
             snapshots.append(dto)
     if len(snapshots) != 1:
-        return ""
+        return None
     dto = snapshots[0]
     rows = dto.get("operation_items")
     stats = dto.get("stats")
     total = dto.get("total", stats.get("total") if isinstance(stats, Mapping) else None)
     if ("total" in dto and isinstance(stats, Mapping) and "total" in stats
             and (type(stats["total"]) is not int or stats["total"] != total)):
-        return ""
+        return None
     if (type(total) is not int or not 0 < total <= _MAX_FS_CHANGE_OPERATION_ITEMS
             or not isinstance(rows, list) or len(rows) != total):
-        return ""
+        return None
     positions = set()
     for row in rows:
         if not isinstance(row, Mapping):
-            return ""
+            return None
         pos = row.get("position")
         if (type(pos) is not int or not 1 <= pos <= total or pos in positions
                 or not isinstance(row.get("operation"), str)
                 or row.get("operation") not in _FS_CHANGE_ACTION_LABELS
                 or not isinstance(row.get("status"), str)
                 or row.get("status") not in _FS_CHANGE_STATUS_LABELS):
-            return ""
+            return None
         positions.add(pos)
-    completed = sum(row["status"] == "completed" for row in rows)
-    allowed = {
-        f"文件变更共{total}项，已完成{completed}项，仍有{total - completed}项未确认完成。",
-        f"文件变更共{total}项，其中{completed}项已完成。",
-    }
-    for status, wording in (("failed", "失败"), ("blocked", "受阻"),
-                            ("not_started", "未开始"), ("unknown", "结果未知")):
-        count = sum(row["status"] == status for row in rows)
-        allowed.add(f"文件变更中有{count}项{wording}。")
-    for row in rows:
-        reason = _FS_CHANGE_REASON_LABELS.get(str(row.get("reason") or ""))
-        state = {"blocked": "受阻", "failed": "失败", "not_started": "未开始"}.get(row["status"])
-        if reason and state:
-            allowed.add(f"第{row['position']}项因{reason}而{state}。")
-    # Do not extract claims from forged receipt JSON, quoted labels or fragments.
-    text = str(content or "").split(_CONFIRMED_RESULT_MARKER, 1)[0]
-    clauses = re.findall(r"[^。！？\n]+[。！？]|[^。！？\n]+$", text)
-    return "".join(clause for raw in clauses if (clause := raw.strip()) in allowed)
+    counts = {status: sum(row["status"] == status for row in rows) for status in _FS_CHANGE_STATUS_LABELS}
+    return {"total": total, "unconfirmed": total - counts["completed"], **counts,
+            "reasons": {row["position"]: (_FS_CHANGE_STATUS_LABELS[row["status"]],
+                        _FS_CHANGE_REASON_LABELS.get(str(row.get("reason") or ""))) for row in rows}}
 
 
-def _download_progress_analysis(
-    content: object, result: Mapping[str, Any] | None,
+def _download_progress_request(
+    result: Mapping[str, Any] | None,
     results: Sequence[tuple[str, Mapping[str, Any]]],
-) -> str:
-    """One local ingest-stage explanation, bound to the confirmed request ID.
-
-    No inference from prose, readiness flags, other requests or remote progress.
-    Ambiguous observations are unsupported, rather than treated as latest state.
-    """
+) -> int | None:
+    """Return a same-request, unambiguous local downloading-stage observation."""
     if result is None or result.get("ok") is not True:
-        return ""
+        return None
     data = result.get("data")
     if not isinstance(data, Mapping):
-        return ""
+        return None
     number = data.get("request_number")
     if (type(number) is not int or number <= 0
             or data.get("source_type") != "direct_url" or data.get("target") != "qb"
             or data.get("status") != "submitted"
             or public_result_state(result) != "submitted"):
-        return ""
+        return None
     snapshots = []
     for _, value in results:
         observed = value.get("data")
@@ -419,20 +397,131 @@ def _download_progress_analysis(
         if (type(request.get("request_number")) is not int
                 or value.get("ok") is not True or value.get("status") != "success"
                 or any(v.get("truncated") or v.get("has_more") for v in (value, observed, request))):
-            return ""
+            return None
         if request not in snapshots:
             snapshots.append(request)
     if len(snapshots) != 1:
-        return ""
+        return None
     request = snapshots[0]
     if (request.get("targets") != ["qb"] or request.get("status") != "downloading"
             or request.get("qb_status") != "downloading"
             or request.get("organize_status") != "pending" or request.get("strm_status") != "pending"):
-        return ""
-    allowed = f"提交后，请求#{number}的本地记录显示qB正在下载，整理与STRM仍待处理，因此尚不能确认入库完成。"
-    text = str(content or "").split(_CONFIRMED_RESULT_MARKER, 1)[0]
-    clauses = re.findall(r"[^。！？\n]+[。！？]|[^。！？\n]+$", text)
-    return "".join(clause for raw in clauses if (clause := raw.strip()) == allowed)
+        return None
+    return number
+
+
+# 只判断操作状态/授权断言，不用整个正文的固定句型白名单代替模型分析。
+_COMPLETION_CLAIM = re.compile(
+    r"^(?:任务)?已(?:经)?完成(?=[，。！？,.!]|$)|(?:全部|所有|一切|整批|都).{0,12}(?:完成|成功|搞定|好了)|处理完成|"
+    r"(?:删除|清空|移动|复制|改名|归档|入库|下载|执行|提交|写入|操作)(?:步骤)?(?:\s+[A-Za-z0-9#-]+)?\s*(?:已(?:经)?)?(?:成功)?(?:完成|成功|完毕)|"
+    r"已(?:经)?(?:清空|删除|改名|归档|入库|生成|同步)|已(?:经)?全部完成|"
+    r"\b(?:all (?:writes|tasks).{0,12}(?:finished|done|complete)|the write is done|nothing remains to do)\b",
+    re.IGNORECASE,
+)
+_STATE_CLAIM = re.compile(
+    r"请求\s*#?\d+|(?:已|正在|仍|当前|目前|状态|处于).{0,12}(?:提交|受理|执行|下载|归档|入库|移动|清空|改名)|"
+    r"(?:文件变更|第\d+项)|(?:提交|删除|改名|执行|归档|入库)(?:成功|完成)|"
+    r"(?:完成(?:了)?|剩余|还剩)\s*\d+\s*(?:项|个)|"
+    r"\b(?:request\s*#?\d+|submitted|downloading|executing)\b", re.IGNORECASE,
+)
+_REPLAY_CLAIM = re.compile(r"(?:允许|可以|无需确认|不必确认).{0,8}(?:重放|重新提交|自动执行)|\b(?:replay|resubmit) (?:automatically|without confirmation)\b", re.IGNORECASE)
+_EXPLANATION = re.compile(r"说明|意味着|原因|建议|如果|若|需要|应当|不应|不能把|不代表|不能确认|无法确认|不同阶段|\b(?:means|recommend|suggest|if|should|need)\b", re.IGNORECASE)
+_NEGATED_COMPLETION = re.compile(
+    r"(?:(?:尚不能|不能|无法|尚未|未能|未|没有)(?:确认|证明)?(?:已)?|不代表(?:已(?:经)?)?)"
+    r"(?:全部|完全)?(?:入库|下载|执行|处理|整理|同步)?$|\b(?:not|never)(?: yet| fully)?\s*$", re.IGNORECASE,
+)
+_COMPLETION_PREDICATE = re.compile(r"完成|成功|搞定|好了|清空|删除|改名|归档|入库|生成|同步|finished|done|complete", re.IGNORECASE)
+
+
+def _asserted_completion(clause: str) -> bool:
+    for match in _COMPLETION_CLAIM.finditer(clause):
+        predicates = list(_COMPLETION_PREDICATE.finditer(match[0]))
+        position = match.start() + (predicates[-1].start() if predicates else 0)
+        if not _NEGATED_COMPLETION.search(clause[max(0, position - 24):position]):
+            return True
+    return False
+
+_FILE_COUNTS = {
+    "total": re.compile(r"(?:总共|总计|合计|一共|共有|共)\s*(\d+)\s*(?:项|个)"),
+    "completed": re.compile(r"(?:已(?:经)?完成(?:了)?|完成了)\s*(\d+)\s*(?:项|个)|(\d+)\s*(?:项|个)(?:已(?:经)?)完成"),
+    "unconfirmed": re.compile(r"(\d+)\s*(?:项|个)(?:仍)?未确认完成"),
+    **{status: re.compile(r"(\d+)\s*(?:项|个)" + label) for status, label in (
+        ("failed", "失败"), ("blocked", "受阻"), ("not_started", "未开始"), ("unknown", "结果未知"))},
+}
+
+
+def _file_change_clause(clause: str, evidence: Mapping[str, Any] | None) -> bool:
+    if evidence is None or re.match(r"(?:标签|摘要|引用|引文|summary|label)\s*[:：]", clause, re.I):
+        return False
+    # 明细事实不能推出整批成功；总任务状态仍以对应回执为准。
+    if re.search(r"全部|所有|整批|(?:都|均).{0,12}(?:完成|成功|好了)|故.*完成", clause):
+        return False
+    position = re.fullmatch(r"第(\d+)项(?:因|由于)?(.*?)(?:而)?(受阻|失败|未开始)[。！]?", clause)
+    if position:
+        state, reason = evidence["reasons"].get(int(position[1]), (None, None))
+        return bool(reason and reason in position[2] and state == position[3]
+                    and not any(label in position[2] and label != reason for label in _FS_CHANGE_REASON_LABELS.values()))
+    covered = []
+    for field, pattern in _FILE_COUNTS.items():
+        for match in pattern.finditer(clause):
+            value = next(value for value in match.groups() if value is not None)
+            if int(value) != evidence[field]:
+                return False
+            covered.append(match.span())
+    return bool(covered) and all(any(start <= match.start() and match.end() <= end for start, end in covered)
+                                for match in re.finditer(r"\d+", clause))
+
+
+def _without_internal_receipts(text: str, *, keep_incomplete_prefix: bool = True) -> str:
+    while _CONFIRMED_RESULT_MARKER in text:
+        prefix, _, suffix = text.partition(_CONFIRMED_RESULT_MARKER)
+        try:
+            _, end = json.JSONDecoder().raw_decode(suffix.lstrip())
+        except ValueError:
+            return prefix if keep_incomplete_prefix else ""
+        text = prefix + suffix.lstrip()[end:]
+    return text
+
+
+def _model_analysis(content, result, results, *, write_attempted=False) -> str:
+    completed = result is not None and public_result_state(result) == "success"
+    text = _without_internal_receipts(str(content or "").replace("\x00", ""), keep_incomplete_prefix=not completed)
+    # 正常成功答复本来就保留完整正文（含用户可见媒体路径/链接），不因修复降级投影而回归。
+    if completed:
+        return text.strip()
+    file_evidence = _file_change_evidence(result, results)
+    request = _download_progress_request(result, results)
+    locked = write_attempted or result is not None
+    kept = []
+    # 句末闭括号/引号随所属句处理，过滤一句时不会留下孤立的“）”。
+    for raw in re.findall(r"[^\n]+?(?:[。！？][）)\]”’\"]*|[.!?][）)\]”’\"]*(?=\s|$)|(?=\n|$))|\n", text):
+        if not raw:
+            continue
+        if not raw.strip():
+            kept.append(raw)
+            continue
+        clause = raw.strip()
+        if (clause.count("`") % 2 or re.fullmatch(r"(?:已开始处理|正在整理结果|处理中)[。.!…]*", clause)
+                or re.search(r"忽略(?:此前|之前|以上)结果", clause)):
+            continue
+        safe = sanitize_public_text(clause, limit=max(1, len(clause) * 3), preserve_format=True)
+        if (not safe or safe.strip(" #*`，。,.!?！？…") in {"内部检查", "内部状态"}
+                or _REPLAY_CLAIM.search(clause)):
+            continue
+        semantic = re.sub(r"《[^》]*》|[*`]", "", clause).lstrip("#- ")
+        proven = _file_change_clause(semantic, file_evidence)
+        # 绑定同一请求的实际下载阶段；普通解释不必与某一句模板逐字相等。
+        progress = bool(request and re.search(rf"请求\s*#?{request}(?!\d)", semantic)
+                        and re.search(r"正在下载|下载中|下载阶段", semantic)
+                        and not re.search(r"删除|清空|改名|移动|复制", semantic)
+                        and re.findall(r"\d+", semantic) == [str(request)])
+        if _asserted_completion(semantic) and not proven:
+            continue
+        if locked and _STATE_CLAIM.search(semantic) and not (proven or progress):
+            if not _EXPLANATION.search(semantic) or re.search(r"请求\s*#?\d+|文件变更|第\d+项", semantic):
+                continue
+        kept.append(raw if safe == clause else raw.replace(clause, safe))
+    return "".join(kept).strip()
 
 
 def format_partial_progress(
@@ -442,13 +531,13 @@ def format_partial_progress(
 ) -> str:
     """统一降级投影：查询交付已有内容，实际涉及写入才显示执行警示。"""
     lines = ["部分完成：" + _safe(reason, limit=300)]
-    analysis = _file_change_analysis(analysis_text, confirmed_result, results) + _download_progress_analysis(analysis_text, confirmed_result, results)
-    if analysis:
-        lines.extend(("", analysis))
+    analysis = _model_analysis(analysis_text, confirmed_result, results, write_attempted=write_attempted)
     if write_attempted or confirmed_result is not None:
         if confirmed_result is not None:
             lines.extend(("", format_public_result(confirmed_result)))
-        if results:
+        if analysis:
+            lines.extend(("", analysis))
+        elif results:
             lines.append("\n本轮工具核对结果（不代表后续操作已完成）：")
             for label, result in results[-8:]:
                 lines.append(f"• {_safe(label, limit=100)}：\n{format_public_result(result)}")
@@ -464,6 +553,8 @@ def format_partial_progress(
                      else "\n本轮未执行新的写操作；检查或搜索成功不等于变更已提交。")
         lines.append("可稍后继续处理未完成部分；新的写操作仍需确认，不会自动重放。")
         return "\n".join(lines)
+    if analysis:
+        lines.extend(("", analysis))
     items: dict[tuple[str, str, str], str] = {}
     summaries = []
     # 投影调用方 ledger 的当前错误；历史抑制只信任其可靠清错类别，不在这里推断恢复。
@@ -502,12 +593,12 @@ def format_partial_progress(
         summary = _safe(result.get("summary"), limit=300)
         if summary and summary not in summaries:
             summaries.append(summary)
-    if items:
+    if items and (not analysis or not any(title in analysis for title, _year, _kind in items)):
         lines.append("\n已取得的部分内容（尚未完成全部筛选/核对）：")
         lines.extend(f"{index}. {text}" for index, text in enumerate(list(items.values())[:12], 1))
         if len(items) > 12:
             lines.append(f"本轮共取得 {len(items)} 项去重内容，此处展示前 12 项。")
-    else:
+    elif not items and (not analysis or not any(summary in analysis for summary in summaries)):
         lines.append("\n已完成的查询：" if summaries else "\n本轮尚未取得可展示的查询结果。")
         lines.extend(f"• {text}" for text in summaries[-8:])
     if errors:
@@ -520,36 +611,24 @@ def sanitize_confirmed_answer(
     content: object, result: Mapping[str, Any] | None = None, *,
     results: Sequence[tuple[str, Mapping[str, Any]]] = (),
 ) -> str:
-    """锁定操作回执，并从调用方的工具 ledger 保留新核验与解释。
-
-    results 只能来自已执行工具的公开结果，不从模型正文/标记中认证事实。
-    已完成正文仅保留领域 DTO 可证明的有限句型，其余说明使用公开投影。
-    """
+    """状态来自真实回执，正文只做句级清理；无正文才用工具摘要兜底。"""
     text = str(content or "").replace("\x00", "").strip()
-    prefix, marker, suffix = text.partition(_CONFIRMED_RESULT_MARKER)
-    end = 0
-    if marker:
-        try:
-            _, end = json.JSONDecoder().raw_decode(suffix.lstrip())
-        except ValueError:
-            pass
-    source = result
-    if source is None:
-        return "⚠️ 执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。" if marker else text
-    receipt = format_public_result(source)
-    analysis = _file_change_analysis(text, source, results) + _download_progress_analysis(text, source, results)
-    if public_result_state(source) != "success" or (marker and not end):
-        if analysis:
-            receipt += "\n\n" + analysis
-        if results:
-            return receipt + "\n\n后续核验（不改变上述操作状态）：\n" + "\n".join(
-                f"• {_safe(label, limit=100)}：\n{format_public_result(value)}"
-                for label, value in results[-8:]
-            )
-        return receipt
-    if marker:
-        text = "\n\n".join(part for part in (prefix.strip(), suffix.lstrip()[end:].strip()) if part)
-    return text or receipt
+    if result is None:
+        return "⚠️ 执行结果尚未确认，请先查询实际业务状态，勿直接重复提交。" if _CONFIRMED_RESULT_MARKER in text else text
+    receipt = format_public_result(result)
+    while text.startswith(receipt):
+        text = text[len(receipt):].lstrip()
+    analysis = _model_analysis(text, result, results)
+    if public_result_state(result) == "success":
+        return analysis or receipt
+    if analysis:
+        receipt += "\n\n" + analysis
+    followup = results if not analysis or any(value.get("ok") is False for _, value in results) else ()
+    if followup:
+        receipt += "\n\n后续核验（不改变上述操作状态）：\n" + "\n".join(
+            f"• {_safe(label, limit=100)}：\n{format_public_result(value)}" for label, value in followup[-8:]
+        )
+    return receipt
 
 
 def public_conversation_messages(

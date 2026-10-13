@@ -404,14 +404,23 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="discovery.watchlist_summaries",
-            description="只读分页列出探索收藏摘要，每页最多20项。count是本页数量，不是收藏总数；用户要求全部时，按next_before_number续页直到has_more=false。仅含收藏编号、来源、媒体类型、标题和年份。",
+            description=(
+                "只读分页列出探索收藏摘要，每页最多20项。count是本页数量，不是收藏总数；"
+                "next_before_number是本页已返回的末项收藏编号；"
+                "下一页仅返回编号严格小于该游标的收藏，不含游标本身。"
+                "用户要求全部时，将next_before_number作为before_number续页直到has_more=false。"
+                "仅含收藏编号、来源、媒体类型、标题和年份。"
+            ),
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
                 "properties": {
                     "before_number": {
                         "type": "integer", "minimum": 1, "maximum": 2_147_483_647,
-                        "description": "上一页返回的next_before_number；首次读取不传。",
+                        "description": (
+                            "上一页返回的next_before_number，即上一页已返回的末项收藏编号；"
+                            "仅返回编号严格小于before_number的收藏，不含游标本身；首次读取不传。"
+                        ),
                     },
                 },
                 "additionalProperties": False,

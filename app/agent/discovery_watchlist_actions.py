@@ -134,7 +134,14 @@ def list_watchlist_summaries(arguments: dict[str, Any]) -> ToolResult:
     return ToolResult(
         ok=True,
         status="success" if count else "empty",
-        summary=(f"探索收藏本页返回 {count} 项" + ("，还有下一页" if has_more else "，已到末页")),
+        summary=(
+            f"探索收藏本页返回 {count} 项"
+            + (
+                f"，还有下一页；编号 {items[-1]['watchlist_number']} 已在本页返回，"
+                "下一页仅返回编号严格小于该游标的收藏，不含游标本身"
+                if has_more else "，已到末页"
+            )
+        ),
         data={
             "count": count, "items": items, "has_more": has_more,
             "next_before_number": items[-1]["watchlist_number"] if has_more else None,
@@ -147,7 +154,12 @@ def list_watchlist_summaries(arguments: dict[str, Any]) -> ToolResult:
             )
         ],
         suggestions=(
-            ["如需全部收藏，使用 next_before_number 作为 before_number 继续读取，直到 has_more=false。"]
+            [
+                (
+                    "如需全部收藏，使用 next_before_number 作为 before_number 继续读取，直到 has_more=false；"
+                    "游标对应的收藏已在本页返回，下一页仅返回编号严格小于游标的收藏，不含游标本身。"
+                )
+            ]
             if has_more else []
         ),
     )

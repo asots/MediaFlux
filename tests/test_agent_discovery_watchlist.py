@@ -90,12 +90,26 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
                 self.assertLessEqual(len(result.data["items"]), 20)
                 self.assertEqual(result.data["count"], len(result.data["items"]))
                 self.assertNotIn("共有", result.summary)
-                received.extend(item["watchlist_number"] for item in result.data["items"])
+                page_numbers = [item["watchlist_number"] for item in result.data["items"]]
+                if "before_number" in arguments:
+                    self.assertTrue(all(number < arguments["before_number"] for number in page_numbers))
+                    self.assertNotIn(arguments["before_number"], page_numbers)
+                received.extend(page_numbers)
                 cursor = result.data["next_before_number"]
                 self.assertEqual(result.data["has_more"], cursor is not None)
                 if cursor is not None:
-                    self.assertEqual(cursor, received[-1])
+                    self.assertEqual(cursor, page_numbers[-1])
+                    self.assertIn(f"编号 {cursor} 已在本页返回", result.summary)
+                    self.assertNotIn("before_number", result.summary)
+                    self.assertTrue(result.suggestions)
+                    for hint in (result.summary, *result.suggestions):
+                        self.assertIn("已在本页返回", hint)
+                        self.assertIn("编号严格小于", hint)
+                        self.assertIn("不含游标本身", hint)
                     arguments = {"before_number": cursor}
+                else:
+                    self.assertIn("已到末页", result.summary)
+                    self.assertEqual(result.suggestions, [])
         self.assertFalse(result.data["has_more"])
         self.assertEqual(received, list(reversed(expected)))
         # Web默认调用仍读取原有有界列表，没有被Agent页长截断。
@@ -135,7 +149,17 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         self.assertTrue(first["ok"])
         self.assertTrue(first["data"]["has_more"])
         self.assertFalse(second["data"]["has_more"])
+        cursor = first["data"]["next_before_number"]
+        self.assertEqual(cursor, first["data"]["items"][-1]["watchlist_number"])
+        self.assertIn(f"编号 {cursor} 已在本页返回", first["summary"])
+        self.assertNotIn("before_number", first["summary"])
+        self.assertTrue(first["suggestions"])
+        for hint in (first["summary"], *first["suggestions"]):
+            self.assertIn("已在本页返回", hint)
+            self.assertIn("编号严格小于", hint)
+            self.assertIn("不含游标本身", hint)
         self.assertEqual(second["data"]["items"][0]["watchlist_number"], ids[0])
+        self.assertLess(ids[0], cursor)
         serialized = json.dumps([first, second], ensure_ascii=False)
         for forbidden in ("PRIVATE_POSTER_KEY", "external_id", "created_at"):
             self.assertNotIn(forbidden, serialized)
@@ -143,7 +167,15 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
     def test_watchlist_cursor_contract_is_exposed_and_validated(self) -> None:
         service = get_agent_service()
         tool = service.pipeline.catalog.get("discovery.watchlist_summaries")
-        self.assertIn("before_number", tool.input_schema["properties"])
+        self.assertEqual(set(tool.input_schema["properties"]), {"before_number"})
+        self.assertFalse(tool.input_schema["additionalProperties"])
+        cursor_description = tool.input_schema["properties"]["before_number"]["description"]
+        for description in (tool.description, cursor_description):
+            self.assertIn("已返回", description)
+            self.assertIn("编号严格小于", description)
+            self.assertIn("不含游标本身", description)
+        self.assertIn("count是本页数量，不是收藏总数", tool.description)
+        self.assertIn("首次读取不传", cursor_description)
         self.assertEqual(watchlist_summaries_arguments({}), {})
         self.assertEqual(watchlist_summaries_arguments({"before_number": 12}), {"before_number": 12})
         for arguments in ({"before_number": True}, {"before_number": 0}, {"before_number": "12"}, {"before_number": None}, {"offset": 20}):
