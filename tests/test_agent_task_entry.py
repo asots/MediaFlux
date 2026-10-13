@@ -312,7 +312,7 @@ def test_query_create_typed_evidence_prune_cold_resume(isolated_db, tmp_path):
         first = QueryTaskScript(create=True)
         runtime, events = await turn(first, GOAL)
         dump(tmp_path, "first.json", [first], [events])
-        assert not any(
+        assert any(
             f["function"]["name"] == "agent__task" for f in first.requests[0]["tools"]
         )
         assert first.entry_reached, (
@@ -566,18 +566,13 @@ def test_literal_optins_visibility_related_and_description():
         if mark is not None:
             metadata["query_discoverable"] = mark
         tool = replace(task, metadata=metadata)
-        for opt in (None, False, 1, "true", True):
-            kwargs = {} if opt is None else {"include_discoverable_utilities": opt}
-            selected = retriever.retrieve(
-                QUERY,
-                ToolCatalog([tool]),
-                context={
-                    "include_discoverable_utilities": True,
-                    "query_discoverable": True,
-                },
-                **kwargs,
-            )
-            assert (task.name in selected.names) is (mark is True and opt is True)
+        selected = retriever.retrieve(
+            QUERY, ToolCatalog([tool]),
+            context={"include_discoverable_utilities": True, "query_discoverable": True},
+        )
+        assert (task.name in selected.names) is (mark is True)
+        # 调用方上下文不是工具授权；无关问答也不靠最小返回数塞入任务工具。
+        assert task.name not in retriever.retrieve("你好", ToolCatalog([tool])).names
     hidden = replace(
         task,
         name="agent.hidden",
@@ -603,7 +598,7 @@ def test_literal_optins_visibility_related_and_description():
     assert (
         hidden.name
         not in retriever.retrieve(
-            QUERY, catalog, include_discoverable_utilities=True
+            QUERY, catalog
         ).names
     )
     # The retriever alone does not provide authorization; discovery supplies its filtered catalog.
@@ -723,3 +718,31 @@ def test_task_published_schema_rejects_invalid_acceptance_shape(acceptance):
     args['obligations'][0]['acceptance'] = acceptance
     with pytest.raises(ToolPipelineError):
         _validate_json_schema(args, task_tool().input_schema)
+
+
+def test_explicit_checklist_is_visible_in_first_model_request_without_auto_creation(isolated_db):
+    async def run():
+        script = QueryTaskScript()
+        script.steps = ['finish']
+        runtime = build_agent_kernel_runtime(model=script.adapter, store=store())
+        events = [e async for e in runtime.session.run(AgentInput(
+            message='请建立一个清单并核对TMDB、qBittorrent两个组件当前配置是否完整；只观察配置，不联网、不修改，检查完成后更新清单。',
+            owner=OWNER, session_id='first-checklist'))]
+        names = {item['function']['name'] for item in script.requests[0]['tools']}
+        assert 'agent__task' in names
+        assert not any(e.type.value == 'tool.started' for e in events)
+        assert events[-1].payload['task'] is None  # 可见不等于自动建立、授权或执行任务。
+    asyncio.run(run())
+
+
+def test_query_utility_does_not_replace_business_slot_or_match_substrings():
+    from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+    from app.agent.kernel.task_state import task_tool
+    business = KernelToolSpec(name="library.check", domain="library", description="check",
+        input_schema={"type": "object"}, effect=ToolEffect.READ, read=lambda *_: {"ok": True})
+    catalog = ToolCatalog([business, task_tool()])
+    retriever = CapabilityRetriever(minimum=1, maximum=1)
+    assert retriever.retrieve("check", catalog).names == ("library.check",)
+    selected = retriever.retrieve("check，建立持久任务清单", catalog)
+    assert set(selected.names) == {"library.check", "agent.task"}
+    assert "agent.task" not in retriever.retrieve("check，不要任务清单", catalog).names

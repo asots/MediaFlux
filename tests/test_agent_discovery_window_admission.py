@@ -128,7 +128,8 @@ def test_native_small_window_loaded_is_in_next_request(
     assert {n.replace(".", "__") for n in result["unloaded_tools"]} == previous - set(
         names
     )
-    assert ("agent__task" in names) is has_task
+    assert "agent__task" in names  # 与查询相关即可见，不再要求先创建任务。
+    assert bool(events[-1].payload.get("task")) is has_task  # 可见本身不能建立任务。
     assert (
         len(
             [

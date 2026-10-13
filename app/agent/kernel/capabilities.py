@@ -296,15 +296,11 @@ class CapabilityRetriever:
         catalog: ToolCatalog,
         *,
         context: Mapping[str, Any] | None = None,
-        include_discoverable_utilities: bool = False,
     ) -> CapabilitySelection:
         runtime = context or {}
         visible = [
             tool for tool in catalog.visible(runtime)
-            if not tool.metadata.get("kernel_utility") or (
-                include_discoverable_utilities is True
-                and tool.metadata.get("query_discoverable") is True
-            )
+            if not tool.metadata.get("kernel_utility") or tool.metadata.get("query_discoverable") is True
         ]
         if not visible:
             return CapabilitySelection((), {})
@@ -434,8 +430,13 @@ class CapabilityRetriever:
             score -= negative_overlap * 6.0
             score -= min(2.0, tool.cost * 0.05)
             scores[tool.name] = score
+        # 查询型内核工具与业务工具使用同一可见性规则，但不挤占业务槽位；
+        # 只匹配其名称/使用示例，不能靠“check”是“checklist”的子串混入普通问答。
+        utilities = tuple(tool for tool in visible if tool.metadata.get("kernel_utility")
+                          and scores[tool.name] > 0
+                          and query_counts.keys() & set(_tokens(" ".join((tool.name, tool.model_name, *tool.examples)))))
         ranked = sorted(
-            visible,
+            (tool for tool in visible if not tool.metadata.get("kernel_utility")),
             key=lambda item: (-scores[item.name], item.cost, item.name),
         )
         positive = sum(1 for tool in ranked if scores[tool.name] > 0)
@@ -471,7 +472,8 @@ class CapabilityRetriever:
                 if not catalog.has(str(related_name)):
                     continue
                 target = catalog.get(str(related_name))
-                if target.name in selected_names or target.name in negated_names or target not in visible:
+                if (target.name in selected_names or target.name in negated_names or target not in visible
+                        or target.metadata.get("kernel_utility")):
                     continue
                 workflow = str(source.metadata.get("workflow") or target.name)
                 position = workflow_neighbors.get(workflow, 0)
@@ -485,4 +487,6 @@ class CapabilityRetriever:
         selected.sort(
             key=lambda item: (-scores.get(item.name, 0.0), item.cost, item.name)
         )
-        return CapabilitySelection(tuple(selected[: self.maximum]), scores)
+        combined = sorted((*selected[: self.maximum], *utilities),
+                          key=lambda tool: (-scores[tool.name], tool.cost, tool.name))
+        return CapabilitySelection(tuple(combined), scores)

@@ -419,6 +419,7 @@ def _task_input_schema() -> dict:
             "items": {**text, "maxLength": 512},
         },
         "obligations": {
+            "description": "Required observable business checks only, not answer-writing or checklist-management steps. For configuration checks use observed_component; other acceptance kinds remain blocked.",
             "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": True,
             "items": {
                 "type": "object", "required": ["id", "description", "required", "acceptance"],

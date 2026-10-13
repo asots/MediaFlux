@@ -241,7 +241,6 @@ class CapabilityDiscovery:
     def _query(self, query: str, visible: Sequence[KernelToolSpec]) -> list[KernelToolSpec]:
         selection = CapabilityRetriever(minimum=1, maximum=6).retrieve(
             query, ToolCatalog(visible), context=self.context,
-            include_discoverable_utilities=True,
         )
         positive = [tool for tool in selection.tools if selection.scores.get(tool.name, 0) > 0]
         related = set()
