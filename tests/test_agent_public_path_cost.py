@@ -63,7 +63,7 @@ def test_relative_path_bounded_differential():
 
 
 @pytest.mark.parametrize("text,public,title", [
-    ("Film.Name_2026.mkv", "内部检查", "Film.Name_2026.mkv"),
+    ("Film.Name_2026.mkv", "Film.Name_2026.mkv", "Film.Name_2026.mkv"),
     ("速度 12 MiB/s", "速度 12 MiB/s", "速度 12 MiB/s"),
     ("速度 12.5 MB/s", "速度 12.5 MB/s", "速度 12.5 MB/s"),
     ("a/b", "", ""), ("12/34", "12/34", "12/34"),

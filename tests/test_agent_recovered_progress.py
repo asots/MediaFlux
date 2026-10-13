@@ -18,7 +18,7 @@ from app.agent.kernel.state import AgentInput
 from app.agent.public_view import format_partial_progress, public_conversation_messages
 from tests.test_agent_tool_argument_ingress import PROTOCOLS, Wire, encode
 
-A, B, C = "library.lookup", "library.health", "library.inspect"
+A, B, C = "library.search", "library.health", "library.inspect"
 X = {"ref": "object-x", "scope": "owner-a"}
 Z = {"ref": "object-z"}
 FINAL = "对象核验有据完成，保留模型正常分析。"
@@ -187,7 +187,7 @@ def test_existing_identity_recovery_controls(store, case):
     else:
         assert final["finish_reason"] == "rate_limited"
         assert "已有工具返回真实频率限制" in encode(wire.requests[-1])
-        assert unfinished(final["answer"]) == "未完成的查询：未恢复对象:" + ("内部检查" if case == "empty-switched" else "object-x")
+        assert unfinished(final["answer"]) == "未完成的查询：未恢复对象:" + ("媒体库搜索" if case == "empty-switched" else "object-x")
 
 
 @pytest.mark.parametrize("ending,reason", [
@@ -260,7 +260,7 @@ def test_failed_public_results_without_ledger_entry_remain_visible(store, status
 
 
 @pytest.mark.parametrize("error_text", [
-    "检查不可用 library.lookup provider_state", "检查不可用 /srv/private/error",
+    "检查不可用 library.search provider_state", "检查不可用 /srv/private/error",
     "检查不可用 access_token=SYNTHETICSECRETVALUE",
 ])
 def test_current_error_redaction_and_parameter_identity_never_escape_to_answers(store, error_text):
@@ -271,10 +271,10 @@ def test_current_error_redaction_and_parameter_identity_never_escape_to_answers(
     ))
     assert final["status"] == "partial"
     assert final["finish_reason"] == "provider_timeout"
-    if error_text == "检查不可用 library.lookup provider_state":
+    if error_text == "检查不可用 library.search provider_state":
         assert "检查不可用" in unfinished(final["answer"])
     for text in (final["answer"], saved.conversation[-1]["content"], encode(public_conversation_messages(saved.conversation))):
-        for forbidden in ("PRIVATEIDENTITY", "/srv/private/", "library.lookup", "provider_state", "_recovery_tracked", "SYNTHETICSECRETVALUE"):
+        for forbidden in ("PRIVATEIDENTITY", "/srv/private/", "library.search", "provider_state", "_recovery_tracked", "SYNTHETICSECRETVALUE"):
             assert forbidden not in text
     assert "_recovery_tracked" not in encode([dict(event.payload) for event in events])
 

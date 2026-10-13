@@ -305,3 +305,43 @@ def test_resource_title_direct_path_suffix_is_not_truncated_before_check(length)
 ])
 def test_resource_titles_keep_filename_punctuation(raw, expected):
     assert sanitize_resource_title(raw) == expected
+
+
+@pytest.mark.parametrize("name", [
+    "test.txt", "changed.txt", "Film.Name_2026.mkv", "Spider-Man-No-Way-Home.mkv",
+    "requestId.txt", "mf-ordinary-file.txt", "library.search.mkv", "Film_Name.mkv",
+    "Spider-Man-No-Way-Home",
+])
+def test_public_explanation_preserves_whole_business_names(name):
+    text = f"当前文件 `{name}`,分享尚未创建。"
+    assert sanitize_public_text(text) == text
+    assert replace_internal_identifiers(text) == text
+    assert sanitize_public_text(f"请使用 {name} 核对名称") == f"请使用 {name} 核对名称"
+
+
+@pytest.mark.parametrize("name", ["guangya.fs.query", "guangya__fs__query"])
+def test_native_and_domain_tool_names_share_public_label(name):
+    from app.agent.public_safety import public_tool_label
+    assert public_tool_label(name) == "光鸭文件查询"
+    assert sanitize_public_text(f"查询方式：{name}") == "查询方式:光鸭文件查询"
+    assert name not in sanitize_public_text(f"建议调用 {name} 继续处理。")
+
+
+def test_partial_failure_keeps_actual_filename_and_failed_receipt():
+    from app.agent.public_view import format_partial_progress
+    text = format_partial_progress(
+        "分享对象已变化", [],
+        confirmed_result={"ok": False, "status": "failed", "summary": "分享对象已变化,请重新读取目录"},
+        analysis_text="原名称 `test.txt`，当前名称 `changed.txt`。",
+    )
+    assert "`test.txt`" in text and "`changed.txt`" in text
+    assert "内部检查" not in text
+    assert "❌" in text
+
+
+@pytest.mark.parametrize("unsafe", [
+    "test.txt access_token=PRIVATECANARY123456", "changed.txt /srv/private/file.env",
+    "test.txt https://private.invalid/token", "test.txt C:\\private\\file.env",
+])
+def test_business_names_do_not_bypass_whole_text_secret_and_path_checks(unsafe):
+    assert sanitize_public_text(unsafe) == ""

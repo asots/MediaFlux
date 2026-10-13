@@ -35,28 +35,17 @@ _UNICODE_FILE_PATH_RE = re.compile(
     r"[^\s/\\，。；;]{1,80}\.[A-Za-z0-9]{1,12}(?!\w)"
 )
 _INTERNAL_CAMEL_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:request|confirmation|resource|session|trace|task|"
+    r"(?<![A-Za-z0-9_.-])(?:request|confirmation|resource|session|trace|task|"
     r"ticket|tool|call|owner|message|chat|job|provider|stream)"
-    r"[A-Z][A-Za-z0-9]*(?![A-Za-z0-9_])"
+    r"[A-Z][A-Za-z0-9]*(?![A-Za-z0-9_.-])"
 )
 _INTERNAL_KEBAB_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:mf-[a-z0-9]+(?:-[a-z0-9]+)+|"
-    r"[a-z][a-z0-9]*(?:-[a-z0-9]+){2,})(?![A-Za-z0-9_-])",
+    r"(?<![A-Za-z0-9_.-])mf-[a-z0-9]+(?:-[a-z0-9]+)+(?![A-Za-z0-9_.-])",
     re.IGNORECASE,
-)
-_INTERNAL_TOOL_RE = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*"
-    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+(?![A-Za-z0-9_])"
 )
 _INTERNAL_FIELD_RE = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9]*_[A-Za-z0-9_]+"
-    r"(?![A-Za-z0-9_])"
-)
-_INTERNAL_TOOL_GUIDANCE_RE = re.compile(
-    r"(?:可|可以|建议|请)?(?:继续)?(?:调用|使用)\s+"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+"
-    r"[^。！？!?\n]{0,160}[。！？!?]?",
-    re.IGNORECASE,
+    r"(?<![A-Za-z0-9_.-])[A-Za-z_][A-Za-z0-9]*_[A-Za-z0-9_]+"
+    r"(?![A-Za-z0-9_.-])"
 )
 _PRIVATE_VALUE_RE = re.compile(r"(?:私密(?:值|标识)|private[_ -]?(?:id|value))\s*[:：=]?\s*[a-z0-9_-]+", re.IGNORECASE)
 _TRANSFER_RATE_RE = re.compile(r"(?i)\b(?:\d+(?:\.\d+)?\s*)?(?:[kmgt]?i?b|b)/s\b")
@@ -327,9 +316,29 @@ _PUBLIC_STATUS_KEYS = frozenset(
 )
 
 
+# 只翻译完整的已登记工具标识，不把文件名中的点号/下划线当作内部信息。
+# 与 KernelToolSpec 的默认 wire 名称保持一致；两种拼写共用同一公开名称。
+_PUBLIC_TOOL_ALIASES = {
+    alias: label
+    for name, label in _PUBLIC_TOOL_LABELS.items()
+    for alias in (name, name.replace(".", "__").replace("-", "_"))
+}
+_TOOL_IDENTIFIER_PATTERN = (
+    r"(?<![A-Za-z0-9_.-])(?:"
+    + "|".join(re.escape(name) for name in sorted(_PUBLIC_TOOL_ALIASES, key=len, reverse=True))
+    + r")(?![A-Za-z0-9_.-])"
+)
+_INTERNAL_TOOL_RE = re.compile(_TOOL_IDENTIFIER_PATTERN)
+_INTERNAL_TOOL_GUIDANCE_RE = re.compile(
+    r"(?:可|可以|建议|请)?(?:继续)?(?:调用|使用)\s+"
+    + _TOOL_IDENTIFIER_PATTERN
+    + r"[^。！？!?\n]{0,160}[。！？!?]?"
+)
+
+
 def public_tool_label(tool_name: object) -> str:
     normalized = str(tool_name or "").strip()
-    return _PUBLIC_TOOL_LABELS.get(normalized, "MediaFlux 检查")
+    return _PUBLIC_TOOL_ALIASES.get(normalized, "MediaFlux 检查")
 
 
 def public_followup_prompt(source: object) -> str:
@@ -380,11 +389,7 @@ def _replace_internal_field(match: re.Match[str]) -> str:
 
 def _replace_internal_identifiers_in_text(text: str) -> str:
     text = _remove_internal_tool_guidance(text)
-    for tool_name, label in sorted(
-        _PUBLIC_TOOL_LABELS.items(), key=lambda item: -len(item[0])
-    ):
-        text = text.replace(tool_name, label)
-    text = _INTERNAL_TOOL_RE.sub("内部检查", text)
+    text = _INTERNAL_TOOL_RE.sub(lambda match: _PUBLIC_TOOL_ALIASES[match.group(0)], text)
     text = _INTERNAL_CAMEL_RE.sub("内部状态", text)
     text = _INTERNAL_KEBAB_RE.sub("内部检查", text)
     return _INTERNAL_FIELD_RE.sub(_replace_internal_field, text)
