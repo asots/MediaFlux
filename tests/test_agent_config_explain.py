@@ -301,3 +301,19 @@ class ConfigDiagnosisConsistencyTests(unittest.TestCase):
             result = diagnose_config({})
         self.assertEqual(result.status, "attention")
         self.assertTrue(any(i["code"] == "strm_incomplete" for i in result.data["issues"]))
+
+    def test_diagnosis_reports_exact_missing_labels_without_values(self):
+        from app.agent.config_diagnosis_actions import diagnose_config
+        for values, missing in (({"QB_API_KEY": "test-private-key"}, ["服务地址"]),
+                                ({"QB_URL": "https://private.invalid"}, ["API Key 或用户名/密码"])):
+            with patch("app.agent.config_explain_actions.config.all_items", return_value=values), patch(
+                "app.agent.config_explain_actions.config.get", side_effect=_config_get(values)
+            ), patch("app.agent.config_explain_actions.config.has_external_override", return_value=False):
+                result = diagnose_config({})
+            qb = next(item for item in result.data["components"] if item["name"] == "qbittorrent")
+            self.assertEqual(qb["missing_field_labels"], missing)
+            issue = next(item for item in result.data["issues"] if item["code"] == "qbittorrent_incomplete")
+            self.assertEqual(issue["message"], "qBittorrent 配置不完整，需要补齐：" + "、".join(missing) + "。")
+            serialized = json.dumps(result.to_dict(), ensure_ascii=False)
+            for value in values.values():
+                self.assertNotIn(value, serialized)

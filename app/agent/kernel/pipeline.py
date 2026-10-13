@@ -720,15 +720,15 @@ class ToolPipeline:
                 if tool.observe is not None:
                     exc.task_patch = observation_patch(context.current_task, owner=context.owner,
                         session_id=context.session_id, tool=tool.name, call_id=context.call_id,
-                        component=normalized.get("component", ""), fact=None)
+                        observations=tool.observe(None, normalized))
                 raise
             patch = value if isinstance(value, TaskPatch) else None
             if tool.observe is not None and context.current_task is not None:
-                fact = tool.observe(value, normalized)
+                observations = tool.observe(value, normalized)
                 patch = observation_patch(context.current_task, owner=context.owner,
                     session_id=context.session_id, tool=tool.name, call_id=context.call_id,
-                    component=normalized.get("component", ""), fact=fact)
-                if patch is not None and fact is None:
+                    observations=observations)
+                if patch is not None and any(fact is None for fact in patch.payload["observations"].values()):
                     raise ToolPipelineError("配置观察结果不符合证据合同。", code="invalid_observation", task_patch=patch)
             if isinstance(value, TaskPatch):
                 value = {"ok": True, "summary": "Task proposal"}

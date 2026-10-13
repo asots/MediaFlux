@@ -24,7 +24,7 @@ def diagnose_config(_arguments: dict[str, Any]) -> ToolResult:
         for name in ("jellyfin", "emby", "tmdb", "qbittorrent", "strm", "ai_recognition")
     }
     components = [
-        {"name": name, **{key: data[key] for key in ("label", "enabled", "status")}}
+        {"name": name, **{key: data[key] for key in ("label", "enabled", "status", "missing_field_labels")}}
         for name, data in payloads.items()
     ]
     issues: list[dict[str, str]] = []
@@ -32,7 +32,7 @@ def diagnose_config(_arguments: dict[str, Any]) -> ToolResult:
         if data["status"] == "incomplete":
             code = "strm_schedule_incomplete" if name == "strm" and _state(value("STRM_SCHEDULE_ENABLED")) else f"{name}_incomplete"
             message = {
-                "qbittorrent": "qBittorrent 配置不完整，需要地址以及 API Key 或用户名/密码。",
+                "qbittorrent": "qBittorrent 配置不完整，需要补齐：" + "、".join(data["missing_field_labels"]) + "。",
                 "strm": "STRM 来源、播放地址或输出目录缺失或无效；来源不能使用云盘根目录。",
                 "ai_recognition": "AI 识别回退已启用，请先在 Media Agent 设置中补全模型连接。",
             }.get(name, f"{data['label']}已启用，但缺少 {len(data['missing_field_labels'])} 项必要配置。")

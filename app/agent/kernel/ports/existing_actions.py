@@ -30,6 +30,7 @@ from app.agent.owner_routes import telegram_owner_route_is_currently_authorized
 from app.agent.public_safety import sanitize_public_text
 
 from ..capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from ..task_state import COMPONENTS
 from ..effects import PreparedEffect
 from ..pipeline import ToolCallContext, ToolPipelineError
 from ..projection import DefaultProjector, ToolOutcome
@@ -159,20 +160,30 @@ def _related_tools(spec: ToolSpec) -> tuple[str, ...]:
     )
 
 
-def observe_configuration(value: Any, arguments: dict) -> dict | None:
-    if not isinstance(value, ToolResult) or value.ok is not True:
-        return None
+def observe_configuration(value: Any, arguments: dict) -> dict[str, dict | None]:
+    """同一配置事实合同接收单组件说明或总体诊断；配置不完整也是一次有效观察。"""
+    selected = ({arguments["component"]} if "component" in arguments else COMPONENTS) & COMPONENTS
+    observations: dict[str, dict | None] = {component: None for component in sorted(selected)}
+    if not isinstance(value, ToolResult) or not isinstance(value.data, dict):
+        return observations
     data = value.data
-    if not isinstance(data, dict) or arguments.get("component") not in {"tmdb", "qbittorrent"}:
-        return None
-    if (data.get("component") != arguments["component"]
-            or value.status != data.get("status")
-            or data.get("status") not in {"ready", "incomplete", "not_configured"}
-            or type(data.get("enabled")) is not bool
-            or data.get("probe_mode") != "configuration_only"
-            or data.get("network_accessed") is not False):
-        return None
-    return {key: data[key] for key in ("component", "status", "enabled", "probe_mode", "network_accessed")}
+    if data.get("probe_mode") != "configuration_only" or data.get("network_accessed") is not False:
+        return observations
+    if "component" in arguments:
+        if value.ok is not True or value.status != data.get("status") or data.get("component") not in selected:
+            return observations
+        candidates = [data]
+    else:
+        if value.status not in {"healthy", "degraded", "attention"} or not isinstance(data.get("components"), list):
+            return observations
+        candidates = [{**item, "component": item.get("name")} for item in data["components"] if isinstance(item, dict)]
+    for item in candidates:
+        component = item.get("component")
+        if (component in selected and item.get("status") in {"ready", "incomplete", "not_configured"}
+                and type(item.get("enabled")) is bool):
+            observations[component] = {"component": component, "status": item["status"], "enabled": item["enabled"],
+                                       "probe_mode": "configuration_only", "network_accessed": False}
+    return observations
 
 
 def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
@@ -224,7 +235,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
 
         return build_spec(
             read=read,
-            observe={"config.explain_component": observe_configuration}.get(spec.name),
+            observe=observe_configuration if spec.name in {"config.explain_component", "config.diagnose"} else None,
             cost=1.0 if spec.freshness != "live" else 1.25,
         )
 

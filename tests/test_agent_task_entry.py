@@ -610,13 +610,17 @@ def test_literal_optins_visibility_related_and_description():
     assert len(task.description) <= 500
     for text in (task.description[:500], task.model_definition()["description"]):
         for contract in (
-            "TMDB/qBittorrent",
-            "blocked",
+            "TMDB/qB",
+            "config.diagnose",
+            "config.explain_component",
+            "not connectivity/repairs",
             "No write authority",
-            "create:",
+            "create accepts exact current/historical user source",
+            "revise/cancel require current user source",
             "checkpoint",
-            "cancel",
-            "current user source only",
+            "task.verified_facts evidence_ids",
+            "not artifact refs",
+            "blockers",
             "task_id/epoch/revision",
         ):
             assert contract in text

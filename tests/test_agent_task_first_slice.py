@@ -49,8 +49,9 @@ def declaration():
 
 
 class NativeScript:
-    def __init__(self, component, create=False):
+    def __init__(self, component, create=False, *, observation_tool="config.explain_component"):
         self.component = component
+        self.observation_tool = observation_tool
         self.steps = (
             ["discover"]
             + (["create"] if create else [])
@@ -110,12 +111,13 @@ class NativeScript:
         if step == "discover":
             name, args = (
                 "agent__capabilities",
-                {"tool_names": ["agent.task", "config.explain_component"]},
+                {"tool_names": ["agent.task", self.observation_tool]},
             )
         elif step == "create":
             name, args = "agent__task", declaration()
         elif step == "observe":
-            name, args = "config__explain_component", {"component": self.component}
+            name = self.observation_tool.replace(".", "__")
+            args = {"component": self.component} if self.component is not None else {}
         else:
             task = self.latest or {}
             name, args = (
@@ -128,7 +130,7 @@ class NativeScript:
                     "evidence_ids": [
                         f["evidence_id"]
                         for f in task.get("verified_facts", [])
-                        if f["component"] == self.component
+                        if self.component is None or f["component"] == self.component
                     ],
                     "blockers": [],
                 },
@@ -506,5 +508,86 @@ def test_native_snapshot_capacity_failure_and_cold_recovery(tmp_path, checkpoint
     try:
         with patch("app.agent.rate_limit.agent_rate_limiter", AgentRateLimiter(clock=lambda: clock[0], shared=False)):
             asyncio.run(run())
+    finally:
+        db.configure_database(previous[0], test_mode=previous[1])
+
+
+
+@pytest.mark.parametrize("qb_state", ["ready", "incomplete", "invalid", "error"])
+def test_native_diagnose_batch_attention_to_explicit_checkpoint_and_sqlite(tmp_path, qb_state):
+    from app.agent import config_diagnosis_actions as diagnosis
+    from app.agent import config_explain_actions as explain
+
+    previous = db.DB_PATH, bool(getattr(db, "_configured_test_mode", False))
+    db.configure_database(tmp_path / "diagnose-task.db", test_mode=True)
+    db.init_db()
+    # 全是隔离夹具值；Jellyfin 缺项令总体 attention，不能抹掉 TMDB/qB 的配置观察。
+    values = {"TMDB_API_KEY": "fixture-tmdb", "QB_URL": "http://qb.invalid", "JELLYFIN_ENABLED": "1"}
+    if qb_state != "incomplete":
+        values["QB_API_KEY"] = "fixture-qb"
+    original = diagnosis.component_configuration
+
+    def component_configuration(component, **kwargs):
+        if component == "qbittorrent" and qb_state == "error":
+            raise RuntimeError("synthetic diagnosis failure")
+        payload = original(component, **kwargs)
+        return {**payload, "enabled": 1} if component == "qbittorrent" and qb_state == "invalid" else payload
+
+    async def run():
+        script = NativeScript(None, create=True, observation_tool="config.diagnose")
+        if qb_state in {"invalid", "error"}:
+            script.steps = ["discover", "create", "observe", "finish"]
+        store = SQLiteKernelStore(secret_provider=lambda: "task-test-only")
+        runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
+        session_id = "diagnose-batch"
+        observed = None
+        events = []
+        with (
+            patch.object(diagnosis, "_effective_value", return_value=lambda key: values.get(key, "")),
+            patch.object(diagnosis, "component_configuration", side_effect=component_configuration),
+            patch.object(explain.config, "has_external_override", return_value=False),
+            patch.object(socket.socket, "connect", side_effect=AssertionError("test must remain offline")),
+        ):
+            if qb_state != "error":
+                actual = diagnosis.diagnose_config({})
+                assert actual.ok is False and actual.status == "attention"
+            async for event in runtime.session.run(AgentInput(message=GOAL, owner=OWNER, session_id=session_id)):
+                events.append(event)
+                if event.payload.get("tool") in {"config.diagnose", "config__diagnose"} and event.type.value in {"tool.completed", "tool.failed"}:
+                    if qb_state in {"invalid", "error"}:
+                        assert event.type.value == "tool.failed"
+                        assert event.payload["code"] == ("invalid_observation" if qb_state == "invalid" else "tool_execution_failed")
+                    else:
+                        assert event.type.value == "tool.completed" and event.payload["result"]["ok"] is False
+                    observed = (await SQLiteKernelStore(secret_provider=lambda: "task-test-only").load(owner=OWNER, session_id=session_id)).metadata["task"]
+                    assert observed["revision"] == 2  # create + 一次批量观察。
+                    assert all(o["state"] == "pending" and not o["evidence_ids"] for o in observed["obligations"])
+        assert observed is not None
+        failures = [event for event in events if event.type.value == "tool.failed"]
+        assert len(failures) == (1 if qb_state in {"invalid", "error"} else 0)
+        expected = set() if qb_state == "error" else {"tmdb"} if qb_state == "invalid" else {"tmdb", "qbittorrent"}
+        assert {fact["component"] for fact in observed["verified_facts"]} == expected
+        for fact in observed["verified_facts"]:
+            assert fact["tool"] == "config.diagnose" and fact["call_id"] == "call-observe"
+            assert fact["scope"]["owner"] == OWNER and fact["scope"]["session_id"] == session_id
+            assert fact["network_accessed"] is False and fact["probe_mode"] == "configuration_only"
+            assert fact["status"] == (qb_state if fact["component"] == "qbittorrent" else "ready")
+        cold = await SQLiteKernelStore(secret_provider=lambda: "task-test-only").load(owner=OWNER, session_id=session_id)
+        task = cold.metadata["task"]
+        accepted = qb_state not in {"invalid", "error"}
+        assert task["revision"] == (3 if accepted else 2)  # 只有显式 checkpoint 才关联。
+        evidence = {fact["component"]: fact["evidence_id"] for fact in task["verified_facts"]}
+        for obligation in task["obligations"]:
+            assert obligation["evidence_ids"] == ([evidence[obligation["id"]]] if accepted else [])
+        assert task["status"] == ("complete" if accepted else "blocked")
+        blocked = {"tmdb", "qbittorrent"} if qb_state == "error" else {"qbittorrent"} if qb_state == "invalid" else set()
+        assert {blocker["component"] for blocker in task["blockers"]} == blocked
+        assert all(blocker == {"origin": "query", "component": blocker["component"], "epoch": task["epoch"], "text": "query:" + blocker["component"]} for blocker in task["blockers"])
+        wire = json.dumps(script.requests, ensure_ascii=False)
+        assert all(value not in wire for value in ("fixture-tmdb", "fixture-qb", "qb.invalid"))
+        assert events[-1].payload["task"]["status"] == task["status"]
+
+    try:
+        asyncio.run(run())
     finally:
         db.configure_database(previous[0], test_mode=previous[1])

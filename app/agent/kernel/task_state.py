@@ -192,31 +192,24 @@ def observation_patch(
     session_id: str,
     tool: str,
     call_id: str,
-    component: str,
-    fact: dict | None,
+    observations: dict[str, dict | None] | None,
 ) -> TaskPatch | None:
-    if not task or task["status"] == "cancelled" or component not in COMPONENTS:
+    if not task or task["status"] == "cancelled" or not observations:
         return None
-    payload: dict = {"component": component, "fact": None}
-    if fact is not None:
-        payload["fact"] = {
+    facts = {}
+    for component, fact in observations.items():
+        if component not in COMPONENTS:
+            continue
+        facts[component] = None if fact is None else {
             **fact,
             "evidence_id": secrets.token_urlsafe(18),
-            "task_id": task["task_id"],
-            "epoch": task["epoch"],
-            "tool": tool,
-            "call_id": call_id,
-            "verifier_version": "configuration-v1",
-            "observed_at": time.time(),
-            "scope": {
-                "owner": owner,
-                "session_id": session_id,
-                "task_id": task["task_id"],
-                "epoch": task["epoch"],
-                "component": component,
-            },
+            "task_id": task["task_id"], "epoch": task["epoch"],
+            "tool": tool, "call_id": call_id,
+            "verifier_version": "configuration-v1", "observed_at": time.time(),
+            "scope": {"owner": owner, "session_id": session_id, "task_id": task["task_id"],
+                      "epoch": task["epoch"], "component": component},
         }
-    return TaskPatch(identity(task), "observe", payload, "", "")
+    return TaskPatch(identity(task), "observe", {"observations": facts}, "", "") if facts else None
 
 
 def valid_fact(fact: dict, task: dict, *, owner: str, session_id: str) -> bool:
@@ -298,29 +291,20 @@ def reduce_task(
     elif operation == "cancel":
         task["status"] = "cancelled"
     elif operation == "observe":
-        component = args["component"]
-        marker = {
-            "origin": "query",
-            "component": component,
-            "epoch": task["epoch"],
-            "text": "query:" + component,
-        }
-        if args["fact"] is None:
-            if marker not in task["blockers"]:
-                task["blockers"].append(marker)
-        else:
-            if not valid_fact(args["fact"], task, owner=owner, session_id=session_id):
-                raise ValueError("invalid observation evidence")
-            task["verified_facts"].append(deepcopy(args["fact"]))
-            task["blockers"] = [
-                b
-                for b in task["blockers"]
-                if not (
-                    b["origin"] == "query"
-                    and b["component"] == component
-                    and b["epoch"] == task["epoch"]
-                )
-            ]
+        for component, fact in args["observations"].items():
+            if component not in COMPONENTS:
+                raise ValueError("unsupported observation component")
+            marker = {"origin": "query", "component": component, "epoch": task["epoch"],
+                      "text": "query:" + component}
+            if fact is None:
+                if marker not in task["blockers"]:
+                    task["blockers"].append(marker)
+            else:
+                if fact.get("component") != component or not valid_fact(fact, task, owner=owner, session_id=session_id):
+                    raise ValueError("invalid observation evidence")
+                task["verified_facts"].append(deepcopy(fact))
+                task["blockers"] = [b for b in task["blockers"] if not (
+                    b["origin"] == "query" and b["component"] == component and b["epoch"] == task["epoch"])]
     elif operation == "checkpoint":
         validate_proposal(args)
         facts = {f["evidence_id"]: f for f in task["verified_facts"]}
@@ -445,7 +429,7 @@ def _task_input_schema() -> dict:
                     "required": {"type": "boolean", "enum": [True]},
                     "acceptance": {
                         "type": "object",
-                        "description": "Only observed_component is verifiable from configuration; other goals remain blocked.",
+                        "description": "Observed_component requires an observation, even incomplete/not_configured satisfies it. It does not require fixing configuration or proving connectivity. Other goals remain blocked.",
                         "oneOf": [
                             {
                                 "properties": {
@@ -471,6 +455,7 @@ def _task_input_schema() -> dict:
             "items": {**text, "maxLength": 64},
         },
         "blockers": {
+            "description": "Unresolved work in the requested task. Discovered configuration issues do not block an observation-only goal once observed.",
             "type": "array", "maxItems": 16, "uniqueItems": True,
             "items": {**text, "maxLength": 512},
         },
@@ -502,12 +487,11 @@ def task_tool():
         effect=ToolEffect.READ,
         description=(
             "持久任务清单、检查点与恢复 / persistent task checklist checkpoint. "
-            "Only TMDB/qBittorrent read-only configuration observations are verifiable; "
-            "connectivity, repairs and other goals remain blocked. No write authority. "
-            "create: exact current or historical original user source; revise: current user source only. "
-            "root_goal, constraints, required obligations; "
-            "checkpoint: registered evidence_ids; cancel: exact source. "
-            "expected=null only for first create, otherwise exact committed task_id/epoch/revision."
+            "TMDB/qB configuration observations from config.diagnose or config.explain_component are verifiable, "
+            "not connectivity/repairs. No write authority. "
+            "create accepts exact current/historical user source; revise/cancel require current user source. "
+            "checkpoint uses task.verified_facts evidence_ids (not artifact refs), plus blockers. "
+            "expected=null only for first create, otherwise exact task_id/epoch/revision."
         ),
         examples=("持久任务清单 检查点 剩余义务 恢复", "persistent task checklist checkpoint resume remaining obligations"),
         input_schema=_task_input_schema(),
