@@ -117,6 +117,18 @@ class DiscoveryRegistryTests(unittest.TestCase):
         self.assertTrue(douban)
         self.assertTrue(all(item["enabled"] is False for item in douban))
 
+    def test_discover_date_range_validation(self):
+        for media_type, field in (("movie", "release_date"), ("tv", "first_air_date")):
+            bounds = {f"{field}.gte": "2016-01-01", f"{field}.lte": "2026-12-31"}
+            self.assertEqual(validate_filters("tmdb", "discover", media_type, bounds),
+                             {**bounds, "sort_by": "popularity.desc"})
+            for values in ({f"{field}.gte": "2016-02-30"}, {f"{field}.gte": "20160101"},
+                           {f"{field}.gte": "2026-01-01", f"{field}.lte": "2016-12-31"}):
+                with self.assertRaises(ValueError):
+                    validate_filters("tmdb", "discover", media_type, values)
+            with self.assertRaises(ValueError):
+                validate_filters("tmdb", "discover", "tv" if media_type == "movie" else "movie", bounds)
+
     def test_filter_validation_rejects_unknown_or_invalid_values(self):
         valid = validate_filters(" TMDB ", " DISCOVER ", " MOVIE ", {"with_genres": "16, 35", "with_original_language": "JA"})
         self.assertEqual(valid, {"with_genres": "16,35", "with_original_language": "ja", "sort_by": "popularity.desc"})

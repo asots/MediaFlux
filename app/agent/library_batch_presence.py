@@ -9,11 +9,10 @@ from typing import Any
 
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolResult
-from app.services import inspect_media_identity_batch
+from app.services import inspect_media_identity_batch, summarize_media_identity_batch
 
 _ALLOWED_ARGUMENTS = {"items"}
 _ALLOWED_ITEM_FIELDS = {"tmdb_id", "media_type", "title", "year"}
-_STATUSES = {"present", "possible", "missing", "indeterminate"}
 
 
 def _now() -> str:
@@ -86,49 +85,8 @@ def batch_library_presence(arguments: dict[str, Any]) -> ToolResult:
             error="没有可核对的媒体服务器。",
         )
 
-    source_items = {
-        (str(source.get("server_type") or ""), str(source.get("server_name") or "")): {
-            (str(item.get("media_type") or ""), str(item.get("tmdb_id") or "")): item
-            for item in source.get("items", [])
-            if isinstance(item, dict)
-        }
-        for source in sources
-    }
-    results: list[dict[str, Any]] = []
-    counts = {status: 0 for status in _STATUSES}
-    for identity in requested:
-        key = (identity["media_type"], identity["tmdb_id"])
-        per_source: list[dict[str, str]] = []
-        statuses: list[str] = []
-        for source in sources:
-            source_key = (
-                str(source.get("server_type") or ""),
-                str(source.get("server_name") or ""),
-            )
-            item = source_items.get(source_key, {}).get(key, {})
-            status = str(item.get("status") or "indeterminate")
-            if status not in _STATUSES:
-                status = "indeterminate"
-            statuses.append(status)
-            per_source.append(
-                {
-                    "server_type": source_key[0],
-                    "server_name": source_key[1],
-                    "status": status,
-                    "match": str(item.get("match") or "none"),
-                }
-            )
-        if "present" in statuses:
-            status = "present"
-        elif "possible" in statuses:
-            status = "possible"
-        elif "indeterminate" in statuses:
-            status = "indeterminate"
-        else:
-            status = "missing"
-        counts[status] += 1
-        results.append({**identity, "library_status": status, "sources": per_source})
-
+    data = summarize_media_identity_batch(requested, sources)
+    counts = data["counts"]
     unavailable = sum(
         1 for source in sources if str(source.get("status") or "") != "ready"
     )
@@ -141,24 +99,11 @@ def batch_library_presence(arguments: dict[str, Any]) -> ToolResult:
         ok=True,
         status=status,
         summary=(
-            f"已批量核对 {len(results)} 部媒体：在库 {counts['present']}、"
+            f"已批量核对 {data['total']} 部媒体：在库 {counts['present']}、"
             f"缺失 {counts['missing']}、待确认 {counts['possible']}、"
             f"无法判断 {counts['indeterminate']}"
         ),
-        data={
-            "total": len(results),
-            "counts": counts,
-            "items": results,
-            "sources": [
-                {
-                    "server_type": str(source.get("server_type") or ""),
-                    "server_name": str(source.get("server_name") or ""),
-                    "status": str(source.get("status") or "unavailable"),
-                    "inventories": source.get("inventories", {}),
-                }
-                for source in sources
-            ],
-        },
+        data=data,
         evidence=[
             Evidence(
                 "media_server_provider_ids",

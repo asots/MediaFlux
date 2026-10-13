@@ -1082,3 +1082,67 @@ def inspect_media_identity_batch(
             )
         )
     return _run_media_source_jobs(jobs)
+
+
+def summarize_media_identity_batch(
+    identities: list[dict[str, str]], sources: list[dict]
+) -> dict:
+    """仅聚合已取得的批量身份数据；无媒体源时保留无法判断的身份。"""
+    allowed_statuses = {"present", "possible", "missing", "indeterminate"}
+    source_items = {
+        (str(source.get("server_type") or ""), str(source.get("server_name") or "")): {
+            (str(item.get("media_type") or ""), str(item.get("tmdb_id") or "")): item
+            for item in source.get("items", [])
+            if isinstance(item, dict)
+        }
+        for source in sources
+    }
+    results: list[dict[str, Any]] = []
+    counts = {status: 0 for status in allowed_statuses}
+    for identity in identities:
+        key = (identity["media_type"], identity["tmdb_id"])
+        per_source: list[dict[str, str]] = []
+        statuses: list[str] = []
+        for source in sources:
+            source_key = (
+                str(source.get("server_type") or ""),
+                str(source.get("server_name") or ""),
+            )
+            item = source_items.get(source_key, {}).get(key, {})
+            status = str(item.get("status") or "indeterminate")
+            if status not in allowed_statuses:
+                status = "indeterminate"
+            statuses.append(status)
+            per_source.append(
+                {
+                    "server_type": source_key[0],
+                    "server_name": source_key[1],
+                    "status": status,
+                    "match": str(item.get("match") or "none"),
+                }
+            )
+        if "present" in statuses:
+            status = "present"
+        elif "possible" in statuses:
+            status = "possible"
+        elif not sources or "indeterminate" in statuses:
+            status = "indeterminate"
+        else:
+            status = "missing"
+        counts[status] += 1
+        results.append({**identity, "library_status": status, "sources": per_source})
+
+    return {
+        "total": len(results),
+        "counts": counts,
+        "items": results,
+        "sources": [
+            {
+                "server_type": str(source.get("server_type") or ""),
+                "server_name": str(source.get("server_name") or ""),
+                "status": str(source.get("status") or "unavailable"),
+                "inventories": source.get("inventories", {}),
+            }
+            for source in sources
+        ],
+    }

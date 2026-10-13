@@ -14,6 +14,7 @@ from app.agent.models import Evidence, ToolResult
 from app.discovery.models import DiscoveryPage, MediaCard, ProviderError
 from app.discovery.search import DiscoverySearchResult, get_discovery_search_service
 from app.discovery.service import get_discovery_service
+from app.services import inspect_media_identity_batch, summarize_media_identity_batch
 
 _ALLOWED_PROVIDERS = ("tmdb", "douban", "bangumi")
 _ALLOWED_ARGUMENTS = {
@@ -34,6 +35,9 @@ _RECOMMEND_ARGUMENTS = {
     "year",
     "region",
     "genre",
+    "year_from",
+    "year_to",
+    "exclude_library",
 }
 _CALENDAR_ARGUMENTS = {"weekday", "page", "limit"}
 _RECOMMEND_PROVIDERS = {"tmdb", "douban"}
@@ -304,9 +308,15 @@ def recommend_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
     page = _positive_int(arguments.get("page"), name="page", default=1, maximum=100)
     limit = _positive_int(arguments.get("limit"), name="limit", default=10, maximum=20)
-    year = str(arguments.get("year") or "").strip()
-    if year and not re.fullmatch(r"(?:19|20)[0-9]{2}", year):
-        raise AgentToolError("year 必须是 1900 到 2099 的四位年份")
+    years = {key: str(arguments.get(key) or "").strip() for key in ("year", "year_from", "year_to")}
+    for key, year in years.items():
+        if year and not re.fullmatch(r"(?:19|20)[0-9]{2}", year):
+            raise AgentToolError(f"{key} 必须是 1900 到 2099 的四位年份")
+    lower, upper = years["year_from"] or "1900", years["year_to"] or "2099"
+    if lower > upper or (years["year"] and not lower <= years["year"] <= upper):
+        raise AgentToolError("推荐年份与范围冲突")
+    if "exclude_library" in arguments and type(arguments["exclude_library"]) is not bool:
+        raise AgentToolError("exclude_library 必须是布尔值")
     region = _visible_text(arguments.get("region"), limit=24)
     genre = _visible_text(arguments.get("genre"), limit=24)
     if arguments.get("region") not in {None, ""} and not region:
@@ -319,9 +329,9 @@ def recommend_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         "page": page,
         "limit": limit,
     }
-    for key, value in (("year", year), ("region", region), ("genre", genre)):
-        if value:
-            normalized[key] = value
+    normalized.update({key: value for key, value in {**years, "region": region, "genre": genre}.items() if value})
+    if "exclude_library" in arguments:
+        normalized["exclude_library"] = arguments["exclude_library"]
     return normalized
 
 
@@ -334,6 +344,10 @@ def _recommend_provider_filters(normalized: dict[str, Any]) -> dict[str, str]:
     genre = str(normalized.get("genre") or "")
     filters: dict[str, str] = {}
     if provider == "tmdb":
+        date = "release_date" if media_type == "movie" else "first_air_date"
+        for field, suffix, day in (("year_from", "gte", "01-01"), ("year_to", "lte", "12-31")):
+            if normalized.get(field):
+                filters[f"{date}.{suffix}"] = f"{normalized[field]}-{day}"
         if year:
             filters[
                 "primary_release_year"
@@ -582,32 +596,48 @@ def _recommend_payload(
         for card in tuple(page.items or ())
         if isinstance(card, MediaCard)
         and (not requested_year or str(card.year or "").strip() == requested_year)
+        and (not (normalized.get("year_from") or normalized.get("year_to"))
+             or re.fullmatch(r"(?:19|20)[0-9]{2}", str(card.year or "")))
+        and (not normalized.get("year_from") or str(card.year or "") >= normalized["year_from"])
+        and (not normalized.get("year_to") or bool(card.year) and str(card.year) <= normalized["year_to"])
     ]
     limit = normalized["limit"]
-    items = [_public_card(card) for card in cards[:limit]]
+    items = [_public_card(card) for card in cards]
+    library_check = None
+    if normalized.get("exclude_library"):
+        identities = [{key: item[key] for key in ("tmdb_id", "media_type", "title", "year")}
+                      for item in items if re.fullmatch(r"[1-9][0-9]{0,9}", item["tmdb_id"])]
+        sources = inspect_media_identity_batch(identities) if identities else []
+        library_check = summarize_media_identity_batch(identities, sources)
+        library_check["unmapped_candidates"] = len(items) - len(identities)
+        missing = {(item["media_type"], item["tmdb_id"]) for item in library_check["items"]
+                   if item["library_status"] == "missing"}
+        items = [{**item, "library_status": "missing"} for item in items
+                 if (item["media_type"], item["tmdb_id"]) in missing]
     health = getattr(page, "provider", None)
     health_status = _public_identifier(getattr(health, "status", ""), limit=40)
     if health_status not in _PROVIDER_STATUSES:
         health_status = "unavailable"
     retry_after = _safe_retry_after(getattr(health, "retry_after", 0))
     return {
+        **({"library_check": library_check} if library_check is not None else {}),
         "provider": normalized["provider"],
         "category": "discover" if normalized["provider"] == "tmdb" else "recommend",
         "media_type": normalized["media_type"],
         "page": normalized["page"],
-        "total": len(cards),
-        "returned": len(items),
-        "has_more": bool(page.has_more or len(cards) > limit),
+        "total": len(items),
+        "returned": min(len(items), limit),
+        "has_more": bool(page.has_more or len(items) > limit),
         "cached": bool(page.cached),
         "stale": bool(page.stale),
         "provider_status": health_status,
         "retry_after": retry_after,
         "filters": {
             key: normalized[key]
-            for key in ("year", "region", "genre")
+            for key in ("year", "year_from", "year_to", "region", "genre", "exclude_library")
             if normalized.get(key)
         },
-        "items": items,
+        "items": items[:limit],
     }
 
 
@@ -627,7 +657,7 @@ def recommend_discovery(arguments: dict[str, Any]) -> ToolResult:
         "retry_after": 0,
         "filters": {
             key: normalized[key]
-            for key in ("year", "region", "genre")
+            for key in ("year", "year_from", "year_to", "region", "genre", "exclude_library")
             if normalized.get(key)
         },
         "items": [],
@@ -701,6 +731,15 @@ def recommend_discovery(arguments: dict[str, Any]) -> ToolResult:
         status = "empty"
         summary = "当前推荐列表暂无内容"
         suggestions = ["可切换电影或电视剧，也可以尝试另一个推荐来源。"]
+    check = payload.get("library_check")
+    if check is not None:
+        counts = check["counts"]
+        unresolved = counts["possible"] + counts["indeterminate"] + check["unmapped_candidates"]
+        summary = f"推荐列表已排除在库 {counts['present']} 项，返回 {payload['returned']} 项已核验未入库内容"
+        suggestions = ["本页候选不足且 has_more 为 true 时，可继续下一页；不得把未核验条目当作不在库。"]
+        if unresolved:
+            status = "partial"
+            summary += f"；另有 {unresolved} 项在库状态未能确认，未列入推荐"
     return ToolResult(
         ok=True,
         status=status,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
@@ -10,7 +11,10 @@ from app.agent.library_batch_presence import (
     batch_presence_arguments,
 )
 from app.clients.base import MediaIdentityCandidate, MediaIdentityInventory
-from app.services import _media_identity_batch_source_payload
+from app.services import (
+    _media_identity_batch_source_payload,
+    summarize_media_identity_batch,
+)
 
 _ITEMS = [
     {"tmdb_id": "77", "media_type": "movie", "title": "记忆碎片", "year": "2000"},
@@ -72,10 +76,14 @@ def test_batch_presence_aggregates_all_sources_without_per_title_search():
     with patch(
         "app.agent.library_batch_presence.inspect_media_identity_batch",
         return_value=sources,
-    ) as inspect:
+    ) as inspect, patch(
+        "app.agent.library_batch_presence.summarize_media_identity_batch",
+        wraps=summarize_media_identity_batch,
+    ) as summarize:
         result = batch_library_presence({"items": _ITEMS})
 
     inspect.assert_called_once_with(_ITEMS)
+    summarize.assert_called_once_with(_ITEMS, sources)
     assert result.ok
     assert result.data["counts"] == {
         "present": 1,
@@ -97,3 +105,202 @@ def test_batch_presence_arguments_reject_unbounded_or_invalid_identity_lists():
         batch_presence_arguments(
             {"items": [{"tmdb_id": "0", "media_type": "movie", "title": "X"}]}
         )
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        (("present", "present"), "present"),
+        (("present", "possible"), "present"),
+        (("present", "indeterminate"), "present"),
+        (("present", "missing"), "present"),
+        (("possible", "possible"), "possible"),
+        (("possible", "indeterminate"), "possible"),
+        (("possible", "missing"), "possible"),
+        (("indeterminate", "indeterminate"), "indeterminate"),
+        (("indeterminate", "missing"), "indeterminate"),
+        (("missing", "missing"), "missing"),
+    ],
+)
+@pytest.mark.parametrize("reverse_sources", [False, True])
+def test_summarize_batch_status_priority(statuses, expected, reverse_sources):
+    if reverse_sources:
+        statuses = statuses[::-1]
+    sources = [
+        {
+            "server_type": "jellyfin",
+            "server_name": str(index),
+            "status": "ready",
+            "items": [{**_ITEMS[0], "status": status}],
+        }
+        for index, status in enumerate(statuses)
+    ]
+
+    result = summarize_media_identity_batch(_ITEMS[:1], sources)
+
+    assert result["counts"] == {
+        "present": int(expected == "present"),
+        "possible": int(expected == "possible"),
+        "indeterminate": int(expected == "indeterminate"),
+        "missing": int(expected == "missing"),
+    }
+    assert result["items"][0]["library_status"] == expected
+    assert [source["status"] for source in result["items"][0]["sources"]] == list(statuses)
+
+
+def test_summarize_batch_preserves_public_payload_without_fetching_or_mutating():
+    identities = [
+        _ITEMS[2],
+        {"tmdb_id": "77", "media_type": "tv", "title": "同 ID 剧集", "year": "2000"},
+        _ITEMS[0],
+        {**_ITEMS[1], "note": "保留身份字段"},
+    ]
+    inventories = {
+        "movie": {"total": 100, "truncated": False, "unmapped": 1},
+        "tv": {"total": 20, "truncated": True, "unmapped": 0},
+    }
+    sources = [{
+        "server_type": "jellyfin",
+        "server_name": 123,
+        "status": "ready",
+        "inventories": inventories,
+        "web_url": "https://synthetic.invalid",
+        "error": "synthetic private detail",
+        "items": [
+            None,
+            "ignored",
+            {**_ITEMS[0], "status": "present", "match": "provider_id", "local_id": "private"},
+            {**_ITEMS[1], "status": "possible", "match": "title_year"},
+            {**_ITEMS[2], "status": "missing", "match": ""},
+            {"tmdb_id": "77", "media_type": "tv", "status": "unknown", "match": None},
+        ],
+    }]
+    before = deepcopy((identities, sources))
+    with patch(
+        "app.services.inspect_media_identity_batch", side_effect=AssertionError("不应核对")
+    ), patch(
+        "app.services._configured_media_sources", side_effect=AssertionError("不应扫描")
+    ):
+        result = summarize_media_identity_batch(identities, sources)
+
+    assert result == {
+        "total": 4,
+        "counts": {"present": 1, "possible": 1, "indeterminate": 1, "missing": 1},
+        "items": [
+            {
+                **identity,
+                "library_status": status,
+                "sources": [{
+                    "server_type": "jellyfin",
+                    "server_name": "123",
+                    "status": status,
+                    "match": match,
+                }],
+            }
+            for identity, status, match in zip(
+                identities,
+                ("missing", "indeterminate", "present", "possible"),
+                ("none", "none", "provider_id", "title_year"),
+            )
+        ],
+        "sources": [{
+            "server_type": "jellyfin",
+            "server_name": "123",
+            "status": "ready",
+            "inventories": inventories,
+        }],
+    }
+    assert (identities, sources) == before
+    assert result["sources"][0]["inventories"] is inventories
+
+
+def test_summarize_batch_keeps_last_duplicate_source_and_item_and_inventory_defaults():
+    sources = [
+        {"items": [{**_ITEMS[0], "status": "present"}]},
+        {
+            "inventories": None,
+            "items": [
+                {**_ITEMS[0], "status": "possible"},
+                {**_ITEMS[0], "status": "missing"},
+            ],
+        },
+    ]
+
+    result = summarize_media_identity_batch(_ITEMS[:1], sources)
+
+    assert result == {
+        "total": 1,
+        "counts": {"present": 0, "possible": 0, "indeterminate": 0, "missing": 1},
+        "items": [{
+            **_ITEMS[0],
+            "library_status": "missing",
+            "sources": [
+                {"server_type": "", "server_name": "", "status": "missing", "match": "none"},
+                {"server_type": "", "server_name": "", "status": "missing", "match": "none"},
+            ],
+        }],
+        "sources": [
+            {"server_type": "", "server_name": "", "status": "unavailable", "inventories": {}},
+            {"server_type": "", "server_name": "", "status": "unavailable", "inventories": None},
+        ],
+    }
+
+
+@pytest.mark.parametrize("items", [[], [None, "ignored"], [{**_ITEMS[0]}], [
+    {**_ITEMS[0], "status": "unknown"},
+]])
+def test_summarize_batch_missing_or_unknown_items_are_indeterminate(items):
+    result = summarize_media_identity_batch(_ITEMS[:1], [{"items": items}])
+
+    assert result["counts"]["indeterminate"] == 1
+    assert result["items"][0]["library_status"] == "indeterminate"
+    assert result["items"][0]["sources"] == [{
+        "server_type": "", "server_name": "", "status": "indeterminate", "match": "none",
+    }]
+
+
+@pytest.mark.parametrize("identities", [[], _ITEMS])
+def test_summarize_batch_without_sources_keeps_indeterminate_identities(identities):
+    assert summarize_media_identity_batch(identities, []) == {
+        "total": len(identities),
+        "counts": {
+            "present": 0, "possible": 0, "indeterminate": len(identities), "missing": 0,
+        },
+        "items": [
+            {**identity, "library_status": "indeterminate", "sources": []}
+            for identity in identities
+        ],
+        "sources": [],
+    }
+
+
+def test_batch_presence_without_sources_keeps_existing_early_return():
+    with patch(
+        "app.agent.library_batch_presence.inspect_media_identity_batch", return_value=[]
+    ) as inspect, patch(
+        "app.agent.library_batch_presence.summarize_media_identity_batch",
+        side_effect=AssertionError("无媒体源时不应聚合"),
+    ) as summarize:
+        result = batch_library_presence({"items": _ITEMS})
+
+    inspect.assert_called_once_with(_ITEMS)
+    summarize.assert_not_called()
+    assert not result.ok
+    assert result.status == "not_configured"
+    assert result.summary == "没有可核对的媒体服务器"
+    assert result.data == {"total": 3, "items": [], "sources": []}
+    assert result.suggestions == ["请先在设置中启用并配置 Jellyfin 或 Emby。"]
+    assert result.error == "没有可核对的媒体服务器。"
+
+
+@pytest.mark.parametrize("status", ["possible", "indeterminate"])
+def test_batch_presence_keeps_partial_status_for_uncertain_items(status):
+    with patch(
+        "app.agent.library_batch_presence.inspect_media_identity_batch",
+        return_value=[{"status": "ready", "items": [{**_ITEMS[0], "status": status}]}],
+    ):
+        result = batch_library_presence({"items": _ITEMS[:1]})
+
+    assert result.ok
+    assert result.status == "partial"
+    assert result.data["counts"][status] == 1

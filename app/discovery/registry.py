@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import threading
 from copy import deepcopy
+from datetime import date
 from typing import Any
 
 from app import config
@@ -123,6 +124,8 @@ def validate_filters(provider: str, category: str, media_type: str,
             "with_genres", "with_original_language", "sort_by",
             "primary_release_year", "first_air_date_year",
         }
+        date_field = "release_date" if media_type == "movie" else "first_air_date"
+        allowed.update(f"{date_field}.{bound}" for bound in ("gte", "lte"))
     elif provider == "douban" and category == "recommend":
         allowed = {"sort", "tags"}
     elif provider == "bangumi" and category == "calendar":
@@ -137,6 +140,15 @@ def validate_filters(provider: str, category: str, media_type: str,
         if str(value).strip()
     }
     result.update({str(key): str(value).strip() for key, value in raw.items() if str(value).strip()})
+    if provider == "tmdb" and category == "discover":
+        lower, upper = (result.get(f"{date_field}.{bound}", "") for bound in ("gte", "lte"))
+        for value in (lower, upper):
+            if value:
+                if not re.fullmatch(r"(?:19|20)[0-9]{2}-[0-9]{2}-[0-9]{2}", value):
+                    raise ValueError("TMDB 日期筛选无效")
+                date.fromisoformat(value)
+        if lower and upper and lower > upper:
+            raise ValueError("TMDB 日期范围顺序无效")
     if "with_genres" in result:
         genres = _TMDB_MOVIE_GENRES if media_type == "movie" else _TMDB_TV_GENRES
         values = [value.strip() for value in result["with_genres"].split(",") if value.strip()]

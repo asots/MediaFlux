@@ -164,7 +164,7 @@
 | `discovery.add_watchlist` | WRITE | 预检并在用户确认后把一个精确影视条目加入本地探索收藏；不会下载资源。 |
 | `discovery.remove_watchlist` | WRITE | 预检并在用户确认后按精确收藏编号移除本地探索收藏；不会删除媒体文件或下载任务。 |
 | `media.recommend_from_library` | READ | 从已配置的 Jellyfin / Emby 本地媒体库中推荐可以立即观看的作品。 |
-| `discovery.recommend` | READ | 读取已启用的 TMDB 或豆瓣推荐列表；可按用户明确给出的年份、地区和题材做受控筛选，不返回海报地址、收藏状态或配置值。 |
+| `discovery.recommend` | READ | 读取 TMDB 或豆瓣推荐列表，支持年份范围、地区和题材；`exclude_library=true` 批量核验并排除已入库作品，仅返回确认不在库的候选。未映射或库不可达不代表未入库，候选不足时可继续分页。 |
 | `discovery.anime_calendar` | READ | 读取腾讯视频、爱奇艺和优酷公开动漫排期的追漫日历；默认今天，可按日期、平台和片名筛选。 |
 | `bangumi.calendar` | READ | 读取用户明确指定的 Bangumi 本周或指定星期放送表，不表示国内视频平台排期；不返回图片地址、收藏状态或 Provider 配置。 |
 

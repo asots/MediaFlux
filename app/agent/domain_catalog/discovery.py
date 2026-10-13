@@ -598,8 +598,10 @@ def register_specs(
         ToolSpec(
             name="discovery.recommend",
             description=(
-                "读取已启用的 TMDB 或豆瓣推荐列表；可按用户明确给出的年份、地区和题材做受控筛选，"
-                "不返回海报地址、收藏状态或配置值。"
+                "读取已启用的 TMDB 或豆瓣推荐列表；按年份或年份范围、地区和题材筛选。"
+                "用户要求排除媒体库已有作品时设置 exclude_library=true，服务端批量核对真实 TMDB 身份后仅返回已确认不在库的条目，"
+                "无需逐部调用 library.search/provider.query。候选不足且has_more时继续下一页；"
+                "未映射或媒体库不可达不代表不在库。优先TMDB以获得可核验身份。不返回配置值。"
             ),
             risk=RiskLevel.READ,
             parameters={
@@ -632,6 +634,18 @@ def register_specs(
                         "pattern": "^(?:19|20)[0-9]{2}$",
                         "description": "用户明确给出的四位年份。",
                     },
+                    "year_from": {
+                        "type": "string", "pattern": "^(?:19|20)[0-9]{2}$",
+                        "description": "最早年份（含），例如2015年之后用2016。",
+                    },
+                    "year_to": {
+                        "type": "string", "pattern": "^(?:19|20)[0-9]{2}$",
+                        "description": "最晚年份（含）。",
+                    },
+                    "exclude_library": {
+                        "type": "boolean", "default": False,
+                        "description": "排除已配置媒体库已有内容；只推荐通过完整身份核验确认未入库的作品。",
+                    },
                     "region": {
                         "type": "string",
                         "minLength": 1,
@@ -652,6 +666,7 @@ def register_specs(
             examples=(
                 "最近想看点科幻",
                 "最近有什么推荐的国漫",
+                "推荐2015年之后的热门国漫，排除我的媒体库已有内容",
                 "推荐几部电影",
                 "推荐今年中国大陆的新动画剧集",
                 "今年或指定年份有哪些新剧",
