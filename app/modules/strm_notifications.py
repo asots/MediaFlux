@@ -13,6 +13,22 @@ from app.logger import redact_sensitive_text
 
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
+ROUND_CLEANUP_BLOCKED_REASON = (
+    "整轮扫描未完整或存在异常，已跳过删除型清理、来源退役与空目录清理"
+)
+
+
+def cleanup_notice_lines(stats: Mapping[str, object]) -> tuple[str, ...]:
+    """说明本轮清理保护；只陈述已观测到的后续排队，不承诺自动重试。"""
+    if not stats.get("clean_skipped"):
+        return ()
+    lines = (
+        "本轮扫描未完整或目录状态存在异常；为避免误删，已暂停本轮删除型清理（失效 STRM、来源退役及空目录）。",
+    )
+    if stats.get("organize_followup_queued"):
+        lines += ("截至本轮结束，另有整理联动已排队，将在当前任务结束后再次同步。",)
+    return lines
+
 
 def _safe_text(value: object, *, limit: int, default: str = "") -> str:
     text = redact_sensitive_text(value)

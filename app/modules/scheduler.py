@@ -33,7 +33,10 @@ from app.modules.organize_probe_notifications import (
     publish_probe_scope, probe_downstream_state,
 )
 from app.modules.strm_recovery import reconcile_historical_strm
-from app.modules.strm_notifications import append_change, build_strm_detail_messages, relative_change
+from app.modules.strm_notifications import (
+    ROUND_CLEANUP_BLOCKED_REASON, append_change, build_strm_detail_messages,
+    cleanup_notice_lines, relative_change,
+)
 from app.notifier import NotificationEvent
 
 logger = get_logger(__name__)
@@ -1214,6 +1217,8 @@ class STRMScheduler:
             *current.get("changed_overflow_dirs", []),
         ]))
         for sample in current.get("error_samples") or []:
+            if sample == ROUND_CLEANUP_BLOCKED_REASON and sample in aggregate["error_samples"]:
+                continue  # 整轮保护说明已记录一次，来源前缀不能把它变成重复错误。
             text = f"{source_name}/{sample}"
             if text not in aggregate["error_samples"] and len(aggregate["error_samples"]) < 3:
                 aggregate["error_samples"].append(text)
@@ -1591,9 +1596,7 @@ class STRMScheduler:
             self._set_progress("retirement", 1, 1, "清理已移除的 STRM 来源")
 
         if not round_cleanup_safe:
-            cleanup_reason = (
-                "整轮扫描未完整或存在异常，已跳过删除型清理、来源退役与空目录清理"
-            )
+            cleanup_reason = ROUND_CLEANUP_BLOCKED_REASON
             aggregate["clean_skipped"] = True
             if cleanup_reason not in aggregate["error_samples"]:
                 aggregate["error_samples"].append(cleanup_reason)
@@ -1981,6 +1984,10 @@ class STRMScheduler:
             )
             self._set_progress("refresh", 1, 1, "媒体库刷新已提交")
             self._set_progress("complete", 1, 1, "同步完成")
+            with self._state_lock:
+                stats["organize_followup_queued"] = bool(
+                    self._pending_organize_options and not self._stop_event.is_set()
+                )
             elapsed = round((datetime.now() - started).total_seconds(), 1)
             result = {
                 "stats": stats,
@@ -2313,11 +2320,13 @@ class STRMScheduler:
                 f"最长单次 {read_wait_max_seconds:.3f}s",
             ),)
         errors = tuple(
-            f"错误摘要：{str(item)[:300]}" for item in (stats.get("error_samples") or [])[:3]
+            f"错误摘要：{str(item)[:300]}"
+            for item in (stats.get("error_samples") or [])[:3]
+            if item != ROUND_CLEANUP_BLOCKED_REASON
         )
         return NotificationEvent(
             "⚠️ STRM 同步部分完成" if partial else "✅ STRM 同步完成",
-            fields=fields, lines=errors, layout="relaxed",
+            fields=fields, lines=(*cleanup_notice_lines(stats), *errors), layout="relaxed",
         )
 
     def _foreground_notification_scopes(self, options: dict) -> list[dict]:

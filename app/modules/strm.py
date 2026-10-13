@@ -1928,7 +1928,7 @@ def _source_snapshot_directories(
         pending.extend(file.file_id for file in files if file.is_dir)
     for parent, fingerprint in observed.items():
         if parent not in directories or fingerprint != _directory_fingerprint(directories[parent]):
-            raise RuntimeError("光鸭来源在目录读取与全量快照之间发生变化")
+            raise RuntimeError("扫描期间目录状态发生变化：目录读取与全量快照不一致")
 
     # 来源内历史项追溯到来源根即可；来源外对象须账号根可达才能退役。
     # 断链/非目录父节点/循环不能作为删除证据，无关孤儿不拖垮全部同步。

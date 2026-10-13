@@ -28,6 +28,7 @@ from app.logger import get_logger, log_throttled
 from app.modules.organize_sources import (
     list_nsfw_download_sources as _nsfw_download_sources,
 )
+from app.modules.strm_notifications import cleanup_notice_lines
 from app.notifier import (
     NOTIFICATION_SECTION_BREAK,
     NotificationEvent,
@@ -3424,7 +3425,7 @@ def _strm_summary_event(
     partial = bool(result.get("partial"))
     stopped = bool(result.get("stopped"))
 
-    lines: list[str] = []
+    lines = cleanup_notice_lines(stats)
     sources = [source for source in (source_results or []) if isinstance(source, dict)]
     source_overview = ""
     if sources:
@@ -3436,11 +3437,6 @@ def _strm_summary_event(
                 f"另有 {omitted:,} 个来源已折叠，完整结果请查看 Web 运行记录。"
             )
         source_overview = "\n".join(source_lines)
-    if stats.get("clean_skipped"):
-        lines.append(
-            "部分来源检测到扫描或一致性异常；为避免误删，已跳过对应来源的失效清理。"
-        )
-
     removed_changes = sum(
         1
         for item in (stats.get("changes") or [])
@@ -3504,7 +3500,7 @@ def _strm_summary_event(
         layout="compact_report",
         field_emojis=False,
         fields=tuple(fields),
-        lines=tuple(lines),
+        lines=lines,
         footer=footer,
     )
 
@@ -3556,20 +3552,28 @@ def _do_sync(chat_id, progress_handle=None, sync_mode: str = "full"):
                 progress_handle,
             )
         else:
+            error = result.get("error", "未知错误")
+            busy = error == "STRM 同步任务正在运行"
+            detail = (
+                "已有 STRM 同步正在运行，本次未启动，请等待结果。"
+                if busy
+                else str(result.get("error") or "请检查配置后重新发起。")
+            )
             source_message = getattr(progress_handle, "source_message", None)
             if source_message is not None:
                 _edit_write_confirmation_message(
                     _bot or get_bot(),
                     source_message,
                     "STRM 同步未启动",
-                    str(result.get("error") or "请检查配置后重新发起。"),
+                    detail,
                 )
             _deliver_strm_terminal(
                 chat_id,
                 NotificationEvent(
-                    "STRM 同步失败",
+                    "STRM 同步未启动" if busy else "STRM 同步失败",
                     layout="relaxed",
-                    fields=(("错误原因", result.get("error", "未知错误")),),
+                    fields=() if busy else (("错误原因", error),),
+                    lines=(detail,) if busy else (),
                 ),
                 progress_handle,
             )
