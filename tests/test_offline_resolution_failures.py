@@ -10,9 +10,9 @@ import httpx
 from app.modules import offline
 from app.modules.download_dispatcher import public_dispatch_summary
 from tests.test_guangya_offline_selection import (
-    FakeSelectionClient,
     RESOLVE_EXCLUDED_ONLY_FIXTURE,
     RESOLVE_SUBFILES_FIXTURE,
+    FakeSelectionClient,
 )
 
 
@@ -64,6 +64,32 @@ class OfflineResolutionFailureTests(unittest.TestCase):
         self.assertNotIn("example.invalid", json.dumps(result))
         self.assertNotIn("upstream-body", json.dumps(result))
         self.assert_no_writes(client)
+
+    def test_http_torrent_fetch_failures_are_not_cloud_resolution_failures(self):
+        url = "https://example.invalid/movie.torrent?token=fixture-secret"
+        failures = (
+            (httpx.ReadTimeout("fixture-secret"), "torrent_fetch_timeout", True, "种子读取超时", 0),
+            (self.http_error(403), "torrent_http_error", False, "HTTP 403", 403),
+            (self.http_error(503), "torrent_http_error", True, "HTTP 503", 503),
+        )
+        for error, code, retryable, message, status in failures:
+            for entry in ("automatic", "preview", "manual"):
+                with self.subTest(code=code, status=status, entry=entry):
+                    client = self.client()
+                    with patch("app.modules.rss._fetch_rss_payload", side_effect=error):
+                        if entry == "automatic":
+                            result = offline.submit_offline(url, client=client, isolate_task=True)
+                        elif entry == "preview":
+                            result = offline.preview_offline_selection(url, client=client, rules=self.rules)
+                        else:
+                            result = offline.submit_offline_selection(url, [0], client=client, rules=self.rules)
+                    self.assert_safe_failure(result, client, message)
+                    self.assertEqual(result["failure_code"], code)
+                    self.assertEqual(result["retryable"], retryable)
+                    self.assertEqual(result["resolve_http_status"], status)
+                    self.assertEqual(result["resolve_attempts"], 0)
+                    self.assertEqual(client.resolve_calls, [])
+                    self.assertEqual(client.torrent_resolve_calls, [])
 
     def test_torrent_http_failures_preserve_safe_status_in_submit_and_public_summary(self):
         expected_classification = {

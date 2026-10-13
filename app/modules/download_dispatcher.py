@@ -267,13 +267,9 @@ def prepare_download_input(item: DownloadInput, target: str) -> DownloadInput:
 
     if not item.torrent_data and not _is_http_torrent_url(item.source_value, item.content_type):
         return item
-    try:
-        _url, payload = _prepare_offline_resource(
-            item.source_value, item.torrent_data, content_type=item.content_type,
-        )
-    except Exception as exc:
-        # 传输错误可能带认证URL；只对外暴露稳定安全的错误，不回退HTTP。
-        raise ValueError("种子读取或校验失败，请核对资源后重试") from exc
+    _url, payload = _prepare_offline_resource(
+        item.source_value, item.torrent_data, content_type=item.content_type,
+    )
     display_title = item.display_title
     if not usable_download_title(display_title or item.title):
         display_title = parse_torrent_metadata(payload)[0]

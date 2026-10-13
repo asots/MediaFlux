@@ -31,7 +31,12 @@ from app.indexers.providers.base import magnet_infohash
 from app.logger import get_logger
 from app.modules import media_identity
 from app.modules.media_identity import build_media_key, parse_episode_label
-from app.repositories.rss import RSSMediaAlreadyClaimedError, rss_retry_source_is_safe
+from app.modules.offline import TorrentPreparationError
+from app.repositories.rss import (
+    RSSEntryStateChangedError,
+    RSSMediaAlreadyClaimedError,
+    rss_retry_source_is_safe,
+)
 from app.sensitive_data import redact_sensitive_text
 
 logger = get_logger(__name__)
@@ -922,6 +927,7 @@ class RSSEngine:
             return {"error": error, "ok": False, "method": method}
 
         request_id = 0
+        stage = "submit"
         try:
             runtime = qb_runtime_config if isinstance(qb_runtime_config, dict) else None
             qb_save_path = str(self._entry_value(entry, "qb_save_path", "") or "")
@@ -968,8 +974,11 @@ class RSSEngine:
                     "dispatch": dispatch,
                 }
             else:
+                stage = "normalize"
+                item = self._download_input(entry, torrent_url)
+                stage = "submit"
                 submission = submit_download_input(
-                    self._download_input(entry, torrent_url),
+                    item,
                     method,
                     origin=f"rss:{int(entry['rss_item_id'])}",
                     gy_target_dir=str(self._entry_value(entry, "gy_target_dir", "") or ""),
@@ -988,38 +997,30 @@ class RSSEngine:
         except RSSMediaAlreadyClaimedError:
             return {"ok": True, "existing": True, "method": method, "status": "skipped",
                     "already_processed": True}
-        except ValueError:
-            db.record_rss_entry_failure(entry_id, "invalid_payload", False)
-            db.add_download_log(
-                source=method,
-                title=entry["title"],
-                path=_safe_download_source_marker(torrent_url),
-                rss_item_id=int(entry["rss_item_id"]),
-                status="failed",
-                backend_task_id=infohash,
-                error="RSS 下载链接格式无效",
-            )
-            return {
-                "ok": False,
-                "method": method,
-                "status": "failed",
-                "existing": False,
-                "unverified": False,
-                "infohash": infohash,
-                "error": "RSS 下载链接格式无效",
-            }
+        except RSSEntryStateChangedError:
+            logger.warning("RSS 提交状态冲突 entry_id=%s method=%s stage=bind", entry_id, method)
+            return {"ok": False, "method": method, "status": "conflict",
+                    "error": "RSS 条目状态已变化，请刷新后重试"}
         except Exception as exc:
+            retryable = False
+            review_required = False
+            if isinstance(exc, TorrentPreparationError):
+                stage = exc.stage
+                failure_code, error, retryable = exc.failure_code, str(exc), exc.retryable
+            elif stage == "normalize" and isinstance(exc, ValueError):
+                failure_code, error = "invalid_payload", "RSS 下载链接格式无效"
+            else:
+                # submit 可能已经发生副作用；普通 ValueError 也不能冒充提交前坏链接。
+                failure_code = "guangya_outcome_unknown" if method == "guangya" else "qb_outcome_unknown"
+                error = "提交结果待核对，请先检查下载器状态，勿直接重复提交"
+                review_required = True
             logger.warning(
-                "RSS 统一下载提交异常 entry_id=%s method=%s type=%s",
-                entry_id,
-                method,
-                type(exc).__name__,
+                "RSS 下载失败 entry_id=%s method=%s stage=%s code=%s type=%s cause=%s http_status=%s",
+                entry_id, method, stage, failure_code, type(exc).__name__,
+                type(exc.__cause__).__name__ if exc.__cause__ is not None else "-",
+                (exc.http_status or "-") if isinstance(exc, TorrentPreparationError) else "-",
             )
-            db.record_rss_entry_failure(
-                entry_id,
-                "guangya_outcome_unknown" if method == "guangya" else "qb_outcome_unknown",
-                False,
-            )
+            db.record_rss_entry_failure(entry_id, failure_code, retryable)
             db.add_download_log(
                 source=method,
                 title=entry["title"],
@@ -1027,8 +1028,7 @@ class RSSEngine:
                 rss_item_id=int(entry["rss_item_id"]),
                 request_id=request_id or None,
                 status="failed",
-                backend_task_id=infohash,
-                error="统一下载请求处理结果未知，请人工核对",
+                error=error,
             )
             return {
                 "ok": False,
@@ -1037,8 +1037,10 @@ class RSSEngine:
                 "existing": False,
                 "unverified": False,
                 "infohash": infohash,
-                "error": "提交结果待核对，请先检查下载器状态，勿直接重复提交",
-                "review_required": True,
+                "error": error,
+                "failure_code": failure_code,
+                "retryable": retryable,
+                "review_required": review_required,
                 "request_id": request_id,
             }
 

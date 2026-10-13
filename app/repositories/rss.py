@@ -235,6 +235,10 @@ _RSS_REQUEST_JOIN = (
 _RSS_SELECTED_BACKEND = "CASE e.download_backend WHEN 'qb' THEN r.qb_status WHEN 'guangya' THEN r.gy_status END"
 
 
+class RSSEntryStateChangedError(ValueError):
+    """领取后的条目已被另一操作改变；迟到提交不得覆盖当前状态。"""
+
+
 class RSSMediaAlreadyClaimedError(ValueError):
     """同集的另一条目已开始消费；本条目已经事务性标记为自动跳过。"""
 
@@ -400,7 +404,7 @@ def bind_rss_entry_download(entry_id: int, request_key: str, backend: str) -> No
             (int(entry_id),),
         ).fetchone()
         if current is None or current["status"] != "submitting" or current["processed"]:
-            raise ValueError("RSS 条目状态已变化，请刷新后重试")
+            raise RSSEntryStateChangedError("RSS 条目状态已变化，请刷新后重试")
         duplicate = bool(current["media_key"] and _rss_media_blocker(
             conn, current["media_key"], exclude_id=int(entry_id), binding=True,
         ))
@@ -712,14 +716,22 @@ _RSS_GUANGYA_RETRY_FAILURE_CODES = (
     "guangya_manifest_unavailable",
     "guangya_unavailable",
     "guangya_rate_limited",
+    "torrent_fetch_timeout",
+    "torrent_fetch_failed",
+    "torrent_http_error",
 )
 _RSS_SAFE_RETRY_FAILURE_CODES = (
     *_RSS_QB_RETRY_FAILURE_CODES,
     *_RSS_GUANGYA_RETRY_FAILURE_CODES,
 )
-_RSS_RATE_LIMIT_FAILURE_CODES = ("qb_rate_limited", "guangya_rate_limited")
+_RSS_COOLDOWN_FAILURE_CODES = (
+    "qb_rate_limited", "guangya_rate_limited",
+    "torrent_fetch_timeout", "torrent_fetch_failed", "torrent_http_error",
+)
 _RSS_FAILURE_CODES = {
     "invalid_payload",
+    "torrent_invalid",
+    "torrent_identity_mismatch",
     "missing_torrent_url",
     "qb_auth_failed",
     "qb_rejected",
@@ -770,14 +782,14 @@ def _rss_retry_eligibility_sql(default_method: str) -> tuple[str, tuple[str, ...
     safe_codes = ",".join("?" for _ in _RSS_SAFE_RETRY_FAILURE_CODES)
     qb_codes = ",".join("?" for _ in _RSS_QB_RETRY_FAILURE_CODES)
     gy_codes = ",".join("?" for _ in _RSS_GUANGYA_RETRY_FAILURE_CODES)
-    rate_codes = ",".join("?" for _ in _RSS_RATE_LIMIT_FAILURE_CODES)
+    cooldown_codes = ",".join("?" for _ in _RSS_COOLDOWN_FAILURE_CODES)
     condition = (
         "COALESCE(rss_entries.failure_retryable,0)=1 "
         "AND COALESCE(rss_entries.retry_count,0)<5 "
         f"AND rss_entries.failure_code IN ({safe_codes}) "
         f"AND (({method}='qb' AND rss_entries.failure_code IN ({qb_codes})) "
         f"OR ({method}='guangya' AND rss_entries.failure_code IN ({gy_codes}))) "
-        f"AND (rss_entries.failure_code NOT IN ({rate_codes}) OR ("
+        f"AND (rss_entries.failure_code NOT IN ({cooldown_codes}) OR ("
         "NULLIF(rss_entries.failed_at,'') IS NOT NULL AND "
         "datetime(rss_entries.failed_at)<=datetime('now','localtime','-60 seconds')))"
     )
@@ -785,7 +797,7 @@ def _rss_retry_eligibility_sql(default_method: str) -> tuple[str, tuple[str, ...
         *_RSS_SAFE_RETRY_FAILURE_CODES,
         default_method, *_RSS_QB_RETRY_FAILURE_CODES,
         default_method, *_RSS_GUANGYA_RETRY_FAILURE_CODES,
-        *_RSS_RATE_LIMIT_FAILURE_CODES,
+        *_RSS_COOLDOWN_FAILURE_CODES,
     )
     return condition, parameters
 

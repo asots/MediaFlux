@@ -92,6 +92,18 @@ class OfflineManifestResolution:
     diagnostic: str
 
 
+class TorrentPreparationError(ValueError):
+    """提交前的种子读取/校验失败；仅携带安全文案与稳定分类。"""
+
+    def __init__(self, message: str, *, failure_code: str, stage: str,
+                 retryable: bool = False, http_status: int | None = None):
+        super().__init__(message)
+        self.failure_code = failure_code
+        self.stage = stage
+        self.retryable = retryable
+        self.http_status = http_status
+
+
 class OfflineManifestError(RuntimeError):
     """解析请求/响应失败，不等同于请求成功但文件清单尚不可用。
 
@@ -156,6 +168,15 @@ class OfflineManifestError(RuntimeError):
 
 
 def _manifest_failure(exc: Exception) -> dict:
+    if isinstance(exc, TorrentPreparationError):
+        return {
+            "ok": False, "error": f"{exc}，未创建下载任务",
+            "failure_code": exc.failure_code, "retryable": exc.retryable,
+            "resolve_attempts": 0,
+            "resolve_error_type": type(exc.__cause__ or exc).__name__,
+            "resolve_http_status": exc.http_status or 0,
+            "resolve_diagnostic": f"种子准备阶段={exc.stage}；HTTP={exc.http_status or '-'}",
+        }
     failure = exc if isinstance(exc, OfflineManifestError) else OfflineManifestError(exc)
     return failure.as_result()
 
@@ -402,13 +423,37 @@ def _prepare_offline_resource(
     # 复用 RSS 已有的公网地址校验、逐跳固定解析、有界响应和总时间预算，
     # 不再另写一套无限流式 HTTP 下载；原始 tracker/passkey 保留在种子内。
     if torrent_data is None:
-        torrent_data, _headers = _fetch_rss_payload(
-            url, user_agent="MediaFlux/1.0", timeout_seconds=20, allow_http=True,
-        )
-    item = torrent_download_input("resource.torrent", torrent_data)
+        try:
+            torrent_data, _headers = _fetch_rss_payload(
+                url, user_agent="MediaFlux/1.0", timeout_seconds=20, allow_http=True,
+            )
+        except Exception as exc:
+            http_status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                code, message, retryable = "torrent_fetch_timeout", "种子读取超时，请稍后重试", True
+            elif http_status is not None:
+                code, message = "torrent_http_error", f"种子下载服务器返回 HTTP {http_status}"
+                retryable = http_status in {408, 425, 429} or 500 <= http_status < 600
+            else:
+                code, message = "torrent_fetch_failed", "种子读取失败，请检查下载地址或网络"
+                retryable = isinstance(exc, (httpx.NetworkError, httpx.RemoteProtocolError, OSError)) or (
+                    isinstance(exc, ValueError) and isinstance(exc.__cause__, OSError)
+                )
+            raise TorrentPreparationError(
+                message, failure_code=code, stage="fetch", retryable=retryable, http_status=http_status,
+            ) from exc
+    try:
+        item = torrent_download_input("resource.torrent", torrent_data)
+        actual_hash = parse_torrent_metadata(torrent_data)[1].lower()
+    except ValueError as exc:
+        raise TorrentPreparationError(
+            "种子内容无效，请核对下载来源", failure_code="torrent_invalid", stage="validate",
+        ) from exc
     expected_hash = http_torrent_infohash_hint(url)
-    if expected_hash and parse_torrent_metadata(torrent_data)[1].lower() != expected_hash:
-        raise ValueError("种子内容与链接中的 BT 身份不一致")
+    if expected_hash and actual_hash != expected_hash:
+        raise TorrentPreparationError(
+            "种子内容与链接中的 BT 身份不一致", failure_code="torrent_identity_mismatch", stage="validate",
+        )
     return item.source_value, torrent_data
 
 
