@@ -1591,7 +1591,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(saved["exclude_owned"])
         self.assertEqual(saved["item_ref"], "ref_safe")
         self.assertNotIn("private-cookie", str(saved))
-        self.assertNotIn("/home/private", str(saved))
+        self.assertEqual(saved["path"], "/home/private/library")  # 已提交输入不套用返回 DTO 的路径隐藏
         restored = AgentSession._restore_messages(SessionState(owner="o", session_id="s", conversation=stored))
         bounded = bounded_model_messages(restored + [ModelMessage(role="user", content="继续")], history_end=3,
                                          tool_definitions=(), system_prompt="", context_window_tokens=16384, output_tokens=1024)

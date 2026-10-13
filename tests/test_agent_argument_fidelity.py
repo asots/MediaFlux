@@ -34,6 +34,9 @@ def arguments():
         "zero": 0, "flag": False, "optional": None,
         "truncated": "business-value", "truncation": ["not-result-metadata"],
         "read_tool": "business-reader", "result_handle": "business-handle",
+        # 真实回归：确认后历史把两个不同云端路径改成同一句占位符，核验连续失败。
+        "paths": ["/验收/inbox/Work A", "/验收/inbox/Work B"],
+        "operations": [{"op": "relocate", "target_path": "/验收/library/Work A", "new_name": "final-a.txt"}],
     }
 
 

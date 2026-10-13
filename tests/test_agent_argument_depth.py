@@ -39,10 +39,10 @@ def test_deep_arguments_survive_started_cold_and_next_wire(protocol, shape):
                          "calendar_url": "/discovery/calendar",
                          "children": [{"calendar_url": "/srv/private/calendar"}]})
             expected_leaf.update({"password": "[已隐藏]",
-                                  "internal_id": "[内部标识已隐藏；请使用返回的 opaque ref]",
-                                  "file": "[内部路径已隐藏；请使用返回的 opaque ref]",
+                                  "internal_id": "PRIVATE_ID",
+                                  "file": "/srv/private/media",
                                   "value": "Bearer ********", "calendar_url": "/discovery/calendar",
-                                  "children": [{"calendar_url": "[页面地址无效]"}]})
+                                  "children": [{"calendar_url": "/srv/private/calendar"}]})
         args = nested(leaf, 12, lists=shape == "mixed")
         expected = nested(expected_leaf, 12, lists=shape == "mixed")
         if shape == "depth-limit":
@@ -69,7 +69,7 @@ def test_deep_arguments_survive_started_cold_and_next_wire(protocol, shape):
         assert_native_wire(protocol, follow.requests[0], [("deep", "inspect_args", expected)])
         assert handled == [args]
         public = repr(events) + repr(cold.conversation) + json.dumps(follow.requests, ensure_ascii=False)
-        for private in ("DO_NOT_REPLAY_PASSWORD", "PRIVATE_ID", "/srv/private/media", "abcdefghijklmnop"):
+        for private in ("DO_NOT_REPLAY_PASSWORD", "abcdefghijklmnop"):
             assert private not in public
     with isolated_test_database():
         asyncio.run(exercise())

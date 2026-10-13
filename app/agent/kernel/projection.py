@@ -94,8 +94,8 @@ def _json_safe(value: Any, *, depth: int = 0, max_depth: int = 64) -> Any:
     raise TypeError("工具结果包含不支持的非 JSON 值")
 
 
-def _model_safe(value: Any, *, depth: int = 0, key: str = "", json_max_depth: int = 64) -> Any:
-    safe = _json_safe(value, max_depth=json_max_depth) if depth == 0 else value
+def _model_safe(value: Any, *, depth: int = 0, key: str = "") -> Any:
+    safe = _json_safe(value) if depth == 0 else value
     # 唯一固定应用内路由，不把calendar_url变成任意文件路径/外链的放行口。
     if key == "calendar_url":
         return "/discovery/calendar" if isinstance(safe, str) and safe == "/discovery/calendar" else "[页面地址无效]"
@@ -115,8 +115,7 @@ def _model_safe(value: Any, *, depth: int = 0, key: str = "", json_max_depth: in
     return safe
 
 
-# Argument admission is deliberately narrower than arbitrary result DTOs.
-# Bound recursion before serialization, and reject rather than replace leaves.
+# 已提交参数保留业务值：限定 JSON 深度/容量并脱敏凭据，不套用 Provider 返回 DTO 的隐藏规则。
 _ARGUMENT_MAX_DEPTH = 64
 _ARGUMENT_MAX_BYTES = 256 * 1024
 
@@ -151,7 +150,7 @@ def _arguments_safe(value: Any) -> Any:
         raise ValueError("工具参数无法安全保存") from exc
     if len(encoded) > _ARGUMENT_MAX_BYTES:
         raise ValueError("工具参数超过安全保存容量")
-    return _model_safe(value, json_max_depth=_ARGUMENT_MAX_DEPTH)
+    return _json_safe(value, max_depth=_ARGUMENT_MAX_DEPTH)
 
 
 class DefaultProjector:
