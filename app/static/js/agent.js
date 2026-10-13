@@ -346,6 +346,7 @@
         }
         if (force) followOutput = true;
         if (newRepliesButton) newRepliesButton.hidden = true;
+        transcript.scrollTop = transcript.scrollHeight;
         requestAnimationFrame(() => {
             if (followOutput) transcript.scrollTop = transcript.scrollHeight;
         });
@@ -793,6 +794,18 @@
         turn.markdownFrame = null;
     }
 
+    function normalizeStreamingMarkdown(text) {
+        const value = String(text || '');
+        const lines = value.split('\n');
+        const last = lines[lines.length - 1] || '';
+        const markers = last.match(/\*\*/g);
+        if (markers && markers.length % 2 === 1 && !/\*\*\s*$/.test(last)) {
+            lines[lines.length - 1] = `${last.replace(/\*$/, '')}**`;
+            return lines.join('\n');
+        }
+        return value;
+    }
+
     function renderTurnMarkdown(turn, text, {immediate = false} = {}) {
         if (!turn?.text) return;
         turn.pendingMarkdown = String(text || '');
@@ -800,7 +813,7 @@
             const shouldFollow = transcriptNearBottom();
             turn.markdownTimer = null;
             turn.markdownFrame = null;
-            replaceRichText(turn.text, turn.pendingMarkdown);
+            replaceRichText(turn.text, immediate ? turn.pendingMarkdown : normalizeStreamingMarkdown(turn.pendingMarkdown));
             turn.lastMarkdownRender = performance.now();
             if (shouldFollow) scrollToBottom(true);
         };
