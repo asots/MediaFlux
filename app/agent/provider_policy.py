@@ -116,5 +116,5 @@ def validate_provider_arguments(
     except (ProviderGatewayError, ToolPipelineError) as exc:
         # Only the registered operation schema is evidence for a repair;
         # neither provider responses nor model-supplied fields define it.
-        raise ProviderGatewayError(str(exc), code="invalid_arguments", parameter_schema=parameter_schema) from None
+        raise ProviderGatewayError(str(exc), code="invalid_arguments", argument_schemas={"arguments": parameter_schema}) from None
     return normalized

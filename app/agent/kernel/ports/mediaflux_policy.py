@@ -115,10 +115,11 @@ class MediaFluxToolRateLimiter:
         if canonical == "provider.query":
             # 只按静态目录的 Provider 拆分；换会话、operation 或 profile 不会刷新预算。
             try:
-                spec = get_provider_gateway().catalog.get(arguments.get("operation", ""))
+                spec = get_provider_gateway().query_spec(
+                    profile_ref=str(arguments.get("profile_ref", "")), operation=str(arguments.get("operation", "")))
                 scope_suffix = spec.provider
             except ProviderGatewayError as exc:
-                raise ToolPipelineError(exc.safe_message, code=exc.code) from exc
+                raise ToolPipelineError(exc.safe_message, code=exc.code, argument_schemas=exc.argument_schemas) from exc
         decision = await asyncio.to_thread(
             consume_agent_tool, owner, canonical, scope_suffix=scope_suffix
         )

@@ -162,7 +162,13 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
         from app.agent.provider_actions import get_provider_gateway
 
         db.init_db()
-        catalog = get_provider_gateway().catalog
+        from app.agent.provider_models import ProviderProfileView
+        profiles = [ProviderProfileView(ref, provider, ref, "online") for ref, provider in
+                    (("media-profile-a", "media"), ("media-profile-b", "media"), ("qb-profile-a", "qbittorrent"))]
+        with patch.object(get_provider_gateway(), "profiles", side_effect=lambda provider="": [p for p in profiles if not provider or p.provider == provider]):
+            await self._provider_budget_checks(get_provider_gateway().catalog)
+
+    async def _provider_budget_checks(self, catalog):
         media_operation = catalog.get("media.system.info")
         other_media_operation = catalog.get("media.items.counts")
         qbittorrent_operation = catalog.get("qb.app.version")
@@ -261,7 +267,8 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
                     "arguments": {},
                 },
             )
-        self.assertEqual(raised.exception.code, "operation_not_allowed")
+        self.assertEqual(raised.exception.code, "invalid_arguments")
+        self.assertIn("operation", raised.exception.argument_schemas)
         allowed.assert_not_called()
 
     async def test_preview_cannot_spend_confirmation_budget_across_workers(self) -> None:

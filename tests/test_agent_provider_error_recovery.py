@@ -236,7 +236,7 @@ def test_provider_without_actual_success_does_not_clear_old_failure(outcome, pro
 
 
 @pytest.mark.parametrize('case', ['unknown-operation', 'domain-error-without-schema'])
-def test_provider_unknown_failure_does_not_invent_repair_or_clear_by_tool_name(case, provider_chain, store):
+def test_provider_schema_proof_controls_repair_and_unrelated_success_never_clears_failure(case, provider_chain, store):
     async def run():
         _, media, catalog = provider_chain
         if case == 'unknown-operation':
@@ -248,7 +248,12 @@ def test_provider_unknown_failure_does_not_invent_repair_or_clear_by_tool_name(c
             expected = [(_PROFILE, 'media.items.search', {'query': query, 'limit': 12}) for query in ('原目标', '另一个目标')]
         events, feedback, _, _ = await _run_queries(catalog, store, calls)
         assert media.reads == expected
-        assert 'repair' not in feedback[0], 'no registered schema evidence means no speculative repair ticket'
+        if case == 'unknown-operation':
+            assert feedback[0]['code'] == 'invalid_arguments'
+            assert feedback[0]['repair']['tool'] == 'agent.repair'
+            assert 'enum' in feedback[0]['expected_input_schema']['properties']['operation']
+        else:
+            assert 'repair' not in feedback[0], 'no registered schema evidence means no speculative repair ticket'
         assert feedback[1]['ok'] is True and feedback[1]['status'] == 'success'
         assert events[-1].payload['status'] == 'partial'
     asyncio.run(run())

@@ -11,6 +11,7 @@ from app.agent.provider_artifacts import ProviderArtifactStore
 from app.agent.provider_catalog import ProviderCatalog
 from app.agent.provider_models import (
     ProviderGatewayError,
+    ProviderOperationSpec,
     ProviderPayload,
     ProviderProfileView,
 )
@@ -195,6 +196,26 @@ class ProviderGateway:
             snapshots[argument] = snapshot
         return resolved, snapshots
 
+    def query_spec(self, *, profile_ref: str, operation: str) -> ProviderOperationSpec:
+        """准入与执行共用选择器契约；未知标识可纠正，已知写操作不是查询。"""
+        operations = {spec.operation_id: spec for spec in self.catalog.operations()}
+        spec = operations.get(str(operation or "").strip())
+        if spec is not None and spec.risk is not RiskLevel.READ:
+            raise ProviderGatewayError("写操作不能通过 Provider 查询入口执行", code="operation_not_allowed")
+        profiles = [item.profile_ref for item in self.profiles(spec.provider if spec else "")]
+        selectors: dict[str, dict[str, Any]] = {}
+        if spec is None:
+            selectors["operation"] = {"type": "string", "enum": [key for key, value in operations.items() if value.risk is RiskLevel.READ]}
+        if profile_ref not in profiles:
+            selectors["profile_ref"] = {"type": "string", "enum": profiles}
+        if selectors:
+            raise ProviderGatewayError(
+                "Provider 查询标识不符合已配置能力；请按能力清单纠正 operation/profile_ref",
+                code="invalid_arguments", argument_schemas=selectors,
+            )
+        assert spec is not None
+        return spec
+
     def query(
         self,
         *,
@@ -203,12 +224,7 @@ class ProviderGateway:
         arguments: dict[str, Any],
         context: ToolContext,
     ) -> ToolResult:
-        spec = self.catalog.get(operation)
-        if spec.risk is not RiskLevel.READ:
-            raise ProviderGatewayError(
-                "写操作不能通过 Provider 查询入口执行",
-                code="operation_not_allowed",
-            )
+        spec = self.query_spec(profile_ref=profile_ref, operation=operation)
         normalized = validate_provider_arguments(spec.parameters, arguments)
         transport = self._resolve_profile(
             provider=spec.provider, profile_ref=profile_ref

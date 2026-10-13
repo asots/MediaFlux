@@ -672,8 +672,14 @@ class ToolPipeline:
                 "工具参数校验器返回无效结果", code="invalid_arguments"
             )
         error_repair.validated(pending_repairs, context)
-        async with (_read_publication_lock if _read_publication_lock is not None else nullcontext()):
-            resolved = await self._authorize(tool, normalized, context)
+        try:
+            async with (_read_publication_lock if _read_publication_lock is not None else nullcontext()):
+                resolved = await self._authorize(tool, normalized, context)
+        except ToolPipelineError as exc:
+            if exc.code == "invalid_arguments":
+                exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema,
+                    ToolPipelineError, invalid_fields=exc.invalid_fields, argument_schemas=exc.argument_schemas)
+            raise
         completed = context.confirmed_effect
         plan = completed.effect_plan if completed else None
         if (

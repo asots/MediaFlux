@@ -194,7 +194,7 @@ def test_failed_provider_normalization_retains_registered_schema_without_changin
     with pytest.raises(ProviderGatewayError) as failure:
         validate_provider_arguments(schema, invalid)
     assert schema == original
-    effective = failure.value.parameter_schema
+    effective = failure.value.argument_schemas["arguments"]
     assert effective is not None
     assert effective['properties']['nested']['additionalProperties'] is False
     with pytest.raises(ToolPipelineError):
@@ -203,3 +203,107 @@ def test_failed_provider_normalization_retains_registered_schema_without_changin
     _validate_json_schema(corrected, effective)
     assert validate_provider_arguments(schema, corrected) == corrected
     assert 'not-a-schema' not in str(failure.value)
+
+
+@pytest.mark.parametrize("bad_operation,bad_profile", [(True, True), (True, False), (False, True)])
+def test_unknown_query_selectors_offer_scoped_repair_at_real_admission(bad_operation, bad_profile):
+    from unittest.mock import patch
+    from app.agent.domain_catalog import build_tool_specs
+    from app.agent.kernel.capabilities import ToolCatalog
+    from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+    from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+    from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
+    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.rate_limit import AgentRateLimiter
+
+    gw, transport = gateway()
+    specs = catalog_from_tool_specs(build_tool_specs())
+    async def exercise():
+        state = InMemorySessionStateStore()
+        lease, _ = await state.begin_turn(owner="parity", session_id="selector", request_id="r")
+        async def progress(payload): pass
+        context = ToolCallContext(owner=lease.owner, session_id=lease.session_id, request_id=lease.request_id,
+            turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=progress)
+        pipeline = ToolPipeline(catalog=ToolCatalog([specs.get("provider.query"), specs.get("provider.capabilities")]),
+            state_store=state, rate_limiter=MediaFluxToolRateLimiter())
+        initial = {"profile_ref": "media" if bad_profile else "configured:media",
+                   "operation": "capabilities" if bad_operation else "media.items.counts", "arguments": {}}
+        with pytest.raises(ToolPipelineError) as caught:
+            await pipeline.execute("provider.query", initial, context=context)
+        failure = caught.value
+        assert failure.code == "invalid_arguments" and failure.repair_ticket
+        assert failure.argument_schemas and transport.calls == []
+        discovered = await pipeline.execute("provider.capabilities", {"provider": "media"}, context=context)
+        assert not discovered.recovered_failures and transport.calls == []
+        corrected = {"profile_ref": "configured:media", "operation": "media.items.counts", "arguments": {}}
+        # A separate successful call is not proof that this rejected attempt was replaced.
+        separate = await pipeline.execute("provider.query", corrected, context=context)
+        assert not separate.recovered_failures
+        if not bad_operation:
+            with pytest.raises(ToolPipelineError):
+                await pipeline.execute("agent.repair", {"ticket": failure.repair_ticket,
+                    "arguments": {**corrected, "operation": "media.system.info"}}, context=context)
+        repaired = await pipeline.execute("agent.repair", {"ticket": failure.repair_ticket, "arguments": corrected}, context=context)
+        assert failure.repair_ticket in repaired.recovered_failures
+        assert transport.calls == [("media.items.counts", {}), ("media.items.counts", {})]
+        with pytest.raises(ToolPipelineError):
+            await pipeline.execute("agent.repair", {"ticket": failure.repair_ticket, "arguments": corrected}, context=context)
+        assert len(transport.calls) == 2
+    with patch("app.agent.provider_actions.get_provider_gateway", return_value=gw), \
+         patch("app.agent.kernel.ports.mediaflux_policy.get_provider_gateway", return_value=gw), \
+         patch("app.agent.rate_limit.agent_rate_limiter", AgentRateLimiter(clock=lambda: 100.0)):
+        asyncio.run(exercise())
+
+
+def test_query_selector_contract_does_not_turn_permissions_into_repair_authority():
+    gw, transport = gateway()
+    with pytest.raises(ProviderGatewayError) as denied:
+        gw.query_spec(profile_ref="invented", operation="media.library.refresh")
+    assert denied.value.code == "operation_not_allowed"
+    assert denied.value.argument_schemas is None
+    transport.profiles = lambda: [ProviderProfileView("configured:media", "media", "Offline", "disabled")]
+    assert gw.query_spec(profile_ref="configured:media", operation="media.items.counts").operation_id == "media.items.counts"
+    with pytest.raises(ProviderGatewayError) as disabled:
+        call(gw, {}, "media.items.counts")
+    assert disabled.value.code == "provider_not_configured"
+    assert disabled.value.argument_schemas is None and transport.calls == []
+
+
+def test_selector_repair_preserves_valid_normalized_identity_and_existing_filters():
+    from unittest.mock import patch
+    from app.agent.domain_catalog import build_tool_specs
+    from app.agent.kernel.capabilities import ToolCatalog
+    from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+    from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+    from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
+    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.rate_limit import AgentRateLimiter
+
+    gw, transport = gateway()
+    async def exercise():
+        state = InMemorySessionStateStore()
+        lease, _ = await state.begin_turn(owner="parity", session_id="locked-selector", request_id="r")
+        async def progress(payload): pass
+        context = ToolCallContext(owner=lease.owner, session_id=lease.session_id, request_id=lease.request_id,
+            turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=progress)
+        tool = catalog_from_tool_specs(build_tool_specs()).get("provider.query")
+        pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=state, rate_limiter=MediaFluxToolRateLimiter())
+        initial = {"profile_ref": " configured:media ", "operation": "unknown", "arguments": {"limit": 5}}
+        with pytest.raises(ToolPipelineError) as caught:
+            await pipeline.execute("provider.query", initial, context=context)
+        assert set(caught.value.argument_schemas) == {"operation"}, "已规范化且有效的profile不能解锁"
+        ticket = caught.value.repair_ticket
+        corrected = {**initial, "operation": "media.items.recent_added"}
+        for changed in ({**corrected, "profile_ref": "configured:other"},
+                        {**corrected, "arguments": {}}, {**corrected, "arguments": {"limit": 6}}):
+            with pytest.raises(ToolPipelineError) as conflict:
+                await pipeline.execute("agent.repair", {"ticket": ticket, "arguments": changed}, context=context)
+            assert conflict.value.code == "repair_conflict"
+            assert not transport.calls
+        repaired = await pipeline.execute("agent.repair", {"ticket": ticket, "arguments": corrected}, context=context)
+        assert ticket in repaired.recovered_failures
+        assert transport.calls == [("media.items.recent_added", {"limit": 5})]
+    with patch("app.agent.provider_actions.get_provider_gateway", return_value=gw), \
+         patch("app.agent.kernel.ports.mediaflux_policy.get_provider_gateway", return_value=gw), \
+         patch("app.agent.rate_limit.agent_rate_limiter", AgentRateLimiter(clock=lambda: 100.0)):
+        asyncio.run(exercise())

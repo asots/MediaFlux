@@ -72,11 +72,14 @@ def test_provider_pipeline_isolates_normalized_read_budgets_without_bypassing_li
         assert len(calls) == 9
         with pytest.raises(ToolPipelineError) as error:
             await query("invented.items.query")
-        assert error.value.code == "operation_not_allowed"
+        assert error.value.code == "invalid_arguments"
+        assert error.value.repair_ticket
         assert len(calls) == 9
 
-    with patch(
-        "app.agent.rate_limit.agent_rate_limiter",
-        AgentRateLimiter(clock=lambda: 100.0),
-    ):
+    from app.agent.provider_actions import get_provider_gateway
+    from app.agent.provider_models import ProviderProfileView
+    profiles = [ProviderProfileView(ref, provider, ref, "online") for ref, provider in
+                (("media:1", "media"), ("media:2", "media"), ("qb:default", "qbittorrent"))]
+    with patch("app.agent.rate_limit.agent_rate_limiter", AgentRateLimiter(clock=lambda: 100.0)), \
+         patch.object(get_provider_gateway(), "profiles", side_effect=lambda provider="": [p for p in profiles if not provider or p.provider == provider]):
         asyncio.run(exercise())

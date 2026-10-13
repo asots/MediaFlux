@@ -62,7 +62,7 @@ def test_real_pipeline_shared_owner_and_retry_payload():
             token=CancellationToken()
             if cancel:token.cancel()
             ctx=ToolCallContext(owner=owner,session_id=session,request_id=lease.request_id,turn_id=lease.turn_id,lease=lease,cancellation=token,report_progress=progress)
-            return await pipeline.execute(tool.model_name,{'profile_ref':'media:1','operation':operation,'arguments':{}},context=ctx)
+            return await pipeline.execute(tool.model_name,{'profile_ref':'qb:default' if operation.startswith('qb.') else 'media:1','operation':operation,'arguments':{}},context=ctx)
         for i in range(8):await query(session='s1' if i%2 else 's2')
         with pytest.raises(ToolPipelineError) as exc:await query(session='s3')
         assert exc.value.code=='rate_limited' and len(calls)==8
@@ -84,7 +84,13 @@ def test_real_pipeline_shared_owner_and_retry_payload():
         assert isinstance(exc.value,ToolRateLimitError)
     limiter=AgentRateLimiter(shared=True)
     limiter.reset()
-    with patch('app.agent.rate_limit.time.time',return_value=120.0):asyncio.run(go())
+    from app.agent.provider_actions import get_provider_gateway
+    from app.agent.provider_models import ProviderProfileView
+    profiles = [ProviderProfileView('media:1', 'media', 'offline', 'online'),
+                ProviderProfileView('qb:default', 'qbittorrent', 'offline', 'online')]
+    with patch('app.agent.rate_limit.time.time',return_value=120.0), \
+         patch.object(get_provider_gateway(), 'profiles', side_effect=lambda provider='': [p for p in profiles if not provider or p.provider==provider]):
+        asyncio.run(go())
 
 
 def test_shared_weighted_boundary_and_monotonic_control():
@@ -205,7 +211,8 @@ def test_unknown_provider_does_not_create_a_bucket():
     async def go():
         with pytest.raises(policy.ToolPipelineError) as raised:
             await policy.MediaFluxToolRateLimiter().acquire(owner='owner',tool_name='provider.query',cost=1,arguments={'operation':'media.operation.not_registered'})
-        assert raised.value.code=='operation_not_allowed'
+        assert raised.value.code=='invalid_arguments'
+        assert 'operation' in raised.value.argument_schemas
         assert rows()==[]
     with patch.object(rates,'agent_rate_limiter',limiter):asyncio.run(go())
 
