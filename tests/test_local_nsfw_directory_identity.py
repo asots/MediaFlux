@@ -1,0 +1,192 @@
+"""无标签 NSFW 目录的本地历史身份守卫。"""
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+from app import database as db
+from app.modules.local_media_service import LocalMediaService, LocalMediaServiceError
+from app.modules.organize import OrganizeRules
+from app.modules.scraper import MatchResult
+from tests.support import IsolatedDatabaseTestCase
+from tests.test_local_media_service import FakeScraper
+
+
+class LocalNsfwDirectoryIdentityTests(IsolatedDatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.rules = OrganizeRules(
+            naming_scope="both", region_split=False, year_split=False,
+            small_file_mb=0, clean_empty=False, emby_refresh=False,
+            nsfw_enabled=True, nsfw_metatube_endpoint="http://nsfw-test.invalid",
+        )
+        self.enterContext(patch(
+            "app.modules.local_media_service.OrganizeRules.from_config",
+            return_value=self.rules,
+        ))
+        self.enterContext(patch(
+            "app.modules.local_media_service.probe_local_media_profile", return_value=None,
+        ))
+        self.enterContext(patch(
+            "app.modules.organize.Organizer._historical_root_identities",
+            side_effect=AssertionError("本地不得读取光鸭历史"),
+        ))
+
+    def _source(self, name="source", *, owner="admin", target=None):
+        source = self.root / name
+        source.mkdir()
+        target = target or self.root / "movies"
+        target.mkdir(exist_ok=True)
+        source_id = db.create_local_media_source(
+            name=f"{name}-{self.root.name}", qb_profile="", qb_path_prefix="", local_root=str(source),
+            media_type="nsfw", owner=owner,
+        )
+        db.upsert_local_library_target(source_id, "movie", str(target), owner=owner)
+        return source_id, source, target
+
+    def _service(self, provider="metatube", external_id="javbus:first"):
+        match = MatchResult(
+            title="SODAH-003", media_type="movie", confidence=1.0, status="matched",
+            provider=provider, external_id=external_id,
+            metadata={"number": "SODAH-003", "title": "SODAH-003"},
+        )
+        service = LocalMediaService(scraper=FakeScraper(match))
+        self.addCleanup(service.close)
+        return service
+
+    def _task(self, source_id, path, *, owner="admin"):
+        task_id = db.create_local_media_task(
+            source_id, "", str(path), owner=owner, trigger="scan",
+        )
+        self.assertTrue(db.claim_local_media_task(task_id, owner=owner))
+        return task_id
+
+    def _preview(self, service, source_id, path):
+        inspection = service.inspect_source("admin", source_id, path)
+        return service.preview("admin", inspection["inspection_id"], automatic=True)
+
+    def _history(
+        self, source_id, source, target, *, owner="admin", identity="metatube:javbus:other",
+        status="completed", step_status="completed", group=None,
+    ):
+        path = source / f"history-{len(db.list_local_media_tasks(owner=owner))}.mp4"
+        task_id = db.create_local_media_task(source_id, "", str(path), owner=owner, trigger="scan")
+        db.add_local_media_task_item(
+            task_id, str(path), str(target), role="video", owner=owner,
+            media_group=f"movie:{identity}:__root__" if group is None else group,
+        )
+        if step_status:
+            task = db.get_local_media_task(task_id, owner=owner)
+            step = db.add_local_media_operation_step(
+                task_id, task.operation_token, 1, "rename", str(path), str(target), owner=owner,
+            )
+            db.update_local_media_operation_step(step, step_status)
+        db.update_local_media_task(task_id, owner=owner, status=status)
+        return task_id
+
+    def test_independent_tasks_check_provider_and_external_id(self):
+        for index, (provider, external_id, blocked) in enumerate((
+            ("metatube", "javbus:second", True),
+            ("clean_title", "SODAH-003", True),
+            ("metatube", "javbus:first", False),
+        )):
+            with self.subTest(provider=provider, external_id=external_id):
+                source_id, source, _target = self._source(
+                    f"source-{index}", target=self.root / f"movies-{index}",
+                )
+                batch = source / "batch:first"
+                batch.mkdir()
+                first = batch / "SODAH-003-1.mp4"
+                second = batch / "SODAH-003-2.mp4"
+                first.write_bytes(b"first-video")
+                second.write_bytes(b"second-video")
+                first_task = self._task(source_id, first)
+                first_result = self._service().execute_task("admin", first_task)
+                self.assertEqual(first_result["status"], "completed")
+                self.assertTrue(first_result["moved"])
+                second_task = self._task(source_id, second)
+                result = self._service(provider, external_id).execute_task("admin", second_task)
+                self.assertEqual(result["status"], "requires_manual" if blocked else "completed")
+                if blocked:
+                    self.assertTrue(second.exists())
+                    self.assertIn("历史整理记录", str(result["preview"]["pending_confirmations"]))
+                    self.assertEqual(db.list_local_media_task_items(second_task), [])
+                else:
+                    self.assertTrue(result["moved"])
+                    self.assertFalse(second.exists())
+
+    def test_history_is_scoped_by_owner_and_real_media_root(self):
+        source_id, source, target = self._source()
+        incoming = source / "SODAH-003.mp4"
+        incoming.write_bytes(b"incoming")
+        service = self._service()
+        preview = self._preview(service, source_id, incoming)
+        media_root = Path(preview["plans"][0]["target_path"]).parent
+        self.assertEqual(media_root, target / "SODAH-003")
+        self._history(source_id, source, media_root / "same.mp4", identity="metatube:javbus:first")
+        self._history(source_id, source, self.root / "other-movies" / media_root.name / "other.mp4")
+        self._history(source_id, source, media_root.with_name(media_root.name + "-other") / "other.mp4")
+        other_id, other_source, _ = self._source("other-owner", owner="other", target=target)
+        self._history(other_id, other_source, media_root / "other-owner.mp4", owner="other")
+        self.assertEqual(self._preview(service, source_id, incoming)["pending_confirmations"], [])
+        # 不按来源隔离：另一来源写入同一真实媒体根仍必须拦截。
+        another_id, another_source, _ = self._source("another-source", target=target)
+        self._history(another_id, another_source, media_root / "different.mp4")
+        self.assertIn("历史整理记录", str(self._preview(service, source_id, incoming)["pending_confirmations"]))
+
+    def test_execute_rechecks_history_created_after_preview(self):
+        source_id, source, _target = self._source()
+        incoming = source / "SODAH-003.mp4"
+        incoming.write_bytes(b"incoming")
+        task_id = self._task(source_id, incoming)
+        service = self._service()
+        preview = self._preview(service, source_id, incoming)
+        self.assertEqual(preview["pending_confirmations"], [])
+        target = Path(preview["plans"][0]["target_path"])
+        self._history(source_id, source, target.with_name("already-committed.mp4"))
+        result = service.execute_task("admin", task_id)
+        self.assertEqual(result["status"], "requires_manual")
+        self.assertIn("历史整理记录", str(result["preview"]["pending_confirmations"]))
+        self.assertTrue(incoming.exists())
+        self.assertFalse(target.exists())
+        self.assertEqual(db.list_local_media_task_items(task_id), [])
+
+    def test_only_committed_facts_bind_identity_and_missing_identity_is_not_guessed(self):
+        for index, (status, step_status, group, blocked) in enumerate((
+            ("completed", "", None, False),
+            ("failed", "rolled_back", None, False),
+            ("requires_manual", "completed", None, True),
+            ("completed", "completed", "", None),
+        )):
+            with self.subTest(status=status, step_status=step_status, group=group):
+                source_id, source, _target = self._source(
+                    f"facts-{index}", target=self.root / f"facts-movies-{index}",
+                )
+                incoming = source / "SODAH-003.mp4"
+                incoming.write_bytes(b"incoming")
+                service = self._service()
+                preview = self._preview(service, source_id, incoming)
+                target = Path(preview["plans"][0]["target_path"])
+                history_task = self._history(
+                    source_id, source, target.with_name("history.mp4"),
+                    status=status, step_status=step_status, group=group,
+                )
+                if blocked is None:
+                    with self.assertRaisesRegex(LocalMediaServiceError, "缺少可验证的媒体身份"):
+                        self._preview(service, source_id, incoming)
+                else:
+                    pending = self._preview(service, source_id, incoming)["pending_confirmations"]
+                    self.assertEqual(bool(pending), blocked)
+                    if status == "requires_manual" and step_status == "completed":
+                        archived = target.with_name("history.mp4")
+                        archived.parent.mkdir(parents=True)
+                        archived.write_bytes(b"already-archived")
+                        old_token = db.get_local_media_task(history_task).operation_token
+                        self.assertTrue(db.reset_local_media_task(history_task))
+                        self.assertNotEqual(db.get_local_media_task(history_task).operation_token, old_token)
+                        self.assertEqual(db.list_local_media_task_items(history_task), [])
+                        with self.assertRaisesRegex(LocalMediaServiceError, "身份快照已缺失"):
+                            self._preview(service, source_id, incoming)
+                        self.assertTrue(archived.exists())

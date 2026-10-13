@@ -496,6 +496,27 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         finally:
             _cleanup_source_indexes(source_id)
 
+    def test_old_tagged_and_new_nsfw_directories_share_existing_strm_arbitration(self):
+        source_id = f"nsfw-names-{uuid.uuid4().hex}"
+        client = _TreeClient({
+            source_id: [
+                GuangYaFile("old", "SSIS-001 (2024) {metatube-javbus-ssis001}", True, parent_id=source_id),
+                GuangYaFile("new", "SSIS-001 (2024)", True, parent_id=source_id),
+            ],
+            "old": [GuangYaFile("old-video", "SSIS-001.2024.mp4", False, 100, "old-etag", "old")],
+            "new": [GuangYaFile("new-video", "SSIS-001.2024.mp4", False, 200, "new-etag", "new")],
+        })
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                result = sync_strm(source_id, "http://example", root, client=client)
+                generated = list((Path(root) / STRM_SUBDIR).rglob("*.strm"))
+                self.assertEqual(len(generated), 1)
+                self.assertEqual(result["duplicates_skipped"], 1)
+                self.assertEqual(generated[0].parent.name, "SSIS-001 (2024)")
+                self.assertIn("/playgy/new-video/", generated[0].read_text(encoding="utf-8"))
+        finally:
+            _cleanup_source_indexes(source_id)
+
     def test_same_target_name_selects_larger_then_stable_file_id_tiebreak(self):
         source_id = f"source-{uuid.uuid4().hex}"
         source_key = f"guangya:{source_id}"

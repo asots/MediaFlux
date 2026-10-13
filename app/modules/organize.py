@@ -63,6 +63,7 @@ from app.modules.directory_scrape_errors import (
     safe_organize_failure,
 )
 from app.modules.naming import (
+    NSFW_DIR_DEFAULT,
     append_variant_tags,
     build_context,
     fit_media_filename,
@@ -1185,55 +1186,39 @@ class Organizer:
                 rendered = f"{title} ({year}){marker}.{ext}" if year else f"{title}{marker}.{ext}"
             return with_variant_tags(rendered)
 
+    @classmethod
+    def _media_directory_template(cls, match: MatchResult, rules: OrganizeRules) -> str:
+        if cls._match_provider(match) in {"metatube", "clean_title"}:
+            return NSFW_DIR_DEFAULT
+        return rules.show_dir_template if match.media_type == "tv" else rules.movie_dir_template
+
     def build_show_dir(self, match: MatchResult, rules: OrganizeRules | None = None) -> str:
-        """剧集/节目归档目录名。"""
-        rules = enforce_fixed_organize_rules(rules or OrganizeRules())
-        title = SAFE_RE.sub("_", match.title or "")
-        year = match.year or ""
-        tmdb = match.tmdb_id or ""
-        identity_id = self._match_identity_key(match)
-        identity_tag = self._match_identity_tag(match)
-        context = build_context(
-            title=title, year=year, tmdb_id=tmdb,
-            identity_id=identity_id, identity_tag=identity_tag,
-        )
-        scope = {part.strip() for part in str(rules.naming_scope or "guangya").split(",") if part.strip()}
-        fallback = f"{title} ({year}) {identity_tag}" if year else f"{title} {identity_tag}"
-        if not ({"both", "guangya"} & scope) or not rules.show_dir_template:
-            return fallback.strip()
-        try:
-            return render_template(rules.show_dir_template, context)
-        except ValueError as exc:
-            log_throttled(
-                logger, logging.WARNING, f"show-template:{exc}",
-                "剧集目录模板无效，回退旧规则: %s", exc,
-            )
-            return fallback.strip()
+        """剧集与电影使用同一目录命名规则。"""
+        return self.build_media_dir(match, rules)
 
     def build_media_dir(self, match: MatchResult, rules: OrganizeRules | None = None) -> str:
         """电影和剧集共用的独立媒体目录入口。"""
         rules = enforce_fixed_organize_rules(rules or OrganizeRules())
-        if match.media_type == "tv":
-            return self.build_show_dir(match, rules)
+        template = self._media_directory_template(match, rules)
         title = SAFE_RE.sub("_", match.title or "")
         year = match.year or ""
         tmdb = match.tmdb_id or ""
         identity_id = self._match_identity_key(match)
-        identity_tag = self._match_identity_tag(match)
+        identity_tag = "" if template == NSFW_DIR_DEFAULT else self._match_identity_tag(match)
         context = build_context(
             title=title, year=year, tmdb_id=tmdb,
             identity_id=identity_id, identity_tag=identity_tag,
         )
         scope = {part.strip() for part in str(rules.naming_scope or "guangya").split(",") if part.strip()}
         fallback = f"{title} ({year}) {identity_tag}" if year else f"{title} {identity_tag}"
-        if not ({"both", "guangya"} & scope) or not rules.movie_dir_template:
+        if not ({"both", "guangya"} & scope) or not template:
             return fallback.strip()
         try:
-            return render_template(rules.movie_dir_template, context)
+            return render_template(template, context)
         except ValueError as exc:
             log_throttled(
-                logger, logging.WARNING, f"movie-template:{exc}",
-                "电影目录模板无效，回退默认规则: %s", exc,
+                logger, logging.WARNING, f"media-dir-template:{exc}",
+                "媒体目录模板无效，回退默认规则: %s", exc,
             )
             return fallback.strip()
 
@@ -5484,11 +5469,7 @@ class Organizer:
             if item.strip()
         }
         if {"both", "guangya"} & scope:
-            directory_template = (
-                rules.show_dir_template
-                if match.media_type == "tv"
-                else rules.movie_dir_template
-            )
+            directory_template = self._media_directory_template(match, rules)
             plan.identity_guard_required = not template_has_media_identity(
                 directory_template,
                 tmdb_id=match.tmdb_id,

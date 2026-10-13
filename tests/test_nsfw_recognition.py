@@ -44,7 +44,7 @@ from app.modules.organize import (
 from app.modules.organize_correction import OrganizeCorrectionService
 from app.modules.scraper import Candidate, MatchResult, TMDBScraper
 from app.routes.api import _validate_nsfw_organize_updates
-from tests.support import IsolatedDatabaseTestCase
+from tests.support import IsolatedDatabaseTestCase, isolated_test_database
 
 
 class OrganizeRulesSnapshotTests(unittest.TestCase):
@@ -740,7 +740,7 @@ class NsfwOrganizerTests(unittest.TestCase):
         self.assertFalse(ordinary.nsfw_enabled)
         self.assertFalse(ordinary.nsfw_exclusive)
 
-    def test_metatube_match_uses_dedicated_category_and_provider_identity_tag(self):
+    def test_metatube_match_keeps_identity_without_exposing_it_in_directory(self):
         organizer = Organizer(client=object(), scraper=TMDBScraper())
         session = FakeSession(FakeResponse({"data": [MetaTubeClientTests._item()], "error": None}))
         recognizer = NsfwRecognizer("http://127.0.0.1:8080", session=session)
@@ -752,7 +752,7 @@ class NsfwOrganizerTests(unittest.TestCase):
         )
 
         self.assertEqual(organizer.classify(match, rules), ("成人内容", "其他", "2024"))
-        self.assertIn("{metatube-javbus-ssis001}", organizer.build_media_dir(match, rules))
+        self.assertEqual(organizer.build_media_dir(match, rules), "SSIS-001 测试标题 (2024)")
         self.assertEqual(organizer._match_identity_key(match), "metatube:javbus:ssis001")
 
     def test_tmdb_tag_keeps_tmdb_semantics_while_identity_tag_is_generic(self):
@@ -888,7 +888,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
         self.assertEqual(preview["match"]["provider"], "clean_title")
         self.assertEqual(preview["match"]["external_id"], "SSIS-001")
         self.assertEqual(preview["match"]["title"], "SSIS-001")
-        self.assertIn("{clean_title-SSIS-001}", preview["target_path"])
+        self.assertEqual(preview["target_path"], "成人内容/SSIS-001")
         self.assertTrue(preview["target_path"].startswith("成人内容/"))
 
     def test_pending_adult_preview_resolves_metatube_and_keeps_scoped_archive(self):
@@ -921,10 +921,62 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
         self.assertEqual(preview["match"]["provider"], "metatube")
         self.assertEqual(preview["match"]["external_id"], "javbus:ssis001")
         self.assertTrue(preview["target_path"].startswith("成人内容/"))
-        self.assertIn("{metatube-javbus-ssis001}", preview["target_path"])
+        self.assertEqual(preview["target_path"], "成人内容/SSIS-001 测试标题 (2024)")
         self.assertTrue(preview["rules_snapshot"]["nsfw_exclusive"])
         self.assertNotIn("nsfw_metatube_token", preview["rules_snapshot"])
         self.assertNotIn("server-secret", str(preview["rules_snapshot"]))
+
+    def test_unmarked_nsfw_target_history_blocks_reorganize_preview(self):
+        self.enterContext(isolated_test_database())
+        log_id = self._pending_log()
+        db.add_organize_log(
+            "guangya", "other", "成人内容/SSIS-001", "other-video", "success", "",
+            provider="metatube", external_id="javbus:other", media_type="movie",
+        )
+        client = MagicMock()
+        service = OrganizeCorrectionService(client=client, scraper=TMDBScraper())
+        with (
+            patch("app.modules.organize_correction.OrganizeRules.from_config", return_value=self._rules()),
+            self.assertRaisesRegex(ValueError, "属于其他媒体"),
+        ):
+            service.preview_reorganize(log_id, "", "movie", provider="clean_title", external_id="SSIS-001")
+        client.create_dir.assert_not_called()
+        self.assertEqual(db.get_organize_log(log_id)["status"], "manual")
+
+    def test_batch_nsfw_reorganize_rejects_foreign_target_identity(self):
+        self.enterContext(isolated_test_database())
+        ids = [self._pending_log(), self._pending_log()]
+        db.add_organize_log(
+            "guangya", "other", "成人内容/SSIS-001", "other-video", "success", "",
+            provider="metatube", external_id="javbus:other", media_type="movie",
+        )
+        client = MagicMock()
+        service = OrganizeCorrectionService(client=client, scraper=TMDBScraper())
+        with patch("app.modules.organize_correction.OrganizeRules.from_config", return_value=self._rules()), patch.object(service, "_verify_items"):
+            preview = service.preview_batch(
+                [{"log_id": log_id, "expected_version": 1} for log_id in ids],
+                {"provider": "clean_title", "external_id": "SSIS-001", "media_type": "movie"},
+            )
+        self.assertFalse(preview["can_execute"])
+        self.assertEqual(len(preview["errors"]), 2)
+        self.assertTrue(all("属于其他媒体" in item["error"] for item in preview["errors"]))
+        client.create_dir.assert_not_called()
+
+    def test_nsfw_reorganize_rechecks_target_identity_before_writes(self):
+        self.enterContext(isolated_test_database())
+        log_id = self._pending_log()
+        client = MagicMock()
+        service = OrganizeCorrectionService(client=client, scraper=TMDBScraper())
+        with patch("app.modules.organize_correction.OrganizeRules.from_config", return_value=self._rules()):
+            preview = service.preview_reorganize(log_id, "", "movie", provider="clean_title", external_id="SSIS-001")
+            db.add_organize_log(
+                "guangya", "other", preview["target_path"], "other-video", "success", "",
+                provider="metatube", external_id="javbus:other", media_type="movie",
+            )
+            with patch.object(service, "_verify_items"), self.assertRaisesRegex(ValueError, "属于其他媒体"):
+                service._execute_reorganize(log_id, "test-token", preview["version"], preview)
+        client.create_dir.assert_not_called()
+        self.assertEqual(db.get_organize_log(log_id)["status"], "manual")
 
     def test_pending_adult_preview_rejects_different_number(self):
         log_id = self._pending_log()
@@ -1005,7 +1057,8 @@ class NsfwLocalIntegrationTests(IsolatedDatabaseTestCase):
 
             self.assertEqual(preview["status"], "planned")
             self.assertEqual(preview["matches"][0]["provider"], "metatube")
-            self.assertIn("{metatube-javbus-ssis001}", preview["plans"][0]["target_path"])
+            self.assertNotIn("{metatube-", preview["plans"][0]["target_path"])
+            self.assertEqual(Path(preview["plans"][0]["target_path"]).parent.name, "SSIS-001 测试标题 (2024)")
             destination = Path(preview["plans"][0]["target_path"])
             relative = destination.relative_to(target.resolve())
             self.assertNotIn("成人内容", relative.parts)

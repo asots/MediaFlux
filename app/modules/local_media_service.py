@@ -924,6 +924,64 @@ class LocalMediaService:
         return target_config, destination
 
     @staticmethod
+    def _local_historical_root_identities(
+        owner: str, media_root: Path,
+    ) -> set[tuple[str, str]]:
+        # 文件移动已完成即可取证；后续元数据/通知失败不抹掉入库事实。
+        # task_items 在执行前就会写入，必须以未回滚的完成步骤排除 dry-run。
+        prefix = canonical_local_media_content_path(media_root).rstrip("/") + "/"
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT step.source_path,i.media_group,t.content_path,s.local_root "
+                "FROM local_media_operation_steps step "
+                "JOIN local_media_tasks t ON t.id=step.task_id "
+                "JOIN local_media_sources s ON s.id=t.source_id AND s.owner=t.owner "
+                "LEFT JOIN local_media_task_items i ON i.task_id=t.id AND i.owner=t.owner "
+                "AND step.operation_token=t.operation_token "
+                "AND step.source_path=i.source_path AND step.target_path=i.target_path "
+                "AND i.action IN ('move','replace') "
+                "WHERE t.owner=? AND substr(step.target_path,1,?)=? "
+                "AND step.status='completed' AND (i.role='video' OR i.id IS NULL) "
+                "AND step.action IN ('rename','copy_verify_delete','replace')",
+                (str(owner or "").strip(), len(prefix), prefix),
+            ).fetchall()
+        identities: set[tuple[str, str]] = set()
+        for row in rows:
+            # 重试会清空 items 并换 token，但不会撤销已完成的移动凭据。
+            # 旧 attempt 没有完整身份快照时只能阻断，不能套用新 attempt 身份。
+            if row["media_group"] is None:
+                raise LocalMediaServiceError(
+                    "目标目录存在已完成的本地移动记录，但身份快照已缺失，请人工核验"
+                )
+            # media_group 是执行前保存的完整身份，不从标题/识别摘要猜番号。
+            # 先还原确定的源组后缀再移除，避免切断 MetaTube ID 或目录中的冒号。
+            source_path = Path(row["source_path"])
+            selected_path = Path(row["content_path"])
+            source_root = (
+                Path(row["local_root"]).expanduser().resolve(strict=False)
+                if source_path == selected_path else selected_path
+            )
+            try:
+                relative_parent = source_path.parent.relative_to(source_root).as_posix()
+            except ValueError as exc:
+                raise LocalMediaServiceError(
+                    "本地历史执行记录的来源范围已变化，无法核验目录媒体身份，请人工核验"
+                ) from exc
+            suffix = ":" + (relative_parent if relative_parent != "." else "__root__")
+            group = str(row["media_group"] or "")
+            identity = group[:-len(suffix)] if group.endswith(suffix) else ""
+            media_type, _, identity_key = identity.partition(":")
+            provider, _, external_id = identity_key.partition(":")
+            if media_type not in {"movie", "tv"} or provider not in {
+                "tmdb", "metatube", "clean_title",
+            } or not external_id:
+                raise LocalMediaServiceError(
+                    "本地历史执行记录缺少可验证的媒体身份，请人工核验目标目录"
+                )
+            identities.add((media_type, identity_key))
+        return identities
+
+    @staticmethod
     def _local_target_inventory(
         destination: Path,
     ) -> tuple[str, list[GuangYaFile], dict[str, str]]:
@@ -1353,6 +1411,14 @@ class LocalMediaService:
                 inventory_cache[key] = self._local_target_inventory(destination)
             return inventory_cache[key]
 
+        def load_identity_history(plan: OrganizePlan):
+            _target_config, destination = target_for_plan(plan)
+            tail = Path(plan.target_path).relative_to(Path(plan.media_root_path))
+            media_root = destination
+            for _part in tail.parts:
+                media_root = media_root.parent
+            return self._local_historical_root_identities(owner, media_root)
+
         planning_result, planning_stats = planner.plan_scan_result(
             scan_result,
             rules,
@@ -1363,9 +1429,7 @@ class LocalMediaService:
             media_profile_loader=load_media_profile,
             target_inventory_loader=load_target_inventory,
             source_positions_by_file_id=source_positions_by_file_id,
-            # 光鸭历史日志不属于本地媒体库；本地仍复用同批身份绑定和
-            # 目录标记校验，但历史来源必须由本地后端单独提供。
-            identity_history_loader=lambda _plan: set(),
+            identity_history_loader=load_identity_history,
         )
 
         local_plans: list[LocalMovePlan] = []

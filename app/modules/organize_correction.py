@@ -10,13 +10,14 @@ import json
 import time
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app import config, database as db
 from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.logger import get_logger
 from app.modules.guangya_compensation import restore_guangya_file
 from app.modules.organize import (
+    OrganizePlan,
     OrganizeRules,
     Organizer,
     organize_rules_snapshot,
@@ -143,6 +144,14 @@ class OrganizeCorrectionService:
                 return False, "媒体组存在不完整成员快照，当前记录禁止写操作。"
         return True, ""
 
+    def _rules_for_log(self, data: dict) -> OrganizeRules:
+        """已落库的成人身份不随来源失效而退回 TMDB；未识别日志仍按来源判断。"""
+        rules = OrganizeRules.from_config()
+        if str(data.get("provider") or "").strip().lower() in {"metatube", "clean_title"}:
+            # 仅约束这条历史日志的人工纠偏，不改变全局自动扫描开关。
+            return replace(rules, nsfw_enabled=True, nsfw_exclusive=True)
+        return rules.for_source(str(data.get("source_dir_id") or ""), client=self.client)
+
     def detail(self, log_id: int) -> dict:
         row = db.get_organize_log(log_id)
         if not row:
@@ -183,7 +192,7 @@ class OrganizeCorrectionService:
                 "检测到云端操作或补偿未完整完成。系统已冻结自动写操作；"
                 "请根据成员快照和操作步骤人工核对云端现状，禁止猜测式续写。"
             )
-        rules = OrganizeRules.from_config().for_source(str(data.get("source_dir_id") or ""), client=self.client)
+        rules = self._rules_for_log(data)
         nsfw_only = bool(rules.nsfw_exclusive)
         data["recognition"] = {
             "provider": "metatube" if nsfw_only else "tmdb",
@@ -406,7 +415,7 @@ class OrganizeCorrectionService:
         if not detail["allowed_actions"]["search"]:
             raise ValueError(detail.get("safety_notice") or "该日志不能人工纠偏")
         query = (query or detail.get("title") or detail.get("original_name") or "").strip()
-        rules = OrganizeRules.from_config().for_source(str(detail.get("source_dir_id") or ""), client=self.client)
+        rules = self._rules_for_log(detail)
         if rules.nsfw_exclusive:
             with self.organizer._nsfw_recognizer_lease(rules) as recognizer:
                 if recognizer is None:
@@ -522,6 +531,18 @@ class OrganizeCorrectionService:
             raise ValueError(result.error or "TMDB 详情不存在")
         return result
 
+    def _verify_nsfw_target_identity(self, match: MatchResult, target_path: str) -> None:
+        if Organizer._match_provider(match) not in {"metatube", "clean_title"}:
+            return
+        # 成人纠偏始终为 movie；target_path 即媒体根目录，身份只来自历史记录。
+        plan = OrganizePlan(
+            file_id="", original_name="", original_path="", match=match,
+            media_root_path=target_path, identity_guard_required=True,
+        )
+        reason = self.organizer._identity_guard_reason(plan, {}, {})
+        if reason:
+            raise ValueError(reason)
+
     def preview_reorganize(
         self, log_id: int, tmdb_id: str, media_type: str,
         title: str = "", year: str = "",
@@ -533,7 +554,7 @@ class OrganizeCorrectionService:
             raise ValueError(detail.get("safety_notice") or "当前状态不能重新整理")
         items = self._load_items(log_id)
         video = self._video(items)
-        rules = OrganizeRules.from_config().for_source(str(detail.get("source_dir_id") or ""), client=self.client)
+        rules = self._rules_for_log(detail)
         source_name = video.original_name or video.current_name
         parent_path = str(detail.get("original_path") or "")
         match = self._match(
@@ -605,6 +626,7 @@ class OrganizeCorrectionService:
             parts.append(resolved_year)
         parts.extend(self.organizer.build_media_path_parts(match, parsed, rules))
         target_path = "/".join(parts)
+        self._verify_nsfw_target_identity(match, target_path)
         planned = []
         for item in items:
             target_name = new_name if item.role == "video" else companion_target_name(
@@ -1510,12 +1532,11 @@ class OrganizeCorrectionService:
                             expected_version: int, preview: dict) -> dict:
         items = self._load_items(log_id)
         self._verify_items(items)
-        current_rules = OrganizeRules.from_config().for_source(
-            str(self.detail(log_id).get("source_dir_id") or ""), client=self.client,
-        )
+        current_rules = self._rules_for_log(self.detail(log_id))
         if not organize_rules_snapshot_matches(preview["rules_snapshot"], current_rules):
             raise ValueError("整理规则已变化，请重新预览并确认")
         rules = restore_organize_rules_snapshot(preview["rules_snapshot"], trusted_rules=current_rules)
+        self._verify_nsfw_target_identity(MatchResult(**preview["match"]), preview["target_path"])
         before = db.capture_organize_business_snapshot(log_id)
         previous_log = db.get_organize_log(log_id)
         request_snapshot = self._download_recovery_snapshot(str(previous_log['source_dir_id'] or ''))
