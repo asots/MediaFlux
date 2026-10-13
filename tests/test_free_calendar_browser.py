@@ -1546,8 +1546,10 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 self.assertEqual(button.get_attribute('aria-pressed'), str(status == 200 and success).lower())
                 self.assertEqual(button.bounding_box(), geometry)
                 network.watch_hold = False
-                page.keyboard.press('Space')
-                page.wait_for_timeout(40)
+                # 等真实键盘重试的响应，而不是假设浏览器在 40ms 内派发请求。
+                # 如果键盘焦点或 pending 恢复有回归，这里仍会超时失败。
+                with page.expect_response(lambda response: urlsplit(response.url).path.startswith('/api/discovery/watchlist')):
+                    page.keyboard.press('Space')
                 self.assertEqual(len(network.watch_calls), 2)
                 self.assertTrue(button.evaluate('(b) => document.activeElement === b'))
 
