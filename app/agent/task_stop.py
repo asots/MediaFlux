@@ -407,6 +407,14 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
 
                         if model_turn != "superseded":
                             state = await store.load(owner=owner_key, session_id=session_key)
+                            read = state.metadata.get("read_wait") or {}
+                            if isinstance(read, Mapping) and read.get("state") == "pending" and read.get("source_request_id"):
+                                if await session.cancel(owner=owner_key, session_id=session_key,
+                                                        request_id=read["source_request_id"]):
+                                    cancelled_continuations.append(read["wait_id"])
+                                    state = await store.load(owner=owner_key, session_id=session_key)
+                                else:
+                                    model_turn = "stop_unconfirmed"
                             if state.generation > 0:
                                 cancelled = await _cancel_effect_continuations(
                                     store, owner=owner_key, session_id=session_key,
@@ -415,7 +423,7 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
                                 if cancelled is None:
                                     model_turn = "superseded"
                                 else:
-                                    cancelled_continuations = cancelled
+                                    cancelled_continuations.extend(cancelled)
                             plan_id = str(state.pending_effect_plan_id or "").strip()
                             if plan_id and model_turn != "superseded":
                                 revoked = await session.cancel_effect(

@@ -57,7 +57,8 @@ class Quota:
                                                       retry_at_epoch=110, reason='quota'))
 
 
-def test_native_quota_park_and_cold_cancel():
+@pytest.mark.parametrize("cancel_entry", ["native", "stop"])
+def test_native_quota_park_and_cold_cancel(cancel_entry):
     async def run():
         db.init_db()
         initialize_runtime_fence()
@@ -82,7 +83,17 @@ def test_native_quota_park_and_cold_cancel():
         results = [r for r in state.conversation if r.get('tool_call_id') == 'initial-read']
         assert len(results) == 1 and 'rate_limited' in results[0]['content']
         fresh = build_agent_kernel_runtime(model=WaitScript(True).adapter, store=cold)
-        assert await fresh.session.cancel(owner=OWNER, session_id='wait-park', request_id='wait-source')
+        if cancel_entry == 'native':
+            assert await fresh.session.cancel(owner=OWNER, session_id='wait-park', request_id='wait-source')
+        else:
+            from app.agent.task_stop import stop_agent_session
+            other = await stop_agent_session(fresh, OWNER, 'another-session')
+            assert other['cancelled_continuations'] == []
+            assert (await cold.load(owner=OWNER, session_id='wait-park')).metadata['read_wait'] == record
+            stopped = await stop_agent_session(fresh, OWNER, 'wait-park')
+            assert stopped['status'] == 'stopped' and stopped['stopped'] is True
+            assert stopped['cancelled_continuations'] == [record['wait_id']]
+            assert (await stop_agent_session(fresh, OWNER, 'wait-park'))['status'] == 'already_stopped'
         cancelled = await cold.load(owner=OWNER, session_id='wait-park')
         assert cancelled.metadata['read_wait']['state'] == 'cancelled'
         assert cancelled.metadata['read_wait']['budget'] == record['budget']
