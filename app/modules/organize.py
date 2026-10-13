@@ -5576,7 +5576,7 @@ class Organizer:
                 )
                 self._apply_media_profile_to_move_plan(
                     plan, file, rules, plan.match,
-                    {"season": plan.season, "episode": plan.episode}, effective,
+                    {"season": plan.season, "episode": plan.episode, "part": plan.multipart_index}, effective,
                 )
                 changed += 1
             if changed:
@@ -5676,7 +5676,7 @@ class Organizer:
             file = source_files_by_id.get(str(file_id))
             if plan is None or file is None or plan.match is None:
                 continue
-            parsed = {"season": plan.season, "episode": plan.episode}
+            parsed = {"season": plan.season, "episode": plan.episode, "part": plan.multipart_index}
             plan.media_probe_complete = True
             self._apply_media_profile_to_move_plan(
                 plan, file, rules, plan.match, parsed, profile,

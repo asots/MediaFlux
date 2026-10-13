@@ -315,7 +315,8 @@ def extract_nsfw_multipart(value: str, strip_domains: str = "") -> NsfwMultipart
     if located is None:
         return None
     cleaned, _start, end = located
-    suffix = _MEDIA_EXTENSION_RE.sub("", cleaned[end:].strip())
+    # 下划线会被清洗为空格，数字分段仍需保留这个前置分隔符。
+    suffix = _MEDIA_EXTENSION_RE.sub("", cleaned[end:].rstrip())
     label = _MULTIPART_LABEL_RE.match(suffix)
     if label:
         index = int(label.group(1))
