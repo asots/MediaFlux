@@ -453,6 +453,11 @@ def test_successful_business_read_unlocks_only_new_b_confirmation_not_execution(
         plan_a, source_users = await case.preview()
         events, saved = await case.confirm(plan_a)
         case.assert_io(prepares=["A", "B"], executions=["A"], reads=1, requests=3)
+        # 提示与执行器必须使用同一诊断状态：真实READ成功后，不能继续说“先核对”。
+        prompts = [request["system_prompt"] for request in case.script.model_requests]
+        assert "先用只读业务工具核对真实状态" in prompts[1]
+        assert "先用只读业务工具核对真实状态" not in prompts[2]
+        assert "不能再次索要这张卡的确认或重复执行" in prompts[2]
         assert not case.script.steps
         case.assert_source(saved, source_users)
         failed = case.assert_failure(events, saved, plan_a)
@@ -494,6 +499,7 @@ def test_core_discovery_or_failed_business_read_does_not_unlock_new_write(case, 
         plan_id, source_users = await case.preview()
         events, saved = await case.confirm(plan_id)
         case.assert_io(prepares=["A"], executions=["A"], reads=int(step == "read_a"), requests=4)
+        assert "先用只读业务工具核对真实状态" in case.script.model_requests[2]["system_prompt"]
         case.assert_source(saved, source_users)
         diagnostic_tool = "agent.capabilities" if step == "core_discovery" else READ
         observed = [e for e in events if e.type is AgentEventType.TOOL_COMPLETED and e.payload.get("tool") == diagnostic_tool]

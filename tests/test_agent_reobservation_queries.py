@@ -439,7 +439,7 @@ def test_share_source_boundary_rejects_before_listing(case, boundary):
 class ReobserveNativeScript(NativeScript):
     def __init__(self):
         super().__init__("fixture")
-        self.steps = ["query", "preview", "reobserve", "new_preview"]
+        self.steps = ["query", "preview", "new_preview"]
 
     async def respond(self, request):
         body = json.loads(request.content)
@@ -508,11 +508,14 @@ def test_native_failed_confirmation_passes_actual_private_prepare_source_to_reob
         for event in events:
             view.apply(event)
         assert view.build().to_dict()["effect_result"] == failed[0].payload["result"]
-        assert len(case.script.requests) == len(case.script.model_requests) == 4 and not case.script.steps
+        assert len(case.script.requests) == len(case.script.model_requests) == 3 and not case.script.steps
         resumed_wire = case.script.requests[2]
         assert FS_READ.replace(".", "__") in {tool["function"]["name"] for tool in resumed_wire["tools"]}
-        assert "只传 operation=reobserve" in resumed_wire["messages"][0]["content"]
-        assert "只传 operation=reobserve" not in case.script.requests[3]["messages"][0]["content"]
+        assert "只传 operation=reobserve" not in resumed_wire["messages"][0]["content"]
+        assert events.index(observed[0]) < next(i for i, event in enumerate(events)
+                                              if event.type is AgentEventType.MODEL_STARTED)
+        assert any(json.loads(row["content"]).get("data", {}).get("reobservation", {}).get("complete") is True
+                   for row in resumed_wire["messages"] if row.get("role") == "tool")
         for wire in case.script.requests:
             assert [row["content"] for row in wire["messages"] if row.get("role") == "user"] == [GOAL]
         serialized = json.dumps(case.script.requests + [event.to_dict() for event in case.events])

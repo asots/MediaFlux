@@ -58,7 +58,7 @@ class FsReobservationScript(NativeScript):
 
     def __init__(self):
         super().__init__("fixture")
-        self.steps = ["query", "preview", "card", "reobserve", "new_preview", "new_card"]
+        self.steps = ["query", "preview", "card", "new_preview", "new_card"]
         self.calls = []
 
     async def respond(self, request):
@@ -194,6 +194,10 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
                         and event.payload.get("tool") == PREVIEW]
             approvals = [event for event in recovered if event.type is AgentEventType.EFFECT_APPROVAL_REQUIRED]
             assert len(failed) == len(observed) == len(previews) == len(approvals) == 1
+            # 第一次失败续行模型请求之前，执行器已读到稳定身份；不靠脚本先调reobserve。
+            first_model = next(event for event in recovered if event.type is AgentEventType.MODEL_STARTED)
+            assert recovered.index(observed[0]) < recovered.index(first_model)
+            assert all(call.get("step") != "reobserve" for call in script.calls)
             assert failed[0].payload["plan_id"] == old.plan_id
             assert failed[0].payload["result"]["status"] == "confirmation_stale"
             assert "光鸭变更预览已过期" in failed[0].payload["result"]["summary"]
@@ -205,8 +209,8 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert matched["previous_ref"] == old_object and matched["state"] == "same_identity"
             assert matched["name"] == "External.mp4" and "name" in matched["changed_fields"]
             assert current["observation_ref"] != old_observation and matched["object_ref"] != old_object
-            assert script.calls[4]["arguments"]["observation_ref"] == current["observation_ref"]
-            assert script.calls[4]["arguments"]["operations"][0]["object_ref"] == matched["object_ref"]
+            assert script.calls[3]["arguments"]["observation_ref"] == current["observation_ref"]
+            assert script.calls[3]["arguments"]["operations"][0]["object_ref"] == matched["object_ref"]
             new = await pipeline.get_pending_plan(owner=OWNER, session_id=SESSION_ID)
             assert new is not None and new.arguments == {}
             assert new.plan_id != old.plan_id and new.snapshot_fingerprint != old.snapshot_fingerprint
@@ -224,9 +228,12 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert [row for row in state.conversation if row.get("role") == "user"] == [{"role": "user", "content": GOAL}]
             assert len([row for row in state.conversation if row.get("completion_receipt_id") == old.plan_id]) == 1
             assert state.pending_effect_plan_id == new.plan_id
-            assert len(script.requests) == len(script.model_requests) == 6 and not script.steps
-            assert [call["tool"] for call in script.calls] == [READ, PREVIEW, EXECUTE, READ, PREVIEW, EXECUTE]
-            assert script.calls[3]["arguments"] == {"operation": "reobserve"}
+            assert len(script.requests) == len(script.model_requests) == 5 and not script.steps
+            assert [call["tool"] for call in script.calls] == [READ, PREVIEW, EXECUTE, PREVIEW, EXECUTE]
+            rereads = [call for row in state.conversation for call in row.get("tool_calls", [])
+                       if call["name"] in {READ, READ.replace(".", "__")}
+                       and call["arguments"].get("operation") == "reobserve"]
+            assert len(rereads) == 1 and rereads[0]["arguments"] == {"operation": "reobserve"}
             assert any(json.loads(row["content"]).get("status") == "confirmation_stale"
                        for row in script.requests[3]["messages"] if row.get("role") == "tool")
             for wire in script.requests:
@@ -266,7 +273,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert [row for row in final.conversation if row.get("role") == "user"] == [{"role": "user", "content": GOAL}]
             for plan_id in (old.plan_id, new.plan_id):
                 assert len([row for row in final.conversation if row.get("completion_receipt_id") == plan_id]) == 1
-            assert len(script.requests) == len(script.model_requests) == 7 and not script.steps
+            assert len(script.requests) == len(script.model_requests) == 6 and not script.steps
             for wire in script.requests:
                 assert [row["content"] for row in wire["messages"] if row.get("role") == "user"] == [GOAL]
 
@@ -279,7 +286,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert duplicate[-1].type is AgentEventType.TURN_FAILED
             assert duplicate[-1].payload["code"] == "confirmation_invalid"
             assert (await cold.load(owner=OWNER, session_id=SESSION_ID)).to_payload() == final.to_payload()
-            assert len(script.requests) == len(script.model_requests) == 7
+            assert len(script.requests) == len(script.model_requests) == 6
             writes["rename"].assert_called_once_with("move", "Final.mp4")
             with db.get_conn() as conn:
                 assert conn.execute("SELECT COUNT(*) FROM organize_operation_jobs").fetchone()[0] == 1

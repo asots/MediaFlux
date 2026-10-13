@@ -1021,6 +1021,12 @@ class AgentSession:
             )
             selected_names = {tool.name for tool in selected_tools}
             selected_model_names = {tool.model_name for tool in selected_tools}
+            if (pending_resume_call is None and tool_context.diagnostic_only
+                    and source_spec is not None and source_spec.name in selected_names):
+                # 可信旧计划已保存原观察范围；重读不是新写入，不要求模型再征求许可。
+                # 共用READ的准入、预算、检查点和取消链，不重放旧写操作。
+                resumed_tool = source_spec
+                pending_resume_call = {"arguments": {"operation": "reobserve"}}
             tool_definitions = tuple(
                 tool.model_definition() for tool in selected_tools
             )
@@ -1180,8 +1186,8 @@ class AgentSession:
                 token.raise_if_cancelled()
                 resuming_read = pending_resume_call is not None
                 if resuming_read:
-                    # 此调用曾在 acquire 阶段被拒绝，尚未访问后端。
-                    # 沿同一执行链重新准入；不消耗模型调用，也不重新生成参数。
+                    # 恢复未执行的READ，或读取可信旧计划保存的观察范围。
+                    # 沿同一执行链准入；不消耗模型调用，也不让模型重生成固定参数。
                     calls = [ModelToolCall(secrets.token_urlsafe(12), resumed_tool.model_name,
                                            pending_resume_call["arguments"])]
                     pending_resume_call = None
@@ -1270,23 +1276,15 @@ class AgentSession:
                             + "。不要对受限能力换关键词反复重试；优先基于已有结果回答用户的问题，"
                             "清楚说明哪些补充查询未完成。只读问答不要输出确认卡/写操作/重放提示。"
                         )
-                    if diagnosing_effect:
+                    if tool_context.diagnostic_only:
                         request_system_prompt += (
                             "\n前序写操作失败、部分完成或尚未核验；原回执不能被后续查询成功改成写入成功。"
                             "先用只读业务工具核对真实状态、定位阻塞，不要直接重复原写入。"
                             "核对后可为原任务中仍可推进的后续动作准备新的确认卡；新预检不等于执行，不能沿用旧授权。"
                         )
-                    if (tool_context.diagnostic_only and not final_synthesis_round
-                            and source_spec is not None and source_spec.name in selected_names):
-                        request_system_prompt += (
-                            f"\n服务端已保存原观察来源；可调用 {source_spec.name}，只传 operation=reobserve，"
-                            "由服务端重新查询并比较稳定对象标识。只用返回的新引用和对应序号；"
-                            "没有对应的旧对象不能按同名或旧序号替代。任何新写仍须新确认。"
-                        )
                     if confirmed_result is not None:
                         request_system_prompt += (
-                            "\n原任务目标（后续解释问题不是新任务）：" + sanitize_public_text(agent_input.message)
-                            + "\n当前回合是用户点击确认后的续行，不是原预览请求的重放。"
+                            "\n当前回合是用户点击确认后的续行，不是原预览请求的重放。"
                             "上一张冻结计划已获授权并已消费；对话末尾的可信系统结果是本次真实执行回执。"
                             "历史中的‘只预览/等待确认/approval_required’描述的是授权前状态，不能覆盖新回执。"
                             "系统会展示本次可信回执，不要原样或改写复述；请继续处理原任务剩余步骤，只补充新的核验结果或下一步阻塞。"
