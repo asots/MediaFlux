@@ -19,6 +19,7 @@ from app.clients.guangya import (
     IncompleteOfflineTaskListError,
     guangya_provider_task_state,
 )
+from app.modules.guangya_workspace import observation_page
 from tests.test_agent_guangya_sdk_capabilities import _RecycleClient, _ShareClient
 
 
@@ -608,17 +609,19 @@ class GuangYaAgentReadCompletionTests(unittest.TestCase):
             shares.list_guangya_user_shares({"page": 1, "page_size": 50}, ToolContext())
 
     def test_model_keeps_type_size_extension_without_provider_identifiers(self):
-        page = {
-            "observation_ref": "OBS" + "A" * 32, "scope": "scope", "scopes": [],
-            "page": 1, "total": 1, "has_more": False, "truncated": False,
-            "entries": [{"object_ref": "opaque-object", "object_name": "episode.mkv",
-                         "location": "scope", "kind": "video", "size": 456, "extension": "mkv"}],
-        }
+        page = observation_page({
+            "plan_id": "a" * 32, "scope_name": "scope",
+            "entries": [{"handle": "OBJ" + "B" * 24, "name": "episode.mkv",
+                         "relative_parent": "scope", "media_kind": "video", "size": 456,
+                         "extension": "mkv", "file_id": "private-provider-id"}],
+        })
         with mock.patch.object(workspace, "_read_observation_page", return_value=page):
             result = workspace.query_guangya_filesystem({}, ToolContext())
         entry = result.model_data["entries"][0]
         self.assertEqual((entry["kind"], entry["size"], entry["extension"]), ("video", 456, "mkv"))
         self.assertNotIn("file_id", entry)
+        self.assertNotIn("private-provider-id", json.dumps(result.model_data))
+        self.assertEqual(result.model_data["operation"], "list")
 
 
 if __name__ == "__main__":
