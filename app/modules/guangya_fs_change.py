@@ -687,7 +687,7 @@ def _full_path(parent_path: str, name: str) -> str:
 
 
 def _resolve_directory(
-    client: GuangYaClient, path: str
+    client: GuangYaClient, path: str, observed_directories: dict[str, dict[str, Any]]
 ) -> tuple[str, dict[str, Any] | None]:
     normalized = _normalize_path(path)
     if normalized == "/":
@@ -695,6 +695,16 @@ def _resolve_directory(
     target = resolve_workspace_path(client, normalized)
     if not target.is_dir:
         raise GuangYaFSChangeError("目标路径不是光鸭目录")
+    observed = observed_directories.get(normalized)
+    if observed is None:
+        matches = [item for path, item in observed_directories.items() if path.casefold() == normalized.casefold()]
+        # 跟随解析器实际选中的父目录和名称，不能把真实共存的 D/d 合并。
+        identified = [item for item in matches if item["parent_id"] == target.parent_id and item["name"] == target.name]
+        if len(identified or matches) > 1:
+            raise GuangYaFSChangeStale("目标目录观察存在歧义，请重新读取后再生成计划")
+        observed = next(iter(identified or matches), None)
+    if observed is not None and not _snapshot_matches(target, observed):
+        raise GuangYaFSChangeStale("目标目录与已观察对象不一致，请重新读取后再生成计划")
     return str(target.file_id), _snapshot(target)
 
 
@@ -737,7 +747,7 @@ def _validate_observation(
         raise GuangYaWorkspaceStale("光鸭登录凭据已变化，请重新读取目录")
 
 
-def _expand_batch_operations(
+def _compile_operations(
     operations: list[dict[str, Any]], entries: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     expanded: list[dict[str, Any]] = []
@@ -788,7 +798,46 @@ def _expand_batch_operations(
                     "new_name": _validate_name(f"{title} - {marker}{suffix}"),
                 }
             )
-    return expanded
+    # 未来路径描述的是同一个已观察目录，不是要创建的同名替代目录。
+    # 在唯一冻结链路中归一为当前路径；执行阶段仍只使用核验后的目录 ID。
+    destinations: dict[str, str] = {}
+    for raw in expanded:
+        op = str(raw.get("op") or "").strip().casefold()
+        observed = entries.get(str(raw.get("object_ref") or "").strip().upper(), {})
+        if not observed.get("is_dir") or op not in {"move", "relocate", "rename"}:
+            continue
+        parent = str(observed.get("parent_path") or "/")
+        source = _full_path(parent, str(observed["name"]))
+        destination = _full_path(
+            parent if op == "rename" else _normalize_path(raw.get("target_path")),
+            _validate_name(raw.get("new_name")) if op != "move" else str(observed["name"]),
+        )
+        if destination == source:
+            continue
+        if destination in destinations and destinations[destination] != source:
+            raise GuangYaFSChangeError("计划中的目录目标路径不唯一")
+        destinations[destination] = source
+
+    compiled = []
+    for raw in expanded:
+        item = dict(raw)
+        op = str(raw.get("op") or "").strip().casefold()
+        fields = ("parent_path",) if op == "create_directory" else ("target_path",) if op in {"move", "relocate", "copy"} else ()
+        for field in fields:
+            path = _normalize_path(raw.get(field))
+            used = set()
+            while True:
+                matches = [target for target in destinations if path == target or path.startswith(target + "/")]
+                if not matches:
+                    break
+                target = max(matches, key=len)
+                if target in used:
+                    raise GuangYaFSChangeError("计划中的目录路径变更存在循环或歧义")
+                used.add(target)
+                path = _normalize_path(destinations[target] + path[len(target):])
+            item[field] = path
+        compiled.append(item)
+    return compiled
 
 
 def _validate_plan_names(operations: list[dict[str, Any]]) -> None:
@@ -854,7 +903,9 @@ def build_fs_change_plan(
             f"光鸭变更计划必须包含 1 到 {MAX_FS_CHANGE_OPERATIONS} 项操作"
         )
     entries = observation_entry_map(observation)
-    operations = _expand_batch_operations(operations, entries)
+    operations = _compile_operations(operations, entries)
+    observed_directories = {_full_path(str(item.get("parent_path") or "/"), str(item["name"])): item
+                            for item in entries.values() if item.get("is_dir")}
     create_count = sum(
         1
         for item in operations
@@ -873,7 +924,7 @@ def build_fs_change_plan(
         )
     # 先创建浅层目录，再创建依赖它的子目录；对象操作保持原相对顺序。
     operations = sorted(operations, key=lambda item: (
-        0, len(Path(_normalize_path(item.get("parent_path"))).parts),
+        0, len(Path(item["parent_path"]).parts),
     ) if str(item.get("op") or "").strip().casefold() == "create_directory" else (1, 0))
     cache: dict[str, dict[str, GuangYaFile]] = {}
     frozen: list[dict[str, Any]] = []
@@ -895,12 +946,12 @@ def build_fs_change_plan(
         }:
             raise GuangYaFSChangeError("不支持的光鸭变更操作")
         if op == "create_directory":
-            parent_path = _normalize_path(raw.get("parent_path"))
+            parent_path = raw["parent_path"]
             name = _validate_name(raw.get("name"))
             pending_parent = pending_targets.get(parent_path)
             parent_id, parent_snapshot = (
                 ("", None) if pending_parent is not None
-                else _resolve_directory(client, parent_path)
+                else _resolve_directory(client, parent_path, observed_directories)
             )
             if pending_parent is None and _name_conflict(_list_map(client, parent_id, cache), name):
                 raise GuangYaFSChangeError("新建目录名称已被占用")
@@ -957,10 +1008,10 @@ def build_fs_change_plan(
                 base["move_first"] = True
             base["new_name"] = new_name
         if op in {"move", "relocate", "copy"}:
-            target_path = _normalize_path(raw.get("target_path"))
+            target_path = raw["target_path"]
             pending_target = pending_targets.get(target_path)
             if pending_target is None:
-                target_id, target_snapshot = _resolve_directory(client, target_path)
+                target_id, target_snapshot = _resolve_directory(client, target_path, observed_directories)
                 if target_id == parent_id:
                     if op == "copy":
                         raise GuangYaFSChangeError("复制目标与当前目录相同")
@@ -1004,7 +1055,7 @@ def build_fs_change_plan(
     structural_moves = [
         item
         for item in frozen
-        if item.get("op") in {"move", "relocate", "trash"}
+        if item.get("op") in {"move", "relocate", "rename", "trash"}
         and bool((item.get("source") or {}).get("is_dir"))
     ]
     # 保留签名计划已有的 rename_dependencies 字段，统一表示前置对象操作，
@@ -1014,11 +1065,14 @@ def build_fs_change_plan(
         raise GuangYaFSChangeError("计划不能通过不同引用重复操作同一个对象")
     for item in frozen:
         source_path = str(item.get("source_path") or "")
-        if not source_path:
-            continue
+        target = str(item.get("target_path") or item.get("parent_path") or "")
+        target_id = str(item.get("target_id") or item.get("parent_id") or "")
         for parent in structural_moves:
             parent_path = str(parent["source_path"])
-            if source_path != parent_path and source_path.startswith(parent_path + "/"):
+            if item is not parent and (
+                source_path.startswith(parent_path + "/") or target == parent_path or target.startswith(parent_path + "/")
+                or target_id == parent["source"]["file_id"]
+            ):
                 if parent["op"] == "trash":
                     target = str(item.get("target_path") or "")
                     escapes = item["op"] in {"move", "relocate"} and not (
@@ -1029,9 +1083,9 @@ def build_fs_change_plan(
                     parent["require_empty"] = True
                     if item["op"] == "trash":
                         item["require_empty"] = True
-                elif item["op"] == "trash" and item["source"]["is_dir"]:
+                elif parent["op"] != "rename" and item["op"] == "trash" and item["source"]["is_dir"]:
                     item["require_empty"] = True
-                parent.setdefault("rename_dependencies", []).append(str(item["source"]["file_id"]))
+                parent.setdefault("rename_dependencies", []).append(str((item.get("source") or {}).get("file_id") or item["created_path"]))
 
     for item in frozen:
         if not item.get("require_empty"):
@@ -1061,8 +1115,7 @@ def build_fs_change_plan(
             raise GuangYaFSChangeError("光鸭变更计划存在无法满足的操作依赖")
         pending.remove(item)
         frozen.append(item)
-        if "source" in item:
-            ordered_ids.add(str(item["source"]["file_id"]))
+        ordered_ids.add(str((item.get("source") or {}).get("file_id") or item["created_path"]))
 
     _validate_plan_names(frozen)
     counts = {
@@ -1653,7 +1706,7 @@ def _reconcile_fs_operations(client, operations, outcomes, created_targets, stat
         if verified:
             outcome.update(status="completed", completed_actions=list(_operation_actions(item)))
             outcome.pop("reason", None)
-            completed_objects.add(str((item.get("source") or {}).get("file_id") or created_id))
+            completed_objects.add(str((item.get("source") or {}).get("file_id") or item["created_path"]))
         else:
             outcome.update(status="unknown", reason="verification_pending")
             actions = _operation_actions(item)
@@ -1969,8 +2022,7 @@ def execute_fs_change_plan(
                 expected_statuses={"running"}, expected_job_id=job_id, expected_lease_generation=lease_generation)
             if waiting_copies and not persistence_uncertain:
                 raise GuangYaFSCopyPending(min(waiting_copies))
-        completed_objects = {str((item.get("source") or {}).get("file_id") or
-            (created_targets.get(item.get("created_path")) or {}).get("file_id") or "")
+        completed_objects = {str((item.get("source") or {}).get("file_id") or item["created_path"])
             for item, outcome in zip(operations, outcomes) if outcome["status"] == "completed"}
         successful_operations = [item for item, outcome in zip(operations, outcomes) if outcome["status"] == "completed"]
         for index, item in enumerate(operations, start=1):
@@ -2098,7 +2150,7 @@ def execute_fs_change_plan(
                 # 日志介质失效后停止追加写入，避免扩大无法可靠追溯的副作用面。
                 break
             if status == "completed":
-                completed_objects.add(str(source.get("file_id") or created_id))
+                completed_objects.add(str(source.get("file_id") or item["created_path"]))
                 successful_operations.append(item)
             if needs_checkpoint:
                 try:
