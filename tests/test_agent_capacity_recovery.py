@@ -494,8 +494,9 @@ def test_cold_explanation_preserves_unknown_across_generations_and_new_read(
 
 
 @pytest.mark.parametrize("kind", ["sqlite", "memory"])
-def test_unresolved_prefix_cannot_be_evicted_to_admit_new_turn(kind):
+def test_unstorable_new_user_request_cannot_evict_original_checkpoint(kind):
     from app.agent.kernel.conversation_codec import pending_content
+    from app.agent.kernel.state import HistoryCapacityError
 
     async def exercise():
         store = make_store() if kind == "sqlite" else InMemorySessionStateStore()
@@ -522,7 +523,7 @@ def test_unresolved_prefix_cannot_be_evicted_to_admit_new_turn(kind):
             },
         ]
         saved = await store.commit(lease, conversation=rows)
-        with pytest.raises(ValueError):
+        with pytest.raises(HistoryCapacityError):
             await store.commit(
                 lease, conversation=rows + [{"role": "user", "content": "x" * 170000}]
             )

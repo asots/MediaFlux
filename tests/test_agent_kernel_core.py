@@ -1507,7 +1507,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("old answer", [item.content for item in bounded])
         self.assertEqual(bounded[0].role, "user")
 
-    async def test_latest_oversized_history_turn_is_compacted_not_dropped(self) -> None:
+    async def test_latest_oversized_history_turn_does_not_block_new_request(self) -> None:
         catalog = ToolCatalog([read_tool("library.status")])
         state = InMemorySessionStateStore()
         session = AgentSession(
@@ -1545,29 +1545,15 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ModelMessage(role="user", content="方案 A"),
         ]
 
-        try:
-            bounded = bounded_model_messages(
-                messages,
-                system_prompt=session.system_prompt,
-                context_window_tokens=session.limits.context_window_tokens,
-                output_tokens=session.limits.effective_output_tokens,
-                history_end=4,
-                tool_definitions=(catalog.get("library.status").model_definition(),),
-            )
-        except ToolPipelineError as exc:
-            self.assertEqual(exc.code, "context_budget_exceeded")
-            return
-
-        self.assertEqual(
-            next(call.arguments for item in bounded for call in item.tool_calls),
-            messages[1].tool_calls[0].arguments,
+        bounded = bounded_model_messages(
+            messages,
+            system_prompt=session.system_prompt,
+            context_window_tokens=session.limits.context_window_tokens,
+            output_tokens=session.limits.effective_output_tokens,
+            history_end=4,
+            tool_definitions=(catalog.get("library.status").model_definition(),),
         )
-        self.assertEqual(bounded[-1].content, "方案 A")
-        self.assertTrue(any("完整读取狐妖小红娘" in item.content for item in bounded))
-        self.assertTrue(any("方案 A：按 TMDB" in item.content for item in bounded))
-        self.assertTrue(any(item.tool_calls for item in bounded))
-        self.assertTrue(any(item.role == "tool" for item in bounded))
-        self.assertFalse(any("历史工具观察" in item.content for item in bounded))
+        self.assertEqual(bounded, (messages[-1],))
 
     async def test_historical_tool_pairs_keep_roles_without_changing_current_calls(self):
         prior_call = ModelMessage(role="assistant", tool_calls=(ModelToolCall("old", "media.user.inspect", {}),))

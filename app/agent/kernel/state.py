@@ -400,11 +400,6 @@ def retain_conversation(
     original_bytes = cost(conversation)
     if original_bytes <= maximum_bytes:
         return list(conversation)
-    if any(
-        isinstance(row.get("content"), PendingText) and row["content"] == pending_content(True)
-        for row in conversation
-    ):
-        raise ValueError("unresolved execution history exceeds conversation budget")
     ratio = maximum_bytes / original_bytes * 0.75
     turns: list[list[dict[str, Any]]] = []
     required_rows: set[int] = set()
@@ -414,7 +409,7 @@ def retain_conversation(
             row.get("tool_calls") or row.get("role") == "tool" or row.get("reply_context", {}).get("reference_handle")
         ):
             required_rows.add(id(row))
-        if row.get("role") == "tool":
+        if row.get("role") == "tool" and not isinstance(row.get("content"), PendingText):
             content = str(row.get("content") or "")
             row["content"] = compact_tool_content(content, maximum=max(512, int(len(content) * ratio)), tool_name=row.get("tool_name", ""), trusted=True)
         elif row.get("role") == "assistant" and len(str(row.get("content") or "")) > 8000:
@@ -527,7 +522,7 @@ def preserve_history(
                 "sha256": digest, "tool": str(row.get("tool_name") or "")[:200],
                 "call_id": str(row.get("tool_call_id") or "")[:200],
                 "status": str(result.get("status") or "unknown")[:80],
-                "summary": str(result.get("summary") or "")[:512],
+                "summary": str(result.get("summary") or result.get("error") or "")[:512],
                 "result_handle": str(result.get("result_handle") or "")[:200],
                 "details_omitted": True,
             })

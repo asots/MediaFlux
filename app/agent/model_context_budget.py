@@ -456,19 +456,18 @@ def bounded_model_messages(
         for maximum in (1_200, 400):
             if candidate_cost <= remaining or kept:
                 break
-            candidate = _compact_chain(group, max_tool_chars=maximum)
+            from app.agent.kernel.pipeline import ToolPipelineError
+
+            try:
+                candidate = _compact_chain(group, max_tool_chars=maximum)
+            except ToolPipelineError as exc:
+                if exc.code != "context_budget_exceeded":
+                    raise
+                break  # 不可压缩的旧整组留在存储中，不阻塞当前请求。
             candidate_cost = cost(_native_history(candidate, reserved_ids=reserved_ids))
         if candidate_cost > remaining:
-            # 纯文本旧回合的 user 来源由 Session 历史记录/快照保留；不能因旧助手长文冻结新任务。
-            # 执行参数、原生状态及回执仍是完整组，不借历史记忆绕过它们的保真要求。
-            if not kept and any(m.role == "tool" or m.tool_calls or m.provider_state is not None
-                                or m.effect_plan_id or m.completion_receipt_id for m in group):
-                from app.agent.kernel.pipeline import ToolPipelineError
-
-                raise ToolPipelineError(
-                    "最近任务上下文无法保真保留，请缩小范围或补充完整任务后重试",
-                    code="context_budget_exceeded",
-                )
+            # 历史整组超出窗口时停止装载，不让旧调用锁死新问题。
+            # Session 的历史索引保留遗漏标记；历史本身不授予写操作权限。
             break
         kept.append(candidate)
         remaining -= candidate_cost

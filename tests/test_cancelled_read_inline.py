@@ -118,9 +118,9 @@ def test_real_returned_read(backend, mode):
                 limits=SessionLimits(context_window_tokens=16384) if mode in {"wire_budget", "fake_handle"} else None)
             following_events = [e async for e in following.run(AgentInput(owner="o", session_id="s", message="describe existing facts"))]
             if mode in {"wire_budget", "fake_handle"}:
-                assert following_events[-1].type == AgentEventType.TURN_FAILED
-                assert following_events[-1].payload["code"] == "context_budget_exceeded"
-                assert not next_model.requests
+                assert following_events[-1].type == AgentEventType.TURN_COMPLETED
+                assert next_model.requests
+                assert any(json.loads(m.content).get("truncated") for m in next_model.requests[0].messages if m.role == "tool")
             else:
                 assert following_events[-1].type == AgentEventType.TURN_COMPLETED
                 actual = next(m.content for m in next_model.requests[0].messages if m.role == "tool")
@@ -165,66 +165,12 @@ def test_small_cancelled_fact_real_consumer():
         next_model = model(False)
         following = session(next_model, SessionLimits(context_window_tokens=16384))
         events = [e async for e in following.run(AgentInput(owner="o", session_id="small", message="describe previous fact"))]
-        assert events[-1].type == AgentEventType.TURN_FAILED
-        assert events[-1].payload["code"] == "context_budget_exceeded"
-        assert not next_model.requests
+        assert events[-1].type == AgentEventType.TURN_COMPLETED
+        assert next_model.requests
+        assert "observations" in next_model.requests[0].system_prompt
         cold = await sqlite_store().load(owner="o", session_id="small")
         assert next(r for r in cold.conversation if r["role"] == "tool") == fact
         assert len(calls) == 1
-    with isolated_test_database():
-        asyncio.run(run())
-
-
-@pytest.mark.parametrize("mode", ["snapshot", "reader", "foreign", "missing_part", "extra_business", "typed_business", "small_error_fact", "pending"])
-def test_consumer_recovery_requires_readable_exact_source(mode):
-    from app.agent.kernel.session import _require_complete_inline_history
-    from app.agent.kernel.pipeline import ToolPipelineError
-    async def run():
-        store = sqlite_store()
-        catalog = ToolCatalog([replace(READ_TOOL, read=lambda args, context: {"ok": True, "data": {"text": "x" * 18000, "flag": True}})])
-        first_model = ScriptedModel([
-            [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("one", "library.inspect", {})),
-             ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")],
-            [ModelEvent(ModelEventType.TEXT_DELTA, text="observed"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
-        ])
-        active = AgentSession(model=first_model, catalog=catalog, retriever=CapabilityRetriever(),
-            pipeline=ToolPipeline(catalog=catalog, state_store=store, reference_store=store), state_store=store)
-        events = [e async for e in active.run(AgentInput(owner="o", session_id="scope", message="inspect"))]
-        assert events[-1].type == AgentEventType.TURN_COMPLETED, [(e.type, e.payload) for e in events]
-        cold = sqlite_store()
-        saved = await cold.load(owner="o", session_id="scope")
-        row = next(r for r in saved.conversation if r["role"] == "tool")
-        payload = json.loads(row["content"])
-        handle = payload["result_handle"]
-        lease, _ = await cold.begin_turn(owner="o", session_id="scope", request_id="verify")
-        pipeline = ToolPipeline(catalog=catalog, state_store=cold, reference_store=cold)
-        page = await pipeline._read_result({"handle": handle, "path": "/data", "offset": 1, "limit": 1}, lease)
-        assert json.loads(page.model_content)["data"]["items"] == [{"key": "flag", "value": True}]
-        if mode == "reader":
-            row = {**row, "tool_name": "agent.read_result", "content": page.model_content}
-        elif mode == "foreign":
-            lease = replace(lease, session_id="other")
-        elif mode == "missing_part":
-            from app import database as db
-            with db.get_conn() as conn:
-                conn.execute("DELETE FROM agent_kernel_refs WHERE kind = 'tool_result_part'")
-        elif mode == "extra_business":
-            payload["business_fact"] = "not in snapshot"
-            row = {**row, "content": json.dumps(payload)}
-        elif mode == "typed_business":
-            payload = json.loads(page.model_content)
-            payload["data"]["items"][0]["value"] = 1
-            row = {**row, "content": json.dumps(payload)}
-        elif mode == "small_error_fact":
-            row = {**row, "content": json.dumps({"ok": False, "status": "error", "data": {"unique": "BUSINESS_FACT"}})}
-        elif mode == "pending":
-            row = {**row, "content": pending_content(True)}
-        if mode in {"snapshot", "reader", "pending"}:
-            await _require_complete_inline_history([row], [], code="context_budget_exceeded", pipeline=pipeline, lease=lease)
-        else:
-            with pytest.raises(ToolPipelineError) as error:
-                await _require_complete_inline_history([row], [], code="context_budget_exceeded", pipeline=pipeline, lease=lease)
-            assert error.value.code == "context_budget_exceeded"
     with isolated_test_database():
         asyncio.run(run())
 

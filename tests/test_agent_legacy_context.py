@@ -745,12 +745,10 @@ def test_large_latest_assistant_text_cannot_freeze_legacy_task_after_tool_result
     bounded = bounded_model_messages(prior + current, history_end=2, tool_definitions=(),
                                     system_prompt="", context_window_tokens=16_384, output_tokens=4096)
     assert bounded == tuple(current)
-    # 与执行组严格区分：真实工具参数/结果不能按普通助手文字裁掉。
-    from app.agent.kernel.pipeline import ToolPipelineError
+    # 旧调用按完整组退出窗口，不能截断参数，也不能阻塞新问题。
     guarded = [prior[0], ModelMessage(role="assistant", content=prior[1].content,
                tool_calls=(ModelToolCall("executed", "library.inspect", {}),)),
                ModelMessage(role="tool", tool_call_id="executed", tool_name="library.inspect", content='{"ok":true}'), *current]
-    with pytest.raises(ToolPipelineError) as error:
-        bounded_model_messages(guarded, history_end=3, tool_definitions=(),
-                               system_prompt="", context_window_tokens=16_384, output_tokens=4096)
-    assert error.value.code == "context_budget_exceeded"
+    assert bounded_model_messages(guarded, history_end=3, tool_definitions=(),
+                                  system_prompt="", context_window_tokens=16_384,
+                                  output_tokens=4096) == tuple(current)

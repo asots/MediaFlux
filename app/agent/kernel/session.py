@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from app.agent.domain_tool_metadata import loaded_tool_guidance
-from app.agent.model_context_budget import bounded_model_messages, compact_tool_content, protocol_history_baseline
+from app.agent.model_context_budget import bounded_model_messages, compact_tool_content
 from . import telegram_reference
 from .references import ReferenceError
 from app.agent.public_safety import public_tool_label, sanitize_public_text
@@ -75,78 +75,6 @@ from .state import (
 from .ux_selection import validate_selection
 
 logger = logging.getLogger(__name__)
-
-
-async def _require_complete_inline_history(original, candidate, *, code, pipeline, lease, wire=False):
-    """Only a readable scoped source and its exact projection permit fact eviction."""
-    from collections import Counter
-    from .conversation_codec import PendingText
-    from .state import _exact_value
-    from app.agent.model_context_budget import compact_tool_content
-
-    async def recoverable(payload):
-        handle = payload.get("result_handle")
-        if not isinstance(handle, str) or payload.get("read_tool") != "agent.read_result":
-            return False
-        try:
-            store = pipeline.reference_store
-            manifest = await store.resolve(handle, owner=lease.owner, session_id=lease.session_id, expected_kind="tool_result")
-            parts = [await store.resolve(part, owner=lease.owner, session_id=lease.session_id,
-                                        expected_kind="tool_result_part") for part in manifest["parts"]]
-            source = "".join(parts)
-            # Reconstruct the existing producer's envelope, not a business-field
-            # subset. Extra fields or a different snapshot cannot confer recovery.
-            for trusted in (False, True):
-                projected = json.loads(compact_tool_content(source, maximum=pipeline.projector.max_model_chars, trusted=trusted))
-                projected.update(result_handle=handle, read_tool="agent.read_result")
-                expected = compact_tool_content(json.dumps(projected, ensure_ascii=False, separators=(",", ":")),
-                                                maximum=pipeline.projector.max_model_chars, trusted=True)
-                if _exact_value(json.loads(expected)) == _exact_value(payload):
-                    return True
-                # A later retention pass can compact this same producer envelope.
-                # Its canonical serialized size is a witness budget, not an
-                # exemption: reconstruct every field and compare typed trees.
-                canonical_size = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-                reprojected = compact_tool_content(expected, maximum=canonical_size, trusted=True)
-                if _exact_value(json.loads(reprojected)) == _exact_value(payload):
-                    return True
-        except (ReferenceError, ValueError, TypeError, KeyError, ToolPipelineError):
-            pass
-        # Reader pages have different coordinates; verify through the actual
-        # existing scoped reader (including its untrusted-reference restrictions).
-        data = payload.get("data")
-        if (isinstance(data, dict) and type(data.get("returned")) is int and 0 <= data["returned"] <= 1000
-                and isinstance(data.get("path"), str) and type(data.get("offset")) is int and data["offset"] >= 0):
-            try:
-                page = await pipeline._read_result({"handle": handle, "path": data["path"],
-                    "offset": data["offset"], "limit": max(1, data["returned"])}, lease)
-                return _exact_value(json.loads(page.model_content)) == _exact_value(payload)
-            except (ReferenceError, ValueError, TypeError, KeyError, ToolPipelineError):
-                pass
-        return False
-
-    def identity(row):
-        # The existing native-history serializer renames non-native historical IDs.
-        return (None if wire else row.get("tool_call_id"), row.get("tool_name"), row.get("content"))
-    remaining = Counter(identity(row) for row in candidate if row.get("role") == "tool")
-    for row in original:
-        content = row.get("content")
-        # PendingText has executor provenance; a business JSON error/status shape
-        # does not. Protect all JSON fact objects regardless of their length.
-        if row.get("role") != "tool" or not isinstance(content, str) or isinstance(content, PendingText):
-            continue
-        try:
-            payload = json.loads(content)
-        except ValueError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        key = identity(row)
-        if remaining[key] <= 0:
-            if await recoverable(payload):
-                continue
-            raise ToolPipelineError("完整 inline 结果超过当前预算；已保留原始事实，未发送截断结果。", code=code)
-        remaining[key] -= 1
 
 
 def _provider_failure_message(exc: ModelProviderError) -> str:
@@ -578,10 +506,6 @@ class AgentSession:
                             "tool_limit": self.limits.max_tool_calls,
                             "model_spent": round_index + 1, "tool_spent": total_tool_calls,
                         }, binding=self.continuation_binding),)
-                    await _require_complete_inline_history(
-                        state.conversation, retain_conversation(stored), code="history_capacity_exceeded",
-                        pipeline=self.pipeline, lease=lease,
-                    )
                     # 失败确认后的诊断仍属于同一执行组，不能在续接前撤掉已有的有界容量。
                     # 下一用户回合仍按正常规则释放；保留此阶段并不会提高容量上限。
                     state = await self.state_store.commit(
@@ -1439,12 +1363,6 @@ class AgentSession:
                     model=selected_model,
                     # 原生开关允许提出多个调用，不授予并行写权限；实际批次仍逐项验资格。
                     allow_parallel_tool_calls=bool(parallel_reads),
-                )
-                await _require_complete_inline_history(
-                    [message.to_dict() for message in protocol_history_baseline(messages, history_end=history_end)],
-                    [message.to_dict() for message in request.messages],
-                    code="context_budget_exceeded", wire=True,
-                    pipeline=self.pipeline, lease=lease,
                 )
                 reply = agent_input.reply_context
                 handle = reply.get("reference_handle")
