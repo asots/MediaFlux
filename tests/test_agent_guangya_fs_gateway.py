@@ -2163,6 +2163,179 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(client.file_info("source").parent_id, "0")
         self.assertEqual(client.list_dir("target"), [])
 
+    def _named_copy_plan(self, client, *, directory=False):
+        plan = self._confirmed_plan(client, {
+            "op": "copy", "source_name": "source" if directory else "Move.mp4",
+            "new_name": "archived" if directory else "Final.mp4", "target_path": "/target",
+        }, path="/" if directory else "/source")
+        return plan, self._queued_payload(plan)
+
+    def test_copy_and_name_changes_only_the_verified_copy(self):
+        for directory in (False, True):
+            with self.subTest(directory=directory):
+                client = FakeGatewayClient()
+                original = deepcopy(client.directories)
+                _, payload = self._named_copy_plan(client, directory=directory)
+                with mock.patch.object(client, "copy", wraps=client.copy) as copied, \
+                     mock.patch.object(client, "rename", wraps=client.rename) as renamed:
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                self.assertFalse(result["partial"])
+                self.assertEqual(result["stats"]["copied"], 1)
+                self.assertEqual(result["operation_items"][0]["completed_actions"], ["copy", "rename"])
+                self.assertEqual(client.directories["source"], original["source"])
+                self.assertEqual(client.directories["0"], original["0"])
+                target = client.list_dir("target")
+                self.assertEqual(len(target), 1)
+                self.assertEqual(target[0].name, "archived" if directory else "Final.mp4")
+                renamed.assert_called_once_with(target[0].file_id, target[0].name)
+                copied.assert_called_once()
+
+    def test_named_copy_waits_and_resumes_without_recopy_or_second_confirmation(self):
+        for directory in (False, True):
+            with self.subTest(directory=directory):
+                client = FakeGatewayClient()
+                plan, payload = self._named_copy_plan(client, directory=directory)
+                with mock.patch.object(client, "copy", wraps=client.copy) as copied, \
+                     mock.patch.object(client, "rename", wraps=client.rename) as renamed, \
+                     mock.patch.object(client, "task_status", return_value={"data": {"status": 1}}) as task, \
+                     mock.patch.object(guangya_fs_change, "_COPY_FOREGROUND_ATTEMPTS", 1):
+                    for generation in (1, 2):
+                        with self.assertRaises(guangya_fs_change.GuangYaFSCopyPending):
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=generation)
+                        renamed.assert_not_called()
+                    task.return_value = {"data": {"status": 2}}
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    copied.assert_called_once()
+                    renamed.assert_called_once()
+                self.assertFalse(result["partial"])
+                self.assertEqual(result["stats"]["copied"], 1)
+                self.assertEqual(client.file_info("source").parent_id, "0")
+                self.assertEqual(guangya_fs_change._read(plan["plan_id"])["status"], "completed")
+
+    def test_named_copy_resumes_verified_identity_or_verifies_interrupted_rename(self):
+        class WorkerExit(BaseException): pass
+        for directory in (False, True):
+            for boundary in ("copy_verified", "rename_applied"):
+                with self.subTest(directory=directory, boundary=boundary):
+                    client = FakeGatewayClient()
+                    _, payload = self._named_copy_plan(client, directory=directory)
+                    original_checkpoint, original_rename = guangya_fs_change._append_journal, client.rename
+                    def checkpoint(plan_id, event):
+                        original_checkpoint(plan_id, event)
+                        row = (event.get("data") or {}).get("operation_item") or {}
+                        if boundary == "copy_verified" and row.get("status") == "partial":
+                            raise WorkerExit()
+                    def rename(file_id, name):
+                        original_rename(file_id, name)
+                        if boundary == "rename_applied": raise WorkerExit()
+                    with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), \
+                         mock.patch.object(client, "rename", side_effect=rename):
+                        with self.assertRaises(WorkerExit):
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                    copied_id = client.list_dir("target")[0].file_id
+                    with mock.patch.object(client, "copy") as copied, \
+                         mock.patch.object(client, "rename", wraps=original_rename) as renamed, \
+                         mock.patch.object(client, "task_status", side_effect=TimeoutError("history unavailable")) as task:
+                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=2)
+                        copied.assert_not_called()
+                        task.assert_not_called()
+                        self.assertEqual(renamed.call_count, int(boundary == "copy_verified"))
+                    self.assertFalse(result["partial"])
+                    self.assertEqual(result["stats"]["copied"], 1)
+                    self.assertEqual(client.list_dir("target")[0].file_id, copied_id)
+                    self.assertEqual(client.file_info("source").name, "source")
+                    self.assertEqual(client.file_info("move").name, "Move.mp4")
+
+    def test_named_copy_rejects_initial_or_final_name_conflicts_before_writes(self):
+        for name in ("Move.mp4", "Final.mp4"):
+            with self.subTest(name=name):
+                client = FakeGatewayClient()
+                client.directories["target"].append(GuangYaFile("existing", name, False, parent_id="target"))
+                with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
+                    self._named_copy_plan(client)
+                self.assertEqual(client.file_info("move").name, "Move.mp4")
+                self.assertEqual(len(client.list_dir("target")), 1)
+
+    def test_named_copy_rechecks_copy_identity_and_conflicts_before_renaming(self):
+        for change in ("conflict", "replacement", "source_changed"):
+            with self.subTest(change=change):
+                client = FakeGatewayClient()
+                _, payload = self._named_copy_plan(client)
+                original = guangya_fs_change._append_journal
+                def checkpoint(plan_id, event):
+                    original(plan_id, event)
+                    row = (event.get("data") or {}).get("operation_item") or {}
+                    if row.get("status") == "partial":
+                        if change == "conflict":
+                            client.directories["target"].append(GuangYaFile("existing", "Final.mp4", False, parent_id="target"))
+                        elif change == "replacement": client.directories["target"][0].file_id = "unrelated"
+                        else: client.directories["source"][1].etag = "new-content"
+                with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), \
+                     mock.patch.object(client, "rename", wraps=client.rename) as renamed:
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                    renamed.assert_not_called()
+                self.assertTrue(result["partial"])
+                self.assertEqual(result["stats"]["copied"], 0)
+                self.assertEqual(result["operation_items"][0]["completed_actions"], ["copy"])
+                self.assertEqual(client.file_info("move").name, "Move.mp4")
+
+    def test_named_copy_supports_new_target_and_omits_noop_rename(self):
+        for new_target in (False, True):
+            for new_name in ("Final.mp4", "Move.mp4"):
+                with self.subTest(new_target=new_target, new_name=new_name):
+                    client = FakeGatewayClient()
+                    obs = guangya_workspace.create_directory_observation(client, owner="owner", path="/", recursive=True)
+                    refs = {row["file_id"]: row["handle"] for row in obs["entries"]}
+                    operations = ([{"op": "create_directory", "parent_path": "/", "name": "archive"}] if new_target else [])
+                    operations.append({"op": "copy", "object_ref": refs["move"], "target_path": "/archive" if new_target else "/target", "new_name": new_name})
+                    plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=obs, operations=operations, trigger_strm=False)
+                    guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+                    with mock.patch.object(client, "rename", wraps=client.rename) as renamed:
+                        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client, lease_generation=1)
+                    self.assertFalse(result["partial"])
+                    self.assertEqual(result["stats"]["created"], int(new_target))
+                    self.assertEqual(result["stats"]["copied"], 1)
+                    self.assertEqual(renamed.call_count, int(new_name != "Move.mp4"))
+                    self.assertEqual(client.file_info("move").name, "Move.mp4")
+
+    def test_named_copy_batch_can_reuse_the_temporary_original_name(self):
+        client = FakeGatewayClient()
+        client.directories["0"].append(GuangYaFile("second", "second", True, parent_id="0", etag="s2"))
+        client.directories["second"] = [GuangYaFile("other", "Move.mp4", False, parent_id="second", size=99, etag="other")]
+        obs = guangya_workspace.create_directory_observation(client, owner="owner", path="/", recursive=True)
+        refs = {row["file_id"]: row["handle"] for row in obs["entries"]}
+        plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=obs, trigger_strm=False,
+            operations=[{"op": "copy", "object_ref": refs[source], "target_path": "/target", "new_name": name}
+                        for source, name in (("move", "A.mp4"), ("other", "B.mp4"))])
+        guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client, lease_generation=1)
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["stats"]["copied"], 2)
+        self.assertEqual({row.name for row in client.list_dir("target")}, {"A.mp4", "B.mp4"})
+        self.assertEqual(client.file_info("move").name, "Move.mp4")
+        self.assertEqual(client.file_info("other").name, "Move.mp4")
+
+    def test_cancel_after_verified_copy_prevents_rename(self):
+        from app.modules.organize_tasks import OrganizeOperationCancelled
+        client = FakeGatewayClient()
+        _, payload = self._named_copy_plan(client)
+        cancelled = False
+        original = guangya_fs_change._append_journal
+        def checkpoint(plan_id, event):
+            nonlocal cancelled
+            original(plan_id, event)
+            if ((event.get("data") or {}).get("operation_item") or {}).get("status") == "partial":
+                cancelled = True
+        def check():
+            if cancelled: raise OrganizeOperationCancelled("cancelled after copy")
+        with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), \
+             mock.patch.object(client, "rename", wraps=client.rename) as renamed:
+            with self.assertRaises(OrganizeOperationCancelled):
+                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1, cancel_check=check)
+            renamed.assert_not_called()
+        self.assertEqual(client.file_info("move").name, "Move.mp4")
+        self.assertEqual(client.list_dir("target")[0].name, "Move.mp4")
+
     def _copy_plan(self, client, *, source_id="trash"):
         client.directories["trash"] = [
             GuangYaFile("leaf", "leaf.txt", False, parent_id="trash", size=10, etag="hash-leaf"),

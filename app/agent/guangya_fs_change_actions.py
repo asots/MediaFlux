@@ -419,6 +419,8 @@ def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, 
             expected = {"op", "parent_path", "name"}
         if expected is None:
             raise AgentToolError("不支持的光鸭变更 op；请按工具 Schema 选择操作")
+        if op == "copy" and "new_name" in raw:
+            expected.add("new_name")
         if set(raw) != expected:
             missing = ", ".join(sorted(expected - set(raw))) or "无"
             extra = ", ".join(sorted(set(raw) - expected)) or "无"
@@ -432,7 +434,7 @@ def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, 
             if not valid_object_handle(object_ref):
                 raise AgentToolError("object_ref 格式无效")
             normalized["object_ref"] = object_ref
-        if op in {"rename", "relocate"}:
+        if "new_name" in raw:
             name = raw.get("new_name")
             if not isinstance(name, str) or not 1 <= len(name.strip()) <= 255:
                 raise AgentToolError("new_name 长度必须在 1 到 255 之间")

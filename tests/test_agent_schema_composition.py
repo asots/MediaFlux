@@ -9,6 +9,8 @@ from types import MappingProxyType
 import pytest
 
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import AgentToolError
+from app.agent.guangya_fs_change_actions import guangya_fs_change_preview_arguments
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
@@ -29,10 +31,10 @@ def catalog_schema(name):
     return next(spec.parameters for spec in build_tool_specs() if spec.name == name)
 
 
-async def execute(schema, arguments, trace):
+async def execute(schema, arguments, trace, *, validator=None):
     def validate(value):
         trace.append(("validate", value))
-        return value
+        return validator(value) if validator is not None else value
 
     tool = KernelToolSpec(name="lookup", domain="library", description="offline schema contract",
                           input_schema=schema, effect=ToolEffect.READ, validator=validate,
@@ -169,3 +171,105 @@ def test_native_composed_schema_invalid_arguments_corrected_call(name, invalid, 
         assert events[-1].payload.get("status") == "success"
         transport.verify(3)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("extra,normalized_extra", [
+    ({}, {}),
+    ({"new_name": "a"}, {"new_name": "a"}),
+    ({"new_name": " 副本.mkv "}, {"new_name": "副本.mkv"}),
+    ({"new_name": "副" * 255}, {"new_name": "副" * 255}),
+])
+def test_copy_preview_schema_and_validator_normalize_optional_name(extra, normalized_extra):
+    spec = next(spec for spec in build_tool_specs() if spec.name == "guangya.fs.change.preview")
+    assert spec.validator is guangya_fs_change_preview_arguments
+    arguments = {"operations": [{"op": "copy", "object_ref": "OBJ" + "a" * 24,
+                                 "target_path": "backup//child\\", **extra}]}
+    original = json.loads(json.dumps(arguments))
+    expected = {"observation_ref": "", "operations": [
+        {"op": "copy", "object_ref": "OBJ" + "A" * 24,
+         "target_path": "/backup/child", **normalized_extra}], "trigger_strm": True}
+    trace = []
+    result = asyncio.run(execute(spec.parameters, arguments, trace, validator=spec.validator))
+    assert result.arguments == expected
+    assert trace == [("validate", arguments), ("read", expected)]
+    assert arguments == original
+
+
+@pytest.mark.parametrize("new_name", [None, True, 1, [], {}, "", "a" * 256],
+                         ids=["null", "boolean", "integer", "array", "object", "empty", "too-long"])
+def test_copy_preview_schema_and_validator_reject_invalid_name(new_name):
+    arguments = {"operations": [{"op": "copy", "object_ref": "OBJ" + "A" * 24,
+                                 "target_path": "/backup", "new_name": new_name}]}
+    trace = []
+    with pytest.raises(ToolPipelineError) as error:
+        asyncio.run(execute(catalog_schema("guangya.fs.change.preview"), arguments, trace,
+                            validator=guangya_fs_change_preview_arguments))
+    assert error.value.code == "invalid_arguments"
+    assert trace == []
+    with pytest.raises(AgentToolError, match="new_name 长度必须在 1 到 255 之间"):
+        guangya_fs_change_preview_arguments(arguments)
+
+
+@pytest.mark.parametrize("new_name", [" ", "\t\n"])
+def test_copy_preview_validator_rejects_name_empty_after_trimming(new_name):
+    arguments = {"operations": [{"op": "copy", "object_ref": "OBJ" + "A" * 24,
+                                 "target_path": "/backup", "new_name": new_name}]}
+    trace = []
+    with pytest.raises(ToolPipelineError, match="长度必须在 1 到 255 之间") as error:
+        asyncio.run(execute(catalog_schema("guangya.fs.change.preview"), arguments, trace,
+                            validator=guangya_fs_change_preview_arguments))
+    assert error.value.code == "invalid_arguments"
+    assert trace == [("validate", arguments)]
+
+
+@pytest.mark.parametrize("operation", [
+    {"op": "copy", "object_ref": "OBJ" + "A" * 24, "new_name": "副本.mkv"},
+    {"op": "copy", "target_path": "/backup", "new_name": "副本.mkv"},
+    {"op": "copy", "object_ref": "OBJ" + "A" * 24, "target_path": "/backup",
+     "new_name": "副本.mkv", "name": "其他.mkv"},
+    {"op": "move", "object_ref": "OBJ" + "A" * 24, "target_path": "/backup", "new_name": "副本.mkv"},
+    {"op": "trash", "object_ref": "OBJ" + "A" * 24, "new_name": "副本.mkv"},
+], ids=["missing-target", "missing-object", "extra-field", "move-name", "trash-name"])
+def test_copy_preview_optional_name_keeps_required_and_other_operation_fields(operation):
+    arguments = {"operations": [operation]}
+    trace = []
+    with pytest.raises(ToolPipelineError) as error:
+        asyncio.run(execute(catalog_schema("guangya.fs.change.preview"), arguments, trace))
+    assert error.value.code == "invalid_arguments"
+    assert trace == []
+    with pytest.raises(AgentToolError, match="光鸭变更操作字段与 op 不匹配"):
+        guangya_fs_change_preview_arguments(arguments)
+
+
+def test_copy_preview_catalog_uses_one_existing_operation_with_optional_name():
+    spec = next(spec for spec in build_tool_specs() if spec.name == "guangya.fs.change.preview")
+    branches = spec.parameters["properties"]["operations"]["items"]["oneOf"]
+    copy_schema, = [branch for branch in branches if branch["properties"]["op"]["enum"] == ["copy"]]
+    assert copy_schema["required"] == ["op", "object_ref", "target_path"]
+    assert set(copy_schema["properties"]) == {"op", "object_ref", "target_path", "new_name"}
+    assert copy_schema["additionalProperties"] is False
+    for op in ("copy", "rename", "relocate"):
+        branch = next(branch for branch in branches if branch["properties"]["op"]["enum"] == [op])
+        assert branch["properties"]["new_name"]["type"] == "string"
+        assert branch["properties"]["new_name"]["minLength"] == 1
+        assert branch["properties"]["new_name"]["maxLength"] == 255
+    assert {op for branch in branches for op in branch["properties"]["op"]["enum"]} == {
+        "rename", "move", "copy", "relocate", "batch_relocate", "trash", "create_directory"}
+    assert "同一计划" in spec.description
+    assert "副本改名" in spec.description
+    assert "源对象不变" in spec.description
+    assert "冲突必须拒绝" in spec.description
+
+
+def test_copy_preview_mixes_legacy_and_named_copies_in_one_plan():
+    legacy = {"op": "copy", "object_ref": "OBJ" + "A" * 24, "target_path": "/backup"}
+    named = {"op": "copy", "object_ref": "OBJ" + "B" * 24,
+             "target_path": "/backup", "new_name": "副本.mkv"}
+    arguments = {"observation_ref": "OBS" + "A" * 32,
+                 "operations": [legacy, named], "trigger_strm": False}
+    trace = []
+    result = asyncio.run(execute(catalog_schema("guangya.fs.change.preview"), arguments, trace,
+                                validator=guangya_fs_change_preview_arguments))
+    assert result.arguments == arguments
+    assert "new_name" not in result.arguments["operations"][0]
+    assert trace == [("validate", arguments), ("read", arguments)]
