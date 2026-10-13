@@ -385,6 +385,17 @@ def _validate_json_schema(
         required = forbidden.get("required")
         groups = ([{"required": [key]} for key in required]
                   if set(forbidden) == {"required"} and isinstance(required, list) else None)
+        if groups is None and path == "arguments" and isinstance(value, dict):
+            def involved_fields(branch):
+                fields = set(branch.get("required", ())) | set(branch.get("properties", {}))
+                for keyword in ("allOf", "anyOf", "oneOf"):
+                    for child in branch.get(keyword, ()):
+                        if matches(child):
+                            fields.update(involved_fields(child))
+                return fields & value.keys() & schema.get("properties", {}).keys()
+            fields = tuple(sorted(involved_fields(forbidden)))
+            raise ToolPipelineError(f"{path} 不允许此参数组合（not）；相关字段：" + "、".join(fields),
+                                    code="invalid_arguments", invalid_fields=fields)
         invalid_combination(f"{path} 不允许此参数组合（not）", groups)
 
 
@@ -436,7 +447,7 @@ class ToolPipeline:
         if not catalog.has(error_repair.REPAIR_TOOL):
             catalog.register(KernelToolSpec(
                 name=error_repair.REPAIR_TOOL, domain="agent", effect=ToolEffect.READ,
-                description="明确替代本轮指定的参数拒绝调用，不是声称旧目标已知。使用失败返回的一次性ticket，提供原工具完整修正arguments；不得更改已有效的参数。仍需原权限与写入确认，预览/提交不代表业务完成。",
+                description="明确替代本轮指定的参数拒绝调用，不是声称旧目标已知。使用失败返回的一次性ticket，提供原工具完整修正arguments；只修改错误涉及的字段，保留其他有效参数。仍需原权限与写入确认，预览/提交不代表业务完成。",
                 input_schema={"type": "object", "required": ["ticket", "arguments"], "properties": {
                     "ticket": {"type": "string"}, "arguments": {"type": "object"}}, "additionalProperties": False},
                 read=self._replace_schema_failure, availability=lambda context: False,
@@ -479,7 +490,7 @@ class ToolPipeline:
                 context.schema_replacements[exc.repair_ticket] = replace(next_entry, predecessors=lineage)
             raise
         content = result.outcome.public_content
-        if result.effect_plan is None and content.get("ok") is not False and content.get("status", "success") in {"success", "completed"}:
+        if result.effect_plan is None and error_repair.completed_result(result.tool, content):
             return replace(result, recovered_failures=tuple(dict.fromkeys((*lineage, *result.recovered_failures))))
         return result
 
@@ -638,7 +649,8 @@ class ToolPipeline:
         try:
             _validate_json_schema(raw_arguments, tool.input_schema)
         except ToolPipelineError as exc:
-            collision = exc.keys if isinstance(exc, _SchemaCollisionError) else frozenset()
+            collision = (exc.keys if isinstance(exc, _SchemaCollisionError) else
+                         frozenset(exc.invalid_fields) if tool.effect is ToolEffect.READ else frozenset())
             exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema,
                                                   ToolPipelineError, collisions=collision, preserve_fields=True)
             raise

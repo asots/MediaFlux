@@ -178,9 +178,15 @@ def preserves(entry, arguments):
     return True
 
 
+def completed_result(tool, content):
+    """查询的found/empty是已返回事实，不是后台任务的受理状态。"""
+    statuses = {"success", "completed", "found", "empty"} if tool.effect is ToolEffect.READ else {"success", "completed"}
+    return content.get("ok") is not False and content.get("status", "success") in statuses
+
+
 def completed(tool, arguments, context, content):
     """Associate a successful exact correction, never another object's success."""
-    if not context.schema_replacements or content.get("ok") is False or content.get("status", "success") not in {"success", "completed"}:
+    if not context.schema_replacements or not completed_result(tool, content):
         return ()
     encoded = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
     recovered = []

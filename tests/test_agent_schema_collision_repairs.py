@@ -92,3 +92,55 @@ def test_value_errors_and_complex_branches_do_not_unlock_omission(composition, f
                 await pipeline.execute("lookup", arguments, context=context)
             assert error.value.code == "invalid_arguments"
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("correction,allowed", [
+    ({"operation": "list", "paths": ["/a", "/b"], "identity": "A", "page_size": 5}, True),
+    ({"operation": "stat", "path": "/a", "identity": "A", "page_size": 5}, True),
+    ({"operation": "list", "paths": ["/a", "/b"], "identity": "B", "page_size": 5}, False),
+    ({"operation": "stat", "path": "/a", "identity": "A"}, False),
+    ({"operation": "stat", "paths": ["/a", "/b"], "identity": "A", "page_size": 5}, False),
+    ({"identity": "A", "page_size": 5}, False),
+])
+@pytest.mark.parametrize("effect", [ToolEffect.READ, ToolEffect.WRITE, ToolEffect.DANGER])
+@pytest.mark.parametrize("read_status", ["success", "found", "empty"])
+def test_conditional_not_repairs_only_involved_read_fields(correction, allowed, effect, read_status):
+    from tests.test_agent_schema_composition import catalog_schema
+    from app.agent.kernel.effects import PreparedEffect
+
+    async def run():
+        schema = catalog_schema("guangya.fs.query")
+        schema = {**schema, "required": ["identity"], "properties": {
+            **schema["properties"], "identity": {"type": "string"}}}
+        executed = []
+        def read(args, ctx):
+            executed.append(args)
+            return {"ok": True, "status": read_status}
+        def prepare(args, ctx):
+            executed.append(args)
+            return PreparedEffect(preview={"summary": "preview"}, snapshot_fingerprint="fingerprint")
+        tool = KernelToolSpec(name="lookup", domain="library", description="composition contract",
+            input_schema=schema, effect=effect, validator=dict,
+            **({"read": read} if effect is ToolEffect.READ else
+               {"prepare": prepare, "execute_confirmed": lambda plan, ctx: {"ok": True}}))
+        store = InMemorySessionStateStore()
+        lease, _ = await store.begin_turn(owner="owner", session_id="not-repair", request_id="r")
+        async def progress(payload): pass
+        context = ToolCallContext(owner="owner", session_id="not-repair", request_id="r",
+            turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=progress)
+        pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=store)
+        initial = {"operation": "stat", "paths": ["/a", "/b"], "identity": "A", "page_size": 5}
+        with pytest.raises(ToolPipelineError) as caught:
+            await pipeline.execute("lookup", initial, context=context)
+        assert not executed
+        repair = {"ticket": caught.value.repair_ticket, "arguments": correction}
+        if allowed and effect is ToolEffect.READ:
+            result = await pipeline.execute("agent.repair", repair, context=context)
+            assert result.arguments == correction
+            assert result.recovered_failures
+            assert executed == [correction]
+        else:
+            with pytest.raises(ToolPipelineError):
+                await pipeline.execute("agent.repair", repair, context=context)
+            assert not executed
+    asyncio.run(run())
