@@ -6,9 +6,8 @@ from typing import Any
 
 from app.agent.errors import AgentToolError
 from app.agent.guangya_fs_change_actions import (
-    guangya_fs_change_preview_arguments,
+    guangya_fs_change_arguments,
     prepare_guangya_fs_change_confirmation,
-    preview_guangya_fs_change,
 )
 from app.agent.models import ToolContext, ToolResult, ToolReference
 from app.clients.guangya import GuangYaClient
@@ -236,7 +235,7 @@ def _compile(arguments: dict[str, Any], context: ToolContext) -> tuple[dict[str,
             target_root=target_root,
             groups=groups,
         )
-        fs_arguments = guangya_fs_change_preview_arguments(
+        fs_arguments = guangya_fs_change_arguments(
             {
                 "observation_ref": observation_ref(str(observation["plan_id"])),
                 "operations": compiled["operations"],
@@ -258,8 +257,7 @@ def prepare_guangya_episode_naming_confirmation(
     """编译紧凑映射并直接生成统一 fs-change 人工确认卡。"""
     fs_arguments, compiled = _compile(arguments, context)
     try:
-        preview = preview_guangya_fs_change(fs_arguments, context)
-        confirmation, fingerprint = prepare_guangya_fs_change_confirmation({}, context)
+        confirmation, fingerprint = prepare_guangya_fs_change_confirmation(fs_arguments, context)
     finally:
         discard_observation(str(fs_arguments.get("observation_ref") or ""))
     mapping = {
@@ -270,8 +268,11 @@ def prepare_guangya_episode_naming_confirmation(
         "subtitle_skips": list(compiled["subtitle_skips"]),
         "groups": list(compiled["groups"]),
     }
+    if confirmation.status == "no_changes":
+        confirmation.data = {**confirmation.data, "episode_naming": mapping}
+        return confirmation, fingerprint
     confirmation.summary = (
-        f"确认后将按分季方案执行 {int(preview.data.get('total') or 0)} 项光鸭文件变更"
+        f"确认后将按分季方案执行 {int(confirmation.data.get('total') or 0)} 项光鸭文件变更"
         f"（{mapping['video_count']} 个视频、{mapping['subtitle_count']} 个配套字幕）"
     )
     if mapping["included_extra_count"]:

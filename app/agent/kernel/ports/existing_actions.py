@@ -32,6 +32,7 @@ from app.agent.public_safety import sanitize_public_text
 from ..capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from ..effects import PreparedEffect
 from ..pipeline import ToolCallContext, ToolPipelineError
+from ..projection import DefaultProjector, ToolOutcome
 from ..session_guard import guarded_state_call
 
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
@@ -227,7 +228,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
             cost=1.0 if spec.freshness != "live" else 1.25,
         )
 
-    def prepare(arguments: dict[str, Any], context: ToolCallContext) -> PreparedEffect:
+    def prepare(arguments: dict[str, Any], context: ToolCallContext) -> PreparedEffect | ToolOutcome:
         handler = spec.context_confirmation_preparer
         if handler is None:  # pragma: no cover - 领域 ToolSpec 声明已保证
             raise ToolPipelineError(
@@ -240,6 +241,8 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         except Exception as exc:
             raise _safe_error(exc, fallback_code="precondition_failed") from exc
         checked = _assert_success(result, code="precondition_failed")
+        if checked.status == "no_changes":
+            return DefaultProjector().project(checked)
         effect_metadata = (
             dict(checked.effect_metadata)
             if isinstance(checked.effect_metadata, dict)

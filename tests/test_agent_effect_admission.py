@@ -22,7 +22,7 @@ from copy import deepcopy
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from app import database as db
@@ -31,7 +31,10 @@ from app.agent import guangya_cleanup_actions as cleanup_actions
 from app.agent import guangya_directory_scrape_actions as scrape_actions
 from app.agent import guangya_fs_change_actions as fs_actions
 from app.agent import guangya_rename_actions as rename_actions
+from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.domain_catalog import build_tool_specs
 from app.agent.kernel.capabilities import ToolCatalog
+from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
 from app.agent.kernel.ports import existing_actions
@@ -40,8 +43,10 @@ from app.agent.kernel.state import (
     InMemorySessionStateStore,
     StalePublicationError,
     StateUpdate,
+    _PendingEffectTransition,
 )
 from app.agent.models import RiskLevel, ToolContext, ToolResult, ToolSpec
+from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.modules import guangya_fs_change as fs
 from app.modules import guangya_rename as rename
 from app.modules import guangya_residual_cleanup as cleanup
@@ -59,7 +64,7 @@ _SESSION = "effect-admission-session"
 _FS_TOOL = "guangya.fs.change.execute"
 _DOMAINS = {
     "fs": (
-        _FS_TOOL, "agent_guangya_fs_change", fs_actions.guangya_fs_change_execute_arguments,
+        _FS_TOOL, "agent_guangya_fs_change", fs_actions.guangya_fs_change_arguments,
         fs_actions.prepare_guangya_fs_change_confirmation,
         fs_actions.execute_guangya_fs_change_confirmed,
     ),
@@ -206,37 +211,45 @@ def _admission(scope, *, tool=_FS_TOOL):
 
 def _spec(domain, *, verifier=None):
     name, _kind, validator, prepare, execute = _DOMAINS[domain]
+    parameters = (
+        next(spec.parameters for spec in build_tool_specs() if spec.name == name)
+        if domain == "fs" else {"type": "object", "properties": {}, "additionalProperties": False}
+    )
     return ToolSpec(
         name=name, description="持久云盘队列准入回归", risk=RiskLevel.WRITE,
-        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        parameters=parameters,
         validator=validator, requires_confirmation=True,
         context_confirmation_preparer=prepare, context_confirmed_handler=execute,
         post_write_verifier=verifier,
     )
 
 
-def _preview_domain(domain, client, context, stack, *, new_name="admitted.mp4"):
+def _domain_arguments(domain, client, context, stack, *, new_name="admitted.mp4"):
     if domain == "fs":
         observation = workspace.create_directory_observation(
             client, owner=context.owner, path="/", recursive=True,
         )
         source_ref = next(item["handle"] for item in observation["entries"] if item["file_id"] == "rename")
-        return fs_actions.preview_guangya_fs_change({
+        return fs_actions.guangya_fs_change_arguments({
             "observation_ref": workspace.observation_ref(observation["plan_id"]),
             "operations": [{"op": "rename", "object_ref": source_ref, "new_name": new_name}],
             "trigger_strm": False,
-        }, context)
+        })
     if domain == "rename":
         arguments = rename_actions.guangya_rename_preview_arguments({
             "paths": ["/source"], "mode": "replace_text", "recursive": True,
             "limit": 100, "find": "广告-", "replace": "admitted-",
         })
-        return rename_actions.preview_guangya_rename(arguments, context)
+        preview = rename_actions.preview_guangya_rename(arguments, context)
+        assert preview.ok, preview.to_dict()
+        return {}
     if domain == "cleanup":
         arguments = cleanup_actions.guangya_cleanup_preview_arguments({
             "path": "/source", "scope": "empty_only", "max_candidates": 20,
         })
-        return cleanup_actions.preview_guangya_cleanup(arguments, context)
+        preview = cleanup_actions.preview_guangya_cleanup(arguments, context)
+        assert preview.ok, preview.to_dict()
+        return {}
     # 真正的 DirectoryScrapeService/preview；只有 TMDB 数据和云盘来自离线 Provider。
     client.directories["source"] = [replace(
         client.file_info("rename"), name="Iron.Man.2008.1080p.mkv", extension="mkv", size=2 * 1024**3,
@@ -251,18 +264,20 @@ def _preview_domain(domain, client, context, stack, *, new_name="admitted.mp4"):
     stack.enter_context(patch.object(scrape_actions, "get_directory_scrape_service", lambda: service))
     scrape_actions.inspect_directory_scrape({"directory_id": "source"}, context)
     scrape_actions.search_directory_scrape({"query": "Iron Man", "year": "2008", "media_type": "movie"}, context)
-    return scrape_actions.preview_directory_scrape(
+    preview = scrape_actions.preview_directory_scrape(
         scrape_actions.directory_scrape_preview_arguments({"candidate_number": 1}), context,
     )
+    assert preview.ok, preview.to_dict()
+    return {}
 
 
 async def _kernel_plan(domain, store, client, stack, *, owner=_OWNER, session_id=_SESSION,
-                       wait=False, verifier=None, request_id="confirm-request", new_name="admitted.mp4"):
+                       wait=False, verifier=None, request_id="confirm-request", new_name="admitted.mp4",
+                       effect_store=None):
     lease, _ = await store.begin_turn(owner=owner, session_id=session_id, request_id=request_id)
-    preview = _preview_domain(domain, client, ToolContext(
+    arguments = _domain_arguments(domain, client, ToolContext(
         owner=owner, session_id=session_id, request_id=request_id,
     ), stack, new_name=new_name)
-    assert preview.ok, preview.to_dict()
     events = []
 
     async def progress(event):
@@ -274,8 +289,8 @@ async def _kernel_plan(domain, store, client, stack, *, owner=_OWNER, session_id
         wait_for_completion=wait, channel="web",
     )
     catalog = ToolCatalog([existing_actions.adapt_tool_spec(_spec(domain, verifier=verifier))])
-    pipeline = ToolPipeline(catalog=catalog, state_store=store)
-    prepared = await pipeline.execute(_DOMAINS[domain][0], {}, context=context)
+    pipeline = ToolPipeline(catalog=catalog, state_store=store, effect_store=effect_store)
+    prepared = await pipeline.execute(_DOMAINS[domain][0], arguments, context=context)
     assert prepared.effect_plan is not None
     return pipeline, context, prepared.effect_plan, events
 
@@ -526,9 +541,11 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_agent_confirmed_domain_can_enqueue_without_effect_scope(self):
         context = ToolContext(owner=_OWNER, session_id=_SESSION)
-        preview = _preview_domain("fs", self.client, context, self.runtime)
-        self.assertTrue(preview.ok)
-        _preview, fingerprint = fs_actions.prepare_guangya_fs_change_confirmation({}, context)
+        arguments = _domain_arguments("fs", self.client, context, self.runtime)
+        prepared, fingerprint = fs_actions.prepare_guangya_fs_change_confirmation(arguments, context)
+        self.assertTrue(prepared.ok)
+        self.assertEqual(prepared.status, "confirmation_required")
+        self.assertEqual(self._job_count(), 0)
         result = fs_actions.execute_guangya_fs_change_confirmed({}, fingerprint, context)
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "accepted")
@@ -537,6 +554,84 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs.get_organize_operation_job(job_id)["status"], "pending")
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_kernel_sessions").fetchone()[0], 0)
+
+    async def test_legacy_empty_arguments_card_cold_confirms_only_its_original_flow_once(self):
+        fs_actions.configure_guangya_fs_change_context(SQLiteAgentSessionContextRepository())
+        pipeline, context, current, _ = await _kernel_plan(
+            "fs", self.store, self.client, self.runtime,
+            effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
+        )
+        original_flow = fs_actions._flow(_OWNER)
+        self.assertIsNotNone(original_flow)
+        original = fs.load_fs_change_plan(original_flow.plan_id, owner=_OWNER)
+        self.assertEqual(original["status"], "previewed")
+        self.assertEqual(current.arguments["operations"][0]["new_name"], "admitted.mp4")
+        self.assertEqual(self._job_count(), 0)
+        self.assertEqual(self.client.file_info("rename").name, "广告-ABC.mp4")
+
+        # 仅模拟升级前的持久合同：复用真实 prepare 的快照/来源，旧卡 arguments={}。
+        legacy = pipeline.effect_store.freeze(
+            owner=_OWNER, session_id=_SESSION, generation=context.lease.generation,
+            tool_name=_FS_TOOL, effect=current.effect, arguments={},
+            prepared=PreparedEffect(preview=current.preview, snapshot_fingerprint=current.snapshot_fingerprint,
+                                    metadata=current.metadata),
+            public_result=current.public_result,
+        )
+        before = await self.store.load(owner=_OWNER, session_id=_SESSION)
+        await self.store.commit(context.lease, updates=(_PendingEffectTransition(
+            "pending_effect_plan_id", legacy.plan_id, plan_generation=context.lease.generation,
+            goal=before.metadata["pending_effect_goal"],
+        ),))
+        self.assertEqual(legacy.arguments, {})
+        workspace.discard_observation(current.arguments["observation_ref"])
+        fs_actions.clear_guangya_fs_change_context(owner=_OWNER)
+        fs_actions.configure_guangya_fs_change_context(SQLiteAgentSessionContextRepository())
+
+        cold = SQLiteKernelStore()
+        bound = await cold.load(owner=_OWNER, session_id=_SESSION)
+        self.assertEqual(bound.metadata["pending_effect_binding"], {
+            "plan_id": legacy.plan_id, "plan_generation": context.lease.generation,
+        })
+        self.assertEqual(bound.metadata["pending_effect_goal"], before.metadata["pending_effect_goal"])
+        forbidden_prepare = Mock(side_effect=AssertionError("旧冻结卡确认不得重新 prepare 或扩大范围"))
+        tool = replace(existing_actions.adapt_tool_spec(_spec("fs")), prepare=forbidden_prepare)
+        restored = ToolPipeline(
+            catalog=ToolCatalog([tool]), state_store=cold,
+            effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
+        )
+        pending = await restored.get_pending_plan(owner=_OWNER, session_id=_SESSION)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.plan_id, legacy.plan_id)
+        self.assertEqual(pending.arguments, {})
+        self.assertEqual(pending.snapshot_fingerprint, current.snapshot_fingerprint)
+        self.assertEqual(pending.metadata, current.metadata)
+        cold_flow = fs_actions._flow(_OWNER)
+        self.assertEqual((cold_flow.plan_id, cold_flow.fingerprint),
+                         (original_flow.plan_id, original_flow.fingerprint))
+        self.assertEqual(fs.load_fs_change_plan(cold_flow.plan_id, owner=_OWNER), original)
+
+        accepted = await restored.execute_confirmed(legacy.plan_id, context=context)
+        self.assertTrue(accepted.outcome.public_content["ok"])
+        forbidden_prepare.assert_not_called()
+        self.assertEqual(self._job_count(), 1)
+        self.assertEqual(self.client.file_info("rename").name, "广告-ABC.mp4")
+        frozen = fs.load_fs_change_plan(original_flow.plan_id, owner=_OWNER)
+        self.assertEqual(frozen["status"], "queued")
+        self.assertEqual(frozen["operations"], original["operations"])
+        self.assertEqual(frozen["observation_ref"], original["observation_ref"])
+        self.assertEqual({path.stem for path in (self.root / "fs-plans").glob("*.json")}, {original_flow.plan_id})
+
+        with self.assertRaises(ToolPipelineError) as repeated:
+            await restored.execute_confirmed(legacy.plan_id, context=context)
+        self.assertEqual(repeated.exception.code, "confirmation_invalid")
+        self.assertEqual(self._job_count(), 1)
+        _run_real_worker(jobs.claim_organize_operation_job(frozen["job_id"]))
+        self.assertEqual(self.client.file_info("rename").name, "admitted.mp4")
+        self.assertEqual(jobs.get_organize_operation_job(frozen["job_id"])["status"], "completed")
+        self.assertEqual(self.client.file_info("move").name, "Move.mp4")
+        self.assertEqual(self.client.file_info("source").parent_id, "0")
+        self.assertEqual(self._job_count(), 1)
+        forbidden_prepare.assert_not_called()
 
     async def test_stale_generation_after_new_turn_rolls_back_and_keeps_new_pending(self):
         scope = await _confirmed_scope(self.store)

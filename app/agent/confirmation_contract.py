@@ -376,8 +376,8 @@ _CONFIRMATION_COPY: dict[str, dict[str, str]] = {
     },
     "guangya.fs.change.execute": {
         "action": "执行光鸭文件变更",
-        "object": "最近只读快照中冻结的改名、移动、复制、回收或新建目录操作",
-        "impact": "只执行预览中固定的对象和目标；写前复核快照与冲突，回收操作只进入 Provider 回收站，写后逐项验证。",
+        "object": "本次确认卡冻结的完整改名、移动、复制、回收或新建目录计划",
+        "impact": "准备确认卡不写云端；确认后只执行卡中固定的完整计划，写前复核快照与冲突，回收仅进入光鸭回收站，写后逐项验证。",
         "reversibility": "回收项可在光鸭回收站恢复；复制会保留原对象；改名、移动和新建目录需依据私有执行清单手工恢复。",
     },
     "guangya.recycle.restore": {

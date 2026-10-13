@@ -35,7 +35,7 @@ from tests.test_agent_effect_admission import (
     _OfflineClient,
     _offline_runtime,
     _paused_manager,
-    _preview_domain,
+    _domain_arguments,
     _run_real_worker,
     _spec,
 )
@@ -208,10 +208,11 @@ def test_synchronous_failed_confirm_uses_effect_wait_with_or_without_task(native
 class EffectScript(NativeScript):
     """真实领域 WRITE 与本地业务 READ 的原生 HTTP 离线脚本。"""
 
-    def __init__(self, steps, prefix):
+    def __init__(self, steps, prefix, change_arguments):
         super().__init__("tmdb")
         self.steps = list(steps)
         self.prefix = prefix
+        self.change_arguments = change_arguments
 
     async def respond(self, request):
         body = json.loads(request.content)
@@ -222,8 +223,8 @@ class EffectScript(NativeScript):
             # 故意过度宣称：成功 READ 不能洗掉失败 write。
             message = {"content": "诊断读取成功，所以之前的改名操作已成功完成。"}
         else:
-            name, arguments = (WRITE, {}) if step == "preview" else (READ, A)
-            assert step in {"preview", "read"}
+            name, arguments = (WRITE, self.change_arguments) if step == "prepare" else (READ, A)
+            assert step in {"prepare", "read"}
             message = {"content": "", "tool_calls": [{
                 "id": self.prefix + "-" + step, "type": "function",
                 "function": {"name": name.replace(".", "__"),
@@ -283,8 +284,9 @@ def background_case(native_case):
         existing_actions, "wait_for_effect_completion",
         partial(effects.wait_for_effect_completion, timeout_seconds=0),
     ):
-        preview = _preview_domain("fs", client, ToolContext(owner=case.owner, session_id=case.sid), stack)
-        assert preview.ok, preview.to_dict()
+        case.change_arguments = _domain_arguments(
+            "fs", client, ToolContext(owner=case.owner, session_id=case.sid), stack,
+        )
         yield case, source, observed, prepared, client
 
 
@@ -292,7 +294,7 @@ def rebuild(case, steps, prefix):
     """新 SQLite store、pipeline、session、confirmation store 和原生 HTTP adapter。"""
     case.store = case.cold_store()
     case.build([])
-    script = EffectScript(steps, prefix)
+    script = EffectScript(steps, prefix, getattr(case, "change_arguments", None))
     case.script = script
     case.session.model = script.adapter
     case.session.continuation_binding = _capture_creation_binding()
@@ -302,14 +304,14 @@ def rebuild(case, steps, prefix):
 async def failed_background_candidate(case, prepared, client):
     from app.agent.kernel.continuation import effect_payload
 
-    session, script = rebuild(case, ["preview"], "source")
+    session, script = rebuild(case, ["prepare"], "source")
     events = [event async for event in session.run(AgentInput(
         message=GOAL, owner=case.owner, session_id=case.sid, request_id="source-turn",
     ))]
     case.events.extend(events)
     assert events[-1].payload["status"] == "approval_required"
     plan_id = events[-1].payload["plan_id"]
-    assert prepared == [{}]
+    assert prepared == [case.change_arguments]
     with db.get_conn() as conn:
         assert conn.execute("SELECT COUNT(*) FROM agent_confirmations").fetchone()[0] == 1
         assert conn.execute("PRAGMA database_list").fetchone()[2] == str(db.resolve_db_path())
@@ -372,7 +374,7 @@ async def park_read_quota(case, candidate, original_receipt, prefix):
 
 
 def assert_one_write(case, prepared, client, plan_id, state):
-    assert prepared == [{}] and client.write_calls == [("rename", "admitted.mp4")]
+    assert prepared == [case.change_arguments] and client.write_calls == [("rename", "admitted.mp4")]
     assert case.media.executed == ["A"]
     assert len(case.media.journal.read_text().splitlines()) == 1
     assert case.media.target("A").read_bytes() == b"offline-media-A"

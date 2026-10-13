@@ -1,6 +1,6 @@
 """fs.change 来源恢复：离线 Provider、真实 SQLite 与签名 plan，不是生产实测。
 
-只替换 Provider IO/隔离落盘；preview、prepare、query 与原生 pipeline 都走真实实现。
+只替换 Provider IO/隔离落盘；单次 prepare、query 与原生 pipeline 都走真实实现。
 不执行确认、不伪造预检或写入结果；读取工厂的 spy 原样调用真实实现。
 """
 from __future__ import annotations
@@ -21,8 +21,8 @@ from app.agent import guangya_workspace_actions as files
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
 from app.agent.errors import AgentToolError
-from app.agent.kernel.capabilities import ToolCatalog
-from app.agent.kernel.effects import ConfirmationEffectPlanStore
+from app.agent.kernel.capabilities import ToolCatalog, ToolEffect
+from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
@@ -99,19 +99,14 @@ def object_ref(result, name):
     return next(item["object_ref"] for item in result.data["entries"] if item["object_name"] == name)
 
 
-def preview(case, result, operations, *, source=None):
-    arguments = changes.guangya_fs_change_preview_arguments({
-        "observation_ref": result.data["observation_ref"],
+def prepare(case, observation, operations, *, source=None):
+    arguments = changes.guangya_fs_change_arguments({
+        "observation_ref": observation.data["observation_ref"],
         "operations": operations, "trigger_strm": False})
     context = replace(case.context, reobservation_source=source) if source is not None else case.context
-    result = changes.preview_guangya_fs_change(arguments, context)
+    result, fingerprint = changes.prepare_guangya_fs_change_confirmation(arguments, context)
     assert result.ok is True and result.data["total"] == len(operations)
     assert result.data["cloud_write"] is False
-    return result
-
-
-def prepare(case):
-    result, fingerprint = changes.prepare_guangya_fs_change_confirmation({}, case.context)
     assert result.ok is True and result.status == "confirmation_required"
     assert len(fingerprint) == 64
     source = result.effect_metadata.get("reobservation_source")
@@ -122,7 +117,25 @@ def prepare(case):
     assert source["available"] is True and source["read"]["tool"] == FS_READ
     assert isinstance(source["baseline"], dict)
     assert json.loads(json.dumps(source)) == source
+    # 冷恢复读取已冻结的确认卡，而不是通过 prepare({}) 隐式重新编译旧计划。
+    case.confirmation_plan = ConfirmationEffectPlanStore(SQLiteConfirmationStore()).freeze(
+        owner=context.owner, session_id=context.session_id, generation=1,
+        tool_name=FS_EXECUTE, effect=ToolEffect.DANGER, arguments=arguments,
+        prepared=PreparedEffect(preview=result.to_dict(), snapshot_fingerprint=fingerprint,
+                                metadata=result.effect_metadata),
+        public_result=result.to_dict(),
+    )
     return result, source, fingerprint
+
+
+def restore_confirmation(case):
+    stored = ConfirmationEffectPlanStore(SQLiteConfirmationStore()).get_active_plan(
+        owner=case.context.owner, session_id=case.context.session_id,
+        generation=1, plan_id=case.confirmation_plan.plan_id,
+    )
+    assert stored is not None
+    assert stored == case.confirmation_plan
+    return stored
 
 
 def invalidate(case, observation_ref, mode):
@@ -162,24 +175,27 @@ def assert_private(*results):
 
 @pytest.mark.parametrize("operation", ["rename", "copy", "move"])
 @pytest.mark.parametrize("mode", ["deleted", "expired"])
-@pytest.mark.parametrize("invalidated_at", ["before_prepare", "after_prepare"])
-def test_single_directory_plan_reobserves_after_original_obs_is_unusable(case, operation, mode, invalidated_at):
+@pytest.mark.parametrize("restored_at", ["before_invalidation", "after_invalidation"])
+def test_single_directory_plan_reobserves_after_original_obs_is_unusable(case, operation, mode, restored_at):
     observed = read(case)
     old_ref = object_ref(observed, "Nested")
     change = {"op": operation, "object_ref": old_ref}
     change.update({"new_name": "Nested-Renamed"} if operation == "rename"
                   else {"target_path": "/Destination"})
-    initial_preview = preview(case, observed, [change])
+    prepared, source, fingerprint = prepare(case, observed, [change])
     plan = frozen_plan(case)
     assert plan["operations"][0]["source"]["file_id"] == NESTED
     assert plan["operations"][0]["source"]["is_dir"] is True
-    previous = prepare(case) if invalidated_at == "after_prepare" else None
+    previous = restore_confirmation(case) if restored_at == "before_invalidation" else None
     invalidate(case, observed.data["observation_ref"], mode)
     # 丢弃进程内缓存，必须由真实 SQLite flow + 签名冻结计划恢复，不能重载旧 OBS。
     changes.clear_guangya_fs_change_context(owner=case.context.owner)
-    prepared, source, fingerprint = prepare(case)
+    stored = restore_confirmation(case)
+    assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
+    assert stored.metadata["reobservation_source"] == source
+    source = stored.metadata["reobservation_source"]
     if previous is not None:
-        assert (source, fingerprint) == (previous[1], previous[2])
+        assert stored == previous
     frozen = deepcopy(source)
     case.provider.live_file(NESTED).name = "Nested-External-Rename"
     case.provider.trace.clear()
@@ -199,7 +215,7 @@ def test_single_directory_plan_reobserves_after_original_obs_is_unusable(case, o
     assert [row["id"] for row in case.provider.trace if row["method"] == "list_dir"] == [
         "0", FILMS["parent_id"], FILMS["file_id"]]
     assert source == frozen and frozen_plan(case) == plan
-    assert_private(observed, initial_preview, prepared, renewed)
+    assert_private(observed, prepared, renewed)
 
 
 @pytest.mark.parametrize("primary", [0, 1])
@@ -223,13 +239,16 @@ def test_mixed_objects_restore_each_observation_query_without_primary_scope_or_f
     refs = [object_ref(observations[0], "Movie.mkv"), object_ref(observations[1], "Episode.srt")]
     operations = [{"op": "rename", "object_ref": refs[0], "new_name": "Movie-Renamed.mkv"},
                   {"op": "move", "object_ref": refs[1], "target_path": "/Destination"}]
-    initial_preview = preview(case, observations[primary], operations)
+    prepared, source, fingerprint = prepare(case, observations[primary], operations)
     plan = frozen_plan(case)
     assert {item["source"]["file_id"] for item in plan["operations"]} == {MOVIE, SUBTITLE}
     for observed in observations:
         invalidate(case, observed.data["observation_ref"], mode)
     changes.clear_guangya_fs_change_context(owner=case.context.owner)
-    prepared, source, _fingerprint = prepare(case)
+    stored = restore_confirmation(case)
+    assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
+    assert stored.metadata["reobservation_source"] == source
+    source = stored.metadata["reobservation_source"]
     frozen = deepcopy(source)
     actual_queries = []
     real_create = files.create_directory_observation
@@ -262,25 +281,28 @@ def test_mixed_objects_restore_each_observation_query_without_primary_scope_or_f
     assert NESTED not in scanned and DESTINATION not in scanned
     assert {path.stem for path in (case.root / "agent-guangya-workspace").glob("*.json")} == {saved["plan_id"]}
     assert source == frozen and frozen_plan(case) == plan
-    assert_private(initial_preview, prepared, renewed)
-    # 新 OBS 必须可直接用于真实混合预览；这里只读预检，不执行或自动确认。
+    assert_private(prepared, renewed)
+    # 新 OBS 必须可直接用于真实混合准备；这里只读预检，不执行或自动确认。
     new_refs = {item["previous_ref"]: item["object_ref"] for item in mapping["items"]}
-    fresh_preview = preview(case, renewed, [{**item, "object_ref": new_refs[item["object_ref"]]} for item in operations],
-                            source=source)
-    assert_private(fresh_preview)
+    fresh_prepared, _fresh_source, _fresh_fingerprint = prepare(
+        case, renewed, [{**item, "object_ref": new_refs[item["object_ref"]]} for item in operations], source=source)
+    assert_private(fresh_prepared)
 
 
 @pytest.mark.parametrize("mode", ["deleted", "expired"])
 def test_create_directory_only_retains_original_diagnostic_scope_without_object_refs_or_write(case, mode):
     observed = read(case, {"operation": "search", "path": FILMS["path"], "query": "Movie",
                           "kinds": ["video"], "max_depth": 0, "max_items": 7})
-    initial_preview = preview(case, observed, [{
+    prepared, source, fingerprint = prepare(case, observed, [{
         "op": "create_directory", "parent_path": SHOWS["path"], "name": "New Folder"}])
     plan = frozen_plan(case)
     assert all("object_ref" not in item for item in plan["operations"])
     invalidate(case, observed.data["observation_ref"], mode)
     changes.clear_guangya_fs_change_context(owner=case.context.owner)
-    prepared, source, _fingerprint = prepare(case)
+    stored = restore_confirmation(case)
+    assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
+    assert stored.metadata["reobservation_source"] == source
+    source = stored.metadata["reobservation_source"]
     frozen = deepcopy(source)
     case.provider.trace.clear()
     renewed = read(case, {"operation": "reobserve"}, source=source)
@@ -295,22 +317,20 @@ def test_create_directory_only_retains_original_diagnostic_scope_without_object_
         "0", FILMS["parent_id"], FILMS["file_id"]]
     assert not any(item.name == "New Folder" for item in case.provider.directories[SHOWS["file_id"]])
     assert source == frozen and frozen_plan(case) == plan
-    fresh_preview = preview(case, renewed, [{
+    fresh_prepared, _fresh_source, _fresh_fingerprint = prepare(case, renewed, [{
         "op": "create_directory", "parent_path": SHOWS["path"], "name": "New Folder"}], source=source)
-    note = fresh_preview.data["observation_note"]
+    note = fresh_prepared.data["observation_note"]
     assert "没有" in note and "选中对象" in note and "确认" in note
     assert "已按稳定标识核对" not in note
-    fresh_prepare, _fresh_source, _fresh_fingerprint = prepare(case)
-    assert fresh_prepare.data["observation_note"] == note and note in fresh_prepare.data["effects"]
-    assert_private(initial_preview, prepared, renewed, fresh_preview, fresh_prepare)
+    assert note in fresh_prepared.data["effects"]
+    assert_private(prepared, renewed, fresh_prepared)
 
 
 def test_same_name_replacement_is_not_remapped_to_the_old_object_or_accepted_as_its_ref(case):
     observed = read(case)
     old_ref = object_ref(observed, "Nested")
     operation = {"op": "rename", "object_ref": old_ref, "new_name": "Nested-Renamed"}
-    preview(case, observed, [operation])
-    _prepared, source, _fingerprint = prepare(case)
+    _prepared, source, _fingerprint = prepare(case, observed, [operation])
     frozen = deepcopy(source)
     invalidate(case, observed.data["observation_ref"], "deleted")
     replacement = case.provider.live_file(NESTED)
@@ -324,10 +344,10 @@ def test_same_name_replacement_is_not_remapped_to_the_old_object_or_accepted_as_
     assert "object_ref" not in item
     assert object_ref(renewed, "Nested") != old_ref
     with pytest.raises(AgentToolError) as raised:
-        preview(case, renewed, [operation])
+        prepare(case, renewed, [operation])
     assert raised.value.code in {"precondition_failed", "confirmation_stale"}
     with pytest.raises(AgentToolError) as raised:
-        preview(case, renewed, [{**operation, "object_ref": object_ref(renewed, "Nested")}], source=source)
+        prepare(case, renewed, [{**operation, "object_ref": object_ref(renewed, "Nested")}], source=source)
     assert raised.value.code == "observation_selection_changed"
     assert source == frozen
     assert_private(renewed)
@@ -336,8 +356,8 @@ def test_same_name_replacement_is_not_remapped_to_the_old_object_or_accepted_as_
 @pytest.mark.parametrize("boundary", ["root_replaced", "root_moved", "root_kind", "credential", "owner", "session"])
 def test_root_identity_and_credential_or_session_changes_reject_before_any_scope_scan(case, boundary):
     observed = read(case)
-    preview(case, observed, [{"op": "rename", "object_ref": object_ref(observed, "Nested"), "new_name": "New-Nested"}])
-    _prepared, source, _fingerprint = prepare(case)
+    _prepared, source, _fingerprint = prepare(case, observed, [
+        {"op": "rename", "object_ref": object_ref(observed, "Nested"), "new_name": "New-Nested"}])
     frozen = deepcopy(source)
     invalidate(case, observed.data["observation_ref"], "deleted")
     context = case.context
@@ -373,10 +393,9 @@ def test_missing_one_root_retains_other_observation_but_reports_failed_selection
         "operation": "search", "path": SHOWS["path"], "query": "Episode", "kinds": ["video"],
         "max_depth": 0, "max_items": 9})]
     refs = [object_ref(observations[0], "Nested"), object_ref(observations[1], "Episode.mkv")]
-    preview(case, observations[0], [
+    _prepared, source, _fingerprint = prepare(case, observations[0], [
         {"op": "rename", "object_ref": refs[0], "new_name": "New-Nested"},
         {"op": "copy", "object_ref": refs[1], "target_path": "/Destination"}])
-    _prepared, source, _fingerprint = prepare(case)
     frozen = deepcopy(source)
     for observation in observations:
         invalidate(case, observation.data["observation_ref"], "deleted")
@@ -413,48 +432,63 @@ def test_hot_to_real_sqlite_cold_flow_preserves_confirmation_fingerprint_counts_
     change = {"op": operation, "object_ref": object_ref(observed, "Nested")}
     change.update({"new_name": "Nested-Renamed"} if operation == "rename"
                   else {"target_path": "/Destination"})
-    preview(case, observed, [change])
-    _prepared, source, _fingerprint = prepare(case)
+    _prepared, source, _fingerprint = prepare(case, observed, [change])
     renewed = read(case, {"operation": "reobserve"}, source=source)
-    fresh_preview = preview(case, renewed, [{**change, "object_ref": object_ref(renewed, "Nested")}], source=source)
+    fresh_prepared, fresh_source, fresh_fingerprint = prepare(
+        case, renewed, [{**change, "object_ref": object_ref(renewed, "Nested")}], source=source)
     plan = frozen_plan(case)
-    assert fresh_preview.data["observation_note"]
-    # 上面的真实 preview 已同时保存热缓存和 SQLite flow。断开 repository 只读取真实热 flow，
-    # 再重建 repository 实例并清除缓存，真实冷加载既有 SQLite 数据；不 mock _flow/_safe_preview。
+    assert fresh_prepared.data["observation_note"]
+    # 单次准备已保存热 flow、SQLite flow 和确认卡；恢复不再调用 prepare。
     changes.configure_guangya_fs_change_context(None)
-    hot, hot_source, hot_fingerprint = prepare(case)
+    hot = changes._flow(case.context.owner)
+    hot_card = case.confirmation_plan
+    assert hot is not None
+    hot_fingerprint = changes._confirmation_fingerprint(hot, plan)
     changes.configure_guangya_fs_change_context(SQLiteAgentSessionContextRepository())
     changes.clear_guangya_fs_change_context(owner=case.context.owner)
-    cold, cold_source, cold_fingerprint = prepare(case)
-    assert hot_fingerprint == cold_fingerprint
-    assert hot_source == cold_source
-    assert hot.data == cold.data and hot.summary == cold.summary
+    cold = changes._flow(case.context.owner)
+    cold_card = restore_confirmation(case)
+    assert cold is not None
+    cold_fingerprint = changes._confirmation_fingerprint(cold, plan)
+    assert hot_fingerprint == cold_fingerprint == fresh_fingerprint == cold_card.snapshot_fingerprint
+    assert hot_card.metadata["reobservation_source"] == cold_card.metadata["reobservation_source"] == fresh_source
+    assert hot.preview_safe == cold.preview_safe
+    assert hot_card.preview == cold_card.preview == fresh_prepared.to_dict()
+    assert hot_card.public_result == cold_card.public_result == fresh_prepared.to_dict()
     counters = ("total", "unchanged_count", "rename_count", "move_count", "copy_count",
                 "relocate_count", "trash_count", "create_directory_count")
     for key in counters:
-        assert hot.data[key] == cold.data[key] == fresh_preview.data[key]
-    assert cold.data[operation + "_count"] == 1
-    note = fresh_preview.data["observation_note"]
-    assert hot.data["observation_note"] == cold.data["observation_note"] == note
-    assert note in hot.data["effects"] and note in cold.data["effects"]
+        assert hot.preview_safe[key] == cold.preview_safe[key] == fresh_prepared.data[key]
+    assert cold.preview_safe[operation + "_count"] == 1
+    note = fresh_prepared.data["observation_note"]
+    assert hot.preview_safe["observation_note"] == cold.preview_safe["observation_note"] == note
+    assert note in hot_card.preview["data"]["effects"] and note in cold_card.preview["data"]["effects"]
     assert frozen_plan(case) == plan
-    assert_private(fresh_preview, hot, cold)
+    assert_private(fresh_prepared)
+    public = json.dumps([hot_card.public_dict(), cold_card.public_dict(), cold_card.public_result])
+    assert "reobservation_source" not in public and "private-provider-" not in public
 
-def test_credentials_changed_before_prepare_cannot_issue_a_source_from_old_plan(case):
+def test_credentials_changed_before_prepare_cannot_issue_a_source_from_old_observation(case):
     observed = read(case)
-    preview(case, observed, [{"op": "copy", "object_ref": object_ref(observed, "Nested"), "target_path": "/Destination"}])
+    arguments = changes.guangya_fs_change_arguments({
+        "observation_ref": observed.data["observation_ref"], "trigger_strm": False,
+        "operations": [{"op": "copy", "object_ref": object_ref(observed, "Nested"), "target_path": "/Destination"}],
+    })
     case.provider.credential_generation += 1
     with pytest.raises(AgentToolError) as raised:
-        changes.prepare_guangya_fs_change_confirmation({}, case.context)
+        changes.prepare_guangya_fs_change_confirmation(arguments, case.context)
     assert raised.value.code == "confirmation_stale"
+    assert changes._flow(case.context.owner) is None
+    assert not list((case.root / "agent-guangya-fs-change").glob("*.json"))
 
 
 def test_native_pipeline_persists_private_source_in_real_sqlite_without_public_dto_leak(case):
     observed = read(case)
-    initial_preview = preview(case, observed, [{
-        "op": "move", "object_ref": object_ref(observed, "Nested"), "target_path": "/Destination"}])
-    prepared, source, _fingerprint = prepare(case)
-    assert_private(observed, initial_preview, prepared)
+    arguments = changes.guangya_fs_change_arguments({
+        "observation_ref": observed.data["observation_ref"], "trigger_strm": False,
+        "operations": [{"op": "move", "object_ref": object_ref(observed, "Nested"), "target_path": "/Destination"}],
+    })
+    assert_private(observed)
 
     async def native_round_trip():
         specs = [adapt_tool_spec(spec) for spec in build_tool_specs() if spec.name in {FS_READ, FS_EXECUTE}]
@@ -471,13 +505,17 @@ def test_native_pipeline_persists_private_source_in_real_sqlite_without_public_d
         context = ToolCallContext(owner=case.context.owner, session_id=case.context.session_id,
                                   request_id=lease.request_id, turn_id=lease.turn_id, lease=lease,
                                   cancellation=CancellationToken(), report_progress=progress)
-        result = await pipeline.execute(FS_EXECUTE, {}, context=context)
+        result = await pipeline.execute(FS_EXECUTE, arguments, context=context)
         assert result.effect_plan is not None
         stored = ConfirmationEffectPlanStore(SQLiteConfirmationStore()).get_active_plan(
             owner=case.context.owner, session_id=case.context.session_id, generation=lease.generation,
             plan_id=result.effect_plan.plan_id)
         assert stored is not None
+        source = deepcopy(result.effect_plan.metadata["reobservation_source"])
         assert stored.metadata["reobservation_source"] == source == result.effect_plan.metadata["reobservation_source"]
+        assert stored.arguments == arguments
+        assert stored.preview["status"] == "confirmation_required"
+        assert stored.preview["data"]["total"] == 1 and stored.preview["data"]["cloud_write"] is False
         public = json.dumps({"approval": stored.public_approval_dict(), "outcome": result.outcome.public_content})
         for private in ("reobservation_source", "credential_generation", "private-provider-", "source_root",
                         case.context.owner, case.context.session_id):
@@ -502,8 +540,8 @@ def point_case(case, monkeypatch):
              "kinds": ["video"], "max_depth": 0, "max_items": 7}
     observed = read(case, query)
     old_ref = object_ref(observed, "Movie.mkv")
-    preview(case, observed, [{"op": "rename", "object_ref": old_ref, "new_name": "Planned.mkv"}])
-    _prepared, source, _fingerprint = prepare(case)
+    _prepared, source, _fingerprint = prepare(
+        case, observed, [{"op": "rename", "object_ref": old_ref, "new_name": "Planned.mkv"}])
     invalidate(case, observed.data["observation_ref"], "deleted")
     actual_queries = []
     real_create = files.create_directory_observation
@@ -610,15 +648,17 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
     assert "offline-stable-content-hash" not in json.dumps(result.to_dict())
 
     if change in {"renamed", "deeper_inside"}:
-        # 从最终签名 OBS 走真实 preview/prepare 获取下一轮来源；删除 OBS 后仍可重查，
+        # 从最终签名 OBS 单次 prepare 获取下一轮来源；删除 OBS 后仍可冷恢复重查，
         # 不依赖按对象分裂出的 stat OBS 或第一次补充读取的内存 entry。
-        fresh_preview = preview(current, result, [{
+        fresh_prepared, fresh_source, fresh_fingerprint = prepare(current, result, [{
             "op": "rename", "object_ref": item["object_ref"], "new_name": "Planned.mkv"}], source=current.source)
-        fresh_prepared, fresh_source, fresh_fingerprint = prepare(current)
         frozen_source = deepcopy(fresh_source)
         invalidate(current, result.data["observation_ref"], "deleted")
         changes.clear_guangya_fs_change_context(owner=current.context.owner)
-        _cold_prepared, cold_source, cold_fingerprint = prepare(current)
+        cold_card = restore_confirmation(current)
+        assert cold_card.preview == fresh_prepared.to_dict()
+        cold_source = cold_card.metadata["reobservation_source"]
+        cold_fingerprint = cold_card.snapshot_fingerprint
         assert (cold_source, cold_fingerprint) == (fresh_source, fresh_fingerprint)
         current.provider.trace.clear()
         current.actual_queries.clear()
@@ -645,7 +685,7 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
         assert {row["id"] for row in current.provider.trace if row["method"] == "list_dir"} <= {
             "0", FILMS["parent_id"], FILMS["file_id"], NESTED}
         assert cold_source == fresh_source == frozen_source and current.source == source
-        assert_point_private(fresh_preview, fresh_prepared, continued)
+        assert_point_private(fresh_prepared, continued)
 
 
 @pytest.mark.parametrize("interruption", ["credential", "cancelled"])

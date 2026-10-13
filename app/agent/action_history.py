@@ -80,7 +80,7 @@ _TOOL_LABELS = {
     "strm.metadata.set_enabled": "伴随同步开关调整",
     "strm.metadata.cancel_pending": "伴随元数据积压取消",
     "guangya.organize.set_schedule_policy": "光鸭定时整理策略修改",
-    "guangya.fs.change.execute": "光鸭文件变更执行",
+    "guangya.fs.change.execute": "光鸭文件变更",
     "guangya.recycle.restore": "光鸭回收站恢复",
     "guangya.recycle.clear": "光鸭回收站清空",
     "guangya.share.create": "光鸭分享创建",

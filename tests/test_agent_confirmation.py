@@ -1,4 +1,4 @@
-"""Agent 受控写操作确认协议与 STRM 首个动作测试。"""
+"""Agent 受控写操作确认协议与光鸭单入口完整计划合同测试。"""
 
 from __future__ import annotations
 
@@ -101,6 +101,21 @@ class ConfirmationStoreTests(unittest.TestCase):
         self.assertIn("不会立即搜索资源", created["impact"])
         self.assertEqual(deleted["action"], "删除媒体追更订阅")
         self.assertIn("删除不可撤销", deleted["reversibility"])
+
+    def test_guangya_fs_confirmation_copy_separates_preparation_from_cloud_execution(self):
+        contract = build_confirmation_contract(
+            tool_name="guangya.fs.change.execute",
+            risk=RiskLevel.DANGER,
+            preview=ToolResult(True, "confirmation_required", "完整计划已冻结，等待用户确认"),
+        )
+        self.assertEqual(contract["action"], "执行光鸭文件变更")
+        self.assertIn("完整", contract["object"])
+        self.assertIn("复制", contract["object"])
+        self.assertIn("准备确认卡不写云端", contract["impact"])
+        self.assertIn("确认后只执行卡中固定的完整计划", contract["impact"])
+        self.assertIn("写前复核", contract["impact"])
+        self.assertIn("写后逐项验证", contract["impact"])
+        self.assertEqual(sanitize_confirmation_contract(contract), contract)
 
     def test_confirmation_contract_rejects_boolean_version(self):
         contract = build_confirmation_contract(
@@ -563,3 +578,127 @@ class ConfirmationStoreTests(unittest.TestCase):
             ).owner,
             "owner-b",
         )
+
+
+class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    """真实 catalog/validator/ports/Kernel 确认链路；只替换领域 I/O 边界。"""
+
+    async def asyncSetUp(self):
+        from dataclasses import replace
+
+        from app.agent.domain_catalog import build_tool_specs
+        from app.agent.kernel.effects import ConfirmationEffectPlanStore
+        from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+        from app.agent.kernel.ports import catalog_from_tool_specs
+        from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+
+        self.enterContext(isolated_test_database())
+        self.spec = next(spec for spec in build_tool_specs() if spec.name == "guangya.fs.change.execute")
+        self.validator = Mock(wraps=self.spec.validator)
+        self.preparer = Mock(return_value=(
+            ToolResult(True, "confirmation_required", "完整计划已冻结，等待用户确认", data={"total": 2}),
+            "frozen-fs-fingerprint",
+        ))
+        self.confirmed = Mock(return_value=ToolResult(True, "success", "确认后的文件变更已验证", data={"total": 2}))
+        self.catalog = catalog_from_tool_specs([replace(
+            self.spec, validator=self.validator,
+            context_confirmation_preparer=self.preparer,
+            context_confirmed_handler=self.confirmed,
+        )])
+        self.state = InMemorySessionStateStore()
+        lease, _ = await self.state.begin_turn(owner="fs-owner", session_id="fs-session", request_id="fs-request")
+
+        async def progress(_payload):
+            return None
+
+        self.context = ToolCallContext(
+            owner="fs-owner", session_id="fs-session", request_id="fs-request",
+            turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=progress,
+        )
+        self.effects = ConfirmationEffectPlanStore(SQLiteConfirmationStore())
+        self.pipeline = ToolPipeline(catalog=self.catalog, state_store=self.state, effect_store=self.effects)
+        self.arguments = {
+            "observation_ref": "OBS" + "A" * 32,
+            "operations": [
+                {"op": "rename", "object_ref": "OBJ" + "B" * 24, "new_name": "规范名称.mkv"},
+                {"op": "create_directory", "path": "/新目录"},
+            ],
+            "trigger_strm": False,
+        }
+
+    async def test_full_operations_prepare_one_card_and_only_confirmation_executes(self):
+        prepared = await self.pipeline.execute(self.spec.name, self.arguments, context=self.context)
+        self.preparer.assert_called_once()
+        self.confirmed.assert_not_called()
+        self.validator.assert_called_once()
+        plan = prepared.effect_plan
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.tool_name, "guangya.fs.change.execute")
+        self.assertEqual(plan.arguments, self.spec.validator(self.arguments))
+        self.assertEqual(len(plan.arguments["operations"]), len(self.arguments["operations"]))
+        self.assertEqual(plan.arguments["operations"][0], self.arguments["operations"][0])
+        self.assertEqual(plan.arguments["operations"][1], {"op": "create_directory", "parent_path": "/", "name": "新目录"})
+        self.assertEqual(plan.arguments["observation_ref"], self.arguments["observation_ref"])
+        self.assertFalse(plan.arguments["trigger_strm"])
+        self.assertEqual(self.preparer.call_args.args[0], plan.arguments)
+        pending = await self.pipeline.get_pending_plan(owner="fs-owner", session_id="fs-session")
+        self.assertEqual(pending.plan_id, plan.plan_id)
+
+        result = await self.pipeline.execute_confirmed(plan.plan_id, context=self.context)
+        self.confirmed.assert_called_once()
+        self.assertEqual(self.confirmed.call_args.args[:2], (plan.arguments, "frozen-fs-fingerprint"))
+        self.validator.assert_called_once()
+        self.assertTrue(result.outcome.public_content["ok"])
+        self.assertIsNone(await self.pipeline.get_pending_plan(owner="fs-owner", session_id="fs-session"))
+
+    async def test_empty_or_missing_operations_cannot_issue_or_reissue_a_card(self):
+        from app.agent.kernel.pipeline import ToolPipelineError
+
+        for arguments in ({}, {"operations": []}, {"observation_ref": self.arguments["observation_ref"]}):
+            with self.subTest(arguments=arguments), self.assertRaises(ToolPipelineError) as invalid:
+                await self.pipeline.execute(self.spec.name, arguments, context=self.context)
+            self.assertEqual(invalid.exception.code, "invalid_arguments")
+        self.preparer.assert_not_called()
+        self.confirmed.assert_not_called()
+        self.assertIsNone(await self.pipeline.get_pending_plan(owner="fs-owner", session_id="fs-session"))
+
+        prepared = await self.pipeline.execute(self.spec.name, self.arguments, context=self.context)
+        with self.assertRaises(ToolPipelineError) as invalid:
+            await self.pipeline.execute(self.spec.name, {}, context=self.context)
+        self.assertEqual(invalid.exception.code, "invalid_arguments")
+        self.preparer.assert_called_once()
+        self.confirmed.assert_not_called()
+        pending = await self.pipeline.get_pending_plan(owner="fs-owner", session_id="fs-session")
+        self.assertEqual(pending.plan_id, prepared.effect_plan.plan_id)
+
+    async def test_persisted_execute_card_keeps_name_and_skips_new_preparation_schema(self):
+        from app.agent.kernel.capabilities import ToolEffect
+        from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+        from app.agent.kernel.pipeline import ToolPipeline
+        from app.agent.kernel.state import StateUpdate
+
+        # 历史 execute 卡片的参数为空，但对象和目标已冻结在领域快照中。
+        with self.assertRaises(AgentToolError):
+            self.spec.validator({})
+        legacy = self.effects.freeze(
+            owner="fs-owner", session_id="fs-session", generation=self.context.lease.generation,
+            tool_name="guangya.fs.change.execute", effect=ToolEffect.DANGER, arguments={},
+            prepared=PreparedEffect(
+                preview=ToolResult(True, "confirmation_required", "历史完整计划等待确认").to_dict(),
+                snapshot_fingerprint="persisted-fs-fingerprint",
+            ),
+        )
+        await self.state.commit(self.context.lease, updates=(StateUpdate("pending_effect_plan_id", legacy.plan_id),))
+        rebuilt = ToolPipeline(
+            catalog=self.catalog, state_store=self.state,
+            effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
+        )
+        pending = await rebuilt.get_pending_plan(owner="fs-owner", session_id="fs-session")
+        self.assertEqual(pending.tool_name, "guangya.fs.change.execute")
+        self.assertEqual(pending.arguments, {})
+        completed = await rebuilt.execute_confirmed(legacy.plan_id, context=self.context)
+        self.assertTrue(completed.outcome.public_content["ok"])
+        self.preparer.assert_not_called()
+        self.validator.assert_not_called()
+        self.confirmed.assert_called_once()
+        self.assertEqual(self.confirmed.call_args.args[:2], ({}, "persisted-fs-fingerprint"))

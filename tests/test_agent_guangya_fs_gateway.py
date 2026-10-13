@@ -1210,6 +1210,47 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 {"operation": "stat", "path": "/"}
             )
 
+    def test_single_tool_prepares_card_or_noop_without_cloud_writes(self):
+        import asyncio
+        from app.agent.domain_catalog import build_tool_specs
+        from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+        from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+        from app.agent.kernel.state import InMemorySessionStateStore
+        from tests.test_agent_kernel_existing_ports import context_for
+
+        async def run():
+            catalog = catalog_from_tool_specs(build_tool_specs())
+            self.assertFalse(catalog.has("guangya.fs.change.preview"))
+            name = "guangya.fs.change.execute"
+            self.assertIn("operations", catalog.get(name).input_schema["required"])
+            for new_name in ("Final.mp4", "Move.mp4"):
+                client = FakeGatewayClient()
+                observation = self._query(client)
+                ref = next(item["object_ref"] for item in observation.data["entries"] if item["object_name"] == "Move.mp4")
+                state = InMemorySessionStateStore()
+                pipeline = ToolPipeline(catalog=catalog, state_store=state)
+                context = await context_for(state)
+                with self.assertRaises(ToolPipelineError):
+                    await pipeline.execute(name, {}, context=context)
+                with mock.patch.object(change_actions, "GuangYaClient", return_value=client), \
+                     mock.patch.object(client, "rename", wraps=client.rename) as renamed:
+                    result = await pipeline.execute(name, {"operations": [
+                        {"op": "rename", "object_ref": ref, "new_name": new_name}], "trigger_strm": False}, context=context)
+                    renamed.assert_not_called()
+                saved = await state.load(owner="owner", session_id="session")
+                if new_name == "Move.mp4":
+                    self.assertEqual(result.outcome.public_content["status"], "no_changes")
+                    self.assertIsNone(result.effect_plan)
+                    self.assertFalse(saved.pending_effect_plan_id)
+                else:
+                    self.assertIsNotNone(result.effect_plan)
+                    self.assertEqual(saved.pending_effect_plan_id, result.effect_plan.plan_id)
+                    self.assertEqual(result.outcome.public_content["status"], "confirmation_required")
+                    self.assertEqual(result.effect_plan.arguments["operations"][0]["new_name"], new_name)
+                    self.assertTrue(await pipeline.cancel_effect(result.effect_plan.plan_id, lease=context.lease))
+                self.assertEqual(client.file_info("move").name, "Move.mp4")
+        asyncio.run(run())
+
     def test_preview_resolves_object_refs_across_recent_owner_observations(self):
         client = FakeGatewayClient()
         source = self._query(client, path="/source")
@@ -1219,7 +1260,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             if item["object_name"] == "广告-ABC.mp4"
         )
         self._query(client, path="/target")
-        arguments = change_actions.guangya_fs_change_preview_arguments(
+        arguments = change_actions.guangya_fs_change_arguments(
             {
                 "operations": [
                     {
@@ -1233,12 +1274,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
 
         with mock.patch.object(change_actions, "GuangYaClient", return_value=client):
-            result = change_actions.preview_guangya_fs_change(
+            result, _ = change_actions.prepare_guangya_fs_change_confirmation(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
 
         self.assertTrue(result.ok)
-        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.status, "confirmation_required")
         self.assertEqual(result.data["total"], 1)
 
     def test_preview_arguments_accept_full_season_batch(self):
@@ -1250,7 +1291,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             }
             for index in range(85)
         ]
-        normalized = change_actions.guangya_fs_change_preview_arguments(
+        normalized = change_actions.guangya_fs_change_arguments(
             {"operations": operations, "trigger_strm": False}
         )
         self.assertEqual(len(normalized["operations"]), 85)
@@ -1415,7 +1456,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             {"op": "create_directory", "parent_path": "/target/Series", "name": "Season 01"},
             {"op": "create_directory", "parent_path": "/target", "name": "Series"},
         ]
-        normalized = change_actions.guangya_fs_change_preview_arguments({"operations": operations})
+        normalized = change_actions.guangya_fs_change_arguments({"operations": operations})
         plan = guangya_fs_change.build_fs_change_plan(
             client, owner="owner", observation=observation,
             operations=normalized["operations"], trigger_strm=False,
@@ -1553,7 +1594,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         refs = {
             item["object_name"]: item["object_ref"] for item in observed.data["entries"]
         }
-        normalized = change_actions.guangya_fs_change_preview_arguments(
+        normalized = change_actions.guangya_fs_change_arguments(
             {
                 "operations": [
                     {
@@ -1608,7 +1649,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
 
     def test_batch_and_create_accept_compact_model_arguments(self):
-        normalized = change_actions.guangya_fs_change_preview_arguments(
+        normalized = change_actions.guangya_fs_change_arguments(
             {
                 "operations": [
                     {"op": "create_directory", "path": "/动漫/Series"},
@@ -1656,11 +1697,10 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             operations.append({"op": "rename", "object_ref": entries[f"site.example@Code-{index}.mp4"], "new_name": f"Code-{index}.mp4"})
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(change_actions, "GuangYaClient", return_value=client):
-            preview = change_actions.preview_guangya_fs_change(change_actions.guangya_fs_change_preview_arguments({
+            confirmation, _fingerprint = change_actions.prepare_guangya_fs_change_confirmation(change_actions.guangya_fs_change_arguments({
                 "observation_ref": observed.data["observation_ref"], "operations": operations, "trigger_strm": False,
             }), context)
-            confirmation, _fingerprint = change_actions.prepare_guangya_fs_change_confirmation({}, context)
-        self.assertIn(f"改名 {count} 项", preview.summary)
+        self.assertIn(f"改名 {count} 项", confirmation.summary)
         self.assertIn(f"移动 {count} 项", confirmation.summary)
         plan = guangya_fs_change._read(change_actions._flow("owner").plan_id)
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
@@ -1778,7 +1818,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             for item in observed.data["entries"]
             if item["object_name"] == "Move.mp4"
         )
-        normalized = change_actions.guangya_fs_change_preview_arguments(
+        normalized = change_actions.guangya_fs_change_arguments(
             {
                 "operations": [
                     {
@@ -3108,7 +3148,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             for item in observed.data["entries"]
             if item["object_name"] == "垃圾残余"
         )
-        arguments = change_actions.guangya_fs_change_preview_arguments(
+        arguments = change_actions.guangya_fs_change_arguments(
             {
                 "operations": [{"op": "trash", "object_ref": target["object_ref"]}],
                 "trigger_strm": False,
@@ -3116,15 +3156,11 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(change_actions, "GuangYaClient", return_value=client):
-            preview = change_actions.preview_guangya_fs_change(arguments, context)
-            confirmation, fingerprint = (
-                change_actions.prepare_guangya_fs_change_confirmation({}, context)
-            )
-        self.assertEqual(preview.status, "ready")
-        self.assertEqual(preview.data["trash_count"], 1)
+            confirmation, fingerprint = change_actions.prepare_guangya_fs_change_confirmation(arguments, context)
+        self.assertEqual(confirmation.data["trash_count"], 1)
         self.assertEqual(confirmation.status, "confirmation_required")
         with self.assertRaises(AgentToolError):
-            change_actions.execute_guangya_fs_change({})
+            change_actions.guangya_fs_change_arguments({})
         manager = mock.Mock()
         manager.start_durable_operation.return_value = {
             "ok": True,
@@ -3153,7 +3189,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             for item in observed.data["entries"]
             if item["object_name"] == "垃圾残余"
         )
-        arguments = change_actions.guangya_fs_change_preview_arguments(
+        arguments = change_actions.guangya_fs_change_arguments(
             {
                 "operations": [{"op": "trash", "object_ref": target["object_ref"]}],
                 "trigger_strm": False,
@@ -3161,10 +3197,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(change_actions, "GuangYaClient", return_value=client):
-            change_actions.preview_guangya_fs_change(arguments, context)
-            _confirmation, fingerprint = (
-                change_actions.prepare_guangya_fs_change_confirmation({}, context)
-            )
+            _confirmation, fingerprint = change_actions.prepare_guangya_fs_change_confirmation(arguments, context)
         job_id = "c" * 32
         manager = mock.Mock()
 
@@ -3373,7 +3406,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
     def test_operation_field_error_explains_schema_without_silently_dropping_fields(self):
         with self.assertRaisesRegex(AgentToolError, '缺少 target_path；多余 new_name'):
-            change_actions.guangya_fs_change_preview_arguments({'operations': [
+            change_actions.guangya_fs_change_arguments({'operations': [
                 {'op': 'move', 'object_ref': 'OBJ' + 'A' * 24, 'new_name': 'wrong'}
             ]})
 
@@ -3432,23 +3465,23 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 args = {'observation_ref': result.data['observation_ref'], 'operations': [
                     {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Different.mp4'}], 'trigger_strm': False}
                 with mock.patch.object(change_actions, 'GuangYaClient', return_value=client):
-                    previous = change_actions.preview_guangya_fs_change(change_actions.guangya_fs_change_preview_arguments(args), context)
+                    previous, previous_fingerprint = change_actions.prepare_guangya_fs_change_confirmation(change_actions.guangya_fs_change_arguments(args), context)
                     old_plan = change_actions._flow('owner').plan_id
-                    self.assertEqual(previous.status, 'ready')
+                    self.assertEqual(previous.status, 'confirmation_required')
                     before = set(self.plan_dir.glob('*.json'))
                     args['operations'] = [
                         {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Move.mp4'},
                         {'op': 'move', 'object_ref': entry['object_ref'], 'target_path': '/source'},
                         {'op': 'relocate', 'object_ref': entry['object_ref'], 'target_path': '/source', 'new_name': 'Move.mp4'},
                     ]
-                    noops = change_actions.preview_guangya_fs_change(change_actions.guangya_fs_change_preview_arguments(args), context)
+                    noops, fingerprint = change_actions.prepare_guangya_fs_change_confirmation(change_actions.guangya_fs_change_arguments(args), context)
                     self.assertEqual(noops.status, 'no_changes')
                     self.assertEqual(noops.data['total'], 0)
                     self.assertEqual(noops.data['unchanged_count'], 3)
                     self.assertIsNone(change_actions._flow('owner'))
                     self.assertFalse(set(self.plan_dir.glob('*.json')) - before)
                     with self.assertRaises(AgentToolError):
-                        change_actions.prepare_guangya_fs_change_confirmation({}, context)
+                        change_actions.execute_guangya_fs_change_confirmed({}, previous_fingerprint, context)
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
                         guangya_fs_change.load_fs_change_plan(old_plan, owner='owner')
                 self.assertEqual(client.file_info('move').parent_id, 'source')

@@ -155,7 +155,6 @@ _TOOL_RATE_LIMITS = {
     "guangya.account.status": 8,
     "guangya.connection_status": 4,
     "guangya.fs.query": 8,
-    "guangya.fs.change.preview": 4,
     "guangya.fs.change.execute": 3,
     "guangya.recycle.list": 8,
     "guangya.recycle.restore": 3,

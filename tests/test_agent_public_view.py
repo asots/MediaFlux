@@ -705,12 +705,12 @@ if __name__ == "__main__":
 
 class PublicToolArgumentErrorTests(unittest.TestCase):
     def test_actual_validator_error_survives_kernel_and_public_projection(self):
-        from app.agent.guangya_fs_change_actions import guangya_fs_change_preview_arguments
+        from app.agent.guangya_fs_change_actions import guangya_fs_change_arguments
         from app.agent.kernel.ports.existing_actions import _safe_error
         from app.agent.public_safety import sanitize_public_text
         from app.agent.errors import AgentToolError
         with self.assertRaises(AgentToolError) as caught:
-            guangya_fs_change_preview_arguments({'operations': [{'op': 'rename', 'object_ref': 'OBJ' + 'A' * 24}]})
+            guangya_fs_change_arguments({'operations': [{'op': 'rename', 'object_ref': 'OBJ' + 'A' * 24}]})
         error = _safe_error(caught.exception, fallback_code='invalid_tool_call')
         text = sanitize_public_text(str(error))
         self.assertIn('缺少 新名称', text)

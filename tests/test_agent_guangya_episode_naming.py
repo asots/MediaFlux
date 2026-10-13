@@ -953,7 +953,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         with (
             mock.patch.object(episode_actions, "_fresh_observation", return_value=observation),
             mock.patch.object(episode_actions, "discard_observation") as discard,
-            mock.patch.object(episode_actions, "preview_guangya_fs_change") as preview,
+            mock.patch.object(episode_actions, "prepare_guangya_fs_change_confirmation") as preview,
             self.assertRaisesRegex(AgentToolError, "无需变更"),
         ):
             episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"))

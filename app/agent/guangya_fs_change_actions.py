@@ -313,7 +313,7 @@ def _normalize_path(value: object, *, field: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+def guangya_fs_change_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise AgentToolError("光鸭变更预览参数必须是对象")
     if set(arguments) - {"observation_ref", "operations", "trigger_strm"}:
@@ -475,12 +475,6 @@ def guangya_fs_change_preview_arguments(arguments: dict[str, Any]) -> dict[str, 
     }
 
 
-def guangya_fs_change_execute_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(arguments, dict) or arguments:
-        raise AgentToolError("执行光鸭变更不接受新参数")
-    return {}
-
-
 def _public_error(exc: Exception) -> AgentToolError:
     if isinstance(exc, OrganizeOperationAdmissionError):
         return AgentToolError(str(exc), code="precondition_failed")
@@ -508,9 +502,9 @@ def _operation_object_refs(operations: list[dict[str, Any]]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(refs))
 
 
-def preview_guangya_fs_change(
+def prepare_guangya_fs_change_confirmation(
     arguments: dict[str, Any], context: ToolContext
-) -> ToolResult:
+) -> tuple[ToolResult, str]:
     if not context.owner:
         raise AgentToolError("光鸭变更预览需要已登录会话", code="precondition_failed")
     ref = str(arguments.get("observation_ref") or "").strip().upper()
@@ -576,7 +570,7 @@ def preview_guangya_fs_change(
             True, "no_changes", "所选操作已符合目标名称或目录，无需重复变更；本次未写入云盘",
             data=preview_safe,
             suggestions=["没有生成新的确认计划；这仅表示所选文件操作无需变更，不代表元数据刮削或媒体库入库已完成。"],
-        )
+        ), ""
     flow = _Flow(
         owner=context.owner,
         plan_id=str(plan["plan_id"]),
@@ -597,66 +591,6 @@ def preview_guangya_fs_change(
         discard_fs_change_plan(previous.plan_id, preview_only=True)
     return ToolResult(
         True,
-        "ready",
-        f"已冻结光鸭文件变更：{_change_summary(stats)}；尚未写入云盘",
-        data=preview_safe,
-        evidence=[
-            Evidence(
-                "guangya_fs_change_plan",
-                "计划已绑定当前会话、登录凭据世代和短时观察快照；公开结果不含对象 ID 或完整云端路径。",
-                _now(),
-            )
-        ],
-        suggestions=[
-            "确认前请核对变更类型和名称示例；执行工具不能追加新操作。",
-            *([f"已省略 {preview_safe['unchanged_count']} 项无需变更的操作；其他改名和移动仍在本计划中。"]
-              if preview_safe["unchanged_count"] else []),
-        ],
-    )
-
-
-def _confirmation_fingerprint(flow: _Flow, plan: dict[str, Any]) -> str:
-    return confirmation_context_fingerprint(
-        {
-            "owner": flow.owner,
-            "plan_id": flow.plan_id,
-            "plan_fingerprint": flow.fingerprint,
-            "credential_generation": int(plan.get("credential_generation") or 0),
-            **flow.preview_safe,
-        },
-        domain="guangya-fs-change-confirmation",
-    )
-
-
-def prepare_guangya_fs_change_confirmation(
-    _arguments: dict[str, Any], context: ToolContext
-) -> tuple[ToolResult, str]:
-    flow = _flow(context.owner)
-    if flow is None:
-        raise AgentToolError(
-            "最近光鸭变更预览不存在或已过期", code="precondition_failed"
-        )
-    client: GuangYaClient | None = None
-    try:
-        plan = load_fs_change_plan(
-            flow.plan_id,
-            owner=context.owner,
-            expected_fingerprint=flow.fingerprint,
-        )
-        client = GuangYaClient()
-        raw_generation = plan.get("credential_generation")
-        expected_generation = int(raw_generation) if raw_generation is not None else -1
-        if not client.logged_in or int(client.credential_generation) != int(
-            expected_generation
-        ):
-            raise GuangYaFSChangeStale("光鸭登录凭据已变化，请重新预览")
-    except Exception as exc:
-        raise _public_error(exc) from exc
-    finally:
-        if client is not None:
-            client.close()
-    return ToolResult(
-        True,
         "confirmation_required",
         f"确认后将执行光鸭文件变更：{_change_summary(plan.get('stats') or {})}",
         effect_metadata=({"reobservation_source": bind_observation_source(plan["observation_source"], context)}
@@ -664,7 +598,7 @@ def prepare_guangya_fs_change_confirmation(
         data={
             **flow.preview_safe,
             "effects": [
-                "只执行刚才冻结的对象、名称和目标目录，不会扩大范围。",
+                "只执行本卡冻结的对象、名称和目标目录，不会扩大范围。",
                 "移动、复制和改名会在写前重新检查快照与同名冲突。",
                 "trash 只调用 Provider 回收站语义，不提供永久删除。",
                 "每项写入后都会重新读取目录或对象状态验证真实结果。",
@@ -679,15 +613,24 @@ def prepare_guangya_fs_change_confirmation(
         evidence=[
             Evidence(
                 "guangya_fs_change_plan",
-                "已重新核对当前会话的冻结计划、计划签名和登录凭据世代。",
+                "已按当前会话完整操作编译冻结计划，并绑定计划签名和登录凭据世代。",
                 _now(),
             )
         ],
     ), _confirmation_fingerprint(flow, plan)
 
 
-def execute_guangya_fs_change(_arguments: dict[str, Any]) -> ToolResult:
-    raise AgentToolError("光鸭文件变更必须先预览并确认", code="confirmation_required")
+def _confirmation_fingerprint(flow: _Flow, plan: dict[str, Any]) -> str:
+    return confirmation_context_fingerprint(
+        {
+            "owner": flow.owner,
+            "plan_id": flow.plan_id,
+            "plan_fingerprint": flow.fingerprint,
+            "credential_generation": int(plan.get("credential_generation") or 0),
+            **flow.preview_safe,
+        },
+        domain="guangya-fs-change-confirmation",
+    )
 
 
 def execute_guangya_fs_change_confirmed(

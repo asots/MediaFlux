@@ -19,6 +19,7 @@ _FORBIDDEN_TOOL_NAMES = {
     "rss.set_subscription_enabled",
     "rss.set_refresh_interval",
     "guangya.change_plan.execute",
+    "guangya.fs.change.preview",
     "guangya.media_hygiene.execute",
     "guangya.organize.clean_empty",
 }
@@ -97,7 +98,6 @@ _REQUIRED_PROJECT_TOOLS = {
     "guangya.account.status",
     "guangya.connection_status",
     "guangya.fs.query",
-    "guangya.fs.change.preview",
     "guangya.fs.change.execute",
     "guangya.recycle.list",
     "guangya.recycle.restore",
@@ -193,6 +193,8 @@ def test_all_registered_tools_have_one_complete_kernel_lifecycle() -> None:
     specs = build_tool_specs()
     by_name = {spec.name: spec for spec in specs}
     assert len(by_name) == len(specs)
+    assert not _FORBIDDEN_TOOL_NAMES & by_name.keys()
+    assert _REQUIRED_PROJECT_TOOLS <= by_name.keys()
 
     for spec in specs:
         assert public_tool_label(spec.name) != "项目操作", spec.name
@@ -205,6 +207,100 @@ def test_all_registered_tools_have_one_complete_kernel_lifecycle() -> None:
         assert spec.requires_confirmation, spec.name
         assert spec.context_confirmation_preparer is not None, spec.name
         assert spec.context_confirmed_handler is not None, spec.name
+
+
+def test_guangya_fs_change_is_one_full_plan_confirmation_tool() -> None:
+    from app.agent.kernel.capabilities import ToolEffect
+    from app.agent.kernel.ports import catalog_from_tool_specs
+
+    specs = build_tool_specs()
+    spec = next(item for item in specs if item.name == "guangya.fs.change.execute")
+    assert spec.risk.value == "danger"
+    assert spec.requires_confirmation
+    assert spec.handler is None and spec.context_handler is None
+    assert spec.parameters["required"] == ["operations"]
+    assert set(spec.parameters["properties"]) == {"operations", "observation_ref", "trigger_strm"}
+    assert spec.parameters["additionalProperties"] is False
+    operations = spec.parameters["properties"]["operations"]
+    assert operations["minItems"] == 1
+    assert operations["maxItems"] == 200
+    operation_names = {
+        name
+        for branch in operations["items"]["oneOf"]
+        for name in branch["properties"]["op"]["enum"]
+    }
+    assert operation_names == {
+        "rename", "move", "copy", "relocate", "batch_relocate", "create_directory", "trash",
+    }
+
+    catalog = catalog_from_tool_specs(specs)
+    assert not catalog.has("guangya.fs.change.preview")
+    assert not catalog.has("guangya__fs__change__preview")
+    tool = catalog.get(spec.name)
+    assert tool.effect is ToolEffect.DANGER
+    assert tool.read is None
+    assert tool.prepare is not None and tool.execute_confirmed is not None
+    assert tool.metadata["workflow"] == "guangya_fs_change"
+    assert tool.metadata["workflow_stage"] == 10
+    assert tool.metadata["parallel_read"] is False
+
+
+def test_guangya_fs_change_retired_preview_has_no_runtime_metadata_or_alias() -> None:
+    from app.agent import action_history, confirmation_contract, domain_tool_metadata, public_safety, rate_limit
+
+    execute = "guangya.fs.change.execute"
+    retired = "guangya.fs.change.preview"
+    mappings = (
+        action_history._TOOL_LABELS,
+        action_history._SAFE_FIELDS,
+        confirmation_contract._CONFIRMATION_COPY,
+        domain_tool_metadata.TOOL_RETRIEVAL_TERMS,
+        public_safety._PUBLIC_TOOL_LABELS,
+        public_safety._PUBLIC_TOOL_ALIASES,
+        rate_limit._TOOL_RATE_LIMIT_SCOPES,
+        rate_limit._TOOL_RATE_LIMITS,
+    )
+    for mapping in mappings:
+        assert retired not in mapping
+        assert retired.replace(".", "__") not in mapping
+    assert action_history._TOOL_LABELS[execute] == public_tool_label(execute) == "光鸭文件变更"
+    assert public_tool_label(execute.replace(".", "__")) == "光鸭文件变更"
+    assert "复制" in domain_tool_metadata.TOOL_RETRIEVAL_TERMS[execute]
+    guidance = domain_tool_metadata.loaded_tool_guidance([execute])
+    assert retired not in guidance
+    assert "必填的完整 operations" in guidance
+    assert "只有用户确认后才执行" in guidance
+    assert "不能用空参数" in guidance
+    reference = (_REPO_ROOT / "docs/tutorials/09_Agent工具与能力参考.md").read_text()
+    assert retired not in reference
+    assert "不接受 `{}`" in reference
+
+
+def test_guangya_fs_change_intents_retrieve_the_single_execute_entry() -> None:
+    from app.agent.kernel.capabilities import CapabilityRetriever
+    from app.agent.kernel.ports import catalog_from_tool_specs
+
+    catalog = catalog_from_tool_specs(build_tool_specs())
+    for message in ("把刚才这个文件复制到备份目录", "在光鸭新建目录", "移动光鸭文件并生成文件变更确认卡"):
+        names = CapabilityRetriever().retrieve(message, catalog).names
+        assert "guangya.fs.change.execute" in names, (message, names)
+        assert "guangya.fs.change.preview" not in names
+
+
+def test_guangya_fs_change_uses_one_policy_with_separate_confirmation_budget(monkeypatch) -> None:
+    from app.agent import rate_limit
+
+    execute = "guangya.fs.change.execute"
+    assert rate_limit.tool_rate_limit_policy(execute) == (f"tool:{execute}", 3, 1)
+    limiter = rate_limit.AgentRateLimiter(clock=lambda: 100.0)
+    monkeypatch.setattr(rate_limit, "agent_rate_limiter", limiter)
+    for remaining in (2, 1, 0):
+        decision = rate_limit.consume_agent_tool("fs-owner", execute)
+        assert decision.allowed and decision.remaining == remaining
+    assert not rate_limit.consume_agent_tool("fs-owner", execute).allowed
+    # 准备额度耗尽不能阻止用户确认已有卡片；仍使用唯一 execute 的限流合同。
+    confirmed = rate_limit.consume_agent_tool("fs-owner", execute, scope_suffix="confirmed")
+    assert confirmed.allowed and confirmed.limit == 3 and confirmed.remaining == 2
 
 
 def test_provider_operations_are_bounded_and_writes_are_reference_scoped() -> None:

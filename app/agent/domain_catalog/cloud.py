@@ -30,10 +30,8 @@ from app.agent.guangya_episode_naming_actions import (
 )
 from app.agent.guangya_fs_change_actions import (
     execute_guangya_fs_change_confirmed,
-    guangya_fs_change_execute_arguments,
-    guangya_fs_change_preview_arguments,
+    guangya_fs_change_arguments,
     prepare_guangya_fs_change_confirmation,
-    preview_guangya_fs_change,
 )
 from app.agent.guangya_rename_actions import (
     execute_guangya_rename_confirmed,
@@ -457,7 +455,7 @@ def register_specs(
             context_handler=query_guangya_filesystem,
             validator=guangya_fs_query_arguments,
             related_tools=(
-                "guangya.fs.change.preview",
+                "guangya.fs.change.execute",
                 "guangya.fs.change.execute",
             ),
             domains=("cloud_files", "media_naming", "organize", "storage_hygiene"),
@@ -624,16 +622,16 @@ def register_specs(
     )
     registry.register(
         ToolSpec(
-            name="guangya.fs.change.preview",
+            name="guangya.fs.change.execute",
             description=(
-                "把当前会话近期光鸭观察中的对象引用编译为确定性冻结计划；observation_ref 只指定主快照，"
+                "传入完整operations，一次编译冻结计划并直接生成可点击确认卡；确认前不写云盘，无需另调预览或再次请求建卡。observation_ref只指定主快照，"
                 "同一 owner 与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。支持 rename、move、copy（可选 new_name，在同一计划内复制并对副本改名，源对象不变；省略时沿用源名称，冲突必须拒绝）、"
                 "relocate（一次计划内移动并改名，自动选择无名称冲突的执行顺序）、batch_relocate（用 object_ref+集号批量生成规范文件名）、"
                 "trash（Provider 回收站）和 create_directory。子项复制备份、改名或搬出，以及后续空中间目录trash和父目录move/relocate可放在同一计划，系统按依赖执行；父目录清理前必须验证实际为空，任一前置失败会阻止后续父目录操作；这是有序执行而非全局回滚事务；"
                 "多层 create_directory 与指向新目录的移动可放在同一计划，父目录先于子目录创建，无需分次确认；"
                 "重新核对 owner、凭据世代、对象快照、目录占用与结构冲突，不执行任何云端写入。"
             ),
-            risk=RiskLevel.READ,
+            risk=RiskLevel.DANGER,
             parameters={
                 "type": "object",
                 "required": ["operations"],
@@ -848,48 +846,7 @@ def register_specs(
                 },
                 "additionalProperties": False,
             },
-            context_handler=preview_guangya_fs_change,
-            validator=guangya_fs_change_preview_arguments,
-            domains=(
-                "cloud_files",
-                "media_naming",
-                "organize",
-                "storage_hygiene",
-                "strm",
-            ),
-            source_kind="guangya_fs_change_plan",
-            freshness="live",
-            related_tools=(
-                "guangya.fs.query",
-                "guangya.fs.change.execute",
-            ),
-            workflow="guangya_fs_change",
-            workflow_stage=10,
-            examples=(
-                "把刚才光鸭目录中的垃圾目录移入回收站，先预览",
-                "把这些对象移动到 /整理，先生成确认计划",
-                "把这些对象复制到 /备份，先生成确认计划",
-                "新建目录并为这些对象生成移动且改名的冻结计划",
-                "清理视频文件的广告前缀并把原作品目录整体移到目标目录，一次预览",
-                "把 85 个视频按各自集号批量移动并命名为规范剧集文件，先预览",
-            ),
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="guangya.fs.change.execute",
-            description=(
-                "为完整的通用光鸭文件变更预览生成一张确认卡，用户确认后才执行。必须先核对动作计数覆盖用户全部要求；"
-                "若用户选择的方案增加了移动等动作，先重建完整preview，不能提交上轮仅改名的局部计划。不能接收新对象、名称或路径；"
-                "逐项执行写前快照校验、写后读回验证；复制由持久任务等待 Provider 可见性，trash 只使用 Provider 回收站语义。"
-            ),
-            risk=RiskLevel.DANGER,
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
-            validator=guangya_fs_change_execute_arguments,
+            validator=guangya_fs_change_arguments,
             requires_confirmation=True,
             context_confirmation_preparer=prepare_guangya_fs_change_confirmation,
             context_confirmed_handler=execute_guangya_fs_change_confirmed,
@@ -902,11 +859,16 @@ def register_specs(
             ),
             source_kind="guangya_fs_change_plan",
             freshness="live",
+            related_tools=("guangya.fs.query",),
             workflow="guangya_fs_change",
-            workflow_stage=20,
+            workflow_stage=10,
             examples=(
-                "确认执行刚才的光鸭文件变更计划",
-                "按预览把这些垃圾目录移入回收站",
+                "把刚才光鸭目录中的垃圾目录移入回收站，先预览",
+                "把这些对象移动到 /整理，先生成确认计划",
+                "把这些对象复制到 /备份，先生成确认计划",
+                "新建目录并为这些对象生成移动且改名的冻结计划",
+                "清理视频文件的广告前缀并把原作品目录整体移到目标目录，一次预览",
+                "把 85 个视频按各自集号批量移动并命名为规范剧集文件，先预览",
             ),
         )
     )

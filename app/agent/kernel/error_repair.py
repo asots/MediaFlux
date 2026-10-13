@@ -180,7 +180,9 @@ def preserves(entry, arguments):
 
 def completed_result(tool, content):
     """查询的found/empty是已返回事实，不是后台任务的受理状态。"""
-    statuses = {"success", "completed", "found", "empty"} if tool.effect is ToolEffect.READ else {"success", "completed"}
+    statuses = {"success", "completed", "no_changes"}
+    if tool.effect is ToolEffect.READ:
+        statuses.update(("found", "empty"))
     return content.get("ok") is not False and content.get("status", "success") in statuses
 
 

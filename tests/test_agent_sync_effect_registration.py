@@ -360,15 +360,15 @@ def test_registration_storage_fault_keeps_original_exception_and_code(case):
 
 def test_real_admitted_tracker_cannot_be_overwritten_by_sync_failure(case):
     from app.agent.kernel.ports.existing_actions import adapt_tool_spec
-    from tests.test_agent_effect_admission import _OfflineClient, _offline_runtime, _paused_manager, _preview_domain, _spec
+    from tests.test_agent_effect_admission import _OfflineClient, _offline_runtime, _paused_manager, _domain_arguments, _spec
 
     async def run():
         client = _OfflineClient()
         with _offline_runtime(case.root, client) as stack, _paused_manager():
-            assert _preview_domain("fs", client, ToolContext(owner=OWNER, session_id=SID), stack).ok
+            arguments = _domain_arguments("fs", client, ToolContext(owner=OWNER, session_id=SID), stack)
             case.tool = adapt_tool_spec(_spec("fs"))
             case.pipeline.catalog.register(case.tool)
-            await case.preview()
+            await case.preview(arguments)
             accepted = await case.confirm()
             assert accepted.outcome.public_content["status"] == "accepted"
             before = await case.state()

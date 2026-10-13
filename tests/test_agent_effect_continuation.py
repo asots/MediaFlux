@@ -26,7 +26,7 @@ from app.agent.models import ToolContext, ToolResult
 from app.modules import organize_tasks
 from app.repositories import organize_operation_jobs as jobs
 from tests.support import isolated_test_database
-from tests.test_agent_effect_admission import _offline_runtime, _paused_manager, _preview_domain, _spec, _run_real_worker, _OfflineClient
+from tests.test_agent_effect_admission import _offline_runtime, _paused_manager, _domain_arguments, _spec, _run_real_worker, _OfflineClient
 from tests.test_agent_task_first_slice import NativeScript
 
 OWNER, SID = 'effect-follow-owner', 'effect-follow-session'
@@ -38,6 +38,7 @@ class FollowScript(NativeScript):
         super().__init__('tmdb')
         self.steps = ['inspect', 'finish'] if resume else ['discover', 'change']
         self.prefix = 'resumed' if resume else 'source'
+        self.change_arguments = None
 
     async def respond(self, request):
         body = json.loads(request.content)
@@ -54,7 +55,7 @@ class FollowScript(NativeScript):
         else:
             tool, args = {
                 'discover': ('agent__capabilities', {'tool_names': ['guangya.fs.change.execute']}),
-                'change': ('guangya__fs__change__execute', {}),
+                'change': ('guangya__fs__change__execute', self.change_arguments),
                 'inspect': ('guangya__inspect_after', {}),
             }[step]
             message = {'tool_calls': [{'id': self.prefix+'-'+step, 'type': 'function',
@@ -64,6 +65,11 @@ class FollowScript(NativeScript):
 
 
 def _session(store, script, client, reads, *, stack=None):
+    if any(step in {'change', 'execute'} for step in script.steps):
+        script.change_arguments = _domain_arguments(
+            'fs', client, ToolContext(owner=OWNER, session_id=SID), stack,
+            new_name='second.mp4' if isinstance(script, NextWriteScript) else 'admitted.mp4',
+        )
     def inspect(_args, _context):
         item = client.file_info('rename')
         assert item.name == 'admitted.mp4', 'must not inspect before the confirmed write has completed'
@@ -74,13 +80,6 @@ def _session(store, script, client, reads, *, stack=None):
         KernelToolSpec(name='guangya.inspect_after', domain='cloud', description='读取改名后的文件信息 名称 云盘 source',
             input_schema={'type': 'object', 'properties': {}}, effect=ToolEffect.READ, read=inspect),
     ]
-    if stack is not None:
-        tools.append(KernelToolSpec(
-            name='guangya.next_preview', domain='cloud', description='准备后续新改名计划',
-            input_schema={'type': 'object', 'properties': {}}, effect=ToolEffect.READ,
-            metadata={'workflow': 'guangya_fs_change', 'workflow_stage': 10},
-            read=lambda _a, _c: _preview_domain('fs', client, ToolContext(owner=OWNER, session_id=SID), stack, new_name='second.mp4'),
-        ))
     catalog = ToolCatalog(tools)
     session = AgentSession(model=script.adapter, catalog=catalog, retriever=CapabilityRetriever(maximum=10),
         pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
@@ -98,7 +97,6 @@ async def _ready_case(tmp_path, *, channel='web', route=None, fail_write=False):
         initialize_runtime_fence()
         from app.agent import guangya_fs_change_actions
         client = guangya_fs_change_actions.GuangYaClient()
-        _preview_domain('fs', client, ToolContext(owner=OWNER, session_id=SID), stack)
         store, reads, first = SQLiteKernelStore(), [], FollowScript()
         session = _session(store, first, client, reads)
         events = [e async for e in session.run(AgentInput(message=GOAL, owner=OWNER, session_id=SID, channel=channel))]
@@ -152,16 +150,17 @@ def test_native_effect_wait_resumes_original_cloud_goal_without_a_synthetic_user
 class NextWriteScript(FollowScript):
     def __init__(self):
         super().__init__(resume=True)
-        self.steps = ['preview', 'execute']
+        self.steps = ['execute']
 
     async def respond(self, request):
         body = json.loads(request.content)
         self.requests.append(body)
         step = self.steps.pop(0)
-        name = 'guangya__next_preview' if step == 'preview' else 'guangya__fs__change__execute'
+        assert step == 'execute' and self.change_arguments['operations']
+        name = 'guangya__fs__change__execute'
         return httpx.Response(200, json={'choices': [{'message': {'tool_calls': [{
             'id': 'next-'+step, 'type': 'function',
-            'function': {'name': name, 'arguments': '{}'},
+            'function': {'name': name, 'arguments': json.dumps(self.change_arguments)},
         }]}, 'finish_reason': 'tool_calls'}]})
 
 
@@ -321,7 +320,7 @@ def test_new_tg_approval_is_durable_without_executing_it(tmp_path):
     asyncio.run(run())
 
 
-def test_failed_prior_effect_requires_read_before_new_write_preview(tmp_path):
+def test_failed_prior_effect_requires_read_before_new_write_prepare(tmp_path):
     async def run():
         async with _ready_case(tmp_path, fail_write=True) as (store, candidate, client, reads, stack, _users):
             state = await store.load(owner=OWNER, session_id=SID)
@@ -353,11 +352,10 @@ def test_foreground_completion_consumes_same_goal_without_background_double_run(
         def rename(self, *_args, **_kwargs):
             raise RuntimeError("offline provider rejected rename")
     async def run():
-        with isolated_test_database(), _offline_runtime(tmp_path, RefusingClient() if fail_write else _OfflineClient()) as stack, _paused_manager():
+        with isolated_test_database(), _offline_runtime(tmp_path, RefusingClient() if fail_write else _OfflineClient()), _paused_manager():
             initialize_runtime_fence()
             from app.agent import guangya_fs_change_actions
             client = guangya_fs_change_actions.GuangYaClient()
-            _preview_domain('fs', client, ToolContext(owner=OWNER, session_id=SID), stack)
             store, reads, script = SQLiteKernelStore(), [], FollowScript()
             script.steps += ['finish'] if fail_write else ['inspect', 'finish']
             session = _session(store, script, client, reads)

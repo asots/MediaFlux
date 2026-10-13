@@ -287,8 +287,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 | `guangya.organize.cleanup.classify` | READ | 逐项复核最近冻结的光鸭残留候选。 |
 | `guangya.organize.cleanup.execute` | DANGER | 在用户确认后执行最近一次冻结的光鸭整理残留计划：真空目录经复核后进入回收站，仅将逐项确认隔离的残留目录整体移入 MediaFlux 隔离区。 |
 | `guangya.fs.query` | READ | 通用只读光鸭文件查询。 |
-| `guangya.fs.change.preview` | READ | 把当前会话近期光鸭观察中的对象引用编译为确定性冻结计划；observation_ref 只指定主快照，同一 owner 与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。 |
-| `guangya.fs.change.execute` | DANGER | 在用户确认后执行最近一次通用光鸭文件变更冻结计划。 |
+| `guangya.fs.change.execute` | DANGER | 接收必填的完整 `operations` 及可选 `observation_ref`、`trigger_strm`，一次调用即可编译冻结计划并准备确认卡；准备阶段不写云端，用户确认后才执行卡中固定的计划。`observation_ref` 只指定主快照，同一 owner 与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。 |
 | `guangya.media_hygiene.preview` | READ | 只读扫描一个精确光鸭目录中的媒体名称污染。 |
 | `guangya.rename.preview` | READ | 按 1 到 4 个精确光鸭绝对路径只读预览批量名称转换；支持递归删除旧式 Mbps 码率字段或字面文本替换。 |
 | `guangya.rename.execute` | DANGER | 在用户确认后执行当前会话最近冻结的光鸭重命名计划，包括批量名称转换和媒体名称清理；不接受文件 ID、路径或名称参数，执行前复核凭据、快照和目标冲突，写后按file_id 验证真实名称。 |
@@ -453,7 +452,7 @@ provider.job.status                  查询当前会话冻结写计划的持久�
 
 光鸭通过第 2 节的 `guangya.*` 和统一 `ingest.*` 领域工具复用 SDK/项目客户端，不要求再加一层相同的 `provider.query` 操作。目录浏览、文件计划、账号容量、回收站和分享已各有专门约束。
 
-通用文件变更预览支持的操作枚举：
+通用文件变更工具支持的操作枚举：
 
 | 操作 | 含义 |
 |---|---|
@@ -465,7 +464,11 @@ provider.job.status                  查询当前会话冻结写计划的持久�
 | `create_directory` | 新建目录，可与指向该目录的后续操作一起规划 |
 | `trash` | 将活动目录中的明确对象移入回收站 |
 
-这些是 `guangya.fs.change.preview` 的参数枚举，不是额外七个免确认工具。`guangya.fs.change.execute` 只能执行已冻结计划，不能临时追加对象或改写路径。
+这些是唯一入口 `guangya.fs.change.execute` 的 `operations` 参数枚举，不是额外七个免确认工具。准备确认卡时必须传入完整且非空的 `operations`，可同时提供 `observation_ref` 与 `trigger_strm`；不接受 `{}` 沿用上次计划生成新卡，也不需要先调用另一个预览工具。
+
+一次调用会完成只读观察复核、完整计划冻结和确认卡准备，**并不表示云端写已执行**。确认后只执行卡中固定的对象和目标，写前复核快照与冲突，写后逐项验证；不能临时追加对象或改写路径。范围变化时须用新的完整 `operations` 重新准备确认卡。`trigger_strm` 仅控制已确认变更完成后的 STRM 衔接，不绕过云端写确认。
+
+已存的 `guangya.fs.change.execute` 确认卡仍绑定原来的冻结计划；确认执行时不重新要求准备阶段的 `operations` schema，也不能据此空参生成新卡。
 
 ## 4. 容易混淆的能力边界
 

@@ -44,6 +44,30 @@ async def context_for(
 
 
 class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
+    async def test_noop_preparation_returns_without_freezing_or_execution_and_settles_repair(self):
+        from unittest.mock import Mock
+        for effect in (RiskLevel.WRITE, RiskLevel.DANGER):
+            with self.subTest(effect=effect):
+                execute = Mock(side_effect=AssertionError("no cloud write"))
+                spec = ToolSpec(name="config.noop", description="预检明确无需变更", risk=effect,
+                    parameters={"type": "object", "required": ["value"], "properties": {"value": {"type": "integer"}}},
+                    validator=dict, requires_confirmation=True,
+                    context_confirmation_preparer=lambda args, ctx: (ToolResult(True, "no_changes", "已符合目标，不执行任何写入"), ""),
+                    context_confirmed_handler=execute)
+                state = InMemorySessionStateStore()
+                pipeline = ToolPipeline(catalog=catalog_from_tool_specs([spec]), state_store=state)
+                context = await context_for(state)
+                with self.assertRaises(ToolPipelineError) as failed:
+                    await pipeline.execute(spec.name, {"value": "invalid"}, context=context)
+                with patch.object(pipeline.effect_store, "freeze", side_effect=AssertionError("must not issue an empty confirmation")):
+                    result = await pipeline.execute("agent.repair", {
+                        "ticket": failed.exception.repair_ticket, "arguments": {"value": 0}}, context=context)
+                self.assertIsNone(result.effect_plan)
+                self.assertTrue(result.recovered_failures)
+                self.assertEqual(result.outcome.public_content["status"], "no_changes")
+                self.assertFalse((await state.load(owner="owner", session_id="session")).pending_effect_plan_id)
+                execute.assert_not_called()
+
     async def test_post_write_verifier_keeps_failed_outcome_and_receipt(self):
         for status in ("conflict", "outcome_unknown"):
             with self.subTest(status=status):
@@ -231,7 +255,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
             "列出我创建的光鸭分享": {"guangya.share.list"},
             "把刚才选中的文件创建 7 天分享链接": {"guangya.share.create"},
             "撤销刚才第一个分享": {"guangya.share.revoke"},
-            "把刚才这个文件复制到备份目录": {"guangya.fs.change.preview"},
+            "把刚才这个文件复制到备份目录": {"guangya.fs.change.execute"},
         }
         for message, expected in cases.items():
             with self.subTest(message=message):

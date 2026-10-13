@@ -773,6 +773,14 @@ class ToolPipeline:
         if tool.prepare is None:  # pragma: no cover - ToolSpec 已校验
             raise ToolPipelineError("工具不支持预检", code="confirmation_not_supported")
         prepared_value = await _invoke(tool.prepare, resolved, context)
+        if isinstance(prepared_value, ToolOutcome):
+            if prepared_value.public_content.get("ok") is not True or prepared_value.public_content.get("status") != "no_changes":
+                raise ToolPipelineError("预检只能直接返回无需变更的结果", code="invalid_effect_preview")
+            outcome = await self._materialize_refs(self.projector.project(prepared_value), context=context)
+            await self._commit_updates(context.lease, outcome.state_updates)
+            return PipelineResult(tool=tool, arguments=normalized, outcome=outcome,
+                                  elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+                                  recovered_failures=error_repair.completed(tool, raw_arguments, context, outcome.public_content))
         if not isinstance(prepared_value, PreparedEffect):
             raise ToolPipelineError(
                 "工具预检返回无效结果", code="invalid_effect_preview"
