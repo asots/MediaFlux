@@ -1059,6 +1059,7 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
                 owner=owner,
                 session_id=session_id,
                 message_thread_id=message_thread_id,
+                bind_session=bool(route_token),
             )
         else:
             body = _render_turn(view)

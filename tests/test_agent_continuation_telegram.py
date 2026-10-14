@@ -303,6 +303,37 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         match = adapter._CALLBACK_RE.fullmatch(button.callback_data)
         self.assertEqual(resolve_session_callback_route(OWNER, match.group("route"), None), SESSION)
 
+    def test_next_private_approval_keeps_explicit_session_and_can_be_cancelled(self):
+        next_plan = "plan_abcdef1234567890"
+
+        async def confirm(**kwargs):
+            self.session.last_confirmation = kwargs
+            factory = EventFactory(session_id=kwargs["session_id"], turn_id="next-card", request_id=kwargs["request_id"])
+            yield factory.create(AgentEventType.TURN_STARTED)
+            yield factory.create(AgentEventType.EFFECT_APPROVAL_REQUIRED, {"plan": {
+                "plan_id": next_plan, "tool_name": "media.subscribe", "effect": "write",
+                "preview": {"summary": "下一项需确认"}, "expires_at": "2099-01-01T00:00:00+00:00",
+            }})
+            yield factory.create(AgentEventType.TURN_COMPLETED, status="approval_required", answer="第一项已完成。")
+
+        self.session.confirm = confirm
+        self.session.cancel_effect = AsyncMock(return_value=True)
+        route = create_session_callback_route(OWNER, SESSION, None)
+        message = Message("第一张确认卡", user_id=0)
+        adapter.handle_agent_callback(self.bot, Call(f"agk:c:{route}:{PLAN}", message), TELEBOT)
+        self.assertEqual(self.session.last_confirmation["session_id"], SESSION)
+        markup = self.bot.edits[-1][3]["reply_markup"]
+        cancel = next(b for b in markup.buttons if b.callback_data.startswith("agk:x:"))
+        match = adapter._CALLBACK_RE.fullmatch(cancel.callback_data)
+        self.assertTrue(match.group("route"), "后续确认卡丢失了显式会话路由")
+        self.assertEqual(resolve_session_callback_route(OWNER, match.group("route"), None), SESSION)
+        self.runtime.store.load.return_value.pending_effect_plan_id = next_plan
+        adapter.handle_agent_callback(self.bot, Call(cancel.callback_data, message), TELEBOT)
+        self.session.cancel_effect.assert_awaited_once_with(
+            owner=OWNER, session_id=SESSION, plan_id=next_plan, request_id="tgcb_callback-1",
+        )
+        self.assertIsNone(self.bot.edits[-1][3]["reply_markup"])
+
     def test_expired_cancelled_or_replaced_plan_sends_fact_without_old_buttons(self):
         for current in (None, types.SimpleNamespace(plan_id="new-plan")):
             with self.subTest(current=current):
