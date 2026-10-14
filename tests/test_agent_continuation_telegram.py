@@ -30,6 +30,8 @@ from app.modules.telegram_topic_routing import (
 from app.notifier import NotificationEvent
 from app.repositories.telegram_notifications import (
     claim_due_notifications,
+    complete_notification,
+    purge_notifications,
     recover_notifications,
 )
 from tests.support import isolated_test_database
@@ -394,6 +396,100 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         recover_notifications()
         center.drain_telegram_notifications()
         self.assertEqual(len(self.bot.attempts), 1)
+
+    def test_segment_failure_blocks_later_buttons_without_blocking_other_results(self):
+        for failure in (TelegramAPIErrorFixture(429), requests.ReadTimeout("unknown first-part result")):
+            with self.subTest(failure=type(failure).__name__):
+                identity = type(failure).__name__
+                payload = self.prepare(approval=True)
+                payload["delivery_id"] = identity
+                first_body = f"<b>{identity}: required first part</b>"
+                payload["parts"].insert(0, {"html": first_body})
+                self.publish(payload)
+                original_send = self.bot.send_message
+                remaining = [failure]
+
+                def send(chat_id, text, **kwargs):
+                    self.bot.failure = remaining.pop() if text == first_body and remaining else None
+                    try:
+                        return original_send(chat_id, text, **kwargs)
+                    finally:
+                        self.bot.failure = None
+
+                start = len(self.bot.sent)
+                with patch.object(self.bot, "send_message", side_effect=send):
+                    self.assertFalse(center.drain_telegram_notifications(limit=100))
+                    self.assertEqual(self.bot.sent[start:], [], "a later confirmation card must not overtake failed facts")
+                    independent = self.prepare(answer="unrelated result")
+                    independent["delivery_id"] = identity + "-independent"
+                    self.publish(independent)
+                    center.drain_telegram_notifications(limit=100)
+                    self.assertEqual(len(self.bot.sent), start + 1)
+                    self.assertIn("unrelated result", self.bot.sent[-1][1])
+                    self.assertIsNone(self.bot.sent[-1][2]["reply_markup"])
+                    if isinstance(failure, requests.ReadTimeout):
+                        recover_notifications()
+                        center.drain_telegram_notifications(limit=100)
+                        self.assertEqual(len(self.bot.sent), start + 1)
+                    else:
+                        with db.get_conn() as conn:
+                            conn.execute("UPDATE telegram_notification_outbox SET next_attempt_at='2000-01-01 00:00:00' WHERE status='retry_wait'")
+                        center.drain_telegram_notifications(limit=100)
+                        self.assertEqual(len(self.bot.sent), start + 3)
+                        self.assertEqual(self.bot.sent[-2][1], first_body)
+                        self.assertIsNone(self.bot.sent[-2][2]["reply_markup"])
+                        self.assertIsNotNone(self.bot.sent[-1][2]["reply_markup"])
+
+    def test_existing_part_keys_are_claimed_in_numeric_order_across_workers(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        payload = self.prepare(approval=True)
+        payload["parts"] = [{"html": f"fact {index}"} for index in range(12)] + payload["parts"]
+        self.publish(payload)
+        for index in range(13):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                claims = list(pool.map(lambda _: claim_due_notifications(limit=100), range(2)))
+            claimed = [row for group in claims for row in group]
+            self.assertEqual(len(claimed), 1, "one reply cannot have two in-flight segments")
+            row = claimed[0]
+            self.assertEqual(row["event_key"].rsplit(":", 2)[-2], str(index))
+            self.assertNotIn("predecessor", row, "existing queue rows need no parallel ordering state")
+            self.assertTrue(complete_notification(
+                row["id"], lease_generation=row["lease_generation"],
+                claimed_revision=row["revision"], message_id=700 + index,
+            ))
+        self.assertEqual(claim_due_notifications(limit=100), [])
+
+    def test_tail_claim_cannot_bypass_unknown_failed_or_missing_prefix(self):
+        payload = self.prepare(approval=True)
+        payload["parts"].insert(0, {"html": "required prefix"})
+        self.publish(payload)
+        head, tail = self.rows()
+        for status in ("pending", "retry_wait", "sending", "outcome_unknown", "failed", "suppressed"):
+            with self.subTest(status=status):
+                with db.get_conn() as conn:
+                    conn.execute("UPDATE telegram_notification_outbox SET status=? WHERE id=?", (status, head["id"]))
+                self.assertEqual(claim_due_notifications(event_key=tail["event_key"]), [])
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM telegram_notification_outbox WHERE id=?", (head["id"],))
+        self.assertEqual(claim_due_notifications(event_key=tail["event_key"]), [], "absence cannot prove delivery")
+
+    def test_purge_keeps_prefix_receipts_until_the_reply_has_no_pending_parts(self):
+        payload = self.prepare(approval=True)
+        payload["parts"].insert(0, {"html": "required prefix"})
+        self.publish(payload)
+        head = claim_due_notifications(limit=100)[0]
+        self.assertTrue(complete_notification(head["id"], lease_generation=head["lease_generation"],
+                                              claimed_revision=head["revision"], message_id=701))
+        with db.get_conn() as conn:
+            conn.execute("UPDATE telegram_notification_outbox SET updated_at='2000-01-01 00:00:00' WHERE id=?", (head["id"],))
+        self.assertEqual(purge_notifications(retention_days=1), 0)
+        tail = claim_due_notifications(limit=100)
+        self.assertEqual(len(tail), 1)
+        self.assertTrue(complete_notification(tail[0]["id"], lease_generation=tail[0]["lease_generation"],
+                                              claimed_revision=tail[0]["revision"], message_id=702))
+        self.assertEqual(purge_notifications(retention_days=1), 1)
+        self.assertEqual(len(self.rows()), 1)
 
     def test_missing_sdk_receipt_is_unknown_not_pretended_success(self):
         self.publish(self.prepare())

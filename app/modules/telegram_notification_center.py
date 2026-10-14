@@ -32,6 +32,7 @@ from app.notifier import (
     truncate_telegram_text,
 )
 from app.repositories.telegram_notifications import (
+    AGENT_CONTINUATION_EVENT_PREFIX,
     claim_due_notifications,
     complete_notification,
     fail_notification,
@@ -57,7 +58,6 @@ _AGENT_INTERACTION_LOGICAL_KEY_PREFIX = "agent-effect:"
 _AGENT_INTERACTION_EVENT_KEY_PREFIX = "tg:event:agent:agent-effect:"
 _AGENT_INTERACTION_STATE = "agent_effect_reply"
 _AGENT_CONTINUATION_KEY_PREFIX = "agent-continuation:"
-_AGENT_CONTINUATION_EVENT_PREFIX = "tg:event:agent:agent-continuation:"
 _AGENT_CONTINUATION_STATE = "agent_continuation_reply"
 _CHAT_ID_RE = re.compile(r"-?[0-9]+\Z")
 _PURGE_INTERVAL_SECONDS = 6 * 60 * 60
@@ -369,7 +369,7 @@ def _dispatch_item(item: dict) -> bool:
     continuation_delivery = None
     continuation_candidate = (
         str(item.get("topic") or "") == NotificationTopic.AGENT.value
-        and str(item.get("event_key") or "").startswith(_AGENT_CONTINUATION_EVENT_PREFIX)
+        and str(item.get("event_key") or "").startswith(AGENT_CONTINUATION_EVENT_PREFIX)
     )
     if continuation_candidate:
         try:

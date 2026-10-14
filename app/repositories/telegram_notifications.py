@@ -10,6 +10,9 @@ from typing import Any
 _MAX_ATTEMPTS = 7
 _LEASE_SECONDS = 120
 _STAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+AGENT_CONTINUATION_EVENT_PREFIX = "tg:event:agent:agent-continuation:"
+# 发布端已有的 SHA256 identity + ':'；既有分段记录也使用同一顺序键，无需迁移。
+_CONTINUATION_GROUP_LENGTH = len(AGENT_CONTINUATION_EVENT_PREFIX) + 65
 
 
 def _future_stamp(delay_seconds: int, *, base_stamp: str = "") -> str:
@@ -202,13 +205,24 @@ def claim_due_notifications(
             "OR (status='sending' AND updated_at<=? "
             "AND COALESCE(message_id,0)>0))"
         ]
-        params: list[object] = [stamp, stale_before]
+        # 每次领取只开放已确认送达的完整前缀；不能让部分事实缺失的确认卡先发出。
+        # 关联查询按 event_key 唯一索引限定到同一回复，不阻塞其他回复/普通通知。
+        group_length = _CONTINUATION_GROUP_LENGTH
+        clauses.append(f"""(candidate.event_key NOT LIKE ? OR (
+            SELECT COUNT(CASE WHEN prior.status='sent' THEN 1 END)
+            FROM telegram_notification_outbox AS prior
+            WHERE prior.event_key >= substr(candidate.event_key,1,{group_length})
+              AND prior.event_key < substr(candidate.event_key,1,{group_length}) || ':'
+              AND CAST(substr(prior.event_key,{group_length + 1}) AS INTEGER)
+                  < CAST(substr(candidate.event_key,{group_length + 1}) AS INTEGER)
+        ) = CAST(substr(candidate.event_key,{group_length + 1}) AS INTEGER))""")
+        params: list[object] = [stamp, stale_before, AGENT_CONTINUATION_EVENT_PREFIX + "%"]
         if event_key:
             clauses.append("event_key=?")
             params.append(str(event_key))
         params.append(max(1, min(int(limit or 1), 100)))
         rows = conn.execute(
-            "SELECT * FROM telegram_notification_outbox WHERE "
+            "SELECT candidate.* FROM telegram_notification_outbox AS candidate WHERE "
             + " AND ".join(clauses)
             + " ORDER BY next_attempt_at,id LIMIT ?",
             tuple(params),
@@ -451,18 +465,26 @@ def recover_notifications() -> int:
 
 
 def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
-    """清理已送达/已抑制的旧事件；失败和结果未知保留更久便于核对。"""
+    """清理旧终态；尚有待投递分段的回复保留前缀回执，避免清理破坏顺序证据。"""
     database = db
     normal_cutoff = _future_stamp(-max(1, int(retention_days)) * 86400)
     diagnostic_cutoff = _future_stamp(-max(90, int(retention_days)) * 86400)
+    group_length = _CONTINUATION_GROUP_LENGTH
     with database.get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM telegram_notification_outbox WHERE id IN ("
-            "SELECT id FROM telegram_notification_outbox WHERE "
-            "(status IN ('sent','suppressed') AND updated_at<?) OR "
-            "(status IN ('failed','outcome_unknown') AND updated_at<?) "
+            "SELECT candidate.id FROM telegram_notification_outbox AS candidate WHERE "
+            "((status IN ('sent','suppressed') AND updated_at<?) OR "
+            "(status IN ('failed','outcome_unknown') AND updated_at<?)) "
+            f"""AND (candidate.event_key NOT LIKE ? OR (
+                SELECT COUNT(CASE WHEN pending.status IN ('pending','retry_wait','sending') THEN 1 END)
+                FROM telegram_notification_outbox AS pending
+                WHERE pending.event_key >= substr(candidate.event_key,1,{group_length})
+                  AND pending.event_key < substr(candidate.event_key,1,{group_length}) || ':'
+            ) = 0) """
             "ORDER BY updated_at,id LIMIT ?)",
-            (normal_cutoff, diagnostic_cutoff, max(1, min(int(limit), 10000))),
+            (normal_cutoff, diagnostic_cutoff, AGENT_CONTINUATION_EVENT_PREFIX + "%",
+             max(1, min(int(limit), 10000))),
         )
         return int(cur.rowcount or 0)
 
