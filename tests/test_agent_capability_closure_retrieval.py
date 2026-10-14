@@ -38,6 +38,13 @@ def select(catalog, message, *, recent_tools=(), recent_messages=(), ref_kinds=(
     return set(selected.names)
 
 
+@pytest.mark.parametrize("resolution", ["720p", "1080p", "2160p"])
+def test_single_preference_change_exposes_update_alongside_current_preferences(catalog, resolution):
+    message = f"把首选清晰度改为{resolution}，只改这一项，最低清晰度和其他偏好不动。先给确认卡，不执行。"
+    selected = select(catalog, message)
+    assert {"media.preferences", "media.set_preferences"} <= selected
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     [

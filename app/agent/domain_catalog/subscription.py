@@ -27,7 +27,6 @@ from app.agent.media_consumption_actions import (
 from app.agent.media_consumption_actions import (
     empty_arguments as media_consumption_empty_arguments,
 )
-from app.agent.provider_operations import RECENT_MEDIA_PROPERTIES
 from app.agent.media_preference_policy import PREFERENCE_PROPERTIES
 from app.agent.media_subscription_actions import (
     create_media_subscription_confirmed,
@@ -55,6 +54,7 @@ from app.agent.models import (
     RiskLevel,
     ToolSpec,
 )
+from app.agent.provider_operations import RECENT_MEDIA_PROPERTIES
 from app.agent.rss_actions import (
     diagnose_rss,
     get_rss_recent_activity,
@@ -597,6 +597,7 @@ def register_specs(
             },
             context_handler=get_preferences,
             validator=media_consumption_empty_arguments,
+            related_tools=("media.set_preferences",),
             examples=("查看我的媒体偏好", "下载默认到哪里", "我偏好哪个媒体服务器"),
         )
     )
