@@ -238,8 +238,8 @@ def claim(state: SessionState, candidate, now, binding, conn=None):
                             record["source_request_id"], record["wait_id"], record["claim_id"])
 
 
-# Effects are already accepted writes. Their continuation can only plan new work;
-# it never restores a confirmation ticket or re-enters execute_confirmed.
+# Accepted writes are never resubmitted. A frozen batch may finish its approved
+# synchronous tail; other continuations can only plan new work with fresh consent.
 EFFECT_ACTIVE_SECONDS = 1800
 EFFECT_PENDING = {"waiting", "pending", "claimed", "running"}
 
@@ -362,7 +362,12 @@ def claim_effect(state, candidate, now, binding, conn=None):
         return None
     from cryptography.fernet import InvalidToken
     try:
-        effect_payload(state, record)
+        payload = effect_payload(state, record)
+        # Confirmation has its own request ID within the same user generation.
+        # Only a newer publication supersedes the frozen tail authorization.
+        if payload["origin"].get("batch_plan") and state.generation != record["publication_generation"]:
+            record.update(state="cancelled", terminal_reason="new_user_turn")
+            return None
     except (InvalidToken, ValueError, KeyError, TypeError):
         record.update(state="cancelled", terminal_reason="origin_unavailable")
         return None
@@ -409,6 +414,15 @@ def apply_effect_action(state, lease, update, now, conn):
         record.update(state="pending", anchor=anchor, due_at=due, claim_until=0, last_checked_at=now)
     elif value["operation"] == "finish":
         record.update(state="terminal", terminal_reason=value["reason"])
+        row = state.metadata["effect_waits"][record["wait_id"]]
+        if row.get("batch_progress"):
+            from .batch_effects import observe_batch
+            from .state import commit_conversation
+            from app.agent.effect_completion import _late_receipt
+            payload = effect_payload(state, record)
+            final = observe_batch(row, payload["origin"], payload["result"])
+            row.update(final_result=final, receipt_message=_late_receipt(payload["seed"], final))
+            commit_conversation(state, state.conversation)
         if value.get("delivery_view") is not None and record.get("channel") == "telegram":
             record.update(delivery_view=deepcopy(value["delivery_view"]), delivery_pending=True)
         marker = state.metadata.get("active_publication") or {}
@@ -442,10 +456,16 @@ def confirmed_result(catalog, state, record):
     from .projection import ToolOutcome
     payload = effect_payload(state, record)
     seed, origin, result = payload["seed"], payload["origin"], payload["result"]
-    tool = catalog.get(seed["tool"])
+    tool = catalog.get(seed["tool"]).for_arguments(origin["arguments"])
+    batch = origin.get("batch_plan") or {}
+    if batch and (tool.name != "agent.batch" or batch["effect"] != tool.effect.value):
+        raise ValueError("frozen batch risk changed")
     plan = EffectPlan(seed["plan_id"], state.owner, state.session_id, origin["origin_generation"],
-                      tool.name, tool.effect, origin["arguments"], "", {}, 0,
-                      metadata=({"reobservation_source": deepcopy(origin["reobservation_source"])}
+                      tool.name, tool.effect, origin["arguments"], batch.get("snapshot", ""), {}, 0,
+                      owner_generation=batch.get("owner_generation", 0),
+                      confirmation_contract=deepcopy(batch.get("confirmation_contract", {})),
+                      metadata=deepcopy(batch["metadata"]) if batch else
+                               ({"reobservation_source": deepcopy(origin["reobservation_source"])}
                                 if origin.get("reobservation_source") is not None else {}))
     return PipelineResult(tool, origin["arguments"], ToolOutcome(
         model_content=json.dumps(result, ensure_ascii=False), public_content=result,

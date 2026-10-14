@@ -128,8 +128,8 @@ class ToolSpec:
     source_kind: str = "system_state"
     freshness: str = "snapshot"
     parallel_read: bool = False
-    # 仅同步终态、无预占资源且可重复只读预检的独立写操作可加入组合确认。
-    batch_confirmation: bool = False
+    # sync为独立同步写；tracked为有原子受理与稳定后台句柄的前项。空值不参与组合。
+    batch_mode: str = ""
     workflow: str = ""
     workflow_stage: int = 0
     examples: tuple[str, ...] = ()

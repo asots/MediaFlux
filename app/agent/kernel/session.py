@@ -118,6 +118,7 @@ DEFAULT_SYSTEM_PROMPT = """你是 MediaFlux Media Agent，理解用户目标与�
 
 授权：
 - READ 可直接执行。用户明确要求变更且对象、目标已核实后直接准备完整冻结确认卡，不再询问是否生成卡；用户明确仅讨论、不预览时除外。
+- 用户要求多项变更一次确认时，先用 agent.capabilities 加载 agent.batch，按其 Schema 核实能否组合；支持的操作合成一张卡，不先调用单项写工具把会话提前停在第一步。未支持或依赖新结果的步骤明确说明，不能擅自扩大授权。
 - WRITE/DANGER 仅准备 EffectPlan；实际副作用由系统在用户确认后执行。approval_required 时系统直接展示确认卡并结束本轮，无需模型再概括；预览不等于已执行，历史已消费卡不再待确认。
 - 确认后的真实执行回执优先于旧预览。已完成步骤不重复；新写步骤另需授权，不能以计划、提交或任务结束冒充全部目标完成。
 
@@ -424,6 +425,7 @@ class AgentSession:
         attempted_write = confirming
         resume_read_done = False
         is_effect_resume = resume_context is not None and resume_context[0].continuation_kind == "effect"
+        batch_resuming = bool(is_effect_resume and resume_context[2]["origin"].get("batch_plan"))
         is_read_resume = resume_context is not None and not is_effect_resume
         continuation_view = TurnViewBuilder()
 
@@ -533,9 +535,11 @@ class AgentSession:
             content: str,
             public_content: str,
             candidate_result: Mapping[str, Any] | None = None,
+            receipt_plan_id: str | None = None,
         ) -> bool:
             """先持久化真实执行结果，再沿原始任务继续，不能靠模型改写事实。"""
             nonlocal state, messages
+            receipt_plan_id = receipt_plan_id or plan_id
             safe_content = str(content or "").strip()
             if not safe_content:
                 return False
@@ -543,7 +547,7 @@ class AgentSession:
             # 完成原调用的结果，而非仅追加一条模型自述；旧预览仍保留在事件审计中。
             # 不新增虚构调用或孤立tool消息，保持各Provider的一问一答配对。
             for row in reversed(conversation):
-                if row.get("role") == "tool" and row.get("effect_plan_id") == plan_id:
+                if row.get("role") == "tool" and row.get("effect_plan_id") == receipt_plan_id:
                     row["content"] = safe_content
                     break
             item = ModelMessage(
@@ -553,8 +557,8 @@ class AgentSession:
                     + safe_content
                 ),
                 tool_name=tool_name,
-                effect_plan_id=plan_id or "",
-                completion_receipt_id=plan_id or "",
+                effect_plan_id=receipt_plan_id or "",
+                completion_receipt_id=receipt_plan_id or "",
             ).to_dict()
             safe_public_content = str(public_content or "").strip()
             if safe_public_content:
@@ -573,14 +577,14 @@ class AgentSession:
                 )
 
                 await remember_effect_receipt(self.state_store, owner=lease.owner,
-                    session_id=lease.session_id, plan_id=plan_id, message=item)
+                    session_id=lease.session_id, plan_id=receipt_plan_id, message=item)
                 state = await self.state_store.commit(
                     lease,
                     conversation=conversation,
                     updates=updates,
                 )
                 await acknowledge_effect_receipt(self.state_store, owner=lease.owner,
-                    session_id=lease.session_id, plan_id=plan_id)
+                    session_id=lease.session_id, plan_id=receipt_plan_id)
                 messages = self._restore_messages(state)
                 return True
             except StalePublicationError:
@@ -687,7 +691,9 @@ class AgentSession:
                 lease, state, resume_call = resume_context
                 if not await self.state_store.is_current(lease):
                     raise StalePublicationError("read wait revoked before start")
-                token = await self.coordinator.begin(lease, task=asyncio.current_task())
+                if batch_resuming:
+                    scope.enter_context(session_scope_guard(agent_input.owner, agent_input.session_id, kind="effect"))
+                token = await self.coordinator.begin(lease, protected=batch_resuming, task=asyncio.current_task())
                 messages = self._restore_messages(state)
                 current_user_index = None
                 checkpoint = persist_conversation
@@ -868,6 +874,25 @@ class AgentSession:
             if is_effect_resume:
                 from .continuation import confirmed_result as restore_confirmed, for_lease
                 result = restore_confirmed(self.catalog, state, for_lease(state, lease))
+                if batch_resuming:
+                    from .batch_effects import resume_batch
+                    progress = state.metadata["effect_waits"][lease.continuation_id].get("batch_progress")
+                    result = await resume_batch(self.pipeline, result, tool_context, progress)
+                    state = await self.state_store.load(owner=lease.owner, session_id=lease.session_id)
+                    saved = await remember_result(tool_name=result.tool.name, content=result.outcome.model_message(),
+                        public_content=format_public_result(result.outcome.public_content), receipt_plan_id=result.effect_plan.plan_id)
+                    await publish(AgentEventType.EFFECT_COMPLETED if result.outcome.public_content.get("ok") else AgentEventType.EFFECT_FAILED,
+                        {"plan_id": result.effect_plan.plan_id, "tool": result.tool.name,
+                         "result": result.outcome.audit_result(), "receipt": format_public_result(result.outcome.public_content)})
+                    scope.close()
+                    await self.coordinator.unprotect(lease, token)
+                    if not saved:
+                        await failure("receipt_unavailable", "已确认组合的结果保存失败，请核对原操作，勿重复执行。")
+                        return
+                    stop_state = await self.state_store.load(owner=lease.owner, session_id=lease.session_id)
+                    if stop_state.metadata.get("stop_requested_generation") == lease.generation:
+                        await publish(AgentEventType.TURN_CANCELLED, {"reason": "已停止后续步骤；已完成项以原回执为准。"})
+                        return
                 confirmed_result = dict(result.outcome.public_content)
                 diagnosing_effect = public_result_state(confirmed_result) in {"failed", "warning", "pending"}
                 tool_context = replace(tool_context, confirmed_effect=result,

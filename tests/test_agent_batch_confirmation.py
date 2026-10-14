@@ -105,7 +105,7 @@ class BatchRig:
                           "properties": {field: {"type": "string", "minLength": 1}}},
             prepare=prepare, execute_confirmed=execute, verify=verify,
             authorize=lambda _context: name not in self.denied,
-            metadata={"batch_confirmation": name != BACKGROUND})
+            metadata={"batch_mode": "sync" if name != BACKGROUND else ""})
 
     def session(self, rounds, store=None):
         store = store if store is not None else self.store
@@ -132,19 +132,22 @@ def rig(task_store, monkeypatch):
 def test_production_whitelist_and_strict_real_subschemas(rig):
     default = ToolSpec(name="test.default", description="默认不组合", risk=RiskLevel.WRITE,
                        parameters={}, validator=dict)
-    assert default.batch_confirmation is False
+    assert default.batch_mode == ""
     specs = build_tool_specs()
-    allowed = {"discovery.add_watchlist", "media.set_preferences"}
-    assert {spec.name for spec in specs if spec.batch_confirmation} == allowed
+    allowed = {"discovery.add_watchlist", "media.set_preferences", "guangya.fs.change.execute"}
+    assert {spec.name for spec in specs if spec.batch_mode} == allowed
     catalog = catalog_from_tool_specs(specs)
     pipeline = ToolPipeline(catalog=catalog, state_store=rig.store)
-    assert {tool.name for tool in catalog.visible() if tool.metadata.get("batch_confirmation")} == allowed
+    assert {tool.name for tool in catalog.visible() if tool.metadata.get("batch_mode")} == allowed
+    retriever = CapabilityRetriever()
+    assert "agent.batch" not in retriever.retrieve("hello", pipeline.catalog).names
+    assert "agent.batch" in retriever.retrieve("云盘复制完成后加入探索收藏，两项合成一张确认卡", pipeline.catalog).names
     schema = pipeline.catalog.get("agent.batch").input_schema
     steps = schema["properties"]["steps"]
     assert schema["required"] == ["steps"] and schema["additionalProperties"] is False
     assert steps["minItems"] == 2 and 2 <= steps["maxItems"] <= 4
     branches = steps["items"]["oneOf"]
-    assert len(branches) == 2
+    assert len(branches) == len(allowed)
     for branch in branches:
         assert set(branch["required"]) == {"tool", "arguments"}
         assert branch["additionalProperties"] is False

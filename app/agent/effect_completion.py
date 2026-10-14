@@ -636,7 +636,8 @@ def _effect_seed(result: Mapping[str, Any], tracker: _CompletionTracker | None, 
     return {
         "owner": scope.lease.owner, "session_id": scope.lease.session_id,
         "request_id": scope.lease.request_id, "turn_id": scope.lease.turn_id,
-        "plan_id": scope.plan_id, "channel": scope.channel, "tool": str(tool),
+        "plan_id": scope.plan_id, "channel": scope.channel,
+        "tool": "agent.batch" if (scope.origin or {}).get("batch_plan") else str(tool),
         **({"tracker": {"kind": tracker.kind, "value": tracker.value}} if tracker else {}),
         "result": deepcopy(dict(result)),
         **({"origin": scope.origin} if scope.origin else {}),
@@ -818,7 +819,9 @@ async def _record_effect_observation(
         row["last_status"] = str(status or "unknown")
         row["next_poll_at"] = time.time() + (0 if due_now else _EFFECT_POLL_SECONDS)
         if final is not None:
-            row.update(state="terminal", final_result=dict(DefaultProjector().project(final).public_content),
+            from app.agent.kernel.batch_effects import observe_batch
+            observed = dict(DefaultProjector().project(final).public_content)
+            row.update(state="terminal", final_result=observe_batch(row, scope.origin or {}, observed),
                        foreground_final=True)
             from app.agent.kernel.continuation import release_effect
             release_effect(row, time.time())
@@ -1027,7 +1030,11 @@ async def poll_effect_receipts(
                         _next_effect_poll(state)
                         return None
                     message = template or _late_receipt(seed, final)
-                    row.update(state="terminal", final_result=final, receipt_message=message)
+                    from app.agent.kernel.batch_effects import observe_batch
+                    final_result = observe_batch(row, seed.get("origin") or {}, final)
+                    if (seed.get("origin") or {}).get("batch_plan"):
+                        message = _late_receipt(seed, final_result)
+                    row.update(state="terminal", final_result=final_result, receipt_message=message)
                     from app.agent.kernel.continuation import release_effect
                     release_effect(row, time.time())
                     commit_conversation(state, state.conversation)

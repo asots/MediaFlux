@@ -599,6 +599,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="guangya.fs.change.execute",
+            batch_mode="tracked",
             description=(
                 "传入完整operations，一次编译冻结计划并直接生成可点击确认卡；确认前不写云盘，无需另调预览或再次请求建卡。observation_ref只指定主快照，"
                 "同一 owner 与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。支持 rename、move、copy（可选 new_name，在同一计划内复制并对副本改名，源对象不变；省略时沿用源名称，冲突必须拒绝）、"

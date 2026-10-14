@@ -444,7 +444,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="discovery.add_watchlist",
-            batch_confirmation=True,
+            batch_mode="sync",
             description="预检并在用户确认后把一个精确影视条目加入本地探索收藏；不会下载资源。",
             risk=RiskLevel.LOW_WRITE,
             parameters={

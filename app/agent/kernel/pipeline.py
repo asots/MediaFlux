@@ -113,6 +113,7 @@ class ToolCallContext:
     confirmed_effect: PipelineResult | None = None
     current_task: dict | None = None
     active_effect_plan: EffectPlan | None = None
+    batch_progress: dict | None = None
     user_source: str = ""
     user_history: tuple[str, ...] = ()
     user_reply_context: Mapping[str, Any] = field(default_factory=dict)
@@ -682,6 +683,7 @@ class ToolPipeline:
                 "工具参数校验器返回无效结果", code="invalid_arguments"
             )
         error_repair.validated(pending_repairs, context)
+        tool = tool.for_arguments(normalized)
         try:
             async with (_read_publication_lock if _read_publication_lock is not None else nullcontext()):
                 resolved = await self._authorize(tool, normalized, context)
@@ -982,7 +984,7 @@ class ToolPipeline:
                 "plan_id": plan_id, "kind": "confirmed_effect", "tool": plan.tool_name,
             })
             try:
-                tool = self.catalog.get(plan.tool_name)
+                tool = self.catalog.get(plan.tool_name).for_arguments(plan.arguments)
             except KeyError as exc:
                 raise ToolPipelineError(
                     "确认计划对应工具不存在", code="tool_not_found"
@@ -1033,7 +1035,7 @@ class ToolPipeline:
         )
 
     async def _run_effect(self, plan: EffectPlan, *, context: ToolCallContext):
-        tool = self.catalog.get(plan.tool_name)
+        tool = self.catalog.get(plan.tool_name).for_arguments(plan.arguments)
         if tool.effect is ToolEffect.READ or tool.effect is not plan.effect:
             raise ToolPipelineError("确认计划风险类型不匹配", code="confirmation_invalid")
         context = replace(context, active_effect_plan=plan)

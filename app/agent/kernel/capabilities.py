@@ -8,7 +8,7 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -40,6 +40,7 @@ class KernelToolSpec:
     description: str
     input_schema: Mapping[str, Any]
     effect: ToolEffect
+    effect_resolver: Callable[[Mapping[str, Any]], ToolEffect] | None = None
     examples: tuple[str, ...] = ()
     cost: float = 1.0
     context_requirements: frozenset[str] = frozenset()
@@ -67,6 +68,8 @@ class KernelToolSpec:
             raise ValueError("tool description cannot be empty")
         if not isinstance(self.input_schema, Mapping):
             raise TypeError("input_schema must be an object")
+        if self.effect is ToolEffect.READ and self.effect_resolver is not None:
+            raise ValueError("READ tools cannot resolve write effects")
         if self.effect is ToolEffect.READ:
             if (
                 self.read is None
@@ -106,6 +109,15 @@ class KernelToolSpec:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", model_name):
             raise ValueError(f"invalid provider tool name: {model_name!r}")
         object.__setattr__(self, "model_name", model_name)
+
+    def for_arguments(self, arguments: Mapping[str, Any]) -> KernelToolSpec:
+        """参数可提升组合风险，不能把目录声明的风险降级。"""
+        if self.effect_resolver is None:
+            return self
+        effect = self.effect_resolver(arguments)
+        if not isinstance(effect, ToolEffect) or effect not in {self.effect, ToolEffect.DANGER}:
+            raise ValueError("resolved tool effect cannot downgrade risk")
+        return replace(self, effect=effect, effect_resolver=None)
 
     def model_definition(self) -> dict[str, Any]:
         description = self.description
