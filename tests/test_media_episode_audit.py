@@ -17,16 +17,17 @@ from app.services import _series_source_payload
 
 
 class _FakeTMDB:
-    details = {"name": "The Show", "first_air_date": "2026-01-01", "seasons": [{"season_number": 1}, {"season_number": 2}]}
-    seasons = {
-        1: {"episodes": [
-            {"episode_number": 1, "air_date": "2026-07-01"},
-            {"episode_number": 2, "air_date": "2026-07-08"},
-            {"episode_number": 3, "air_date": "2026-08-08"},
-            {"episode_number": 4, "air_date": None},
-        ]},
-        2: {"episodes": [{"episode_number": 1, "air_date": "2026-07-15"}]},
-    }
+    def __init__(self):
+        self.details = {"name": "The Show", "first_air_date": "2026-01-01", "seasons": [{"season_number": 1}, {"season_number": 2}]}
+        self.seasons = {
+            1: {"episodes": [
+                {"episode_number": 1, "air_date": "2026-07-01"},
+                {"episode_number": 2, "air_date": "2026-07-08"},
+                {"episode_number": 3, "air_date": "2026-08-08"},
+                {"episode_number": 4, "air_date": None},
+            ]},
+            2: {"episodes": [{"episode_number": 1, "air_date": "2026-07-15"}]},
+        }
 
     def search(self, title, year, media_type):
         return [{
@@ -197,6 +198,99 @@ class EpisodeAuditTests(unittest.TestCase):
         ):
             return audit_series_episodes(dict(self.arguments))
 
+    def _large_missing_fixture(self):
+        fake = _FakeTMDB()
+        # TMDB 本身断号，本地还收录了后面的集；不能用首尾范围或集数猜缺集。
+        fake.seasons = {
+            1: {"episodes": [
+                {"episode_number": number, "air_date": "2026-07-01"}
+                for number in range(1, 131) if number not in {2, 17, 88}
+            ]},
+            2: {"episodes": [
+                {"episode_number": number, "air_date": "2026-07-01"}
+                for number in (1, 3, 8, 13, 21, 150)
+            ]},
+        }
+        source = _ready([(1, 1), (1, 4), (1, 70), (1, 124), (2, 1), (2, 8), (2, 150)])
+        missing = [
+            {"season": 1, "episode": number}
+            for number in range(1, 131) if number not in {1, 2, 4, 17, 70, 88, 124}
+        ] + [{"season": 2, "episode": number} for number in (3, 13, 21)]
+        return fake, source, missing
+
+    def test_full_missing_list_survives_real_audit_to_batch_across_sparse_seasons(self):
+        fake, source, missing = self._large_missing_fixture()
+        with patch(
+            "app.agent.episode_audit.inspect_series_episode_sources", return_value=[source],
+        ) as inspect, patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+            audit = audit_series_episodes(dict(self.arguments))
+            # 不 mock audit_series_episodes：批量入口必须再次经过真实审计算法。
+            batch = check_library_updates({
+                "queries": ["The Show"], "media_type": "tv",
+                "as_of": self.arguments["as_of"], "refresh": True,
+            })
+        self.assertEqual(inspect.call_count, 2)
+        self.assertEqual(len(missing), 126)
+        self.assertTrue(audit.ok)
+        self.assertEqual(audit.status, "updates_available")
+        self.assertEqual(batch.status, "success")
+        self.assertEqual(batch.data["counts"], {
+            "requested": 1, "updates_available": 1, "up_to_date": 0, "uncertain": 0,
+        })
+        for data in (audit.data, batch.data["items"][0], batch.model_data["items"][0]):
+            self.assertEqual(data["expected_aired"], 133)
+            self.assertEqual(data["local_episode_count"], 7)
+            self.assertEqual(data["missing_count"], len(missing))
+            self.assertEqual(data["missing_sample"], missing)
+            self.assertFalse(data["missing_sample_truncated"])
+            self.assertEqual(data["latest_local"], {"season": 2, "episode": 150})
+            self.assertEqual(data["latest_aired"], {"season": 2, "episode": 150})
+        followups = audit.data["resource_followups"]
+        self.assertEqual(len(followups), 12)
+        self.assertTrue(audit.data["resource_followups_truncated"])
+        self.assertEqual(
+            [item["episode_label"] for item in followups],
+            [f"S{item['season']:02d}E{item['episode']:02d}" for item in missing[:12]],
+        )
+        for followup, item in zip(followups, missing[:12], strict=True):
+            self.assertEqual(followup["tool"], "library.search_missing_episode_resources")
+            self.assertEqual(followup["arguments"]["season"], item["season"])
+            self.assertEqual(followup["arguments"]["episode"], item["episode"])
+
+    def test_full_missing_list_does_not_make_incomplete_audit_conclusive(self):
+        fake, source, missing = self._large_missing_fixture()
+        incomplete_sources = {
+            "truncated_inventory": [{**source, "truncated": True}],
+            "unpositioned_inventory": [{**source, "ignored_unknown": 1}],
+            "unavailable_server": [source, {
+                **_ready([], server="Emby"), "status": "unavailable", "selected": None,
+            }],
+        }
+        for reason, sources in incomplete_sources.items():
+            with self.subTest(reason=reason):
+                reset_episode_audit_cache_for_tests()
+                with patch(
+                    "app.agent.episode_audit.inspect_series_episode_sources", return_value=sources,
+                ), patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+                    audit = audit_series_episodes(dict(self.arguments))
+                    batch = check_library_updates({
+                        "queries": ["The Show"], "media_type": "tv",
+                        "as_of": self.arguments["as_of"], "refresh": True,
+                    })
+                self.assertFalse(audit.ok)
+                self.assertEqual(audit.status, "inconclusive")
+                self.assertNotIn("resource_followups", audit.data)
+                self.assertFalse(batch.ok)
+                self.assertEqual(batch.status, "partial")
+                self.assertEqual(batch.data["counts"], {
+                    "requested": 1, "updates_available": 0, "up_to_date": 0, "uncertain": 1,
+                })
+                for data in (audit.data, batch.data["items"][0], batch.model_data["items"][0]):
+                    self.assertEqual(data["missing_count"], len(missing))
+                    self.assertEqual(data["missing_sample"], missing)
+                    self.assertFalse(data["missing_sample_truncated"])
+                self.assertEqual(batch.data["items"][0]["status"], "inconclusive")
+
     def test_reports_aired_missing_episodes_and_ignores_future_unknown_and_specials(self):
         result = self._run([_ready([(1, 1)])])
         self.assertTrue(result.ok)
@@ -341,14 +435,14 @@ class EpisodeAuditTests(unittest.TestCase):
             "The Show", tmdb_id="", max_episodes=2000, library_name="美女库"
         )
 
-    def test_resource_followups_are_bounded_and_only_cover_verified_sample(self):
+    def test_resource_followups_stay_bounded_with_full_large_missing_list(self):
         fake = _FakeTMDB()
         fake.details = {"name": "The Show", "first_air_date": "2026-01-01", "seasons": [{"season_number": 1}]}
         fake.seasons = {
             1: {
                 "episodes": [
                     {"episode_number": number, "air_date": "2026-07-01"}
-                    for number in range(1, 16)
+                    for number in range(1, 151)
                 ]
             }
         }
@@ -359,7 +453,11 @@ class EpisodeAuditTests(unittest.TestCase):
             result = audit_series_episodes(dict(self.arguments))
 
         self.assertEqual(result.status, "updates_available")
-        self.assertEqual(len(result.data["missing_sample"]), 15)
+        self.assertEqual(result.data["missing_count"], 150)
+        self.assertEqual(result.data["missing_sample"], [
+            {"season": 1, "episode": number} for number in range(1, 151)
+        ])
+        self.assertFalse(result.data["missing_sample_truncated"])
         self.assertEqual(len(result.data["resource_followups"]), 12)
         self.assertTrue(result.data["resource_followups_truncated"])
         self.assertEqual(

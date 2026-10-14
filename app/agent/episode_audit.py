@@ -20,7 +20,6 @@ _CACHE_TTL_SECONDS = 120
 _CACHE_MAX_ENTRIES = 64
 _MAX_TMDB_SEASONS = 24
 _MAX_TMDB_EPISODES = 2000
-_MAX_MISSING_SAMPLE = 100
 _MAX_RESOURCE_FOLLOWUPS = 12
 _cache: dict[tuple[Any, ...], tuple[float, ToolResult]] = {}
 _inflight: dict[tuple[Any, ...], threading.Event] = {}
@@ -517,7 +516,7 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
     if arguments.get("season") is not None:
         local = {item for item in local if item[0] == arguments["season"]}
     missing = sorted(expected - local)
-    sample = [{"season": season, "episode": episode} for season, episode in missing[:_MAX_MISSING_SAMPLE]]
+    sample = [{"season": season, "episode": episode} for season, episode in missing]
     latest_local = max(local) if local else None
     latest_aired = max(expected) if expected else None
     data.update({
@@ -528,7 +527,7 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
         "local_episode_count": len(local),
         "missing_count": len(missing),
         "missing_sample": sample,
-        "missing_sample_truncated": len(missing) > len(sample),
+        "missing_sample_truncated": False,
         "future_episode_count": future_count,
         "unknown_air_date_count": unknown_air_date,
         "ignored_specials": sum(int(source.get("ignored_specials", 0) or 0) for source in ready),

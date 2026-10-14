@@ -130,16 +130,14 @@ class LibraryUpdateArgumentTests(unittest.TestCase):
             {"queries": ["批量"], "season": 1},
         ]
         for arguments in invalid_arguments:
-            with self.subTest(arguments=arguments):
-                with self.assertRaises(AgentToolError):
-                    _library_update_arguments(arguments)
+            with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
+                _library_update_arguments(arguments)
 
         for invalid_refresh in (0, 1, "true", "false", None, []):
-            with self.subTest(refresh=invalid_refresh):
-                with self.assertRaises(AgentToolError):
-                    _library_update_arguments(
-                        {"query": "黑镜", "refresh": invalid_refresh}
-                    )
+            with self.subTest(refresh=invalid_refresh), self.assertRaises(AgentToolError):
+                _library_update_arguments(
+                    {"query": "黑镜", "refresh": invalid_refresh}
+                )
 
 
 class LibraryUpdateActionTests(unittest.TestCase):
@@ -595,7 +593,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
             ["up_to_date", "up_to_date"],
         )
 
-    def test_batch_limits_missing_sample_and_default_projector_keeps_twenty_items(self):
+    def test_batch_preserves_full_missing_sample_and_default_projector_keeps_twenty_items(self):
         titles = [f"投影剧集 {index:02d}" for index in range(1, 21)]
         all_missing = [{"season": 1, "episode": episode} for episode in range(1, 8)]
 
@@ -612,7 +610,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
                     "latest_local": None,
                     "latest_aired": {"season": 1, "episode": 7},
                     "missing_sample": list(all_missing),
-                    "missing_sample_truncated": True,
+                    "missing_sample_truncated": False,
                 }
             )
             return result
@@ -635,12 +633,38 @@ class LibraryUpdateActionTests(unittest.TestCase):
         self.assertEqual([item["query"] for item in items], titles)
         for item in items:
             with self.subTest(query=item["query"]):
-                self.assertLessEqual(len(item["missing_sample"]), 5)
-                self.assertTrue(item["missing_sample_truncated"])
+                self.assertEqual(item["missing_sample"], all_missing)
+                self.assertEqual(len(item["missing_sample"]), item["missing_count"])
+                self.assertFalse(item["missing_sample_truncated"])
 
         projected = json.loads(DefaultProjector().project(result).model_content)
         self.assertEqual(len(projected["data"]["items"]), 20)
         self.assertEqual([item["query"] for item in projected["data"]["items"]], titles)
+        for item in projected["data"]["items"]:
+            self.assertEqual(item["missing_sample"], all_missing)
+            self.assertFalse(item["missing_sample_truncated"])
+
+    def test_batch_preserves_upstream_missing_sample_and_truncation_flag(self):
+        missing = [{"season": 1, "episode": episode} for episode in range(2, 24, 2)]
+        for truncated in (False, True):
+            with self.subTest(truncated=truncated):
+                scalar = _query_audit_result("示例剧", status="updates_available")
+                scalar.data.update(
+                    missing_count=len(missing),
+                    missing_sample=list(missing),
+                    missing_sample_truncated=truncated,
+                )
+                with patch("app.agent.update_actions.audit_series_episodes", return_value=scalar):
+                    result = check_library_updates(_library_update_arguments({
+                        "queries": ["示例剧"], "as_of": "2026-08-01",
+                    }))
+                model = json.loads(DefaultProjector().project(result).model_content)
+                for data in (result.data, model["data"]):
+                    item = data["items"][0]
+                    self.assertEqual(item["missing_sample"], missing)
+                    self.assertIs(item["missing_sample_truncated"], truncated)
+                self.assertEqual(scalar.data["missing_sample"], missing)
+                self.assertIs(scalar.data["missing_sample_truncated"], truncated)
 
     def test_twenty_long_titles_keep_every_fact_under_model_projection_budget(self):
         titles = [f"第{i:02d}部" + "长标题样本" * 23 for i in range(20)]
@@ -677,15 +701,16 @@ class LibraryUpdateActionTests(unittest.TestCase):
 
     def test_cancelled_kernel_batch_stops_queued_library_reads(self):
         import asyncio
+
         from app.agent.domain_catalog import build_tool_specs
         from app.agent.kernel.capabilities import CapabilityRetriever
         from app.agent.kernel.events import AgentEventType
         from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+        from app.agent.kernel.persistence import SQLiteKernelStore
         from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.ports import catalog_from_tool_specs
         from app.agent.kernel.session import AgentSession
         from app.agent.kernel.state import AgentInput
-        from app.agent.kernel.persistence import SQLiteKernelStore
         from tests.support import isolated_test_database
         from tests.test_agent_kernel_core import ScriptedModel
         names = [f"取消测试作品{i}" for i in range(10)]

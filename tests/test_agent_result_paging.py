@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.model import ModelMessage
@@ -699,4 +699,38 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
             self.assertEqual(names, [tool.name for tool in tools])
             self.assertEqual(executed, [])
             self.assertEqual(finder.requests, 1)
+        asyncio.run(run())
+
+
+    def test_batch_missing_episodes_survive_existing_paging_and_cold_restart(self):
+        from app.agent.update_actions import check_library_updates
+
+        expected = [{"season": season, "episode": episode}
+                    for season in (1, 3) for episode in range(1, 151) if episode % 5]
+        titles = [f"缺集完整性{i}" for i in range(20)]
+
+        def audit(arguments, **_):
+            return ToolResult(True, "updates_available", "已核对库存", data={
+                "title": arguments["query"], "missing_count": len(expected),
+                "missing_sample": expected, "missing_sample_truncated": False,
+            })
+
+        async def run():
+            with patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
+                result = check_library_updates({"queries": titles, "as_of": "2026-10-14"})
+            observed, read = await self.snapshot_reader(result, raw=True)
+            self.assertIn("result_handle", observed)
+            for index, title in enumerate(titles):
+                restored, offset = [], 0
+                for _ in range(len(expected)):
+                    page = await read(f"/data/items/{index}/missing_sample", offset=offset)
+                    data = page["data"]
+                    self.assertEqual(data["total"], len(expected))
+                    restored.extend(data["items"])
+                    if data["next_offset"] is None:
+                        break
+                    self.assertGreater(data["next_offset"], offset)
+                    offset = data["next_offset"]
+                self.assertEqual(restored, expected, title)
+            self.assertEqual(result.data["counts"]["requested"], 20)
         asyncio.run(run())

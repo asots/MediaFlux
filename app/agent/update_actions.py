@@ -1,16 +1,16 @@
 """媒体更新核对：剧集审计已播集，电影核对本地存在性并给出安全资源跟进。"""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
 
 from app.agent.episode_audit import audit_series_episodes
 from app.agent.models import Evidence, ToolContext, ToolResult
-from app.services import search_media_servers
 from app.logger import get_logger
+from app.services import search_media_servers
 
 logger = get_logger(__name__)
 
@@ -44,7 +44,7 @@ def _check_movie_updates(arguments: dict[str, Any]) -> ToolResult:
     normalized_query = _normalized_title(query)
     try:
         raw_sources = search_media_servers(query, limit=_MOVIE_SEARCH_LIMIT)
-    except Exception:
+    except Exception:  # noqa: BLE001 - Provider异常只标记不可用，不能伪装成库内没有
         raw_sources = []
         search_failed = True
     else:
@@ -207,7 +207,7 @@ def _batch_update_item(arguments: dict[str, Any], context: ToolContext | None = 
     """每部使用同一紧凑响应；无法读取的计数为None，不能伪装成零缺集。"""
     try:
         result = check_library_updates(arguments, context)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 单部失败不丢弃同批其他作品的核验结果
         logger.warning("批量更新核对单项失败 type=%s", type(exc).__name__)
         result = ToolResult(ok=False, status="unavailable", summary="本部查询失败，暂时无法判断更新")
     data = result.data
@@ -222,9 +222,8 @@ def _batch_update_item(arguments: dict[str, Any], context: ToolContext | None = 
     for key in ("media_type", "season", "local_match_status", "exact_match_count", "possible_match_count"):
         if key in data:
             row[key] = data[key]
-    missing = data.get("missing_sample", [])
-    row["missing_sample"] = missing[:5]
-    row["missing_sample_truncated"] = bool(data.get("missing_sample_truncated") or len(missing) > 5)
+    row["missing_sample"] = data.get("missing_sample", [])
+    row["missing_sample_truncated"] = bool(data.get("missing_sample_truncated"))
     row["sources"] = [
         {key: source[key] for key in ("server_type", "server_name", "status", "truncated") if key in source}
         for source in data.get("sources", [])
