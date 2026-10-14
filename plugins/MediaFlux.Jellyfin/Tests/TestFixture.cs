@@ -21,6 +21,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
@@ -50,6 +51,9 @@ internal sealed class TestFixture : IDisposable
     public Mock<ILibraryManager> Library { get; } = new();
     public Mock<IUserManager> Users { get; } = new();
     public Dictionary<Guid, BaseItem> Items { get; } = [];
+    public HashSet<Guid> Hidden { get; } = [];
+    public int MfSessions { get; private set; }
+    public List<Guid> NativeChildDeletes { get; } = [];
     public User User { get; } = new("tester", "auth", "reset");
     public Plugin Plugin { get; }
     public FakeMfHandler Handler { get; } = new();
@@ -62,6 +66,14 @@ internal sealed class TestFixture : IDisposable
         Directory.CreateDirectory(Root);
         User.Permissions.Add(new Permission(PermissionKind.EnableContentDeletion, true));
         BaseItem.LibraryManager = Library.Object;
+        var repository = new Mock<IItemRepository>();
+        repository.Setup(r => r.GetItemList(It.IsAny<InternalItemsQuery>()))
+            .Returns((InternalItemsQuery q) => Items.Values.Where(i => i.ParentId == q.ParentId).ToArray());
+        BaseItem.ItemRepository = repository.Object;
+        var fileSystem = new Mock<IFileSystem>();
+        fileSystem.Setup(fs => fs.GetFileSystemInfo(It.IsAny<string>())).Returns((string p) =>
+            new FileSystemMetadata { FullName = p, IsDirectory = Directory.Exists(p), Exists = File.Exists(p) || Directory.Exists(p) });
+        BaseItem.FileSystem = fileSystem.Object;
         Library.Setup(l => l.GetLocalAlternateVersionIds(It.IsAny<Video>())).Returns([]);
         Library.Setup(l => l.GetLinkedAlternateVersions(It.IsAny<Video>())).Returns([]);
         var mediaSources = new Mock<IMediaSourceManager>();
@@ -97,9 +109,15 @@ internal sealed class TestFixture : IDisposable
         else { Plugin.Configuration.Enabled = enabled; Plugin.Configuration.ManualMappings = config.ManualMappings; }
         Users.Setup(u => u.GetUserById(User.Id)).Returns(User);
         Library.Setup(l => l.GetItemById<BaseItem>(It.IsAny<Guid>(), It.IsAny<User?>()))
-            .Returns((Guid id, User? _) => Items.GetValueOrDefault(id));
+            .Returns((Guid id, User? user) => user is not null && Hidden.Contains(id) ? null : Items.GetValueOrDefault(id));
+        Library.Setup(l => l.FindByPath(It.IsAny<string>(), It.IsAny<bool?>()))
+            .Returns((string path, bool? folder) => Items.Values.FirstOrDefault(i => i.Path == path && (!folder.HasValue || i.IsFolder == folder)));
         Library.Setup(l => l.DeleteItem(It.IsAny<BaseItem>(), It.IsAny<DeleteOptions>(), true))
-            .Callback((BaseItem _, DeleteOptions options, bool _) => { Assert.True(options.DeleteFileLocation); NativeDeletes++; });
+            .Callback((BaseItem item, DeleteOptions options, bool _) =>
+            {
+                Assert.True(options.DeleteFileLocation); NativeDeletes++;
+                if (item is Folder folder) NativeChildDeletes.AddRange(folder.GetRecursiveChildren(false).Select(i => i.Id));
+            });
         Library.Setup(l => l.GetVirtualFolders()).Returns([]);
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Testing", ContentRootPath = Root });
         builder.WebHost.UseTestServer();
@@ -115,11 +133,11 @@ internal sealed class TestFixture : IDisposable
         services.AddSingleton(Mock.Of<ILibraryMonitor>()); services.AddSingleton(Mock.Of<IServerConfigurationManager>());
         services.AddSingleton(Mock.Of<IInstallationManager>());
         var plugins = new Mock<IPluginManager>();
-        plugins.Setup(p => p.GetPlugin(Plugin.Id, null)).Returns(new LocalPlugin(Root, true, new PluginManifest { Id = Plugin.Id, Name = Plugin.Name, Version = "0.1.1.0" }) { Instance = Plugin });
+        plugins.Setup(p => p.GetPlugin(Plugin.Id, null)).Returns(new LocalPlugin(Root, true, new PluginManifest { Id = Plugin.Id, Name = Plugin.Name, Version = "0.1.2.0" }) { Instance = Plugin });
         services.AddSingleton(plugins.Object);
         new PluginServiceRegistrator().RegisterServices(services, host.Object);
         services.AddSingleton(Plugin);
-        services.AddSingleton(new MfClient(() => Handler, TimeSpan.FromMilliseconds(1)));
+        services.AddSingleton(new MfClient(() => { MfSessions++; return Handler; }, TimeSpan.FromMilliseconds(1)));
         services.AddControllers().ConfigureApplicationPartManager(p =>
         {
             p.FeatureProviders.Clear(); p.FeatureProviders.Add(new SelectedControllers());
@@ -132,12 +150,12 @@ internal sealed class TestFixture : IDisposable
         Client.DefaultRequestHeaders.Add("X-Test-User", User.Id.ToString());
     }
 
-    public Mock<Episode> Episode(string name = "episode.strm", bool allowed = true)
+    public Mock<Episode> Episode(string name = "episode.strm", bool allowed = true, Folder? parent = null)
     {
         var path = Path.Combine(Root, name); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllBytes(path, System.Text.Encoding.UTF8.GetBytes("https://example.invalid/video?x=1\r\n"));
         var item = new Mock<Episode> { CallBase = true };
-        item.Object.Id = Guid.NewGuid(); item.Object.Path = path;
+        item.Object.Id = Guid.NewGuid(); item.Object.Path = path; item.Object.ParentId = parent?.Id ?? Guid.Empty;
         item.Setup(i => i.CanDelete(It.IsAny<User>())).Returns(allowed);
         item.Setup(i => i.GetDeletePaths()).Returns(() => [new FileSystemMetadata { FullName = item.Object.Path }]);
         Items[item.Object.Id] = item.Object;
@@ -157,14 +175,16 @@ internal sealed class TestFixture : IDisposable
         return item;
     }
 
-    public Mock<Folder> Folder(string directory = "series")
+    public Folder Folder(string directory = "series") => DirectoryItem<Folder>(directory, null);
+    public Series Series(string directory = "series") => DirectoryItem<Series>(directory, null);
+    public Season Season(string directory = "series/Season 1", Folder? parent = null) => DirectoryItem<Season>(directory, parent);
+
+    private T DirectoryItem<T>(string directory, Folder? parent) where T : Folder, new()
     {
         var path = Path.Combine(Root, directory); Directory.CreateDirectory(path);
-        var item = new Mock<Folder> { CallBase = true };
-        item.Object.Id = Guid.NewGuid(); item.Object.Path = path;
-        item.Setup(i => i.CanDelete(It.IsAny<User>())).Returns(true);
-        item.Setup(i => i.GetDeletePaths()).Returns(() => [new FileSystemMetadata { FullName = item.Object.Path, IsDirectory = true }]);
-        Items[item.Object.Id] = item.Object;
+        var item = new T { Id = Guid.NewGuid(), Path = path, ParentId = parent?.Id ?? Guid.Empty };
+        // 使用官方 CanDelete、BaseItem.GetDeletePaths、GetCachedChildren 和 GetRecursiveChildren(false)。
+        Items[item.Id] = item;
         return item;
     }
 
@@ -200,6 +220,11 @@ internal sealed class FakeMfHandler : HttpMessageHandler
 {
     public int DeletePosts { get; private set; }
     public int LoginPosts { get; private set; }
+    public int CapabilityGets { get; private set; }
+    public string Capabilities { get; set; } = "{\"scope_version\":1,\"kinds\":[\"movie\",\"episode\",\"season\",\"series\"]}";
+    public HttpStatusCode CapabilityCode { get; set; } = HttpStatusCode.OK;
+    public List<string> Requests { get; } = [];
+    public Action? OnCapabilities { get; set; }
     public string? DeleteBody { get; private set; }
     public HttpStatusCode DeleteCode { get; set; } = HttpStatusCode.Accepted;
     public string State { get; set; } = "completed";
@@ -216,6 +241,7 @@ internal sealed class FakeMfHandler : HttpMessageHandler
     {
         if (Offline) throw new HttpRequestException("offline");
         var path = request.RequestUri!.AbsolutePath;
+        Requests.Add(request.Method + " " + path);
         if (path == "/login" && request.Method == HttpMethod.Get) return Reply("<input value='before-login' name='csrf_token'>");
         if (path == "/login")
         {
@@ -226,6 +252,14 @@ internal sealed class FakeMfHandler : HttpMessageHandler
         }
         if (path == "/") return Reply("<meta content='" + (RefreshToken ? "after-login" : "before-login") + "' name='csrf-token'>");
         if (path == "/api/media-libraries/overview") return Reply(Overview ?? "{\"servers\":[]}");
+        if (path == "/api/jellyfin/delete-capabilities")
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.True(LoginPosts > 0);
+            CapabilityGets++;
+            OnCapabilities?.Invoke();
+            return Reply(Capabilities, CapabilityCode);
+        }
         if (path == "/api/jellyfin/delete")
         {
             DeletePosts++;

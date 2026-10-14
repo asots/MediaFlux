@@ -128,7 +128,7 @@ public sealed class DeleteFlowTests
     [InlineData(false)]
     public async Task BroadMappingFolderRejectsManagedStrmButAllowsPureLocalVideo(bool strm)
     {
-        using var f = new TestFixture(); var folder = f.Folder().Object;
+        using var f = new TestFixture(); var folder = f.Folder();
         File.WriteAllText(Path.Combine(folder.Path, strm ? "ep.strm" : "ep.mp4"), "local bytes");
         using var response = await f.Delete(folder);
         Assert.Equal(strm ? HttpStatusCode.Conflict : HttpStatusCode.NoContent, response.StatusCode);

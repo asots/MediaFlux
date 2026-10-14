@@ -76,14 +76,24 @@ public sealed class MfClient
             return new MfOverview(validMappings, validLibraries);
         }, token);
 
-    public Task<bool> DeleteAsync(PluginConfiguration c, IReadOnlyDictionary<string, string> fingerprints, CancellationToken token) =>
+    public Task<bool> DeleteAsync(PluginConfiguration c, DeletePlan plan, Func<CancellationToken, Task> beforeSubmit, CancellationToken token) =>
         ExecuteAsync(c, async session =>
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             deadline.CancelAfter(TimeSpan.FromSeconds(c.TaskTimeoutSeconds));
             var waitToken = deadline.Token;
-            var payload = new DeleteRequest(fingerprints.Keys.ToArray(), c.MappingMode,
-                c.MappingMode == "manual" ? new MappingSet(c.ManualMappings).Mappings : null, fingerprints);
+            // 每次在同一登录会话握手，绝不让旧 MF 忽略 scopes 后假成功。
+            using var capabilities = await session.GetJsonAsync("api/jellyfin/delete-capabilities", waitToken).ConfigureAwait(false);
+            var capability = capabilities.RootElement;
+            if (capability.ValueKind != JsonValueKind.Object
+                || !capability.TryGetProperty("scope_version", out var version) || !version.TryGetInt32(out var number) || number != 1
+                || !capability.TryGetProperty("kinds", out var kinds) || kinds.ValueKind != JsonValueKind.Array
+                || kinds.EnumerateArray().Any(k => k.ValueKind != JsonValueKind.String)
+                || !new[] { "movie", "episode", "season", "series" }.All(k => kinds.EnumerateArray().Any(v => v.GetString() == k)))
+                throw new PluginFault("MF 不支持完整 scopes v1 删除协议；请升级 MF。本地删除已取消，未提交云任务。", 502);
+            await beforeSubmit(waitToken).ConfigureAwait(false);
+            var payload = new DeleteRequest(plan.Fingerprints.Keys.ToArray(), c.MappingMode,
+                c.MappingMode == "manual" ? new MappingSet(c.ManualMappings).Mappings : null, plan.Fingerprints, plan.Scopes);
             using var request = new HttpRequestMessage(HttpMethod.Post, "api/jellyfin/delete")
             {
                 Content = new StringContent(JsonSerializer.Serialize(payload), System.Text.Encoding.UTF8, "application/json")
@@ -148,7 +158,8 @@ public sealed class MfClient
         [property: JsonPropertyName("paths")] string[] Paths,
         [property: JsonPropertyName("mapping_mode")] string MappingMode,
         [property: JsonPropertyName("mappings"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PathMapping[]? Mappings,
-        [property: JsonPropertyName("fingerprints")] IReadOnlyDictionary<string, string> Fingerprints);
+        [property: JsonPropertyName("fingerprints")] IReadOnlyDictionary<string, string> Fingerprints,
+        [property: JsonPropertyName("scopes")] DeleteScope[] Scopes);
 
     private sealed class Session(HttpClient http, PluginConfiguration c)
     {

@@ -17,6 +17,12 @@ from app.web import require_api_login
 router = APIRouter(prefix="/api/jellyfin")
 
 
+@router.get("/delete-capabilities")
+def delete_capabilities(request: Request):
+    require_api_login(request)
+    return {"scope_version": 1, "kinds": ["movie", "episode", "season", "series"]}
+
+
 @router.post("/delete")
 def delete_media(request: Request, data: Annotated[dict | None, Body()] = None):
     require_api_login(request)

@@ -6,29 +6,35 @@
 
 1. 使用 Jellyfin 当前用户的 `CanDelete` 权限，先检查整批选择。
 2. 核对原生删除涉及的文件和目录，读取选中 STRM 的原始内容指纹。
-3. 将 Jellyfin 路径和指纹交给 MediaFlux。MF 使用已有路径映射、STRM 索引和统一光鸭 Writer，重新校验本地文件及云端身份。
-4. 光鸭文件经检查后移入回收站，写入已有删除审计，并触发受影响 STRM 来源的同步。
+3. 将 Jellyfin 路径、指纹及电影／单集／整季／整剧范围交给 MediaFlux。MF 使用已有路径映射、STRM 索引和统一光鸭 Writer，重新校验本地文件及云端身份。
+4. 在第一笔写入前核对完整文件清单，随后逐项回收视频与属于该范围的伴随文件，最后复核并回收空目录，记录删除审计并触发受影响 STRM 来源的同步。不会未经核验递归回收整个云盘目录。
 5. 插件等待 MF 任务 `completed` 且 `result.ok=true`，重新检查权限、节目路径及删除范围，再继续 Jellyfin 原生本地删除。
 
 **不会因为扫库、条目消失、目录离线或移除媒体库而调用云端删除。** 不经过 Media Agent，不新增账户系统、任务队列或映射数据库。
 
-### 第一版支持与限制
+### 支持范围与边界
 
 - 目标平台：**仅 Jellyfin 12.2 系列，.NET 10**；官方源码基线为 Git tag `v12.2`，以 NuGet `Jellyfin.Controller`／`Jellyfin.Model` **12.2.0** 编译，TFM 为 `net10.0`。其他目标系列不在支持范围内。
-- 插件版本：**0.1.1**（清单版本 `0.1.1.0`），`targetAbi=12.2.0.0`；插件 GUID 保持不变。
-- 支持 MF 纳管的光鸭 **电影／单集 STRM**，以及明确选择多项的原生批量删除；最多 1000 个 STRM。
+- 插件版本：**0.1.2**（清单版本 `0.1.2.0`），`targetAbi=12.2.0.0`；插件 GUID 保持不变。
+- 支持 MF 纳管的光鸭 **电影／单集／整季／整剧**，以及明确选择多项的原生批量删除；最多 1000 个 STRM，目录文件清单另有规模限制。
+- 删除独立电影（含 NSFW 作品）时，若原生删除拥有该作品目录且云端没有未选择的视频，会回收视频、NFO、字幕、图片等目录内容，最终回收空作品目录。
+- 删除单集时，只回收该集视频和明确同名的伴随文件（包括语言字幕、NFO、缩略图），保留其他集、`tvshow.nfo`、共享海报等。最后一集删除不等于整剧授权，仍有共享素材时保留目录。
+- 删除整季／整剧时，枚举范围内的纳管 STRM 并校验权限；云端目录还有未选中或未同步视频时拒绝整批请求，不猜测其归属。核验完整后回收该范围的所有文件及空目录。
 - 普通本地视频、未纳管 STRM 保持原生行为。宽映射目录内只有普通本地视频的文件夹仍可原生删除。
-- **暂不联动删除含纳管 STRM 的整季、整剧或文件夹。** 同目录存在未选中的纳管 STRM、多版本、叠放分段／附加媒体等范围不明确时，会拒绝整个请求。不要通过关闭保护去强行重试云端删除；可先在 MF 核对具体文件。
+- **不支持把普通文件夹或媒体库根当作整部作品删除。** 同目录存在未选中的纳管 STRM、多版本、叠放分段／附加媒体等原生删除范围不明确时，会拒绝请求。不要通过关闭保护强行重试；先在 MF 核对文件。
+- 混放电影目录不会整目录回收：云端有其他未选择视频时，仅回收目标电影及明确同名的伴随文件；本地原生删除会影响未选择媒体时，插件会直接拒绝。
 - 仅有 API key、没有真实 Jellyfin 用户身份的纳管删除请求不允许联动；仍须由有删除权限的用户发起。
-- 不递归删除云盘父目录，不清空回收站，不自动删除云端同级字幕或图片。云端空父目录可能保留；本地伴随文件按 Jellyfin 原生行为及 MF 既有 STRM 清理规则处理。
+- 这是用户明确发起的删除，目录收尾随该删除范围执行，不依赖“整理后清理空目录”开关，也不新增单独开关。
+- 不清空回收站，不删除媒体库根、配置来源根或归档根。不扩大到所选媒体范围以外，也不把“同目录”直接等同于“同一集伴随文件”。目录出现新增内容或状态不明时保留，实际结果记录在 MF 任务及删除审计中。
+- 本地文件仍由 Jellyfin 原生删除及 MF 既有 STRM 校准处理；确认云任务成功后，插件还会复验原生范围，防止等待期间出现的新媒体被连带删除。
 - 同一云端文件若还被本次选择之外的 MF STRM 索引引用，MF 会拒绝删除，避免破坏其他来源。
 
 ## 安装
 
-先更新并重启 MediaFlux，使其包含 `/api/jellyfin/delete` 接口。旧版 MF 即使能登录，也不能完成本功能。
+同时更新并重启 MediaFlux 与插件。新版插件在写入前读取 `/api/jellyfin/delete-capabilities`，核对媒体范围协议；旧版 MF 即使能登录，也不会降级为仅删除视频后假报完成。旧插件没有媒体范围参数，MF 不会据此推断整目录删除权限。
 
 1. 停止 Jellyfin，备份其插件配置。
-2. 解压 `MediaFlux.Jellyfin-0.1.1.0.zip` 到 Jellyfin **数据目录**下的 `plugins/MediaFlux/`。目录中应直接有 `MediaFlux.Jellyfin.dll` 和 `meta.json`，不要再套一层目录。
+2. 解压 `MediaFlux.Jellyfin-0.1.2.0.zip` 到 Jellyfin **数据目录**下的 `plugins/MediaFlux/`。目录中应直接有 `MediaFlux.Jellyfin.dll` 和 `meta.json`，不要再套一层目录。升级时替换旧插件 DLL/清单，不要并排保留两份 MediaFlux 插件；保留已有插件配置。
 3. 不要复制构建目录中的 Jellyfin、ASP.NET 或测试 DLL；这些由 Jellyfin 宿主提供。
 4. 启动 Jellyfin，进入管理后台 → 插件 → MediaFlux。
 5. 插件默认关闭。按下面流程完成配置后再启用；先用可恢复的测试条目验证。
@@ -46,8 +52,8 @@ bash plugins/MediaFlux.Jellyfin/scripts/package.sh
 可用 `DOTNET_BIN=/path/to/dotnet` 指定 SDK 可执行文件。产物：
 
 ```text
-plugins/MediaFlux.Jellyfin/artifacts/MediaFlux.Jellyfin-0.1.1.0.zip
-plugins/MediaFlux.Jellyfin/artifacts/MediaFlux.Jellyfin-0.1.1.0.zip.sha256
+plugins/MediaFlux.Jellyfin/artifacts/MediaFlux.Jellyfin-0.1.2.0.zip
+plugins/MediaFlux.Jellyfin/artifacts/MediaFlux.Jellyfin-0.1.2.0.zip.sha256
 ```
 
 产物、`bin/`、`obj/` 均不纳入 Git。打包脚本从 csproj 读取插件版本及 TFM，核对清单版本、插件 GUID、`net10.0` 与两个 Jellyfin NuGet 包的 `12.2.0` 基线；`targetAbi` 按 NuGet 版本加 `.0` 核对，并生成 SHA256 校验文件，不创建 Git 标签或上传包。
@@ -98,7 +104,7 @@ HTTP 202 仅表示 MF 接收任务，不表示云端已删除。等待上限可�
 - 云端调用失败、结果未知、部分成功或 STRM 联动提交失败，不会伪报整批成功，也不会自动重放删除请求。
 - **云盘与 Jellyfin 不构成一个事务。** 云端成功而本地失败、超时或请求中断时，不能假定云端已回滚。MF 来源同步可能已经清掉对应 STRM；先核对 MF 任务结果、云盘目录及回收站，再决定恢复或同步。
 - 部分 Jellyfin 客户端只展示通用删除失败弹窗。插件配置页的“最近删除错误”提供当前进程内的详细错误；MF 删除审计持久保存。不要根据通用弹窗盲目重试。
-- 需要恢复时，从光鸭回收站恢复对应文件，再执行 MF STRM 同步及 Jellyfin 媒体库刷新。清空回收站后不能依靠此插件恢复；插件不保存媒体副本。
+- 需要恢复时，依据 MF 删除审计在光鸭回收站核对并恢复对应文件及目录，再执行 MF STRM 同步及 Jellyfin 媒体库刷新。文件和空目录是分别回收的，不承诺跨多项的原子回滚。清空回收站后不能依靠此插件恢复；插件不保存媒体副本。
 - 已收到明确成功后，若节目路径、原生删除范围、内容或用户权限又变化，插件会取消继续本地删除。
 - 关闭插件仅恢复后续请求的原生行为，不会撤销已提交的 MF 任务。卸载前等待任务终止，停服删除插件目录；需要移除凭据时再删除对应插件 XML，并妥善处理备份。
 
@@ -107,7 +113,7 @@ HTTP 202 仅表示 MF 接收任务，不表示云端已删除。等待上限可�
 后端：
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_jellyfin_delete.py \
+.venv/bin/python -m pytest -q tests/test_jellyfin_delete.py tests/test_jellyfin_scoped_delete.py \
   tests/test_media_server_path_mapping.py tests/test_media_libraries_api.py \
   tests/test_guangya_active_download_delete.py tests/test_guangya_direct_delete.py
 ```

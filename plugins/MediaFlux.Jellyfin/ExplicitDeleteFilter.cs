@@ -49,25 +49,26 @@ public sealed class ExplicitDeleteFilter(Plugin plugin, ILibraryManager library,
             if (user is not null && items.Any(i => !i.CanDelete(user)))
                 throw new PluginFault("当前用户没有删除全部所选媒体的权限；整批删除已取消。", 401);
             var mappings = Plugin.ActiveMappings(config);
-            var plan = await DeletePlanner.PrepareAsync(items, mappings, library, token).ConfigureAwait(false);
+            var plan = await DeletePlanner.PrepareAsync(items, mappings, library, user, token).ConfigureAwait(false);
             if (plan.Fingerprints.Count > 0)
             {
                 if (!plugin.IsTargetVersion) throw new PluginFault("纳管删除仅允许 Jellyfin 12.2 系列；本地删除已取消。", 503);
-                if (user is null || apiKey)
-                    throw new PluginFault("已管理 STRM 必须由真实 Jellyfin 用户发起，并通过 CanDelete 权限检查；不允许 API key 绕过。", 403);
                 Plugin.RequireCredentials(config);
                 if (config.MappingMode == "mf" && !Plugin.CacheCurrent(config))
                     throw new PluginFault("MF 范围缓存不属于当前连接配置；请先关闭插件并重新同步。本地删除已取消。");
-                plugin.EnsureUnchanged(config);
-                await mf.DeleteAsync(config, plan.Fingerprints, token).ConfigureAwait(false);
-                plugin.EnsureUnchanged(config);
-                var currentUser = users.GetUserById(userId)
-                    ?? throw new PluginFault("等待期间用户已不存在；云任务可能已完成，本地删除已取消。", 401);
-                var currentItems = plan.Items.Select(p => library.GetItemById<BaseItem>(p.Id, currentUser)
-                    ?? throw new PluginFault("MF 任务已成功，但媒体条目已不存在或不可见；本地删除已取消，请刷新媒体库核对结果。", 404)).ToArray();
-                if (currentItems.Any(i => !i.CanDelete(currentUser)))
-                    throw new PluginFault("等待期间删除权限已变化；云任务可能已完成，本地删除已取消。", 401);
-                await DeletePlanner.RecheckAsync(plan, currentItems, mappings, library, token).ConfigureAwait(false);
+                async Task Recheck(bool completed, CancellationToken checkToken)
+                {
+                    plugin.EnsureUnchanged(config);
+                    var currentUser = users.GetUserById(userId)
+                        ?? throw new PluginFault("等待期间用户已不存在；本地删除已取消。如已提交云任务，请核对 MF 日志。", 401);
+                    var currentItems = plan.Items.Select(p => library.GetItemById<BaseItem>(p.Item.Id, currentUser)
+                        ?? throw new PluginFault("媒体条目已不存在或不可见；本地删除已取消。如已提交云任务，请核对 MF 日志。", 404)).ToArray();
+                    if (currentItems.Any(i => !i.CanDelete(currentUser)))
+                        throw new PluginFault("等待期间删除权限已变化；本地删除已取消。如已提交云任务，请核对 MF 日志。", 401);
+                    await DeletePlanner.RecheckAsync(plan, currentItems, mappings, library, currentUser, completed, checkToken).ConfigureAwait(false);
+                }
+                await mf.DeleteAsync(config, plan, t => Recheck(false, t), token).ConfigureAwait(false);
+                await Recheck(true, token).ConfigureAwait(false);
             }
         }
         catch (PluginFault fault)

@@ -1,4 +1,7 @@
 using System.Security.Cryptography;
+using System.Text.Json.Serialization;
+using Emby.Naming.Common;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
@@ -7,129 +10,292 @@ using MediaBrowser.Model.IO;
 
 namespace MediaFlux.Jellyfin;
 
-public sealed record SelectedItem(Guid Id, string Path, string ItemType, FileSystemMetadata[] DeletePaths);
-public sealed record DeletePlan(Dictionary<string, string> Fingerprints, SelectedItem[] Items, FileSystemMetadata[] Footprint);
+public sealed record DeleteScope(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("root")] string? Root,
+    [property: JsonPropertyName("paths")] string[] Paths);
+public sealed record ItemIdentity(Guid Id, string Path, string ItemType);
+public sealed record SelectedItem(ItemIdentity Item, FileSystemMetadata[] DeletePaths,
+    ItemIdentity[] Children, FileSystemMetadata[] Entries, DeleteScope? Scope);
+public sealed record DeletePlan(Dictionary<string, string> Fingerprints, SelectedItem[] Items, ItemIdentity[] StrmItems)
+{
+    public DeleteScope[] Scopes => Items.Where(i => i.Scope is not null).Select(i => i.Scope!).ToArray();
+}
 
 public static class DeletePlanner
 {
     private static readonly StringComparer PathComparer = OperatingSystem.IsWindows()
         ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+    private static readonly NamingOptions Naming = new();
+    private static readonly HashSet<string> MediaExtensions = new(
+        Naming.VideoFileExtensions.Concat(Naming.AudioFileExtensions).Concat(Naming.StubFileExtensions), StringComparer.OrdinalIgnoreCase);
 
-    public static async Task<DeletePlan> PrepareAsync(IReadOnlyList<BaseItem> items, MappingSet mappings, ILibraryManager library, CancellationToken token)
+    public static Task<DeletePlan> PrepareAsync(IReadOnlyList<BaseItem> items, MappingSet mappings,
+        ILibraryManager library, User? user, CancellationToken token) =>
+        InspectAsync(items, mappings, library, user, null, false, token);
+
+    public static async Task RecheckAsync(DeletePlan plan, IReadOnlyList<BaseItem> items, MappingSet mappings,
+        ILibraryManager library, User user, bool mfCompleted, CancellationToken token)
     {
-        var paths = new HashSet<string>(PathComparer);
-        var footprint = new List<FileSystemMetadata>();
+        _ = await InspectAsync(items, mappings, library, user, plan, mfCompleted, token).ConfigureAwait(false);
+    }
+
+    // 准备、提交前、成功后使用同一套范围/对象/权限检查；成功后仅放宽“原有文件已消失”。
+    private static async Task<DeletePlan> InspectAsync(IReadOnlyList<BaseItem> items, MappingSet mappings,
+        ILibraryManager library, User? user, DeletePlan? previous, bool allowMissing, CancellationToken token)
+    {
         var snapshots = new List<SelectedItem>();
+        var strmItems = new Dictionary<Guid, ItemIdentity>();
+        var paths = new HashSet<string>(PathComparer);
+        var previousOwners = previous?.StrmItems.ToHashSet();
+        var explicitlySelected = items.Where(i => i is Movie or Episode && IsManaged(i.Path, mappings))
+            .Select(i => i.Path).ToHashSet(PathComparer);
         foreach (var item in items)
         {
-            // Native LibraryManager uses these exact paths with DeleteFileLocation=true.
-            var roots = item.GetDeletePaths().Select(r => new FileSystemMetadata { FullName = r.FullName, IsDirectory = r.IsDirectory }).ToArray();
-            snapshots.Add(new SelectedItem(item.Id, item.Path ?? "", item.GetType().FullName!, roots));
-            footprint.AddRange(roots);
-            var itemPath = item.Path ?? "";
-            var relevant = mappings.Match(itemPath) is not null || roots.Any(r => mappings.Overlaps(r.FullName));
-            if (!relevant) continue;
-            if (IsStrm(itemPath) && mappings.Match(itemPath) is not null)
+            token.ThrowIfCancellationRequested();
+            var identity = Identity(item);
+            var old = previous?.Items.Single(i => i.Item.Id == item.Id);
+            if (old is not null && old.Item != identity)
+                throw new PluginFault("等待期间媒体条目已改名、换路径或类型；本地删除已取消。请核对 MF 日志。");
+            var roots = item.GetDeletePaths().Select(CopyPath).ToArray();
+            if (old is not null)
             {
-                if (item is not (Movie or Episode) || !item.IsFileProtocol)
-                    throw new PluginFault("已映射 STRM 仅支持明确选择的电影/单集；此媒体类型不能安全联动删除。");
-                if (IsGrouped((Video)item, library))
-                    throw new PluginFault("该电影/单集含多版本、分段或关联媒体，无法确认单项原生删除范围；请先拆分关联，或在 MF 中操作。");
-                _ = MappingSet.Normalize(itemPath);
-                paths.Add(itemPath);
+                foreach (var root in roots)
+                {
+                    var original = old.DeletePaths.FirstOrDefault(p => PathComparer.Equals(p.FullName, root.FullName));
+                    if (original is null || (original.IsDirectory != root.IsDirectory
+                        && !(allowMissing && !File.Exists(root.FullName) && !Directory.Exists(root.FullName))))
+                        throw new PluginFault("等待期间原生删除范围出现新的文件或目录；本地删除已取消。请核对 MF 日志。");
+                }
+                // 原生文件系统在目录消失后可能报告 IsDirectory=false；仍复核最初的完整范围。
+                roots = old.DeletePaths;
             }
-        }
-        if (paths.Count > 1000) throw new PluginFault("一次最多选择 1000 个 STRM 文件。");
-        CheckFootprint(footprint, paths, mappings, allowMissingDirectories: false, token);
-        var fingerprints = new Dictionary<string, string>(PathComparer);
-        foreach (var path in paths)
-        {
-            CheckNoLinks(path);
-            fingerprints.Add(path, await FingerprintAsync(path, token).ConfigureAwait(false));
-        }
-        return new DeletePlan(fingerprints, snapshots.ToArray(), footprint.ToArray());
-    }
-
-    public static async Task RecheckAsync(DeletePlan plan, IReadOnlyList<BaseItem> currentItems, MappingSet mappings, ILibraryManager library, CancellationToken token)
-    {
-        foreach (var old in plan.Items)
-        {
-            var current = currentItems.Single(i => i.Id == old.Id);
-            if (!PathComparer.Equals(current.Path, old.Path) || current.GetType().FullName != old.ItemType)
-                throw new PluginFault("等待期间媒体条目已改名、换路径或类型；云任务可能已成功，本地删除已取消。请刷新媒体库并核对 MF 日志。");
-            if (plan.Fingerprints.ContainsKey(old.Path) && current is Video video && IsGrouped(video, library))
-                throw new PluginFault("等待期间媒体关联版本发生变化；云任务已成功，本地删除已取消。请核对 MF 日志，不要盲目重试。");
-            var now = current.GetDeletePaths().ToArray();
-            if (now.Any(r => !old.DeletePaths.Any(p => PathComparer.Equals(p.FullName, r.FullName) && p.IsDirectory == r.IsDirectory)))
-                throw new PluginFault("等待期间原生删除范围出现新的文件或目录；云任务可能已成功，本地删除已取消。请核对 MF 日志。");
-        }
-        // MF's confirmed-success STRM linkage may already have removed files/directories.
-        // This is NOT a delete trigger: only a prior explicit selection + completed/ok authorizes continuation.
-        CheckFootprint(plan.Footprint, new HashSet<string>(plan.Fingerprints.Keys, PathComparer), mappings, true, token);
-        foreach (var pair in plan.Fingerprints)
-        {
-            if (!File.Exists(pair.Key)) continue;
-            CheckNoLinks(pair.Key);
-            if (await FingerprintAsync(pair.Key, token).ConfigureAwait(false) != pair.Value)
-                throw new PluginFault("等待云任务期间 STRM 内容已变化，本地删除已取消。云任务可能已成功，请核对 MF 日志，勿盲目重试。");
-        }
-    }
-
-    // 12.2 stores version relations in LinkedChildren, not the legacy in-memory arrays.
-    private static bool IsGrouped(Video video, ILibraryManager library) =>
-        video.IsStacked || video.PrimaryVersionId.HasValue || video.OwnerId != Guid.Empty
-        || library.GetLocalAlternateVersionIds(video).Any()
-        || library.GetLinkedAlternateVersions(video).Any();
-
-    private static void CheckFootprint(IEnumerable<FileSystemMetadata> footprint, HashSet<string> selected,
-        MappingSet mappings, bool allowMissingDirectories, CancellationToken token)
-    {
-        var examined = 0;
-        foreach (var root in footprint)
-        {
-            if (!mappings.Overlaps(root.FullName)) continue;
-            if (!root.IsDirectory)
+            BaseItem[] children = [];
+            if (item is Folder folder)
             {
-                CheckFile(root.FullName, selected, mappings);
+                // 原生删除读取 Children；不能让旧缓存隐藏等待期间新增的数据库对象。
+                folder.ReleaseCachedChildren();
+                children = folder.GetRecursiveChildren(false).ToArray();
+                if (children.Length > 10000) throw new PluginFault("原生删除对象过多；请在 MF 中操作。");
+            }
+            var childIdentities = children.Select(Identity).ToArray();
+            if (old is not null && !childIdentities.ToHashSet().IsSubsetOf(old.Children.ToHashSet()))
+                throw new PluginFault("等待期间原生递归删除出现新增或变化的媒体对象；本地删除已取消。请核对 MF 日志。");
+            var relevant = roots.Any(r => mappings.Overlaps(r.FullName)) || children.Append(item).Any(i => IsManaged(i.Path, mappings));
+            var scan = relevant ? Scan(roots, token) : new ScanResult();
+            if (old is not null)
+            {
+                var originalEntries = old.Entries.ToDictionary(e => e.FullName, e => e.IsDirectory, PathComparer);
+                if (scan.Entries.Any(e => !originalEntries.TryGetValue(e.FullName, out var directory) || directory != e.IsDirectory))
+                    throw new PluginFault("等待期间原生目录出现新增文件、STRM 或目录；本地删除已取消。请核对 MF 日志。");
+            }
+            var managed = scan.Entries.Where(e => !e.IsDirectory && IsManaged(e.FullName, mappings))
+                .Select(e => e.FullName).Concat(children.Append(item).Where(i => IsManaged(i.Path, mappings)).Select(i => i.Path))
+                .ToHashSet(PathComparer);
+            if (old?.Scope is not null) managed.UnionWith(old.Scope.Paths);
+            DeleteScope? scope = null;
+            if (managed.Count > 0)
+            {
+                if (user is null) throw new PluginFault("已管理 STRM 必须由真实 Jellyfin 用户发起，并通过 CanDelete 权限检查；不允许 API key 绕过。", 403);
+                foreach (var root in roots.Where(r => mappings.Overlaps(r.FullName))) CheckNoLinks(root.FullName);
+                if (scan.Links.Count > 0) throw new PluginFault("原生删除目录包含符号链接或重解析点，不能安全确认 STRM 范围。");
+                if (!allowMissing && scan.MissingDirectories.Count > 0)
+                    throw new PluginFault("无法读取原生删除目录；不能确认完整 STRM 范围，本地删除已取消。");
+                scope = Scope(item, roots, managed, mappings, explicitlySelected);
+                if (old is not null && (old.Scope is null || old.Scope.Kind != scope.Kind || !PathComparer.Equals(old.Scope.Root, scope.Root)))
+                    throw new PluginFault("等待期间纳管删除范围发生变化；本地删除已取消。请核对 MF 日志。");
+                var nativeIds = children.Append(item).Select(i => i.Id).ToHashSet();
+                foreach (var entry in scan.Entries)
+                {
+                    if (IsStrm(entry.FullName) && !entry.IsDirectory)
+                    {
+                        if (!scope.Paths.Contains(entry.FullName, PathComparer) && !explicitlySelected.Contains(entry.FullName))
+                            throw new PluginFault("原生删除还会移除未明确选中或未纳管的 STRM；整批请求已取消。");
+                        continue;
+                    }
+                    if (!entry.IsDirectory && MediaExtensions.Contains(Path.GetExtension(entry.FullName)))
+                        throw new PluginFault("原生删除范围混放本地视频或其它媒体文件；不能扩大目录删除。");
+                    if (scope.Root is null && !IsCompanion(entry.FullName, item.Path))
+                        throw new PluginFault("原生文件删除含非自身路径或无法确认归属的伴随文件；本地删除已取消。");
+                    var owner = library.FindByPath(entry.FullName, null);
+                    if (owner is not null && (!entry.IsDirectory || !nativeIds.Contains(owner.Id)))
+                        throw new PluginFault("原生删除目录包含库内其它归属对象；不能扩大目录删除。");
+                }
+                foreach (var native in children.Append(item))
+                {
+                    var current = Authorize(native, library, user);
+                    if (!current.IsFileProtocol || current is not (Movie or Episode or Season or Series))
+                        throw new PluginFault("原生递归删除含未知媒体对象或非文件对象；不能扩大目录删除。");
+                    if (scope.Root is not null && !Within(current.Path, scope.Root))
+                        throw new PluginFault("原生递归删除对象位于所选目录之外；不能扩大目录删除。");
+                    if (current is Video video)
+                    {
+                        if (!IsManaged(current.Path, mappings) || !scope.Paths.Contains(current.Path, PathComparer))
+                            throw new PluginFault("原生递归删除混放本地视频或范围外 STRM；不能扩大目录删除。");
+                        CheckVersions(video, library);
+                        strmItems[current.Id] = Identity(current);
+                    }
+                }
+                paths.UnionWith(scope.Paths);
+            }
+            snapshots.Add(new SelectedItem(identity, roots, childIdentities, scan.Entries.ToArray(), scope));
+        }
+        if (paths.Count > 1000) throw new PluginFault("一次最多删除 1000 个 STRM 文件。");
+        if (previous is not null && !paths.SetEquals(previous.Fingerprints.Keys))
+            throw new PluginFault("等待期间 STRM 删除集合发生变化；本地删除已取消。请核对 MF 日志。");
+        var fingerprints = new Dictionary<string, string>(PathComparer);
+        foreach (var path in paths.OrderBy(p => p, PathComparer))
+        {
+            token.ThrowIfCancellationRequested();
+            CheckNoLinks(path); // 先查链接，不能将悬空链接视作 MF 已移除的文件。
+            if (allowMissing && !File.Exists(path))
+            {
+                if (Directory.Exists(path)) throw new PluginFault("等待期间 STRM 被替换成目录；本地删除已取消。");
+                fingerprints.Add(path, previous!.Fingerprints[path]);
                 continue;
             }
-            if (!Directory.Exists(root.FullName))
+            var owner = library.FindByPath(path, false)
+                ?? throw new PluginFault("原生删除目录存在未知、未入库 STRM；不能扩大目录删除。");
+            var current = Authorize(owner, library, user!);
+            if (!PathComparer.Equals(current.Path, path) || !current.IsFileProtocol || current is not (Movie or Episode))
+                throw new PluginFault("STRM 没有对应可授权的电影或单集对象；本地删除已取消。");
+            var identity = Identity(current);
+            if (!strmItems.ContainsKey(current.Id))
+                throw new PluginFault("STRM 属于所选作品之外的库对象；不能扩大目录删除。");
+            if (previous is not null && !previousOwners!.Contains(identity))
+                throw new PluginFault("等待期间 STRM 对应的媒体对象发生变化；本地删除已取消。请核对 MF 日志。");
+            CheckVersions((Video)current, library);
+            strmItems[current.Id] = identity;
+            var fingerprint = await FingerprintAsync(path, token).ConfigureAwait(false);
+            if (previous is not null && previous.Fingerprints[path] != fingerprint)
+                throw new PluginFault("等待云任务期间 STRM 内容已变化，本地删除已取消。云任务可能已成功，请核对 MF 日志，勿盲目重试。");
+            fingerprints.Add(path, fingerprint);
+        }
+        return new DeletePlan(fingerprints, snapshots.ToArray(), strmItems.Values.ToArray());
+    }
+
+    private static DeleteScope Scope(BaseItem item, FileSystemMetadata[] roots, HashSet<string> managed, MappingSet mappings, HashSet<string> explicitlySelected)
+    {
+        var directories = roots.Where(r => r.IsDirectory).ToArray();
+        var kind = item switch
+        {
+            Movie => "movie", Episode => "episode", Season => "season", Series => "series",
+            _ => throw new PluginFault("已映射 STRM 仅支持明确选择的电影、单集、季或剧；此媒体类型不能安全联动删除。")
+        };
+        string? root = null;
+        if (item is Season or Series)
+        {
+            if (directories.Length != 1 || !PathComparer.Equals(directories[0].FullName, item.Path))
+                throw new PluginFault("季/剧没有唯一原生目录范围；不能扩大目录删除。");
+            root = directories[0].FullName;
+        }
+        else
+        {
+            if (!IsManaged(item.Path, mappings) || managed.Any(p => !explicitlySelected.Contains(p)))
+                throw new PluginFault("原生删除还会移除未明确选中的 STRM；电影/单集只能授权自身 STRM。");
+            if (directories.Length > 0)
             {
-                if (allowMissingDirectories) continue;
-                throw new PluginFault("无法读取原生删除目录；不能确认其中是否存在其他已管理 STRM，本地删除已取消。");
-            }
-            CheckNoLinks(root.FullName);
-            var directories = new Stack<string>();
-            directories.Push(root.FullName);
-            while (directories.TryPop(out var directory))
-            {
-                token.ThrowIfCancellationRequested();
-                foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos())
-                {
-                    if (++examined > 10000) throw new PluginFault("原生删除目录过大，不能安全确认 STRM 范围；请在 MF 中操作。");
-                    if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
-                        throw new PluginFault("原生删除目录包含符号链接或重解析点，不能安全确认 STRM 范围。");
-                    if (entry is DirectoryInfo) directories.Push(entry.FullName);
-                    else CheckFile(entry.FullName, selected, mappings);
-                }
+                if (item is not Movie || directories.Length != 1
+                    || !PathComparer.Equals(directories[0].FullName, Path.GetDirectoryName(item.Path)))
+                    throw new PluginFault("电影/单集原生删除范围不是独立电影父目录；不能扩大目录删除。");
+                root = directories[0].FullName;
             }
         }
+        if (root is not null)
+        {
+            root = MappingSet.Normalize(root);
+            if (mappings.Match(root) is null || mappings.Mappings.Any(m => MappingSet.Within(m.Server, root)))
+                throw new PluginFault("原生删除目录是映射根或包含映射根；不能扩大目录删除。");
+            if (managed.Any(p => !Within(p, root)))
+                throw new PluginFault("STRM 位于原生目录范围之外；不能扩大目录删除。");
+        }
+        if (managed.Any(p => !roots.Any(r => r.IsDirectory ? Within(p, r.FullName) : PathComparer.Equals(p, r.FullName))))
+            throw new PluginFault("STRM 不在原生删除范围内；本地删除已取消。");
+        // 同目录多项明确选择仍是一次合法批量删除；每个 scope 只认领自身，
+        // MF 按共同目录合并授权，不能把未选择的邻居带进某个电影 scope。
+        var scopePaths = item is Movie or Episode ? new[] { item.Path } : managed.OrderBy(p => p, PathComparer).ToArray();
+        return new DeleteScope(kind, root, scopePaths);
     }
 
-    private static void CheckFile(string path, HashSet<string> selected, MappingSet mappings)
+    private static BaseItem Authorize(BaseItem item, ILibraryManager library, User user)
     {
-        if (IsStrm(path) && mappings.Match(path) is not null && !selected.Contains(path))
-            throw new PluginFault("原生删除还会移除未明确选中的已映射 STRM（整季/整剧、同目录版本、附加项或其他文件）。已拒绝整批请求；请逐个选择电影/单集、拆分目录或在 MF 中操作。");
+        var current = library.GetItemById<BaseItem>(item.Id, user)
+            ?? throw new PluginFault("原生删除对象对当前用户不可见或已不存在；整批删除已取消。", 403);
+        if (Identity(current) != Identity(item)) throw new PluginFault("原生删除对象路径或类型已变化；本地删除已取消。");
+        if (!current.CanDelete(user)) throw new PluginFault("当前用户没有删除全部子项/原生对象的权限；整批删除已取消。", 401);
+        return current;
     }
 
-    public static bool IsStrm(string? path) => !string.IsNullOrEmpty(path)
-        && path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase);
+    // 12.2 的主版本和关联版本索引存放在 LinkedChildren，而非旧内存数组。
+    private static void CheckVersions(Video video, ILibraryManager library)
+    {
+        if (video.IsStacked || video.PrimaryVersionId.HasValue || video.OwnerId != Guid.Empty
+            || library.GetLocalAlternateVersionIds(video).Any() || library.GetLinkedAlternateVersions(video).Any())
+            throw new PluginFault("该电影/单集含多版本、分段或关联媒体，或等待期间关联已变化；本地删除已取消。若云任务已成功，请核对 MF 日志。");
+    }
+
+    private sealed class ScanResult
+    {
+        public List<FileSystemMetadata> Entries { get; } = [];
+        public List<string> Links { get; } = [];
+        public List<string> MissingDirectories { get; } = [];
+    }
+
+    private static ScanResult Scan(IEnumerable<FileSystemMetadata> roots, CancellationToken token)
+    {
+        var result = new ScanResult();
+        var examined = new HashSet<string>(PathComparer);
+        foreach (var root in roots)
+        {
+            var pending = new Stack<FileSystemMetadata>();
+            pending.Push(root);
+            while (pending.TryPop(out var entry))
+            {
+                token.ThrowIfCancellationRequested();
+                if (!examined.Add(entry.FullName)) continue;
+                if (examined.Count > 10000) throw new PluginFault("原生删除目录过大；请在 MF 中操作。");
+                FileSystemInfo info = entry.IsDirectory ? new DirectoryInfo(entry.FullName) : new FileInfo(entry.FullName);
+                if (info.LinkTarget is not null || (info.Exists && (info.Attributes & FileAttributes.ReparsePoint) != 0))
+                {
+                    result.Links.Add(entry.FullName);
+                    result.Entries.Add(entry);
+                    continue;
+                }
+                // 快照记录真实存在的节点和类型，不能授权原本不存在的伴随文件或节点替换。
+                var directory = Directory.Exists(entry.FullName);
+                if (File.Exists(entry.FullName) || directory)
+                    result.Entries.Add(new FileSystemMetadata { FullName = entry.FullName, IsDirectory = directory });
+                if (!entry.IsDirectory) continue;
+                if (!directory) { result.MissingDirectories.Add(entry.FullName); continue; }
+                foreach (var child in new DirectoryInfo(entry.FullName).EnumerateFileSystemInfos())
+                    pending.Push(new FileSystemMetadata { FullName = child.FullName, IsDirectory = child is DirectoryInfo });
+            }
+        }
+        return result;
+    }
+
+    private static ItemIdentity Identity(BaseItem item) => new(item.Id, item.Path ?? "", item.GetType().FullName!);
+    private static FileSystemMetadata CopyPath(FileSystemMetadata path) => new() { FullName = path.FullName, IsDirectory = path.IsDirectory };
+    private static bool IsCompanion(string path, string itemPath)
+    {
+        if (!PathComparer.Equals(Path.GetDirectoryName(path), Path.GetDirectoryName(itemPath))) return false;
+        var stem = Path.GetFileNameWithoutExtension(itemPath);
+        var name = Path.GetFileNameWithoutExtension(path);
+        return PathComparer.Equals(stem, name) || new[] { ".", "-", "_" }.Any(separator =>
+            name.StartsWith(stem + separator, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal));
+    }
+    private static bool Within(string path, string root) => MappingSet.Within(MappingSet.Normalize(path), MappingSet.Normalize(root));
+    private static bool IsManaged(string? path, MappingSet mappings) => IsStrm(path) && mappings.Match(path!) is not null;
+    public static bool IsStrm(string? path) => !string.IsNullOrEmpty(path) && path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase);
 
     private static void CheckNoLinks(string path)
     {
-        if (new FileInfo(path).LinkTarget is not null) throw new PluginFault("STRM 或删除目录不能是符号链接。");
+        FileSystemInfo info = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
+        if (info.LinkTarget is not null || (info.Exists && (info.Attributes & FileAttributes.ReparsePoint) != 0))
+            throw new PluginFault("STRM 或删除目录不能是符号链接或重解析点。");
         for (var dir = new DirectoryInfo(Path.GetDirectoryName(path)!); dir is not null; dir = dir.Parent)
-            if (dir.LinkTarget is not null) throw new PluginFault("STRM 或删除目录经过符号链接，无法确认文件身份。");
+            if (dir.LinkTarget is not null || (dir.Exists && (dir.Attributes & FileAttributes.ReparsePoint) != 0))
+                throw new PluginFault("STRM 或删除目录经过符号链接，无法确认文件身份。");
     }
 
     private static async Task<string> FingerprintAsync(string path, CancellationToken token)
