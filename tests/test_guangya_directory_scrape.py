@@ -4217,3 +4217,52 @@ class OrganizeScanSampleTests(unittest.TestCase):
         self.assertEqual(result.scanned_videos, [])
         self.assertEqual(stats["total"], 0)
         self.assertEqual(stats["skipped"], 1)
+
+
+class StagingRecognitionOrganizeTests(IsolatedDatabaseTestCase):
+    def test_ambiguous_remake_stays_in_staging_without_cloud_writes(self):
+        from app.modules.organize import Organizer
+        from tests.test_recognition_pipeline import _DeterministicClient
+
+        filename = "[ANi] 魔法騎士雷阿斯 - 02 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
+        source_name = (
+            "MF-368-[ANi] Majikku Naito Reiāsu _ 魔法骑士雷阿斯 - 02 "
+            "[1080P][Baha][WEB-DL][AAC AVC][CHT][MP4]"
+        )
+        candidates = [
+            {"id": media_id, "name": title, "original_name": "魔法騎士レイアース",
+             "first_air_date": year + "-10-01", "media_type": "tv",
+             "aliases": ["Majikku Naito Reiāsu", "魔法骑士雷阿斯", "魔法騎士雷阿斯"]}
+            for media_id, title, year in (
+                (34158, "魔法骑士", "1994"), (303272, "魔法骑士雷阿斯", "2026"),
+            )
+        ]
+        scraper = TMDBScraper(client=_DeterministicClient(candidates))
+        self.addCleanup(scraper.close)
+        video = _file("episode-2", filename, "source")
+        cloud = _MutableTreeClient(
+            {"source": [video], "archive": []},
+            {"source": _dir("source", source_name),
+             "archive": _dir("archive", "媒体库"), video.file_id: video},
+        )
+        organizer = Organizer(client=cloud, scraper=scraper)
+        self.addCleanup(organizer.close)
+        with (
+            patch.object(cloud, "create_dir", wraps=cloud.create_dir) as create,
+            patch.object(cloud, "move", wraps=cloud.move) as move,
+            patch.object(cloud, "rename", wraps=cloud.rename) as rename,
+            patch.object(cloud, "delete", wraps=cloud.delete) as delete,
+        ):
+            _plans, stats = organizer.organize(
+                "source", OrganizeRules(
+                    target_dir_id="archive", small_file_mb=0, media_info_enabled=False,
+                    clean_empty=False, link_strm=False, notify_enabled=False, library_notify=False,
+                ), dry_run=False, automatic=True, post_actions=False,
+            )
+        self.assertEqual(stats["need_confirm"], 1)
+        self.assertEqual(stats["moved"], 0)
+        for operation in (create, move, rename, delete):
+            operation.assert_not_called()
+        self.assertEqual(cloud.infos[video.file_id].name, filename)
+        self.assertEqual(cloud.infos[video.file_id].parent_id, "source")
+        self.assertEqual(cloud.tree["archive"], [])

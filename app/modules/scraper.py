@@ -2077,7 +2077,12 @@ def _prefer_guessit_numeric_title(
 def _folder_context(
     parent_path: str, *, episode_context: bool = False,
 ) -> tuple[str, str, str, int | None]:
-    parts = [part.strip() for part in re.split(r"[\\/]+", str(parent_path or "")) if part.strip()]
+    # 下载隔离目录使用 MF-<请求ID>-<发布名>，请求号/包装不是作品身份。
+    # 必须在年份、季号和发布组解析前去掉；原始 parent_path 仍留给快照和规则作用域。
+    parts = [
+        re.sub(r"^MF-(?:[1-9][0-9]*|download)-", "", part.strip())
+        for part in re.split(r"[\\/]+", str(parent_path or "")) if part.strip()
+    ]
     media_type = ""
     lowered = "/".join(parts).lower()
     if re.search(r"(?:^|/)(?:tv|shows?|series|剧集|电视剧|动漫)(?:/|$)", lowered):
@@ -6069,6 +6074,8 @@ class TMDBScraper:
                 result.error = "源文件包含 Donghua 动画标记，但 TMDB 候选不是动画条目，需要人工确认"
             elif decision.get("reason") == "ambiguous_romaji_alias":
                 result.error = "同一罗马字/拉丁别名命中多个 TMDB 条目，需要人工确认"
+            elif decision.get("reason") == "ambiguous_exact_title":
+                result.error = "同一标题或别名命中多个 TMDB 条目，缺少区分版本的依据，需要人工确认"
             elif decision.get("reason") == "ambiguous_near_tie":
                 result.error = "存在同名同年且得分接近的多个 TMDB 条目，需要人工确认"
             elif decision.get("reason") == "romaji_candidate_overflow":
@@ -7572,7 +7579,12 @@ class TMDBScraper:
     ) -> MatchResult:
         """按固定优先级执行外部线索、发布组知识与 AI 回退。"""
         rejected = set(deterministic.rejected_constraints or [])
-        if any(item.startswith("tmdb_position_") for item in rejected):
+        if (
+            any(item.startswith("tmdb_position_") for item in rejected)
+            or rejected.intersection({"ambiguous_exact_title", "ambiguous_romaji_alias"})
+        ):
+            # 年份/季集已在确定性阶段尝试消歧；仍共享同一身份标签时，
+            # AI 或外部标题线索不能凭空替无年份文件选择某个重制版本。
             return self._attach_preprocess(deterministic, processed)
         external = self._external_hint_fallback(
             processed.filename,
