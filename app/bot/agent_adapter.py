@@ -1004,12 +1004,11 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         return
     if match.group("action") == "x":
         try:
-            discarded = asyncio.run(
-                runtime.telegram.cancel_effect(envelope)
-            )
-        except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
+            discarded = asyncio.run(runtime.telegram.cancel_effect(envelope))
+        except Exception as exc:  # noqa: BLE001 - 取消状态未知，不能清除仍可能有效的卡片
             logger.warning("Telegram Agent 取消计划失败 type=%s", type(exc).__name__)
-            discarded = False
+            bot.answer_callback_query(call.id, "取消结果暂时无法核实，请稍后重试；原确认按钮保留。", show_alert=True)
+            return
         body = "已取消，本次没有执行任何写操作。" if discarded else "该确认已过期或已处理。"
         _settle_candidate_draft(owner, session_id, envelope.plan_id, html.escape(body))
         _edit_final(bot, call.message, body)

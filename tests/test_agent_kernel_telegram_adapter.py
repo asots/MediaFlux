@@ -618,6 +618,67 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         self.assertIn("已处理或被替代", bot.answers[-1][1])
         self.assertTrue(bot.answers[-1][2]["show_alert"])
 
+    def test_cancel_callback_keeps_pending_card_on_error_and_allows_retry(self):
+        plan_id = "plan_1234567890abcdef"
+        state = types.SimpleNamespace(pending_effect_plan_id=plan_id)
+        store = types.SimpleNamespace(load=AsyncMock(return_value=state))
+
+        async def cancel(envelope):
+            if cancel_effect.await_count == 1:
+                raise RuntimeError("fixture cancellation unavailable before state change")
+            state.pending_effect_plan_id = ""
+            return True
+
+        cancel_effect = AsyncMock(side_effect=cancel)
+        runtime = types.SimpleNamespace(
+            telegram=types.SimpleNamespace(cancel_effect=cancel_effect), store=store,
+        )
+        bot = FakeBot()
+        message = Message("有效确认卡", user_id=0, message_id=33)
+        markup = Markup()
+        markup.add(
+            Button("确认执行", f"agk:c:{plan_id}"),
+            Button("取消", f"agk:x:{plan_id}"),
+        )
+        message.reply_markup = markup
+        call = Call(f"agk:x:{plan_id}", message)
+        patches = self._patch_access()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime),
+            patch.object(adapter, "_settle_candidate_draft") as settle,
+        ):
+            adapter.handle_agent_callback(bot, call, TELEBOT)
+
+            cancel_effect.assert_awaited_once()
+            self.assertEqual(state.pending_effect_plan_id, plan_id)
+            self.assertEqual(bot.edits, [])
+            self.assertEqual(bot.sent, [])
+            self.assertIs(message.reply_markup, markup)
+            self.assertEqual(len(markup.buttons), 2)
+            settle.assert_not_called()
+            feedback = bot.answers[-1][1]
+            self.assertRegex(feedback, r"取消.*(?:未核实|无法核实)")
+            self.assertIs(bot.answers[-1][2].get("show_alert"), True)
+            for misleading in ("已失效", "已过期", "已处理", "已取消"):
+                self.assertNotIn(misleading, feedback)
+
+            call.id = "callback-cancel-retry"
+            adapter.handle_agent_callback(bot, call, TELEBOT)
+
+            self.assertEqual(cancel_effect.await_count, 2)
+            self.assertEqual(state.pending_effect_plan_id, "")
+            self.assertIn("已取消", bot.edits[-1][0])
+            self.assertEqual(bot.edits[-1][2], message.message_id)
+            self.assertIsNone(bot.edits[-1][3]["reply_markup"])
+            self.assertEqual(bot.sent, [])
+            settle.assert_called_once()
+            self.assertEqual(settle.call_args.args[2], plan_id)
+            self.assertIn("已取消", settle.call_args.args[3])
+            self.assertIn("已取消", bot.answers[-1][1])
+
     def test_confirm_callback_executes_plan_without_model_protocol(self):
         factory = EventFactory(
             session_id="tg_session",
