@@ -14,7 +14,7 @@ def catalog():
     return catalog_from_tool_specs(build_tool_specs())
 
 
-@pytest.mark.parametrize('titles', [('9号秘事', '黑镜'), ('银河边界', '深海回声')])
+@pytest.mark.parametrize('titles', [('9号秘事', '黑镜'), ('银河边界', '深海回声'), ('三体', '冰血暴')])
 @pytest.mark.parametrize('constraints', [
     '不找资源、不刷新、不播放、不修改。',
     '不要找资源，不要刷新，不要播放，不要修改。',
@@ -96,9 +96,26 @@ def test_visibility_requirements_are_applied_before_constraint_ranking():
     assert selection.names == ('library.search',)
 
 
-def test_resource_search_survives_a_no_download_constraint(catalog):
-    selection = CapabilityRetriever().retrieve('先搜索资源，但不要提交下载', catalog)
-    assert 'indexer.search_resources' in selection.names
+@pytest.mark.parametrize('message', [
+    '先搜索资源，但不要提交下载',
+    '只找《降临》的资源，不下载、不创建订阅。',
+    '只找《漫长的季节》第一季第六集的资源，不下载、不创建订阅。',
+    '帮我找《流人》S02E04和《人生切割术》S01E03的资源，只找指定资源，不下载、不创建订阅。',
+], ids=['generic', 'single-movie', 'single-episode', 'multiple-episodes'])
+def test_resource_search_survives_a_no_download_constraint(catalog, message):
+    selection = CapabilityRetriever().retrieve(message, catalog)
+    assert 'indexer.search_resources' in selection.names, (selection.names, selection.scores['indexer.search_resources'])
+    assert len(selection.names) <= 10
+
+
+@pytest.mark.parametrize('message', [
+    '帮我下载《星际穿越》。',
+    '帮我下载《苍穹浩瀚》S03E05。',
+], ids=['movie', 'episode'])
+def test_title_download_request_retains_resource_search(catalog, message):
+    selection = CapabilityRetriever().retrieve(message, catalog)
+    assert 'indexer.search_resources' in selection.names, (selection.names, selection.scores['indexer.search_resources'])
+    assert len(selection.names) <= 10
 
 
 def test_repeating_a_negative_clause_does_not_cancel_a_positive_goal():
@@ -119,10 +136,11 @@ def test_current_input_is_not_reintroduced_as_unfiltered_history(catalog):
 def test_native_session_first_window_includes_both_read_goals(catalog):
     """原生Session当前user落盘后的召回上下文；脚本模型，不冒充真实LLM。"""
     import asyncio
-    from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.pipeline import ToolPipeline
-    from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+
     from app.agent.kernel.model import ModelEvent, ModelEventType
+    from app.agent.kernel.pipeline import ToolPipeline
+    from app.agent.kernel.session import AgentSession
+    from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
     from tests.test_agent_kernel_core import ScriptedModel
 
     async def run():

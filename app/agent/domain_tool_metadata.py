@@ -203,6 +203,8 @@ TOOL_RETRIEVAL_TERMS: dict[str, tuple[str, ...]] = {
         "导演作品在库情况",
     ),
     "indexer.search_resources": (
+        # 复合下载目标的前置搜索线索，不是该只读工具会执行的动作。
+        "帮我下载《某片》", "下载某部电视剧",
         "有没有资源",
         "搜索资源",
         "查找资源",

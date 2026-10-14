@@ -53,7 +53,7 @@ def register_specs(
         ToolSpec(
             name="indexer.search_resources",
             description=(
-                "在Agent允许的多站索引中搜索短期资源结果，不受手动页面的普通站点复选框限制；总开关和成人来源授权仍生效。只返回 opaque result_id 与公开元数据。"
+                "按片名、季集或规格直接搜索资源，不要求媒体库中缺失。在Agent允许的多站索引中查询，不受手动页面的普通站点复选框限制；总开关和成人来源授权仍生效。只返回 opaque result_id 与公开元数据。"
                 "sites 可把本次读取严格限制到指定站点且不会修改站点配置；例如 "
                 'sites=["sukebei"] 只查询 Sukebei。需要近期结果时使用 '
                 "sort_mode=published_desc。"
@@ -130,12 +130,10 @@ def register_specs(
             validator=indexer_search_arguments,
             related_tools=("ingest.submit", "indexer.present_candidates", "ingest.inspect"),
             examples=(
-                "搜索《某片》的下载资源",
+                "搜索《某片》的资源版本",
+                "按片名查找指定季集的单集资源",
                 "找种子或磁力资源",
-                "帮我下载《某片》",
-                "下载某部电视剧",
                 "核对某部连载动画的资源索引跟进到第几集",
-                "检查订阅更新并在需要时搜索资源",
                 '最近有什么新出的步兵资源，仅用 sites=["sukebei"] 并按发布时间倒序搜索 uncensored',
                 '查看 Sukebei 最近发布的无码资源，不查询其他索引站',
             ),
