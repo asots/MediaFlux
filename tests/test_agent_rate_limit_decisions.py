@@ -18,15 +18,15 @@ import pytest
 
 from app import database as db
 from app.agent import rate_limit as rates
-from app.agent.rate_limit import AgentRateLimiter
 from app.agent.domain_catalog import build_tool_specs
 from app.agent.kernel.capabilities import ToolCatalog
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError, ToolCallContext
+from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
 from app.agent.kernel.ports import mediaflux_policy as policy
-from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
 from app.agent.kernel.session import AgentSession as Session
-from app.agent.kernel.state import InMemorySessionStateStore, CancellationToken
+from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.rate_limit import AgentRateLimiter
 from tests.support import isolated_test_database
 
 
@@ -197,7 +197,7 @@ def test_authoritative_cost_and_bool_wrapper_same_bucket():
         assert rates.allow_agent_tool('cost-owner','media.subscription_updates') is True
         with pytest.raises(policy.ToolRateLimitError) as raised:
             await port.acquire(owner='cost-owner',tool_name='media.subscription_updates',cost=0,arguments={})
-        assert dict(raised.value.rate_limit)==dict(limit=4,cost=2,remaining=0,retry_after_seconds=90.0,retry_at_epoch=210.0,reason='quota')
+        assert dict(raised.value.rate_limit)=={'limit':4,'cost':2,'remaining':0,'retry_after_seconds':90.0,'retry_at_epoch':210.0,'reason':'quota'}
         with pytest.raises(AttributeError):raised.value.rate_limit={}
         with db.get_conn() as conn:
             row=conn.execute('SELECT limiter_key,count FROM agent_rate_limit_buckets').fetchone()
@@ -266,9 +266,9 @@ def test_real_port_public_values_are_immutable_json_scalars(denial):
             assert projection[key] is None or type(projection[key]) is float
         assert projection['reason']==denial
         if denial=='quota':
-            assert dict(projection)==dict(limit=6,cost=1,remaining=0,retry_after_seconds=70.0,retry_at_epoch=190.0,reason='quota')
+            assert dict(projection)=={'limit':6,'cost':1,'remaining':0,'retry_after_seconds':70.0,'retry_at_epoch':190.0,'reason':'quota'}
         elif denial=='capacity':
-            assert dict(projection)==dict(limit=6,cost=1,remaining=6,retry_after_seconds=120.0,retry_at_epoch=240.0,reason='capacity')
+            assert dict(projection)=={'limit':6,'cost':1,'remaining':6,'retry_after_seconds':120.0,'retry_at_epoch':240.0,'reason':'capacity'}
         else:
             assert projection['retry_after_seconds'] is None and projection['retry_at_epoch'] is None
         serialized=json.dumps(dict(projection),allow_nan=False,sort_keys=True)
@@ -329,9 +329,8 @@ def test_failed_permit_rolls_back_cleanup_and_releases_writer_lock():
     assert limiter.consume('expired',limit=2,window_seconds=60).allowed
     before=rows();wall[0]=240.0
     failure=RuntimeError('synthetic timestamp failure after cleanup')
-    with patch.object(db,'now',side_effect=failure):
-        with pytest.raises(RuntimeError) as raised:
-            limiter.consume('new',limit=2,window_seconds=60)
+    with patch.object(db,'now',side_effect=failure), pytest.raises(RuntimeError) as raised:
+        limiter.consume('new',limit=2,window_seconds=60)
     assert raised.value is failure
     assert rows()==before
     # A fresh real transaction proves no leaked writer lock or hidden permit.
@@ -345,20 +344,84 @@ def test_failed_permit_rolls_back_cleanup_and_releases_writer_lock():
     print('ROLLBACK: expired cleanup rolled back on failure; reopened transaction admitted exactly once')
 
 
-def test_local_watchlist_pages_share_existing_default_budget_across_workers():
-    names = ('discovery.watchlist_summaries', 'discovery.get_watchlist_summary')
-    for name in names:
-        assert rates.tool_rate_limit_policy(name) == ('discovery-watchlist-read', 30, 1)
-    for index in range(30):
-        # 每次重建limiter，仍读取同一SQLite身份桶，而非重置进程内额度。
-        limiter = AgentRateLimiter(shared=True, wall_clock=lambda: 120.0)
-        with patch.object(rates, 'agent_rate_limiter', limiter):
-            assert rates.consume_agent_tool('watchlist-owner', names[index % 2]).allowed
-    with patch.object(rates, 'agent_rate_limiter', AgentRateLimiter(shared=True, wall_clock=lambda: 120.0)):
-        for name in names:
-            denied = rates.consume_agent_tool('watchlist-owner', name)
-            assert not denied.allowed and denied.reason == 'quota' and denied.limit == 30
-        assert rates.consume_agent_tool('other-owner', names[0]).allowed
+def test_local_watchlist_reads_share_existing_default_budget_across_workers_without_writes():
+    tool = catalog_from_tool_specs(build_tool_specs()).get('discovery.watchlist_summaries')
+    assert rates.tool_rate_limit_policy(tool.name) == ('discovery-watchlist-read', 30, 1)
+    assert tool.read is not None
+    db.add_media_watchlist('tmdb', 'rate-fixture', 'movie', '本地收藏', '2026', 'PRIVATE_POSTER_KEY')
+    number = int(db.get_media_watchlist('tmdb', 'rate-fixture', 'movie')['id'])
+    variants = (
+        {}, {'mode': 'list'}, {'before_number': number}, {'mode': 'statistics'},
+        {'watchlist_number': number}, {'watchlist_number': number + 1},
+    )
+    calls = []
+    watched_tables = (
+        'media_watchlist', 'media_subscriptions', 'media_subscription_candidates',
+        'media_subscription_runs', 'media_download_admissions', 'agent_action_history',
+    )
+
+    def domain_snapshot():
+        with db.get_conn() as conn:
+            return {table: [tuple(row) for row in conn.execute(f'SELECT * FROM {table} ORDER BY id')]
+                    for table in watched_tables}
+
+    before = domain_snapshot()
+
+    def read(arguments, context):
+        calls.append((context.owner, context.session_id, dict(arguments)))
+        return tool.read(arguments, context)
+
+    async def progress(_payload):
+        pass
+
+    async def exercise():
+        store = InMemorySessionStateStore()
+
+        async def query(index, arguments, owner='watchlist-owner'):
+            # 重建pipeline/limiter且切换会话与模型别名，仍使用唯一工具身份桶。
+            pipeline = ToolPipeline(
+                catalog=ToolCatalog([replace(tool, read=read)]), state_store=store,
+                rate_limiter=MediaFluxToolRateLimiter(),
+            )
+            session_id = f'watchlist-session-{index}'
+            lease, _ = await store.begin_turn(owner=owner, session_id=session_id, request_id=str(index))
+            context = ToolCallContext(
+                owner=owner, session_id=session_id, request_id=lease.request_id,
+                turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(),
+                report_progress=progress,
+            )
+            limiter = AgentRateLimiter(shared=True, wall_clock=lambda: 120.0)
+            with patch.object(rates, 'agent_rate_limiter', limiter):
+                return await pipeline.execute(
+                    tool.model_name if index % 2 else tool.name, arguments, context=context,
+                )
+
+        for index in range(30):
+            result = await query(index, variants[index % len(variants)])
+            assert result.tool.name == 'discovery.watchlist_summaries'
+            assert result.outcome.public_content['ok'] is True
+            assert result.effect_plan is None
+        assert len(calls) == 30
+        buckets = rows()
+        for index, arguments in enumerate(variants, start=30):
+            with pytest.raises(ToolPipelineError) as raised:
+                await query(index, arguments)
+            assert raised.value.code == 'rate_limited'
+            assert raised.value.rate_limit['reason'] == 'quota'
+            assert raised.value.rate_limit['limit'] == 30
+            assert raised.value.rate_limit['remaining'] == 0
+            assert rows() == buckets
+        assert len(calls) == 30  # 拒绝发生在真实只读handler之前。
+        other = await query(36, {'watchlist_number': number}, owner='other-owner')
+        assert other.effect_plan is None and other.outcome.public_content['data']['count'] == 1
+        assert len(calls) == 31
+
+    with patch('app.agent.discovery_watchlist_actions.config.get_bool', return_value=True):
+        asyncio.run(exercise())
+    assert domain_snapshot() == before  # 限流桶可写，但收藏、订阅、下载及动作历史不变。
+    with db.get_conn() as conn:
+        counts = conn.execute('SELECT count,previous_count FROM agent_rate_limit_buckets ORDER BY count').fetchall()
+    assert [tuple(row) for row in counts] == [(1, 0), (30, 0)]
     # 放宽的是纯本地收藏读取特例，外部搜索及写入没有改额度。
     assert rates.tool_rate_limit_policy('discovery.search')[1] == 6
     assert rates.tool_rate_limit_policy('discovery.add_watchlist')[1] == 4

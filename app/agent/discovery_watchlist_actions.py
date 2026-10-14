@@ -64,8 +64,10 @@ def _identity(provider: Any, external_id: Any, media_type: Any) -> tuple[str, st
 def watchlist_summaries_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise AgentToolError("工具参数必须是 JSON 对象")
+    if "watchlist_number" in arguments:
+        return watchlist_summary_arguments(arguments)
     if set(arguments) - {"mode", "before_number"}:
-        raise AgentToolError("探索收藏摘要仅接受 mode 和翻页编号 before_number")
+        raise AgentToolError("探索收藏读取仅接受 mode、before_number 或单独的 watchlist_number")
     mode = arguments.get("mode", "list")
     if mode not in ("list", "statistics"):
         raise AgentToolError("mode 仅支持 list 或 statistics")
@@ -160,7 +162,11 @@ def list_watchlist_summaries(arguments: dict[str, Any]) -> ToolResult:
                 )
             ],
         )
-    rows = db.list_media_watchlist(limit=21, **arguments)
+    if "watchlist_number" in arguments:
+        row = db.get_media_watchlist_by_id(arguments["watchlist_number"])
+        rows = [row] if row is not None else []
+    else:
+        rows = db.list_media_watchlist(limit=21, **arguments)
     items = [_row_summary(row) for row in rows[:20]]
     count = len(items)
     has_more = len(rows) > count
@@ -195,34 +201,6 @@ def list_watchlist_summaries(arguments: dict[str, Any]) -> ToolResult:
             ]
             if has_more else []
         ),
-    )
-
-
-def get_watchlist_summary(arguments: dict[str, Any]) -> ToolResult:
-    if not config.get_bool("DISCOVERY_ENABLED"):
-        return _feature_disabled()
-    number = int(arguments["watchlist_number"])
-    row = db.get_media_watchlist_by_id(number)
-    if row is None:
-        return ToolResult(
-            ok=False,
-            status="not_found",
-            summary=f"没有找到编号 {number} 的探索收藏",
-            error="目标收藏不存在。",
-        )
-    item = _row_summary(row)
-    return ToolResult(
-        ok=True,
-        status="success",
-        summary=f"探索收藏 {number}：{item['title']}",
-        data=item,
-        evidence=[
-            Evidence(
-                "discovery_watchlist",
-                "仅读取本地探索收藏的公开摘要。",
-                _now(),
-            )
-        ],
     )
 
 
@@ -306,7 +284,7 @@ def prepare_add_watchlist(arguments: dict[str, Any]) -> tuple[ToolResult, str]:
             summary="暂时无法核对该影视条目",
             error=exc.safe_message or "影视数据源暂时不可用。",
         ), ""
-    except Exception:
+    except Exception:  # noqa: BLE001 - Provider失败不可生成收藏写入预览
         return ToolResult(
             ok=False,
             status="unavailable",

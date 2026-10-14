@@ -22,6 +22,7 @@ _FORBIDDEN_TOOL_NAMES = {
     "guangya.fs.change.preview",
     "guangya.media_hygiene.execute",
     "guangya.organize.clean_empty",
+    "discovery.get_watchlist_summary",
 }
 _REQUIRED_PROJECT_TOOLS = {
     "agent.capabilities",
@@ -76,7 +77,6 @@ _REQUIRED_PROJECT_TOOLS = {
     "discovery.mapping_candidates",
     "discovery.confirm_mapping",
     "discovery.watchlist_summaries",
-    "discovery.get_watchlist_summary",
     "discovery.add_watchlist",
     "discovery.remove_watchlist",
     "media.subscription_summaries",
@@ -209,6 +209,49 @@ def test_all_registered_tools_have_one_complete_kernel_lifecycle() -> None:
         assert spec.context_confirmed_handler is not None, spec.name
 
 
+def test_watchlist_reads_have_one_read_only_entry_and_no_retired_handler_or_alias() -> None:
+    from app.agent import (
+        discovery_watchlist_actions,
+        domain_tool_metadata,
+        public_safety,
+        rate_limit,
+    )
+    from app.agent.kernel.capabilities import ToolEffect
+    from app.agent.kernel.ports import catalog_from_tool_specs
+
+    specs = build_tool_specs()
+    watchlist_specs = {spec.name: spec for spec in specs if spec.name.startswith('discovery.') and 'watchlist' in spec.name}
+    assert set(watchlist_specs) == {
+        'discovery.watchlist_summaries', 'discovery.add_watchlist', 'discovery.remove_watchlist',
+    }
+    spec = watchlist_specs['discovery.watchlist_summaries']
+    assert spec.risk.value == 'read'
+    assert spec.handler is discovery_watchlist_actions.list_watchlist_summaries
+    assert spec.validator is discovery_watchlist_actions.watchlist_summaries_arguments
+    assert not spec.requires_confirmation and spec.parallel_read
+
+    catalog = catalog_from_tool_specs(specs)
+    retired = 'discovery.get_watchlist_summary'
+    assert not catalog.has(retired)
+    assert not catalog.has(retired.replace('.', '__'))
+    assert not hasattr(discovery_watchlist_actions, 'get_watchlist_summary')
+    for mapping in (
+        domain_tool_metadata.TOOL_RETRIEVAL_TERMS, public_safety._PUBLIC_TOOL_LABELS,
+        public_safety._PUBLIC_TOOL_ALIASES, rate_limit._TOOL_RATE_LIMIT_SCOPES,
+        rate_limit._TOOL_RATE_LIMITS,
+    ):
+        assert retired not in mapping
+        assert retired.replace('.', '__') not in mapping
+    assert retired not in domain_tool_metadata.loaded_tool_guidance([spec.name])
+
+    tool = catalog.get(spec.name)
+    assert tool.effect is ToolEffect.READ and tool.read is not None
+    assert tool.prepare is None and tool.execute_confirmed is None
+    assert tool.metadata['parallel_read'] is True
+    assert set(tool.input_schema['properties']) == {'mode', 'before_number', 'watchlist_number'}
+    assert tool.input_schema['additionalProperties'] is False
+
+
 def test_guangya_fs_change_is_one_full_plan_confirmation_tool() -> None:
     from app.agent.kernel.capabilities import ToolEffect
     from app.agent.kernel.ports import catalog_from_tool_specs
@@ -246,7 +289,13 @@ def test_guangya_fs_change_is_one_full_plan_confirmation_tool() -> None:
 
 
 def test_guangya_fs_change_retired_preview_has_no_runtime_metadata_or_alias() -> None:
-    from app.agent import action_history, confirmation_contract, domain_tool_metadata, public_safety, rate_limit
+    from app.agent import (
+        action_history,
+        confirmation_contract,
+        domain_tool_metadata,
+        public_safety,
+        rate_limit,
+    )
 
     execute = "guangya.fs.change.execute"
     retired = "guangya.fs.change.preview"

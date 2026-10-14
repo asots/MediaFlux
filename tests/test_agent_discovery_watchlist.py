@@ -8,9 +8,10 @@ from unittest.mock import Mock, patch
 
 from app import database as db
 from app.agent.discovery_watchlist_actions import (
-    get_watchlist_summary,
     list_watchlist_summaries,
+    remove_watchlist_arguments,
     watchlist_summaries_arguments,
+    watchlist_summary_arguments,
 )
 from app.agent.errors import AgentToolError
 from app.agent.rate_limit import agent_rate_limiter
@@ -73,9 +74,16 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             "app.agent.discovery_watchlist_actions.config.get_bool", return_value=True
         ):
             listed = list_watchlist_summaries({})
-            single = get_watchlist_summary({"watchlist_number": number})
+            single = list_watchlist_summaries({"watchlist_number": number})
         self.assertTrue(listed.ok)
-        self.assertEqual(single.data["watchlist_number"], number)
+        self.assertTrue(single.ok)
+        self.assertEqual(single.data, listed.data)
+        self.assertEqual(single.data["items"][0]["watchlist_number"], number)
+        self.assertEqual(set(single.data), {"count", "items", "has_more", "next_before_number"})
+        self.assertEqual(
+            set(single.data["items"][0]),
+            {"watchlist_number", "provider", "media_type", "title", "year"},
+        )
         serialized = json.dumps(
             {"listed": listed.to_dict(), "single": single.to_dict()}, ensure_ascii=False
         )
@@ -117,6 +125,108 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         self.assertEqual(received, list(reversed(expected)))
         # Web默认调用仍读取原有有界列表，没有被Agent页长截断。
         self.assertEqual(len(db.list_media_watchlist()), 45)
+
+    def test_watchlist_sparse_high_numbers_are_fully_enumerated_across_pages(self) -> None:
+        expected = [1_000_000_007 + index * 104_729 for index in range(45)]
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO media_watchlist(id,provider,external_id,media_type,title,year,poster_key,created_at) "
+                "VALUES(?,'tmdb',?,'movie',?,'2026','PRIVATE_POSTER_KEY',?)",
+                [(number, f"PRIVATE_EXTERNAL_{number}", f"收藏 {number}", f"PRIVATE_TIME_{index}")
+                 for index, number in enumerate(expected)],
+            )
+        service = get_agent_service()
+        received = []
+        pages = []
+        arguments = {}
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            for _ in range(3):
+                result = service.invoke("discovery.watchlist_summaries", arguments)["result"]
+                self.assertTrue(result["ok"])
+                data = result["data"]
+                self.assertEqual(set(data), {"count", "items", "has_more", "next_before_number"})
+                numbers = [item["watchlist_number"] for item in data["items"]]
+                self.assertEqual(data["count"], len(numbers))
+                self.assertLessEqual(data["count"], 20)
+                self.assertEqual(numbers, sorted(numbers, reverse=True))
+                if "before_number" in arguments:
+                    self.assertTrue(all(number < arguments["before_number"] for number in numbers))
+                pages.append(data["count"])
+                received.extend(numbers)
+                cursor = data["next_before_number"]
+                self.assertEqual(data["has_more"], cursor is not None)
+                if not data["has_more"]:
+                    break
+                self.assertEqual(cursor, numbers[-1])
+                arguments = {"before_number": cursor}
+        self.assertEqual(pages, [20, 20, 5])
+        self.assertFalse(data["has_more"])
+        self.assertIsNone(data["next_before_number"])
+        self.assertEqual(received, list(reversed(expected)))
+        self.assertEqual(len(set(received)), len(expected))
+
+    def test_watchlist_exact_number_reads_outside_first_page_and_missing_is_empty(self) -> None:
+        ids = [self._insert(external_id=str(index), title="  Ａ\t收藏\x00  ") for index in range(25)]
+        number = ids[0]
+        service = get_agent_service()
+        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+            first = service.invoke("discovery.watchlist_summaries", {})["result"]
+            single = service.invoke(
+                "discovery.watchlist_summaries", {"watchlist_number": number}
+            )["result"]
+            direct = list_watchlist_summaries({"watchlist_number": number})
+            missing = service.invoke(
+                "discovery.watchlist_summaries", {"watchlist_number": ids[-1] + 1}
+            )["result"]
+        self.assertNotIn(number, [item["watchlist_number"] for item in first["data"]["items"]])
+        self.assertTrue(single["ok"])
+        self.assertEqual(single["status"], "success")
+        self.assertEqual(single["data"], {
+            "count": 1,
+            "items": [{"watchlist_number": number, "provider": "tmdb", "media_type": "movie",
+                       "title": "A 收藏", "year": "2026"}],
+            "has_more": False,
+            "next_before_number": None,
+        })
+        self.assertEqual(direct.data, single["data"])
+        self.assertEqual(single["suggestions"], [])
+        self.assertTrue(missing["ok"])
+        self.assertEqual(missing["status"], "empty")
+        self.assertEqual(missing["data"], {
+            "count": 0, "items": [], "has_more": False, "next_before_number": None,
+        })
+        self.assertEqual(missing["suggestions"], [])
+        serialized = json.dumps([single, missing], ensure_ascii=False)
+        for forbidden in ("PRIVATE_POSTER_KEY", "external_id", "created_at", "poster_key"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_watchlist_all_read_variants_use_read_only_local_queries(self) -> None:
+        number = self._insert(external_id="movie")
+        latest = self._insert(external_id="tv", media_type="tv")
+        real_conn = db.get_conn
+        queries = []
+
+        @contextmanager
+        def read_only():
+            with real_conn() as conn:
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_trace_callback(queries.append)
+                yield conn
+
+        with (
+            patch.object(db, "get_conn", read_only),
+            patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True),
+            patch("app.agent.discovery_watchlist_actions.get_discovery_service") as provider,
+        ):
+            for arguments in (
+                {}, {"mode": "list"}, {"before_number": latest}, {"mode": "statistics"},
+                {"watchlist_number": number}, {"watchlist_number": latest + 1},
+            ):
+                with self.subTest(arguments=arguments):
+                    self.assertTrue(list_watchlist_summaries(arguments).ok)
+            provider.assert_not_called()
+        self.assertTrue(queries)
+        self.assertTrue(all(query.lstrip().upper().startswith(("SELECT", "WITH")) for query in queries))
 
     def test_watchlist_cursor_does_not_shift_after_inserts_or_deletes(self) -> None:
         ids = [self._insert(external_id=str(n)) for n in range(25)]
@@ -170,31 +280,37 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
     def test_watchlist_cursor_contract_is_exposed_and_validated(self) -> None:
         service = get_agent_service()
         tool = service.pipeline.catalog.get("discovery.watchlist_summaries")
-        self.assertEqual(set(tool.input_schema["properties"]), {"mode", "before_number"})
+        self.assertEqual(set(tool.input_schema["properties"]), {"mode", "before_number", "watchlist_number"})
         self.assertFalse(tool.input_schema["additionalProperties"])
         self.assertEqual(tool.input_schema["properties"]["mode"]["enum"], ["list", "statistics"])
         self.assertEqual(tool.input_schema["properties"]["mode"]["default"], "list")
-        self.assertIn("不需要逐页统计", tool.description)
+        self.assertIn("不需要逐页统计", tool.input_schema["properties"]["mode"]["description"])
         cursor_description = tool.input_schema["properties"]["before_number"]["description"]
-        for description in (tool.description, cursor_description):
-            self.assertIn("已返回", description)
-            self.assertIn("编号严格小于", description)
-            self.assertIn("不含游标本身", description)
+        # 参数约束放在原生Schema字段说明中，不要求顶层摘要再重复一遍。
+        self.assertIn("已返回", cursor_description)
+        self.assertIn("编号严格小于", cursor_description)
+        self.assertIn("不含游标本身", cursor_description)
         self.assertIn("count是本页数量，不是收藏总数", tool.description)
         self.assertIn("首次读取不传", cursor_description)
+        for field in ("before_number", "watchlist_number"):
+            self.assertEqual(tool.input_schema["properties"][field]["type"], "integer")
+            self.assertEqual(tool.input_schema["properties"][field]["minimum"], 1)
+            self.assertEqual(tool.input_schema["properties"][field]["maximum"], 2_147_483_647)
         self.assertEqual(watchlist_summaries_arguments({}), {})
         self.assertEqual(watchlist_summaries_arguments({"before_number": 12}), {"before_number": 12})
         for arguments in ({"before_number": True}, {"before_number": 0}, {"before_number": "12"}, {"before_number": None}, {"offset": 20}):
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
                 watchlist_summaries_arguments(arguments)
 
-    def test_watchlist_statistics_arguments_match_schema(self) -> None:
+    def test_watchlist_read_modes_and_number_arguments_match_schema(self) -> None:
         from app.agent.kernel.pipeline import ToolPipelineError, _validate_json_schema
 
         schema = get_agent_service().pipeline.catalog.get("discovery.watchlist_summaries").input_schema
         for arguments in (
             {}, {"mode": "list"}, {"before_number": 12},
             {"mode": "list", "before_number": 12}, {"mode": "statistics"},
+            {"before_number": 2_147_483_647}, {"watchlist_number": 1},
+            {"watchlist_number": 12}, {"watchlist_number": 2_147_483_647},
         ):
             with self.subTest(arguments=arguments):
                 _validate_json_schema(arguments, schema)
@@ -208,6 +324,22 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             {"mode": "statistics", "limit": 3}, {"before_number": 2_147_483_648},
             {"before_number": True}, {"before_number": None}, {"before_number": "12"},
             {"before_number": 0}, {"offset": 20},
+        ] + [
+            {field: value}
+            for field in ("before_number", "watchlist_number")
+            for value in (False, -1, 12.0, 2_147_483_648, 10**100, None, "12", [], {})
+        ] + [
+            {"watchlist_number": value} for value in (True, 0)
+        ] + [
+            {"watchlist_number": 12, **other}
+            for other in (
+                {"mode": "list"}, {"mode": "statistics"}, {"before_number": 10},
+                {"mode": "list", "before_number": 10},
+                {"mode": "statistics", "before_number": 10},
+                {"mode": None}, {"before_number": None}, {"limit": 1},
+            )
+        ] + [
+            None, [], 12, "12", True,
         ]
         for arguments in invalid_arguments:
             with self.subTest(arguments=arguments):
@@ -216,6 +348,27 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
                 with self.assertRaises(ToolPipelineError) as error:
                     _validate_json_schema(arguments, schema)
                 self.assertEqual(error.exception.code, "invalid_arguments")
+
+    def test_watchlist_number_helper_keeps_exact_read_and_remove_boundaries(self) -> None:
+        for number in (1, 12, 2_147_483_647):
+            arguments = {"watchlist_number": number}
+            with self.subTest(arguments=arguments):
+                self.assertEqual(watchlist_summary_arguments(arguments), arguments)
+                self.assertEqual(watchlist_summaries_arguments(arguments), arguments)
+                self.assertEqual(remove_watchlist_arguments(arguments), arguments)
+        invalid_arguments = [
+            {"watchlist_number": value}
+            for value in (True, False, 0, -1, 12.0, 2_147_483_648, 10**100, None, "12", [], {})
+        ] + [
+            {}, None, [], {"watchlist_number": 12, "mode": "list"},
+            {"watchlist_number": 12, "mode": "statistics"},
+            {"watchlist_number": 12, "before_number": 10},
+        ]
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                for validator in (watchlist_summary_arguments, remove_watchlist_arguments):
+                    with self.subTest(validator=validator.__name__), self.assertRaises(AgentToolError):
+                        validator(arguments)
 
     def test_watchlist_statistics_empty_database(self) -> None:
         self.assertEqual(db.get_media_watchlist_statistics(), [])
@@ -409,7 +562,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
 
     def test_watchlist_statistics_keeps_discovery_feature_switch(self) -> None:
         with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=False):
-            for arguments in ({}, {"mode": "list"}, {"mode": "statistics"}):
+            for arguments in ({}, {"mode": "list"}, {"mode": "statistics"}, {"watchlist_number": 12}):
                 result = list_watchlist_summaries(arguments)
                 self.assertFalse(result.ok)
                 self.assertEqual(result.status, "disabled")

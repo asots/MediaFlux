@@ -112,7 +112,6 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "discovery.confirm_mapping": "影视映射确认",
     "discovery.detail": "影视发现详情",
     "discovery.credits": "影视演职员查询",
-    "discovery.get_watchlist_summary": "探索收藏详情",
     "discovery.lookup_rating": "豆瓣评分查询",
     "discovery.mapping_candidates": "影视映射候选",
     "discovery.person_filmography": "人物电影作品查询",

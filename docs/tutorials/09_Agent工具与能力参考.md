@@ -159,8 +159,7 @@
 | `discovery.credits` | READ | 只读查询已确认 TMDB 作品的演员、角色/配音及导演等主创。 |
 | `discovery.mapping_candidates` | READ | 只读查询一个非 TMDB 来源条目的 TMDB 映射候选，并将内部候选身份短期绑定到当前会话；不会自动保存高置信映射。 |
 | `discovery.confirm_mapping` | WRITE | 预检并在用户确认后保存当前会话最近映射候选中的一个；候选会重新通过 TMDB 详情核验。 |
-| `discovery.watchlist_summaries` | READ | 只读列出有界探索收藏摘要，仅含收藏编号、来源、媒体类型、标题和年份。 |
-| `discovery.get_watchlist_summary` | READ | 按精确收藏编号读取一条探索收藏的安全摘要。 |
+| `discovery.watchlist_summaries` | READ | 统一读取收藏摘要：默认分页列表、`mode=statistics` 全库统计，或仅传 `watchlist_number` 查已知编号（返回 0 或 1 项）。列表按返回游标续页，不猜编号枚举。 |
 | `discovery.add_watchlist` | WRITE | 预检并在用户确认后把一个精确影视条目加入本地探索收藏；不会下载资源。 |
 | `discovery.remove_watchlist` | WRITE | 预检并在用户确认后按精确收藏编号移除本地探索收藏；不会删除媒体文件或下载任务。 |
 | `media.recommend_from_library` | READ | 从已配置的 Jellyfin / Emby 本地媒体库中推荐可以立即观看的作品。 |

@@ -14,12 +14,14 @@ from app.agent.kernel.state import AgentInput
 from tests.test_agent_kernel_capability_discovery import capability_tool
 from tests.test_agent_kernel_core import read_tool
 from tests.test_agent_task_entry import (
-    isolated_db as isolated_db,
-    store,
-    proposal,
     GOAL,
+    proposal,
+    store,
 )
-from tests.test_agent_task_first_slice import NativeScript, OWNER
+from tests.test_agent_task_entry import (
+    isolated_db as isolated_db,  # noqa: PLC0414 - pytest共享fixture需要显式导出
+)
+from tests.test_agent_task_first_slice import OWNER, NativeScript
 
 
 class WindowScript(NativeScript):
@@ -264,3 +266,19 @@ def test_unmatched_kernel_utility_cannot_enter_via_workflow_neighbor(opted_in):
     # 明确按名称查询仍可加载；这里修的是自动补位，不是取消工具权限。
     explicit = finder.search({"tool_names": [utility.name]})
     assert utility.name in explicit["loaded_tools"]
+
+
+@pytest.mark.parametrize("question", [
+    "我收藏的剧集有更新吗？把收藏里的剧集都核对一下，只看媒体库和已播进度，先不找资源、不下载。",
+    "我收藏的剧集，帮我核对有无更新，不找下载资源",
+    "我的收藏片单都有什么？",
+    "收藏编号1043是哪部？",
+])
+def test_watchlist_entry_is_visible_for_collection_and_known_number_queries(question):
+    from app.agent.domain_catalog import build_tool_specs
+    from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+
+    catalog = catalog_from_tool_specs(build_tool_specs())
+    selected = CapabilityRetriever().retrieve(question, catalog)
+    assert "discovery.watchlist_summaries" in [tool.name for tool in selected.tools]
+    assert len(selected.tools) <= 10

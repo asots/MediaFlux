@@ -30,14 +30,12 @@ from app.agent.discovery_mapping_actions import (
 from app.agent.discovery_watchlist_actions import (
     add_watchlist_arguments,
     add_watchlist_confirmed,
-    get_watchlist_summary,
     list_watchlist_summaries,
     prepare_add_watchlist,
     prepare_remove_watchlist,
     remove_watchlist_arguments,
     remove_watchlist_confirmed,
     watchlist_summaries_arguments,
-    watchlist_summary_arguments,
 )
 from app.agent.library_recommendation_actions import (
     get_library_recommendations,
@@ -405,22 +403,22 @@ def register_specs(
         ToolSpec(
             name="discovery.watchlist_summaries",
             description=(
-                "只读探索收藏摘要。统计总数、各类型数量或各类型最新3项时使用mode=statistics，"
-                "单次查询返回全库total及by_media_type（各类型count和latest），包含历史未知类型，"
-                "不需要逐页统计，不能提供before_number。"
-                "默认mode=list分页列出摘要，每页最多20项。count是本页数量，不是收藏总数；"
-                "next_before_number是本页已返回的末项收藏编号；"
-                "下一页仅返回编号严格小于该游标的收藏，不含游标本身。"
-                "需要完整收藏明细时，将next_before_number作为before_number续页直到has_more=false。"
-                "仅含收藏编号、来源、媒体类型、标题和年份。"
+                "读取探索收藏片单：默认分页列出电影、剧集的编号、来源、类型、标题和年份；"
+                "核对收藏剧集更新时先从此取得片单。统计总数用mode=statistics，"
+                "查看已知编号用watchlist_number；不能靠猜编号枚举收藏。"
+                "完整清单按next_before_number续页直到has_more=false，count是本页数量，不是收藏总数。"
             ),
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
                 "properties": {
+                    "watchlist_number": {
+                        "type": "integer", "minimum": 1, "maximum": 2_147_483_647,
+                        "description": "仅单独传入用户指定或列表返回的已知编号，返回0或1项；不用于枚举。",
+                    },
                     "mode": {
                         "type": "string", "enum": ["list", "statistics"], "default": "list",
-                        "description": "list 为默认分页；statistics 统计全库及各类型最新3项，与 before_number 互斥。",
+                        "description": "list 默认每页20项；statistics 返回全库total、各类型count和最新3项（含未知类型），不需要逐页统计，不能带before_number。",
                     },
                     "before_number": {
                         "type": "integer", "minimum": 1, "maximum": 2_147_483_647,
@@ -430,31 +428,17 @@ def register_specs(
                         ),
                     },
                 },
-                "not": {
-                    "required": ["mode", "before_number"],
-                    "properties": {"mode": {"enum": ["statistics"]}},
-                },
+                "not": {"anyOf": [
+                    {"required": ["watchlist_number", "mode"]},
+                    {"required": ["watchlist_number", "before_number"]},
+                    {"required": ["mode", "before_number"],
+                     "properties": {"mode": {"enum": ["statistics"]}}},
+                ]},
                 "additionalProperties": False,
             },
             handler=list_watchlist_summaries,
             parallel_read=True,
             validator=watchlist_summaries_arguments,
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="discovery.get_watchlist_summary",
-            description="按精确收藏编号读取一条探索收藏的安全摘要。",
-            risk=RiskLevel.READ,
-            parameters={
-                "type": "object",
-                "required": ["watchlist_number"],
-                "properties": {"watchlist_number": {"type": "integer", "minimum": 1}},
-                "additionalProperties": False,
-            },
-            handler=get_watchlist_summary,
-            parallel_read=True,
-            validator=watchlist_summary_arguments,
         )
     )
     registry.register(

@@ -107,7 +107,6 @@ _TOOL_RATE_LIMIT_SCOPES = {
     "discovery.recommend": "discovery-recommend",
     "discovery.person_filmography": "discovery-person-filmography",
     "discovery.watchlist_summaries": "discovery-watchlist-read",
-    "discovery.get_watchlist_summary": "discovery-watchlist-read",
     "discovery.detail": "discovery-detail",
     "discovery.mapping_candidates": "discovery-mapping",
     "discovery.confirm_mapping": "discovery-mapping-write",
