@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from app import config
 from app import database as db
-from app.clients.guangya import GuangYaFile
+from app.clients.guangya import GuangYaFile, GuangYaReadRejected
 from app.modules.organize import OrganizeRules
 from app.modules.organize_correction import OrganizeCorrectionService
 from app.modules.process_lock import CrossProcessLock
@@ -297,6 +297,69 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
             self.assertTrue(self._reorganize()['success'])
         self.assertEqual(db.get_download_request(request_id)['organize_started'], -1)
         self.assertIn('source', self.cloud.nodes)
+
+    def test_return_restores_audited_deleted_directories_when_provider_rejects_old_ids(self):
+        self._reorganize()
+        read = self.cloud.file_info
+
+        def reject_deleted(file_id):
+            if file_id not in self.cloud.nodes:
+                raise GuangYaReadRejected("file_info", code="149")
+            return read(file_id)
+
+        with patch.object(self.cloud, "file_info", side_effect=reject_deleted):
+            result = self.service.return_to_source(
+                self.log_id, "return-provider-149", self.service.detail(self.log_id)["version"],
+            )
+        self.assertTrue(result["success"])
+        leaf = self.cloud.nodes[self.cloud.nodes["video"].parent_id]
+        parent = self.cloud.nodes[leaf.parent_id]
+        self.assertEqual((leaf.name, parent.name, parent.parent_id),
+                         ("Season 1", "Synthetic source", "incoming"))
+
+    def test_restore_read_rejection_never_bypasses_parent_or_receipt_proofs(self):
+        self._reorganize()
+        read, listing = self.cloud.file_info, self.cloud.list_dir
+        original_parent = self.cloud.nodes["video"].parent_id
+        count = self.cloud.directory_sequence
+        for case in ("other_code", "parent_info", "parent_list", "invalid_receipt"):
+            with self.subTest(case=case):
+                if case == "invalid_receipt":
+                    with db.get_conn() as conn:
+                        conn.execute("UPDATE organize_delete_audit SET status='failed' WHERE file_id='leaf'")
+
+                def reject(file_id, scenario=case):
+                    if file_id not in self.cloud.nodes or (scenario == "parent_info" and file_id == "incoming"):
+                        raise GuangYaReadRejected("file_info", code="101" if scenario == "other_code" else "149")
+                    return read(file_id)
+
+                def reject_list(file_id, scenario=case):
+                    if scenario == "parent_list" and file_id == "incoming":
+                        raise GuangYaReadRejected("list_dir", code="149")
+                    return listing(file_id)
+
+                with (
+                    patch.object(self.cloud, "file_info", side_effect=reject),
+                    patch.object(self.cloud, "list_dir", side_effect=reject_list),
+                    self.assertRaises(GuangYaReadRejected),
+                ):
+                    self.service.return_to_source(
+                        self.log_id, f"blocked-{case}", self.service.detail(self.log_id)["version"],
+                    )
+                self.assertEqual(self.cloud.directory_sequence, count)
+                self.assertEqual(self.cloud.nodes["video"].parent_id, original_parent)
+
+    def test_restore_still_rejects_audited_directory_moved_by_external_actor(self):
+        self._reorganize()
+        self.cloud.add("elsewhere", "0", "Other", is_dir=True)
+        self.cloud.add("source", "elsewhere", "Synthetic source", is_dir=True)
+        count = self.cloud.directory_sequence
+        with self.assertRaisesRegex(RuntimeError, "外部移动或改名"):
+            self.service.return_to_source(
+                self.log_id, "externally-restored", self.service.detail(self.log_id)["version"],
+            )
+        self.assertEqual(self.cloud.directory_sequence, count)
+        self.assertEqual(self.cloud.nodes["source"].parent_id, "elsewhere")
 
     def test_return_reuses_persisted_restore_receipt_after_file_failure(self):
         self._reorganize()

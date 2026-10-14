@@ -12,8 +12,8 @@ import re
 import uuid
 from dataclasses import dataclass, replace
 
-from app import config, database as db
-from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
+from app import database as db
+from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaReadRejected, close_guangya_client
 from app.logger import get_logger
 from app.modules.guangya_compensation import restore_guangya_file
 from app.modules.organize import (
@@ -31,7 +31,6 @@ from app.modules.nsfw import (
     build_clean_title_candidate, extract_nsfw_identifier, normalize_code,
 )
 from app.modules.organize_postprocess import companion_target_name, normalize_media_number
-from app.modules.organize_sources import normalize_organize_sources
 from app.modules.scraper import Candidate, MatchResult, TMDBScraper, extract_recognition_context
 from app.modules.organize_identity import _usable_filename_identity_hint
 from app.modules.recognition.cleaner import _comparison_key
@@ -780,10 +779,10 @@ class OrganizeCorrectionService:
                 # 清理只跟随已有恢复凭据；未由整理清理的目录不猜路径、不创建。
                 result = directory_id
             else:
-                info = self.client.file_info(directory_id)
                 if (audit['status'] != 'success' or audit['trigger'] not in (
                         'empty_dir_cleanup', 'download_staging_cleanup', 'correction_empty_dir_cleanup',
-                        'return_to_source_empty_dir_cleanup') or not audit['parent_id'] or not audit['file_name']):
+                        'return_to_source_empty_dir_cleanup', 'reorganize_empty_dir_cleanup') or not audit['parent_id'] or not audit['file_name']):
+                    info = self.client.file_info(directory_id)
                     # 清理被阻止时原目录可能仍真实存在：保留原 ID 的既有送回契约，
                     # 但回收站详情不算存在，必须仍在其父目录成员中；此分支绝不建目录。
                     if (info is not None and info.is_dir and info.parent_id
@@ -815,6 +814,14 @@ class OrganizeCorrectionService:
                             or current.name != name or not any(entry.file_id == result for entry in self.client.list_dir(parent_id))):
                         raise RuntimeError("已恢复目录的身份或位置已变化，禁止接管同名目录")
                 else:
+                    try:
+                        info = self.client.file_info(directory_id)
+                    except GuangYaReadRejected as exc:
+                        # 只在完整成功清理凭据、父目录可读且原 ID 已不在父列表时，
+                        # 允许按凭据重建。149 绝不用于判空、放行删除或跳过父级校验。
+                        if exc.code != "149":
+                            raise
+                        info = None
                     if info is not None and (info.name != name or info.parent_id != str(audit['parent_id'])):
                         raise RuntimeError("原目录已被外部移动或改名，禁止猜测重建")
                     if any(entry.name == name for entry in children):
@@ -963,19 +970,14 @@ class OrganizeCorrectionService:
         ) else default
 
     @staticmethod
-    def _return_cleanup_protected_ids(
+    def _archive_cleanup_protected_ids(
         items: list[CorrectionItem], rules: OrganizeRules,
     ) -> tuple[set[str], str]:
         """返回送回源目录时绝不能删除的永久根目录。"""
-        protected = {
-            "0",
-            str(rules.target_dir_id or "").strip(),
-            *(str(item.original_parent_id or "").strip() for item in items),
-        }
-        sources, error = normalize_organize_sources(
-            config.get("GY_ORGANIZE_SOURCE_DIRS", "")
-        )
-        protected.update(str(item.get("id") or "").strip() for item in sources)
+        from app.modules.organize_tasks import _protected_organize_root_ids
+
+        protected, error = _protected_organize_root_ids(rules)
+        protected.update(str(item.original_parent_id or "").strip() for item in items)
         protected.discard("")
         return protected, error
 
@@ -1015,7 +1017,7 @@ class OrganizeCorrectionService:
             ancestor_id = next_parent
         return False
 
-    def _capture_return_cleanup_directories(
+    def _capture_archive_cleanup_directories(
         self,
         *,
         detail: dict,
@@ -1027,7 +1029,7 @@ class OrganizeCorrectionService:
         只沿日志 ``new_path`` 能证明的媒体层级向上读取，最多清理
         ``Season N`` 和它的媒体根；分类、地区、年份和归档根永不进入候选。
         """
-        protected, config_error = self._return_cleanup_protected_ids(items, rules)
+        protected, config_error = self._archive_cleanup_protected_ids(items, rules)
         if config_error:
             return [], protected, [
                 "整理源目录配置异常，已跳过目标空目录清理以保证安全"
@@ -1135,7 +1137,7 @@ class OrganizeCorrectionService:
                     current = read_directory(current_id)
                 except Exception as exc:
                     logger.warning(
-                        "送回源目录前读取目标目录失败 level=%s type=%s",
+                        "纠偏前读取旧归档目录失败 level=%s type=%s",
                         level, type(exc).__name__,
                     )
                     warnings.append("无法核验部分整理目标目录，已安全保留")
@@ -1150,7 +1152,13 @@ class OrganizeCorrectionService:
                 current_id = next_parent
             if len(branch) != cleanup_levels:
                 continue
-            if not belongs_to_target_root(branch[-1]):
+            try:
+                belongs = belongs_to_target_root(branch[-1])
+            except Exception as exc:  # noqa: BLE001 - 收尾核验失败仅保留目录，不阻止纠偏。
+                logger.warning("核验旧归档祖先失败 type=%s", type(exc).__name__)
+                warnings.append("无法核验整理目标目录的祖先，已安全保留")
+                continue
+            if not belongs:
                 warnings.append("整理目标目录不属于当前整理目标根，已安全保留")
                 continue
             for current in branch:
@@ -1161,15 +1169,16 @@ class OrganizeCorrectionService:
                 seen.add(directory_id)
         return captured, protected, list(dict.fromkeys(warnings))
 
-    def _cleanup_return_target_directories(
+    def _cleanup_archive_directories(
         self,
         *,
         log_id: int,
         directories: list[GuangYaFile],
         protected: set[str],
         target_root_id: str,
+        trigger: str = "return_to_source_empty_dir_cleanup",
     ) -> tuple[int, list[str]]:
-        """文件全部送回后，自底向上安全回收本日志留下的目标空目录。"""
+        """纠偏提交后，自底向上安全回收本日志移空的旧归档目录。"""
         if not directories:
             return 0, []
         delete_empty = getattr(self.client, "delete_empty_directory", None)
@@ -1188,7 +1197,7 @@ class OrganizeCorrectionService:
                     continue
                 try:
                     record_blocked_delete(
-                        trigger="return_to_source_empty_dir_cleanup",
+                        trigger=trigger,
                         reason="当前 Provider 不支持带版本与空目录复核的回收站删除",
                         candidate=DeleteCandidate(
                             file_id=directory_id,
@@ -1258,7 +1267,7 @@ class OrganizeCorrectionService:
             try:
                 if self.client.list_dir(directory_id):
                     record_blocked_delete(
-                        trigger="return_to_source_empty_dir_cleanup",
+                        trigger=trigger,
                         reason="目录仍含其他内容，已保留",
                         candidate=DeleteCandidate(
                             file_id=directory_id,
@@ -1299,9 +1308,9 @@ class OrganizeCorrectionService:
                     raise RuntimeError("目录已不属于当前整理目标根")
                 execute_recycle_bin_delete(
                     self.client,
-                    trigger="return_to_source_empty_dir_cleanup",
+                    trigger=trigger,
                     reason=(
-                        "送回源目录成功后清理本日志留下的整理目标空目录；"
+                        "纠偏成功后清理本日志移空的旧归档目录；"
                         f"{cleanup_strategy}"
                     ),
                     candidate=DeleteCandidate(
@@ -1323,7 +1332,7 @@ class OrganizeCorrectionService:
                 cleaned += 1
             except Exception as exc:
                 logger.warning(
-                    "送回源目录后清理目标空目录失败 type=%s",
+                    "纠偏后清理旧归档空目录失败 type=%s",
                     type(exc).__name__,
                 )
                 warnings.append("部分整理目标空目录未能清理，目录已安全保留")
@@ -1396,6 +1405,7 @@ class OrganizeCorrectionService:
 
     def _finalize_reorganized_source(
         self, source_dir_id: str, rules: OrganizeRules, *, request_snapshot: dict | None = None,
+        cleanup_source: bool = True,
     ) -> list[str]:
         """成功提交后闭环旧确认，并复用现有来源/下载隔离目录收尾。"""
         from app.modules.download_staging_cleanup import source_inside_protected_staging
@@ -1418,6 +1428,10 @@ class OrganizeCorrectionService:
         try:
             recovery = self._verified_download_recovery(request_snapshot)
             tokens = reconcile_reorganized_confirmations([source_dir_id], recovery=recovery)
+            # 已入库作品纠正的是当前归档位置，不应重读早已清理的下载根。
+            # 尚有确认/失败下载恢复工作时，仍走原有严格下载收尾。
+            if not cleanup_source and not tokens and request_snapshot is None:
+                return []
             # 必须在持久收尾可能删除 staging 根之前判定来源归属；通用扫描
             # 永不绕过下载确认、请求身份或结果未知的删除保护。
             staging_ids = set(db.list_protected_guangya_staging_ids())
@@ -1466,8 +1480,12 @@ class OrganizeCorrectionService:
                         self.organizer, cleanup_source_id, "", rules, stats, trigger_type="manual",
                     )
         except Exception as exc:  # noqa: BLE001 - 收尾失败不能回滚已持久化的整理结果。
-            logger.warning("重新整理后源目录收尾失败 type=%s", type(exc).__name__)
-            warnings.append(f"源目录收尾失败，已保留未删除目录: {type(exc).__name__}")
+            reason = (
+                f"{exc}（{exc.operation}）"
+                if isinstance(exc, GuangYaReadRejected) else type(exc).__name__
+            )
+            logger.warning("重新整理后源目录收尾失败: %s", reason)
+            warnings.append(f"源目录收尾失败，已保留未删除目录: {reason}")
         warnings.extend(stats.get("empty_dir_cleanup_reasons", []))
         return warnings
 
@@ -1539,6 +1557,15 @@ class OrganizeCorrectionService:
         self._verify_nsfw_target_identity(MatchResult(**preview["match"]), preview["target_path"])
         before = db.capture_organize_business_snapshot(log_id)
         previous_log = db.get_organize_log(log_id)
+        # 回退可能回到上一部作品的归档，也可能回到最初来源；用恢复后的
+        # 业务路径和目标父目录区分，不能把所有 reverted 都当成原始来源。
+        already_archived = previous_log["status"] == "success" or bool(
+            previous_log["status"] == "reverted" and previous_log["new_path"]
+            and previous_log["current_parent_id"]
+            and previous_log["current_parent_id"] == previous_log["target_parent_id"]
+            and previous_log["current_parent_id"] != previous_log["original_parent_id"]
+        )
+        cleanup_directories, cleanup_protected, cleanup_warnings = ([], set(), [])
         request_snapshot = self._download_recovery_snapshot(str(previous_log['source_dir_id'] or ''))
         parent_path = str(previous_log["original_path"] or "") if previous_log else ""
         previous_tmdb_id = str(before["log"].get("tmdb_id") or "").strip()
@@ -1560,6 +1587,13 @@ class OrganizeCorrectionService:
             target_id, created_dirs = self._ensure_target_dir(preview["target_root_id"], preview["target_path"])
             targets = [(item, target_id, planned["to_name"]) for item, planned in zip(items, preview["items"])]
             self._verify_targets_available(targets)
+            vacated_items = [item for item in items if item.current_parent_id != target_id]
+            if rules.clean_empty and already_archived and vacated_items:
+                cleanup_directories, cleanup_protected, cleanup_warnings = (
+                    self._capture_archive_cleanup_directories(
+                        detail=dict(previous_log), items=vacated_items, rules=rules,
+                    )
+                )
             for step_index, (item, planned) in enumerate(zip(items, preview["items"]), start=1):
                 step_id = db.add_organize_operation_step(
                     log_id, operation_token, step_index, "move_rename",
@@ -1606,10 +1640,16 @@ class OrganizeCorrectionService:
             self._cleanup_created_dirs(created_dirs)
             db.update_organize_log(log_id, status=self._failure_status(log_id, "failed"), error=str(exc))
             raise
-        warnings = self._finalize_reorganized_source(
-            str(previous_log["source_dir_id"] or "") if previous_log else "", rules,
-            request_snapshot=request_snapshot,
+        empty_dirs_cleaned, directory_warnings = self._cleanup_archive_directories(
+            log_id=log_id, directories=cleanup_directories,
+            protected=cleanup_protected | {target_id}, target_root_id=rules.target_dir_id,
+            trigger="reorganize_empty_dir_cleanup",
         )
+        warnings = [*cleanup_warnings, *directory_warnings]
+        warnings.extend(self._finalize_reorganized_source(
+            str(previous_log["source_dir_id"] or "") if previous_log else "", rules,
+            request_snapshot=request_snapshot, cleanup_source=not already_archived,
+        ))
         warnings.extend(self._notify_reorganize_result(preview, items, rules))
         warnings.extend(self._run_post_actions(
             items=items,
@@ -1621,7 +1661,8 @@ class OrganizeCorrectionService:
         ))
         return {
             "success": True, "log_id": log_id, "target_dir_id": target_id,
-            "item_count": len(items), "warnings": warnings,
+            "item_count": len(items), "empty_dirs_cleaned": empty_dirs_cleaned,
+            "warnings": list(dict.fromkeys(warnings)),
         }
 
     def return_to_source(self, log_id: int, operation_token: str,
@@ -1633,7 +1674,7 @@ class OrganizeCorrectionService:
         self._verify_items(items)
         rules = OrganizeRules.from_config()
         cleanup_directories, cleanup_protected, cleanup_warnings = (
-            self._capture_return_cleanup_directories(
+            self._capture_archive_cleanup_directories(
                 detail=detail, items=items, rules=rules,
             )
         )
@@ -1688,7 +1729,7 @@ class OrganizeCorrectionService:
             current_name=video.original_name, error="",
         )
         empty_dirs_cleaned, directory_warnings = (
-            self._cleanup_return_target_directories(
+            self._cleanup_archive_directories(
                 log_id=log_id,
                 directories=cleanup_directories,
                 protected=cleanup_protected,

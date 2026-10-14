@@ -1929,7 +1929,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     return_value=rules,
                 ),
                 patch(
-                    "app.modules.organize_correction.config.get",
+                    "app.modules.organize_tasks.config.get",
                     return_value="",
                 ),
             ):
@@ -1986,7 +1986,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             "app.modules.organize_correction.execute_recycle_bin_delete",
             side_effect=run_delete,
         ) as audited_delete:
-            cleaned, warnings = service._cleanup_return_target_directories(
+            cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
                 directories=[directory],
                 protected=set(),
@@ -2066,7 +2066,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             "app.modules.organize_correction.execute_recycle_bin_delete",
             side_effect=run_delete,
         ):
-            cleaned, warnings = service._cleanup_return_target_directories(
+            cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
                 directories=directories,
                 protected=set(),
@@ -2096,7 +2096,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
         )
         service = OrganizeCorrectionService(client=client, scraper=object())
         with patch("app.modules.organize_correction.record_blocked_delete") as blocked:
-            cleaned, warnings = service._cleanup_return_target_directories(
+            cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
                 directories=[directory],
                 protected=set(),
@@ -2129,7 +2129,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             "app.modules.organize_correction.record_blocked_delete",
             side_effect=RuntimeError("audit unavailable"),
         ):
-            cleaned, warnings = service._cleanup_return_target_directories(
+            cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
                 directories=[directory],
                 protected=set(),
@@ -2155,7 +2155,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
         client = SimpleNamespace(delete_empty_directory=Mock())
         service = OrganizeCorrectionService(client=client, scraper=object())
         with patch("app.modules.organize_correction.record_blocked_delete") as blocked:
-            cleaned, warnings = service._cleanup_return_target_directories(
+            cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
                 directories=[directory],
                 protected=set(),
@@ -2204,11 +2204,11 @@ class OrganizeCorrectionTests(unittest.TestCase):
         )
         rules = OrganizeRules(target_dir_id="0", link_strm=False)
         with patch(
-            "app.modules.organize_correction.config.get",
+            "app.modules.organize_tasks.config.get",
             return_value='[{"id":"source-root","name":"整理来源"}]',
         ):
             directories, _protected, warnings = (
-                service._capture_return_cleanup_directories(
+                service._capture_archive_cleanup_directories(
                     detail={
                         "new_path": ("Show (2026) {tmdb-1}/Season 1/Show.S01E01.mkv"),
                         "media_type": "tv",
@@ -2269,7 +2269,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
         with patch(
             "app.modules.organize_correction.execute_recycle_bin_delete"
         ) as audited_delete:
-            cleaned, warnings = service._cleanup_return_target_directories(
+            cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
                 directories=[snapshot],
                 protected=set(),
@@ -2326,11 +2326,11 @@ class OrganizeCorrectionTests(unittest.TestCase):
         )
         rules = OrganizeRules(target_dir_id="target-root", link_strm=False)
         with patch(
-            "app.modules.organize_correction.config.get",
+            "app.modules.organize_tasks.config.get",
             return_value="",
         ):
             directories, _protected, warnings = (
-                service._capture_return_cleanup_directories(
+                service._capture_archive_cleanup_directories(
                     detail={
                         "new_path": (
                             "剧集/Show (2026) {tmdb-1}/Season 1/Show.S01E01.mkv"
@@ -2384,11 +2384,11 @@ class OrganizeCorrectionTests(unittest.TestCase):
         )
         rules = OrganizeRules(target_dir_id="target-root", link_strm=False)
         with patch(
-            "app.modules.organize_correction.config.get",
+            "app.modules.organize_tasks.config.get",
             return_value="",
         ):
             directories, _protected, warnings = (
-                service._capture_return_cleanup_directories(
+                service._capture_archive_cleanup_directories(
                     detail={
                         "new_path": (
                             "剧集/Show (2026) {metatube-series_1}/Season 1/"
@@ -2428,11 +2428,11 @@ class OrganizeCorrectionTests(unittest.TestCase):
         )
         rules = OrganizeRules(target_dir_id="target-root", link_strm=False)
         with patch(
-            "app.modules.organize_correction.config.get",
+            "app.modules.organize_tasks.config.get",
             return_value="",
         ):
             directories, _protected, warnings = (
-                service._capture_return_cleanup_directories(
+                service._capture_archive_cleanup_directories(
                     detail={
                         "new_path": "剧集/file.mkv",
                         "media_type": "movie",

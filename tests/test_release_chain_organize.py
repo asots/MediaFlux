@@ -108,7 +108,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
                 service = OrganizeCorrectionService(client=cloud, scraper=object())
                 with patch.object(
                     service,
-                    "_capture_return_cleanup_directories",
+                    "_capture_archive_cleanup_directories",
                     return_value=([], set(), []),
                 ):
                     with self.assertRaises(TimeoutError):
@@ -135,7 +135,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
                 service = OrganizeCorrectionService(client=cloud, scraper=object())
                 with patch.object(
                     service,
-                    "_capture_return_cleanup_directories",
+                    "_capture_archive_cleanup_directories",
                     return_value=([], set(), []),
                 ):
                     with self.assertRaises(RuntimeError):
