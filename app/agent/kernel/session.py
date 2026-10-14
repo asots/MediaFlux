@@ -1807,6 +1807,8 @@ class AgentSession:
                         completed_call_ids.add(call.call_id)
                         if result.effect_plan is not None:
                             plan = result.effect_plan
+                            # 卡片可一收到就取消：先落盘原观察，再对外提供可操作票据。
+                            await persist_conversation(close_pending=True)
                             await publish_tool_result(canonical_call, result)
                             # Provider 已被要求禁止并行工具，但兼容服务仍可能
                             # 违规一次返回多个调用。写操作在此暂停等待人工确认，
@@ -1819,7 +1821,8 @@ class AgentSession:
                                 )
                                 await close_failed_call(deferred_call, deferred_error)
                             active_calls = ()
-                            await persist_conversation()
+                            if call_index + 1 < len(calls):
+                                await persist_conversation()
                             await publish(
                                 AgentEventType.TURN_COMPLETED,
                                 {

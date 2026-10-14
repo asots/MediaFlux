@@ -212,6 +212,7 @@ class _PendingEffectTransition(StateUpdate):
     """Internal atomic ID/binding/goal transition; never built from business JSON."""
 
     plan_generation: int = 0
+    cancelled: bool = False
     goal: Mapping[str, Any] | None = None
 
 
@@ -317,6 +318,13 @@ class SessionState:
             if type(update) is _PendingEffectTransition:
                 if update.mode == "clear_if_equals":
                     if self.pending_effect_plan_id == update.value:
+                        if update.cancelled:
+                            for row in self.conversation:
+                                if row.get("role") == "tool" and row.get("effect_plan_id") == update.value:
+                                    row["effect_cancelled"] = True
+                                    row["content"] = json_text({"ok": True, "status": "cancelled",
+                                        "summary": "此工具此前已成功生成确认卡；这是随后撤销该卡后的状态更新：原确认计划已取消，未执行业务变更。",
+                                        "data": {"plan_id": update.value, "preview_created": True, "executed": False}})
                         self.pending_effect_plan_id = ""
                         self.metadata.pop("pending_effect_binding", None)
                         self.metadata.pop("pending_effect_goal", None)
@@ -542,6 +550,13 @@ def commit_conversation(
     # Resolve the executor's positional boundary, not equal call IDs in old turns.
     start = next((u.current_start for u in updates if type(u) is _ExecutionCapacity), None)
     merged = merge_effect_receipts(conversation, state.metadata if receipt_metadata is None else receipt_metadata)
+    # 取消按钮可在同一generation的只读期间到达；迟到检查点不能复活旧预览。
+    cancelled = {(row.get("effect_plan_id"), row.get("tool_call_id")): row["content"]
+                 for row in state.conversation if row.get("role") == "tool" and row.get("effect_cancelled") is True}
+    for row in merged:
+        key = (row.get("effect_plan_id"), row.get("tool_call_id"))
+        if row.get("role") == "tool" and key in cancelled:
+            row.update(content=cancelled[key], effect_cancelled=True)
     if start is not None:
         user_ordinal = sum(row.get("role") == "user" for row in conversation[:start])
         users = [i for i, row in enumerate(merged) if row.get("role") == "user"]

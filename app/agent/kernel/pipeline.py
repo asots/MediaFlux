@@ -1113,7 +1113,8 @@ class ToolPipeline:
         if cancelled_plan is not None:
             self._notify_effect("cancelled", plan=cancelled_plan)
         await self._commit_updates(lease, (
-            _PendingEffectTransition("pending_effect_plan_id", plan_id, mode="clear_if_equals"),
+            _PendingEffectTransition("pending_effect_plan_id", plan_id, mode="clear_if_equals",
+                                     cancelled=cancelled_plan is not None),
         ))
         return cancelled_plan is not None
 

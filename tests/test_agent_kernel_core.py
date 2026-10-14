@@ -3981,7 +3981,17 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(cancelled, not expired)
                     after = await session.state_store.load(owner="owner", session_id=sid)
                     self.assertEqual(after.pending_effect_plan_id, "")
-                    self.assertEqual(after.conversation, before.conversation)
+                    self.assertEqual(len(after.conversation), len(before.conversation))
+                    for previous, current in zip(before.conversation, after.conversation):
+                        if not expired and previous.get("role") == "tool" and previous.get("effect_plan_id") == second:
+                            self.assertTrue(current["effect_cancelled"])
+                            cancelled_result = json.loads(current["content"])
+                            self.assertEqual(cancelled_result["status"], "cancelled")
+                            self.assertFalse(cancelled_result["data"]["executed"])
+                            self.assertEqual({k: v for k, v in current.items() if k not in {"content", "effect_cancelled"}},
+                                             {k: v for k, v in previous.items() if k != "content"})
+                        else:
+                            self.assertEqual(current, previous, "已确认首项的真实回执不能被撤销尾项改写")
                     self.assertEqual(after.metadata, {key: value for key, value in before.metadata.items() if key not in {"pending_effect_binding", "pending_effect_goal"}})
                     self.assertIsNone(self.active(session, after, second))
                     self.assert_rejected(await self.confirm(session, sid, second))
