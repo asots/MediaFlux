@@ -239,7 +239,8 @@ class CapabilityDiscovery:
         }
 
     def _query(self, query: str, visible: Sequence[KernelToolSpec]) -> list[KernelToolSpec]:
-        selection = CapabilityRetriever(minimum=1, maximum=6).retrieve(
+        # 先保留实际命中，只有剩余槽位才补关联能力，避免第5/6名被无关邻居挤掉。
+        selection = CapabilityRetriever(minimum=6, maximum=6).retrieve(
             query, ToolCatalog(visible), context=self.context,
         )
         positive = [tool for tool in selection.tools if selection.scores.get(tool.name, 0) > 0]
@@ -250,7 +251,8 @@ class CapabilityDiscovery:
                 names = (names,)
             if isinstance(names, (list, tuple, set, frozenset)):
                 related.update(str(name) for name in names)
-        return [tool for tool in selection.tools if tool in positive or tool.name in related]
+        neighbors = [tool for tool in visible if tool.name in related and tool not in positive]
+        return (positive + neighbors)[:6]
 
     def checkpoint(self) -> tuple[tuple[KernelToolSpec, ...], tuple[str, ...]]:
         return self._pending, self._retained

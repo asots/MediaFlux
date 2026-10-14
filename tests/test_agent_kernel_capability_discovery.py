@@ -437,3 +437,46 @@ def test_overview_groups_by_runtime_domain_instead_of_tool_name_prefix(name, gro
     groups = {group["title"]: group["tool_count"] for group in result.data["groups"]}
     assert groups[group_title] == 1
     assert "其他项目能力" not in groups
+
+
+def test_discovery_matches_are_not_displaced_by_unrelated_workflow_neighbors():
+    matches = [read_tool(f"library.match{i}", description="stellar inventory") for i in range(6)]
+    neighbors = [read_tool(f"unrelated.neighbor{i}", description="other business") for i in range(2)]
+    matches[0] = replace(matches[0], metadata={"related_tools": tuple(t.name for t in neighbors)})
+    finder = CapabilityDiscovery(ToolCatalog([*matches, *neighbors]), context={})
+    result = finder.search({"query": "stellar inventory"})
+    assert {t["name"] for t in result["tools"]} == {t.name for t in matches}
+    assert len(result["loaded_tools"]) == 6
+    assert finder.search({"query": "unfindablephrase"})["tools"] == []
+
+
+def test_actual_filesystem_capability_survives_discovery_ranking():
+    finder = CapabilityDiscovery(ToolCatalog(adapt_tool_spec(s) for s in build_tool_specs()), context={})
+    result = finder.search({"query": "光鸭云盘文件移动、复制、改名"})
+    assert "guangya.fs.change.execute" in {tool["name"] for tool in result["tools"]}
+    assert len(result["tools"]) <= 6
+    assert result["remaining_discoveries"] == 7
+
+
+def test_catalog_domain_case_normalization_keeps_filter_scope_and_pagination():
+    tools = [read_tool("rss.item", domain="rss"), read_tool("library.item", domain="library")]
+    finder = CapabilityDiscovery(ToolCatalog(tools), context={})
+    arguments = capability_arguments({"catalog": {"domains": [" RSS ", "rss"], "offset": 0, "limit": 1}})
+    assert arguments == {"catalog": {"domains": ["rss"], "offset": 0, "limit": 1}}
+    result = finder.search(arguments)
+    assert [t["name"] for t in result["tools"]] == ["rss.item"]
+    assert result["catalog_only"] is True
+    assert result["loaded_tools"] == []
+    assert result["next_offset"] is None
+
+
+def test_ranked_discovery_is_explicitly_a_subset_not_domain_total():
+    spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
+    finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(spec), *[read_tool(f"rss.item{i}", description="feed inspection", domain="rss") for i in range(9)]]), context={})
+    context = ToolContext(capability_search=finder.search)
+    result = spec.context_handler({"query": "feed inspection"}, context)
+    assert result.ok and len(result.data["tools"]) == 6
+    assert "不是完整目录" in result.summary
+    assert any("catalog" in hint and "next_offset" in hint for hint in result.suggestions)
+    full = spec.context_handler(capability_arguments({"catalog": {"domains": ["RSS"]}}), context)
+    assert len(full.data["tools"]) == 9 and full.data["next_offset"] is None

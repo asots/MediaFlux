@@ -25,7 +25,7 @@ CAPABILITY_PARAMETERS = {
         },
         "catalog": {
             "type": "object",
-            "description": "词法未命中时按领域分页探索目录；只返回摘要，再用tool_names加载。空对象浏览全部领域。",
+            "description": "按领域分页列出目录摘要，不加载工具。domains使用概况返回的domain标识，不填中文需求描述；描述需求用query。用户要完整清单时沿next_offset自动续读，不另问是否继续。空对象浏览全部领域。",
             "properties": {
                 "domains": {"type": "array", "minItems": 1, "maxItems": 4,
                             "items": {"type": "string", "minLength": 1, "maxLength": 80}},
@@ -96,7 +96,7 @@ def capability_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         offset, limit = page.get("offset", 0), page.get("limit", 12)
         if type(offset) is not int or not 0 <= offset <= 10000 or type(limit) is not int or not 1 <= limit <= 12:
             raise AgentToolError("目录 offset 必须为0至10000整数，limit为1至12整数。")
-        return {"catalog": {"domains": list(dict.fromkeys(d.strip() for d in domains)), "offset": offset, "limit": limit}}
+        return {"catalog": {"domains": list(dict.fromkeys(d.strip().casefold() for d in domains)), "offset": offset, "limit": limit}}
     if "query" in arguments:
         query = arguments["query"]
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
@@ -120,8 +120,12 @@ def discover_capabilities(
             False, "unavailable", "当前调用缺少会话能力目录，未加载任何工具。"
         )
     data = context.capability_search(arguments)
+    ranked = bool(arguments.keys() & {"query", "queries"})
     return ToolResult(
-        True, "completed", "已查询项目能力，尚未执行业务操作。", data=data
+        True, "completed",
+        "已查询相关能力候选（不是完整目录），尚未执行业务操作。" if ranked else "已查询项目能力，尚未执行业务操作。",
+        data=data,
+        suggestions=["要列全某领域的能力，请用catalog按领域分页，并沿next_offset继续；不能把本次候选数当作该领域工具总数。"] if ranked else [],
     )
 
 
