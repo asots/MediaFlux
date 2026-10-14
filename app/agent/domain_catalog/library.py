@@ -118,6 +118,8 @@ def register_specs(
                 "演员模式精确解析人物元数据，不以标题包含当演员作品；all 默认不计单集。"
                 "多服务器数量按记录累加，不是去重作品数；可用时返回已校验的 open_url。"
                 "已有 TMDB 身份清单核对存在性用 library.batch_presence；"
+                "media_type=episode 的标题搜索查单集自身标题，不是按剧名读取分集；空结果不能证明剧或指定集不存在。"
+                "按剧名查本地季集库存用 library.count_series_episodes；"
                 "多部剧更新核对直接用 library.check_updates 的 queries，不要逐部重复搜索。"
             ),
             risk=RiskLevel.READ,
@@ -498,7 +500,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="library.count_series_episodes",
-            description="直接读取已配置 Jellyfin / Emby 中指定剧集的本地普通集数量与季度分布；不访问 TMDB，也不判断缺集。",
+            description="按剧名或 TMDB ID 读取 Jellyfin / Emby 的本地普通集数量、季度分布及实际季集闭区间 seasons.episode_ranges，用于核对指定集是否已收录。inventory_complete=false 时未出现的集不能判为不存在。不访问 TMDB，不判断播出或应补哪些集。",
             risk=RiskLevel.READ,
             domains=("library", "episode_numbering"),
             source_kind="local_library",
@@ -509,7 +511,10 @@ def register_specs(
                 "properties": {
                     "query": {"type": "string", "minLength": 1, "maxLength": 120},
                     "tmdb_id": {"type": "string", "pattern": "^[0-9]{1,10}$"},
-                    "library_name": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "library_name": {
+                        "type": "string", "minLength": 1, "maxLength": 80,
+                        "description": "服务器内的具体媒体库名称，如动漫、电视剧，不是服务器产品名；用户未指定具体媒体库时省略。",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -519,6 +524,7 @@ def register_specs(
             examples=(
                 "媒体库中《某剧》一共有多少集",
                 "这部剧本地有几季几集",
+                "核对剧集的指定季集在 Jellyfin 里有没有收录",
             ),
         )
     )

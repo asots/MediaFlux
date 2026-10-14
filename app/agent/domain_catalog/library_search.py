@@ -105,7 +105,8 @@ def _safe_overview(value: Any) -> str:
 
 def search_library(arguments: dict[str, Any]) -> ToolResult:
     query = arguments["query"]
-    match_label = "演员元数据" if arguments.get("search_by") == "actor" else "标题"
+    episode_titles = arguments.get("search_by", "title") == "title" and arguments.get("media_type") == "episode"
+    match_label = "演员元数据" if arguments.get("search_by") == "actor" else "单集自身标题" if episode_titles else "标题"
     scope_label = f"媒体库按{match_label}检索“{query}”"
     options = {key: arguments[key] for key in ("offset", "search_by", "media_type", "count_only") if key in arguments}
     sources = _search_sources(query, arguments["limit"], **options)
@@ -117,6 +118,7 @@ def search_library(arguments: dict[str, Any]) -> ToolResult:
         "search_by": arguments.get("search_by", "title"),
         "media_type": arguments.get("media_type", "all"),
         "match_basis": "actor_metadata" if arguments.get("search_by") == "actor" else "title_search",
+        "search_scope": "episode_title" if episode_titles else "actor_metadata" if arguments.get("search_by") == "actor" else "item_title",
         "count_scope": "server_records_sum_not_deduplicated",
         "pagination_scope": "per_server",
     }
@@ -252,15 +254,17 @@ def search_library(arguments: dict[str, Any]) -> ToolResult:
         summary = (
             f"已查询 {available} 个媒体服务器，另有 {unavailable} 个暂时不可用；可用来源未找到匹配内容"
             if unavailable
-            else "媒体库中没有找到匹配内容" if total == 0 else "本次未返回媒体条目，匹配总数无法确认"
+            else f"{scope_label}未找到匹配内容" if total == 0 else "本次未返回媒体条目，匹配总数无法确认"
         )
         suggestions = ["请检查不可用的媒体服务器后重试。"] if unavailable else []
-        if arguments.get("search_by", "title") == "title":
+        if arguments.get("search_by", "title") == "title" and not episode_titles:
             suggestions.extend([
                 "可尝试中文名、原名或去掉季集编号后重新搜索。",
                 f"搜索《{query}》的资源。",
                 f"在网上找《{query}》。",
             ])
+    if episode_titles:
+        suggestions.append("此结果仅为单集自身标题搜索；未匹配不能证明所属剧集或指定季集不存在。请用 library.count_series_episodes 按剧名读取实际季集库存。")
     if total is None and available:
         suggestions.append("总数未知：不能把 returned 当作 total，也不要按片名分片累加猜测。")
     if arguments.get("search_by") == "actor":

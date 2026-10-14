@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unicodedata
 from datetime import datetime
+from itertools import groupby
 from typing import Any
 
 from app.agent.errors import AgentToolError
@@ -84,7 +85,7 @@ def _safe_candidates(sources: list[dict[str, Any]]) -> list[dict[str, str]]:
     return candidates
 
 
-def _safe_source(source: dict[str, Any]) -> dict[str, Any]:
+def _source_inventory(source: dict[str, Any]) -> tuple[dict[str, Any], set[tuple[int, int]]]:
     episodes = {
         (int(item[0]), int(item[1]))
         for item in source.get("episodes") or []
@@ -110,10 +111,10 @@ def _safe_source(source: dict[str, Any]) -> dict[str, Any]:
         "truncated": bool(source.get("truncated")),
         "ignored_specials": max(0, int(source.get("ignored_specials", 0) or 0)),
         "ignored_unknown": max(0, int(source.get("ignored_unknown", 0) or 0)),
-    }
+    }, episodes
 
 
-def _season_breakdown(episodes: set[tuple[int, int]]) -> list[dict[str, int]]:
+def _season_breakdown(episodes: set[tuple[int, int]]) -> list[dict[str, Any]]:
     seasons: dict[int, list[int]] = {}
     for season, episode in sorted(episodes):
         seasons.setdefault(season, []).append(episode)
@@ -123,6 +124,12 @@ def _season_breakdown(episodes: set[tuple[int, int]]) -> list[dict[str, int]]:
             "count": len(numbers),
             "first_episode": min(numbers),
             "last_episode": max(numbers),
+            # 首末集只表示边界，断号必须保留；每个范围都是实际观察到的闭区间。
+            "episode_ranges": [
+                [run[0][1], run[-1][1]]
+                for _, group in groupby(enumerate(numbers), lambda item: item[1] - item[0])
+                if (run := list(group))
+            ],
         }
         for season, numbers in seasons.items()
     ]
@@ -175,6 +182,7 @@ def count_series_episodes(arguments: dict[str, Any]) -> ToolResult:
                 "query": query,
                 "library_name": library_name,
                 "local_episode_count": None,
+                "inventory_complete": False,
                 "matched_source_count": 0,
                 "source_count": 0,
                 "sources": [],
@@ -183,10 +191,9 @@ def count_series_episodes(arguments: dict[str, Any]) -> ToolResult:
             error="media_server_not_configured",
         )
 
-    matched = [
-        source for source in sources if str(source.get("status")) in _FOUND_STATUSES
-    ]
-    safe_sources = [_safe_source(source) for source in sources]
+    inventories = [_source_inventory(source) for source in sources]
+    safe_sources = [source for source, _episodes in inventories]
+    matched = [(source, episodes) for source, episodes in inventories if source["status"] in _FOUND_STATUSES]
     if not matched:
         statuses = {str(source.get("status") or "unavailable") for source in sources}
         candidates = _safe_candidates(sources)
@@ -221,6 +228,7 @@ def count_series_episodes(arguments: dict[str, Any]) -> ToolResult:
                 "query": query,
                 "library_name": library_name,
                 "local_episode_count": None,
+                "inventory_complete": False,
                 "matched_source_count": 0,
                 "source_count": len(sources),
                 "candidates": candidates,
@@ -236,49 +244,40 @@ def count_series_episodes(arguments: dict[str, Any]) -> ToolResult:
     truncated = False
     title = query
     year = ""
-    for source in matched:
-        selected = (
-            source.get("selected") if isinstance(source.get("selected"), dict) else {}
-        )
-        title = str(selected.get("name") or title)
-        year = str(selected.get("year") or year)
-        ignored_specials += max(0, int(source.get("ignored_specials", 0) or 0))
-        ignored_unknown += max(0, int(source.get("ignored_unknown", 0) or 0))
-        truncated = truncated or bool(source.get("truncated"))
-        for item in source.get("episodes") or []:
-            if not isinstance(item, (list, tuple)) or len(item) != 2:
-                continue
-            try:
-                season, episode = int(item[0]), int(item[1])
-            except (TypeError, ValueError):
-                continue
-            if season > 0 and episode > 0:
-                episode_union.add((season, episode))
+    for source, episodes in matched:
+        title = source["title"] or title
+        year = source["year"] or year
+        ignored_specials += source["ignored_specials"]
+        ignored_unknown += source["ignored_unknown"]
+        truncated = truncated or source["truncated"]
+        episode_union.update(episodes)
 
     seasons = _season_breakdown(episode_union)
     count = len(episode_union)
-    incomplete = truncated or ignored_unknown > 0
+    incomplete = any(
+        source["truncated"] or source["ignored_unknown"]
+        or source["status"] not in _FOUND_STATUSES | {"not_found"}
+        for source in safe_sources
+    )
     status = "partial" if incomplete else "success"
     ok = True
-    source_label = (
-        matched[0].get("server_name") or matched[0].get("server_type") or "媒体库"
-    )
+    source_label = matched[0][0]["server_name"]
     if len(matched) > 1:
         source_label = f"{len(matched)} 个媒体服务器"
     summary = f"{source_label} 中《{title}》本地收录 {count} 集"
     if incomplete:
-        summary += "，但部分条目未完整编号或读取结果被截断"
+        summary += "，但部分来源不可用、有歧义、未完整编号或读取被截断"
 
     suggestions: list[str] = []
     if incomplete:
         suggestions.append(
-            "当前数字是已确认的本地普通集下限，请修复未编号条目或稍后重试。"
+            "当前数量是已确认的本地普通集下限；范围仅代表已确认收录，未列出的季集不能据此认定不存在，请核对来源状态。"
         )
     elif ignored_specials:
         suggestions.append(
             f"默认未计入特别篇（第 0 季），共忽略 {ignored_specials} 项。"
         )
-    suggestions.append("如果要检查缺集，请继续说“检查这部剧有没有缺集”。")
+    suggestions.append("指定集是否在库以 seasons.episode_ranges 闭区间为准，不能仅凭首末集推断；inventory_complete=false 时只能确认已观察到的集。检查已播缺集再用 library.audit_episodes。")
 
     return _result(
         ok=ok,
@@ -290,6 +289,7 @@ def count_series_episodes(arguments: dict[str, Any]) -> ToolResult:
             "title": title,
             "year": year,
             "local_episode_count": count,
+            "inventory_complete": not incomplete,
             "season_count": len(seasons),
             "seasons": seasons,
             "matched_source_count": len(matched),

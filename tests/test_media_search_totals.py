@@ -321,3 +321,42 @@ def test_provider_gateway_keeps_actor_statistics_and_unknowns(client, ambiguous)
     assert result.data["person_match"] == ("ambiguous" if ambiguous else "exact")
     assert result.data["count_only"] is True
     assert result.status == ("partial" if ambiguous else "success")
+
+
+@pytest.mark.parametrize("count_only", [False, True])
+def test_episode_title_empty_result_is_not_series_inventory(monkeypatch, count_only):
+    result = library_result(
+        monkeypatch, [source(MediaSearchResult(total=0, has_more=False))],
+        media_type="episode", count_only=count_only,
+    )
+    assert result.status == "empty"
+    assert result.data["total"] == 0
+    assert result.data["match_status"] == "not_found"
+    assert result.data["search_scope"] == "episode_title"
+    assert "单集自身标题" in result.summary
+    assert any("library.count_series_episodes" in hint for hint in result.suggestions)
+    assert not any("搜索《" in hint or "在网上找" in hint for hint in result.suggestions)
+
+
+def test_episode_title_found_keeps_native_results_and_scope(monkeypatch):
+    result = library_result(
+        monkeypatch, [source(MediaSearchResult(
+            items=[MediaItem(id="ep-7", name="Sample", type="Episode", series_name="Different series")],
+            total=1, has_more=False,
+        ))], media_type="episode",
+    )
+    assert result.data["search_scope"] == "episode_title"
+    assert result.data["total"] == 1
+    assert result.data["sources"][0]["items"][0]["series_name"] == "Different series"
+    assert "单集自身标题" in result.summary
+
+
+def test_episode_actor_search_does_not_become_title_search(monkeypatch):
+    result = library_result(
+        monkeypatch, [source(MediaSearchResult(total=2, has_more=True, search_by="actor"))],
+        media_type="episode", search_by="actor", count_only=True,
+    )
+    assert result.data["search_scope"] == "actor_metadata"
+    assert result.data["match_basis"] == "actor_metadata"
+    assert result.data["total"] == 2
+    assert not any("单集自身标题" in hint for hint in result.suggestions)
