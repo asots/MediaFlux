@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 from unittest.mock import patch
 
 from app.agent.errors import AgentToolError
@@ -29,7 +30,9 @@ _MAGNET = "magnet:?xt=urn:btih:" + "a" * 40 + "&dn=Demo"
 _SHARE = "https://www.guangyapan.com/s/1938060615538466851_aecd7hu726g3whGl#/share"
 
 
-def _resource_result(result_id: str, title: str) -> ToolResult:
+def _resource_result(
+    result_id: str, title: str, *additional: tuple[str, str]
+) -> ToolResult:
     return ToolResult(
         True,
         "success",
@@ -37,14 +40,15 @@ def _resource_result(result_id: str, title: str) -> ToolResult:
         data={
             "items": [
                 {
-                    "result_id": result_id,
-                    "title": title,
+                    "result_id": candidate_id,
+                    "title": candidate_title,
                     "site_id": "mikan",
                     "site_name": "Mikan",
                     "size_text": "1.2 GiB",
                     "download_state": "ready",
                     "download_kinds": ["magnet"],
                 }
+                for candidate_id, candidate_title in ((result_id, title), *additional)
             ]
         },
     )
@@ -180,6 +184,63 @@ class AgentIngestArgumentTests(unittest.TestCase):
                 {"source_type": "resource_candidates", "input": "secret"}
             )
 
+    def test_resource_inspection_without_positions_keeps_legacy_arguments(self):
+        self.assertEqual(
+            ingest_inspect_arguments({"source_type": "resource_candidates"}),
+            {"source_type": "resource_candidates", "input": ""},
+        )
+
+    def test_resource_inspection_positions_follow_submit_ordered_deduplication(self):
+        reference = "ref_1234567890abcdefghijkl"
+        for positions in ([1], [12], [3, 1, 3, 2, 1], [12, 1] * 7):
+            with self.subTest(positions=positions):
+                arguments = {
+                    "source_type": "resource_candidates",
+                    "positions": positions,
+                    "resource_candidates_ref": reference,
+                }
+                original_positions = list(positions)
+                inspected = ingest_inspect_arguments(arguments)
+                submitted = ingest_submit_arguments({**arguments, "target": "qb"})
+                self.assertEqual(
+                    inspected,
+                    {
+                        "source_type": "resource_candidates",
+                        "input": "",
+                        "positions": list(dict.fromkeys(positions)),
+                        "resource_candidates_ref": reference,
+                    },
+                )
+                self.assertEqual(inspected["positions"], submitted["positions"])
+                self.assertEqual(arguments["positions"], original_positions)
+
+    def test_resource_inspection_rejects_explicit_invalid_positions(self):
+        invalid_positions = (
+            [], None, True, False, 1, "1", {}, (1,),
+            [True], [False], [1, True], [0], [-1], [13], [1, 13],
+            [1.0], ["1"], [None],
+        )
+        for positions in invalid_positions:
+            with self.subTest(positions=positions), self.assertRaises(AgentToolError):
+                ingest_inspect_arguments(
+                    {"source_type": "resource_candidates", "positions": positions}
+                )
+
+    def test_non_resource_inspection_rejects_positions_even_when_empty_or_null(self):
+        sources = (
+            {"source_type": "auto", "input": _MAGNET},
+            {"source_type": "direct_url", "input": _MAGNET},
+            {"source_type": "guangya_share", "input": _SHARE},
+            {"input": _MAGNET},
+        )
+        for source in sources:
+            for positions in ([1], [], None, True):
+                with (
+                    self.subTest(source=source, positions=positions),
+                    self.assertRaises(AgentToolError),
+                ):
+                    ingest_inspect_arguments({**source, "positions": positions})
+
     def test_status_requires_public_positive_request_number(self):
         self.assertEqual(
             ingest_status_arguments({"request_number": 12}), {"request_number": 12}
@@ -196,6 +257,211 @@ class AgentIngestActionTests(unittest.TestCase):
             store=self.store, recent_resource_store=self.resources
         )
         self.context = ToolContext(owner="owner-a")
+        self.resource_result = _resource_result(
+            "resource-first-001", "First",
+            ("resource-second-01", "Second"),
+            ("resource-third-001", "Third"),
+        )
+
+    def test_resource_inspection_without_positions_returns_entire_snapshot(self):
+        search_id = self.resources.capture(owner="owner-a", result=self.resource_result)
+
+        result = self.actions.inspect(
+            ingest_inspect_arguments({"source_type": "resource_candidates"}),
+            self.context,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(
+            {"source_type", "search_id", "count", "items"} <= result.data.keys()
+        )
+        self.assertEqual(result.data["source_type"], "resource_candidates")
+        self.assertEqual(result.data["search_id"], search_id)
+        self.assertEqual(result.data["count"], 3)
+        self.assertEqual(
+            [(item["position"], item["title"]) for item in result.data["items"]],
+            [(1, "First"), (2, "Second"), (3, "Third")],
+        )
+
+    def test_resource_inspection_returns_only_selected_original_positions_in_order(self):
+        search_id = self.resources.capture(owner="owner-a", result=self.resource_result)
+        titles = {1: "First", 2: "Second", 3: "Third"}
+        for positions in ([3, 1, 3, 1], [2], [3, 2, 1]):
+            with self.subTest(positions=positions):
+                expected = list(dict.fromkeys(positions))
+                result = self.actions.inspect(
+                    ingest_inspect_arguments(
+                        {"source_type": "resource_candidates", "positions": positions}
+                    ),
+                    self.context,
+                )
+
+                self.assertTrue(result.ok)
+                self.assertEqual(result.data["search_id"], search_id)
+                self.assertEqual(result.data["count"], len(expected))
+                self.assertEqual(result.data["total"], 3)
+                self.assertRegex(result.summary, rf"已检查\s*{len(expected)}\s*项")
+                self.assertRegex(result.summary, r"快照共\s*3\s*项")
+                self.assertEqual(
+                    result.data["items"],
+                    [
+                        {
+                            "position": position,
+                            "title": titles[position],
+                            "site_name": "Mikan",
+                            "size_text": "1.2 GiB",
+                            "download_state": "ready",
+                        }
+                        for position in expected
+                    ],
+                )
+                rendered = repr(result.to_dict())
+                for position, title in titles.items():
+                    if position not in expected:
+                        self.assertNotIn(title, rendered)
+                for item in self.resource_result.data["items"]:
+                    self.assertNotIn(item["result_id"], rendered)
+                self.assertNotIn("result_id", rendered)
+
+    def test_resource_inspection_accepts_twelfth_position_without_renumbering(self):
+        resources = _resource_result(
+            "resource-boundary-01", "Candidate 1",
+            *[
+                (f"resource-boundary-{position:02d}", f"Candidate {position}")
+                for position in range(2, 13)
+            ],
+        )
+        self.resources.capture(owner="owner-a", result=resources)
+        result = self.actions.inspect(
+            ingest_inspect_arguments(
+                {"source_type": "resource_candidates", "positions": [12, 1, 12]}
+            ),
+            self.context,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["count"], 2)
+        self.assertEqual(result.data["total"], 12)
+        self.assertRegex(result.summary, r"已检查\s*2\s*项")
+        self.assertRegex(result.summary, r"快照共\s*12\s*项")
+        self.assertEqual(
+            [(item["position"], item["title"]) for item in result.data["items"]],
+            [(12, "Candidate 12"), (1, "Candidate 1")],
+        )
+
+    def test_resource_inspection_fails_whole_request_if_any_position_is_missing(self):
+        self.resources.capture(owner="owner-a", result=self.resource_result)
+        for positions in ([4], [2, 4], [4, 2]):
+            with self.subTest(positions=positions):
+                with self.assertRaises(AgentToolError) as raised:
+                    self.actions.inspect(
+                        ingest_inspect_arguments(
+                            {"source_type": "resource_candidates", "positions": positions}
+                        ),
+                        self.context,
+                    )
+                self.assertEqual(raised.exception.code, "precondition_failed")
+
+    def test_resource_inspection_preserves_owner_and_session_binding_boundaries(self):
+        self.resources.capture(owner="owner-a", result=self.resource_result)
+        contexts = (
+            ToolContext(owner="owner-b"),
+            ToolContext(owner="owner-a", session_id="session-a"),
+            ToolContext(owner="owner-a", session_id="session-b"),
+        )
+        for context in contexts:
+            for selection in ({}, {"positions": [1]}):
+                with self.subTest(context=context, selection=selection):
+                    with self.assertRaises(AgentToolError) as raised:
+                        self.actions.inspect(
+                            ingest_inspect_arguments(
+                                {"source_type": "resource_candidates", **selection}
+                            ),
+                            context,
+                        )
+                    self.assertEqual(raised.exception.code, "precondition_failed")
+                    if context.session_id:
+                        self.assertIn("资源候选引用", raised.exception.safe_message)
+
+    def test_resource_inspection_uses_bound_snapshot_not_newer_latest(self):
+        search_id = new_resource_search_id()
+        snapshot = safe_resource_snapshot(self.resource_result, search_id=search_id)
+        latest_id = self.resources.capture(
+            owner="owner-a", result=_resource_result("resource-newer-001", "Newer")
+        )
+        arguments = ingest_inspect_arguments(
+            {"source_type": "resource_candidates", "positions": [3, 1]}
+        )
+        arguments["resource_candidates"] = snapshot
+
+        result = self.actions.inspect(
+            arguments, ToolContext(owner="owner-a", session_id="session-a")
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["search_id"], search_id)
+        self.assertEqual(result.data["count"], 2)
+        self.assertEqual(result.data["total"], 3)
+        self.assertEqual(
+            [(item["position"], item["title"]) for item in result.data["items"]],
+            [(3, "Third"), (1, "First")],
+        )
+        self.assertNotIn("Newer", repr(result.to_dict()))
+        self.assertEqual(self.resources.get(owner="owner-a")["search_id"], latest_id)
+
+    def test_resource_inspection_does_not_fill_missing_bound_position_from_latest(self):
+        snapshot = safe_resource_snapshot(
+            _resource_result("resource-bound-001", "Bound"),
+            search_id=new_resource_search_id(),
+        )
+        self.resources.capture(owner="owner-a", result=self.resource_result)
+        for positions in ([1, 3], [3, 1]):
+            with self.subTest(positions=positions):
+                arguments = ingest_inspect_arguments(
+                    {"source_type": "resource_candidates", "positions": positions}
+                )
+                arguments["resource_candidates"] = snapshot
+                with self.assertRaises(AgentToolError) as raised:
+                    self.actions.inspect(
+                        arguments, ToolContext(owner="owner-a", session_id="session-a")
+                    )
+                self.assertEqual(raised.exception.code, "precondition_failed")
+
+    def test_resource_inspection_is_read_only_and_selection_does_not_persist(self):
+        self.resources.capture(owner="owner-a", result=self.resource_result)
+        before = self.resources.get(owner="owner-a")
+        mutations = (
+            "app.agent.indexer_candidate_actions.prepare_submit_resource",
+            "app.agent.indexer_candidate_actions.prepare_submit_resource_batch",
+            "app.agent.indexer_candidate_actions.submit_resource_confirmed",
+            "app.agent.indexer_candidate_actions.submit_resource_batch_confirmed",
+            "app.agent.ingest_actions.create_request",
+            "app.agent.ingest_actions.dispatch_request",
+            "app.agent.ingest_actions.create_share_request",
+        )
+        with ExitStack() as stack:
+            mocked_mutations = [stack.enter_context(patch(name)) for name in mutations]
+            capture = stack.enter_context(patch.object(self.store, "capture"))
+            for selection, count in (({"positions": [3]}, 1), ({}, 3)):
+                with self.subTest(selection=selection):
+                    result = self.actions.inspect(
+                        ingest_inspect_arguments(
+                            {"source_type": "resource_candidates", **selection}
+                        ),
+                        self.context,
+                    )
+                    self.assertTrue(result.ok)
+                    self.assertEqual(result.status, "success")
+                    self.assertEqual(result.data["count"], count)
+                    self.assertEqual(result.references, [])
+                    self.assertEqual(result.effect_metadata, {})
+                    self.assertNotIn("plan_ref", result.data)
+                    self.assertNotIn("request_number", result.data)
+            for mocked_mutation in mocked_mutations:
+                mocked_mutation.assert_not_called()
+            capture.assert_not_called()
+        self.assertEqual(self.resources.get(owner="owner-a"), before)
+        self.assertIsNone(self.store.get(owner="owner-a"))
 
     def test_direct_link_snapshot_never_returns_link_or_hash(self):
         result = self.actions.inspect(

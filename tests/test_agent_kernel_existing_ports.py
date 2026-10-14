@@ -44,6 +44,34 @@ async def context_for(
 
 
 class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
+    def test_ingest_inspect_schema_separates_candidate_refs_from_link_inputs(self):
+        from app.agent.kernel.pipeline import _validate_json_schema
+        tool = catalog_from_tool_specs(build_tool_specs()).get("ingest.inspect")
+        reference = "ref_1234567890abcdefghijkl"
+        magnet = "magnet:?xt=urn:btih:" + "a" * 40
+        valid = [
+            {"source_type": "resource_candidates"},
+            {"source_type": "resource_candidates", "input": "", "positions": [3, 1, 3], "resource_candidates_ref": reference},
+            {"source_type": "resource_candidates", "positions": [12, 1] * 7},
+            {"input": magnet}, {"source_type": "direct_url", "input": magnet},
+        ]
+        for arguments in valid:
+            with self.subTest(arguments=arguments):
+                _validate_json_schema(arguments, tool.input_schema)
+                tool.validator(arguments)
+        invalid = [
+            {}, {"source_type": "direct_url"},
+            {"source_type": "resource_candidates", "input": reference, "positions": [3, 1]},
+            {"source_type": "resource_candidates", "positions": []},
+            {"source_type": "resource_candidates", "positions": [True]},
+            {"source_type": "resource_candidates", "positions": [13]},
+            {"source_type": "auto", "input": magnet, "positions": [1]},
+            {"input": magnet, "resource_candidates_ref": reference},
+        ]
+        for arguments in invalid:
+            with self.subTest(arguments=arguments), self.assertRaises(ToolPipelineError):
+                _validate_json_schema(arguments, tool.input_schema)
+
     async def test_noop_preparation_returns_without_freezing_or_execution_and_settles_repair(self):
         from unittest.mock import Mock
         for effect in (RiskLevel.WRITE, RiskLevel.DANGER):

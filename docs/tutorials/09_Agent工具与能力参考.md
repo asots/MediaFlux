@@ -178,7 +178,7 @@
 |---|---|---|
 | `indexer.diagnose_readiness` | READ | 只读检查多站资源索引器的本地开关、启用站点与能力声明；不访问资源站、网络或文件系统，也不返回 URL、Cookie 或凭据。 |
 | `indexer.search_resources` | READ | 在已启用的多站索引中搜索短期资源结果，只返回 opaque result_id 与公开元数据。 |
-| `ingest.inspect` | READ | 统一只读检查资源接入来源：可识别光鸭官方分享、Magnet、ED2K、明确 HTTP(S) 下载直链，或读取当前会话最近资源搜索候选。 |
+| `ingest.inspect` | READ | 只读检查光鸭分享、Magnet、ED2K、明确 HTTP(S) 下载直链或资源候选快照。仅 `resource_candidates` 支持可选 `positions`：按指定顺序返回并保留原序号，省略时读取全部；`count` 是本次检查数，`total` 是快照总数。读取候选快照不等于已验证下载可用性，不创建下载计划。 |
 | `ingest.submit` | DANGER | 在用户确认后统一提交最近检查的直链或光鸭分享，或按资源搜索候选序号提交。 |
 | `ingest.status` | READ | 按公开请求编号读取统一资源接入状态，覆盖 qB、光鸭、整理与 STRM 阶段；不返回链接、路径、哈希或后端任务标识。 |
 

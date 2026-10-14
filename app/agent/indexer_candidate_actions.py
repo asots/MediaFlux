@@ -83,6 +83,23 @@ def present_candidates(arguments: dict[str, Any]) -> ToolResult:
     )
 
 
+
+def select_resource_candidates(candidates: list[dict[str, Any]], positions: list[int] | None = None) -> list[dict[str, Any]]:
+    """检查与提交共用快照序号选择，不重编号，也不修改已冻结候选。"""
+    selected = []
+    for position in positions if positions is not None else range(1, len(candidates) + 1):
+        if type(position) is not int or not 1 <= position <= len(candidates):
+            raise AgentToolError(
+                f"该快照只有 {len(candidates)} 项可提交候选，序号 {position} 不存在；"
+                "请使用 candidate_numbers 的 position，集号和排序名次不是提交序号。",
+                code="precondition_failed",
+            )
+        candidate = candidates[position - 1]
+        if not str(candidate.get("result_id") or "").strip():
+            raise AgentToolError("资源候选已过期，请重新搜索", code="precondition_failed")
+        selected.append(candidate)
+    return selected
+
 def _candidate_result(result: ToolResult, candidates: list[dict[str, Any]], positions: list[int], target: str) -> ToolResult:
     data = dict(result.data) if isinstance(result.data, dict) else {}
     raw_items = data.get("items")
@@ -233,68 +250,27 @@ class IndexerCandidateActions:
             )
         return [item for item in candidates if isinstance(item, dict)]
 
-    def _resolve_one(
-        self,
-        arguments: dict[str, Any],
-        context: ToolContext,
-        *,
-        require_search_id: bool = False,
-    ) -> tuple[dict[str, str], dict[str, Any]]:
-        candidates = self._candidates(
-            arguments,
-            context,
-            require_search_id=require_search_id,
-        )
-        position = int(arguments["position"])
-        if position > len(candidates):
-            raise AgentToolError(
-                f"该快照只有 {len(candidates)} 项可提交候选，序号 {position} 不存在；"
-                "请使用 candidate_numbers 的 position，集号和排序名次不是提交序号。",
-                code="precondition_failed"
-            )
-        candidate = candidates[position - 1]
-        result_id = str(candidate.get("result_id") or "").strip()
-        if not result_id:
-            raise AgentToolError(
-                "资源候选已过期，请重新搜索", code="precondition_failed"
-            )
-        return {"result_id": result_id, "target": str(arguments["target"])}, candidate
-
-    def _resolve_batch(
+    def _resolve(
         self,
         arguments: dict[str, Any],
         context: ToolContext,
         *,
         require_search_id: bool = False,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        candidates = self._candidates(
-            arguments,
-            context,
-            require_search_id=require_search_id,
-        )
-        selected: list[dict[str, Any]] = []
-        result_ids: list[str] = []
-        for position in arguments["positions"]:
-            if int(position) > len(candidates):
-                raise AgentToolError(
-                    f"该快照只有 {len(candidates)} 项可提交候选，序号 {position} 不存在；"
-                    "请使用 candidate_numbers 的 position，集号和排序名次不是提交序号。",
-                    code="precondition_failed",
-                )
-            candidate = candidates[int(position) - 1]
-            result_id = str(candidate.get("result_id") or "").strip()
-            if not result_id:
-                raise AgentToolError(
-                    "部分资源候选已过期，请重新搜索", code="precondition_failed"
-                )
-            selected.append(candidate)
-            result_ids.append(result_id)
-        return {"result_ids": result_ids, "target": str(arguments["target"])}, selected
+        candidates = self._candidates(arguments, context, require_search_id=require_search_id)
+        single = "position" in arguments
+        positions = [arguments["position"]] if single else arguments["positions"]
+        selected = select_resource_candidates(candidates, positions)
+        result_ids = [str(candidate["result_id"]).strip() for candidate in selected]
+        return {
+            "result_id" if single else "result_ids": result_ids[0] if single else result_ids,
+            "target": str(arguments["target"]),
+        }, selected
 
     def prepare_one(
         self, arguments: dict[str, Any], context: ToolContext
     ) -> tuple[ToolResult, str]:
-        internal, candidate = self._resolve_one(arguments, context)
+        internal, [candidate] = self._resolve(arguments, context)
         result, confirmation_context = prepare_submit_resource(internal)
         if isinstance(result.data, dict):
             resource = result.data.get("resource")
@@ -318,7 +294,7 @@ class IndexerCandidateActions:
         expected_context: str,
         context: ToolContext,
     ) -> ToolResult:
-        internal, candidate = self._resolve_one(
+        internal, [candidate] = self._resolve(
             arguments,
             context,
             require_search_id=True,
@@ -331,7 +307,7 @@ class IndexerCandidateActions:
     def prepare_batch(
         self, arguments: dict[str, Any], context: ToolContext
     ) -> tuple[ToolResult, str]:
-        internal, candidates = self._resolve_batch(arguments, context)
+        internal, candidates = self._resolve(arguments, context)
         result, confirmation_context = prepare_submit_resource_batch(internal)
         if isinstance(result.data, dict):
             resources = result.data.get("resources")
@@ -364,7 +340,7 @@ class IndexerCandidateActions:
         expected_context: str,
         context: ToolContext,
     ) -> ToolResult:
-        internal, candidates = self._resolve_batch(
+        internal, candidates = self._resolve(
             arguments,
             context,
             require_search_id=True,

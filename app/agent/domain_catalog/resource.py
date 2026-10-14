@@ -190,7 +190,7 @@ def register_specs(
             name="ingest.inspect",
             description=(
                 "统一只读检查资源接入来源：可识别光鸭官方分享、Magnet、ED2K、明确 HTTP(S) 下载直链，"
-                "或读取当前会话最近资源搜索候选。原始链接、分享令牌、file_id 与索引 result_id 只保存在"
+                "或读取候选快照。resource_candidates 可选 positions 仅检查指定序号，省略读取全部；保持原序号，不代表已下载。原始链接、分享令牌、file_id 与索引 result_id 只保存在"
                 "owner 绑定的短期服务端快照中；普通网页链接不会创建下载任务。"
             ),
             risk=RiskLevel.READ,
@@ -207,13 +207,30 @@ def register_specs(
                         ],
                         "default": "auto",
                     },
-                    "input": {"type": "string", "maxLength": 8192},
+                    "input": {"type": "string", "maxLength": 8192, "description": "仅用于原始下载/分享链接；候选快照引用应填 resource_candidates_ref，不填 input。"},
+                    "positions": {
+                        "type": "array", "minItems": 1,
+                        "items": {"type": "integer", "minimum": 1, "maximum": 12},
+                        "description": "仅resource_candidates可用；按请求顺序去重，省略读取全部。不是集号，不会提交下载。",
+                    },
                     "resource_candidates_ref": {
                         "type": "string",
                         "pattern": "^ref_[A-Za-z0-9_-]{16,160}$",
                     },
                 },
                 "additionalProperties": False,
+                "anyOf": [
+                    {"required": ["source_type"], "properties": {
+                        "source_type": {"enum": ["resource_candidates"]},
+                        "input": {"maxLength": 0},
+                    }},
+                    {"required": ["input"], "properties": {
+                        "source_type": {"enum": ["auto", "direct_url", "guangya_share"]},
+                        "input": {"minLength": 1},
+                    }, "not": {"anyOf": [
+                        {"required": ["positions"]}, {"required": ["resource_candidates_ref"]},
+                    ]}},
+                ],
             },
             context_handler=ingest_actions.inspect,
             validator=ingest_inspect_arguments,

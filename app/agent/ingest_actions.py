@@ -26,7 +26,7 @@ from app import database as db
 from app.agent.download_actions import download_request_public_summary
 from app.agent.errors import AgentToolError
 from app.agent.indexer_actions import download_target_readiness
-from app.agent.indexer_candidate_actions import IndexerCandidateActions
+from app.agent.indexer_candidate_actions import IndexerCandidateActions, select_resource_candidates
 from app.agent.media_consumption_actions import explicit_preferred_download_target
 from app.agent.models import Evidence, ToolContext, ToolReference, ToolResult
 from app.agent.recent_resource_candidates import (
@@ -273,7 +273,7 @@ class AgentIngestSessionStore:
 
 def ingest_inspect_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict) or not set(arguments).issubset(
-        {"source_type", "input", "resource_candidates_ref"}
+        {"source_type", "input", "resource_candidates_ref", "positions"}
     ):
         raise AgentToolError("资源检查参数无效")
     source_type = str(arguments.get("source_type") or "auto").strip().lower()
@@ -287,7 +287,11 @@ def ingest_inspect_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise AgentToolError("请提供需要检查的资源链接")
     if len(value) > 8192:
         raise AgentToolError("资源链接过长")
-    normalized = {"source_type": source_type, "input": value}
+    normalized: dict[str, Any] = {"source_type": source_type, "input": value}
+    if "positions" in arguments:
+        if source_type != "resource_candidates":
+            raise AgentToolError("只有资源候选检查接受 positions")
+        normalized["positions"] = _positions(arguments["positions"], maximum=_MAX_RESOURCE_POSITIONS, required=True)
     raw_reference = arguments.get("resource_candidates_ref")
     if source_type == "resource_candidates":
         if raw_reference not in (None, ""):
@@ -429,37 +433,35 @@ class IngestActions:
                     "最近资源候选不存在或已过期，请重新搜索",
                     code="precondition_failed",
                 )
+            selected = select_resource_candidates(candidates[:_MAX_RESOURCE_POSITIONS], arguments.get("positions"))
             public_candidates = [
                 {
-                    "position": int(item.get("position") or index),
+                    "position": item["position"],
                     "title": _safe_text(item.get("title"), 300),
                     "site_name": _safe_text(item.get("site_name"), 80),
                     "size_text": _safe_text(item.get("size_text"), 64),
                     "download_state": _safe_text(item.get("download_state"), 24),
                 }
-                for index, item in enumerate(
-                    candidates[:_MAX_RESOURCE_POSITIONS], start=1
-                )
-                if isinstance(item, dict) and str(item.get("result_id") or "").strip()
+                for item in selected
             ]
-            if not public_candidates:
-                raise AgentToolError(
-                    "最近资源候选已失效，请重新搜索", code="precondition_failed"
-                )
             return ToolResult(
                 True,
                 "success",
-                f"最近资源候选共 {len(public_candidates)} 项",
+                (
+                    f"已检查 {len(public_candidates)} 项候选，快照共 {len(candidates)} 项"
+                    if "positions" in arguments else f"最近资源候选共 {len(public_candidates)} 项"
+                ),
                 data={
                     "source_type": "resource_candidates",
                     "search_id": snapshot["search_id"],
                     "count": len(public_candidates),
+                    "total": len(candidates),
                     "items": public_candidates,
                 },
                 evidence=[
                     Evidence(
                         "agent_resource_candidates",
-                        "读取当前会话最近一次资源搜索的安全候选序号；未返回下载句柄或链接。",
+                        "读取所选资源快照中的安全候选序号；未探测下载可用性，也未返回下载句柄或链接。",
                         _now(),
                     )
                 ],
