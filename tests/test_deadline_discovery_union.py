@@ -1,4 +1,4 @@
-"""Bounded discovery contracts; real Session -> native serialized requests."""
+"""离线发现契约：真实 Session/Handler 与原生请求序列化；脚本 Client 响应，非真实 LLM。"""
 import asyncio
 import json
 from contextlib import asynccontextmanager
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.agent.capability_discovery_actions import capability_arguments
-from app.agent.kernel.capabilities import ToolCatalog
+from app.agent.kernel.capabilities import ToolCatalog, ToolEffect
 from app.agent.kernel.discovery import CapabilityDiscovery
 from app.agent.kernel.pipeline import ToolPipelineError
 from app.agent.kernel.provider_model import (
@@ -42,18 +42,42 @@ def test_union_pending_cache_and_overflow():
     ]
 
 
-def test_catalog_paging_filters_and_does_not_load():
-    tools = [read_tool(f"sample.item{i}", domain="sample") for i in range(4)]
-    hidden = replace(read_tool("sample.secret", domain="sample"), authorize=lambda c: False)
-    finder = CapabilityDiscovery(ToolCatalog([*tools, hidden]), context={})
-    result = finder.search(capability_arguments({"catalog": {"domains": ["sample"], "limit": 2}}))
-    assert [t["name"] for t in result["tools"]] == [t.name for t in tools[:2]]
-    assert result["next_offset"] == 2
-    assert result["loaded_tools"] == []
-    result = finder.search(capability_arguments({"catalog": {"domains": ["sample"], "offset": 2, "limit": 2}}))
-    assert [t["name"] for t in result["tools"]] == [t.name for t in tools[2:]]
-    assert result["next_offset"] is None
+@pytest.mark.parametrize("scope,domains,counts", [
+    ({}, {"sample", "other"}, (6, 5, 5)),
+    ({"domains": ["sample"]}, {"sample"}, (5, 5, 4)),
+    ({"domains": ["other"]}, {"other"}, (1, 0, 1)),
+    ({"domains": ["missing"]}, set(), (0, 0, 0)),
+])
+def test_catalog_complete_scope_statistics_without_loading_or_extra_budget(scope, domains, counts):
+    def tool(name, domain, effect):
+        spec = read_tool(name, domain=domain, handler=lambda *_: pytest.fail("目录不应执行业务"))
+        return spec if effect is ToolEffect.READ else replace(
+            spec, effect=effect, read=None, prepare=spec.read, execute_confirmed=spec.read,
+        )
+
+    effects = tuple(ToolEffect)
+    tools = [tool(f"sample.item{i:02}", "sample", effects[i % 3]) for i in range(14)]
+    tools += [tool("other.inspect", "other", ToolEffect.READ), tool("other.delete", "other", ToolEffect.DANGER)]
+    hidden = replace(tool("sample.secret", "sample", ToolEffect.WRITE), authorize=lambda c: False)
+    finder = CapabilityDiscovery(ToolCatalog([*reversed(tools), hidden]), context={}, maximum=2)
+    arguments = capability_arguments({"catalog": scope})
+    result = finder.search(arguments)
+    expected = sorted(t.name for t in tools if t.domain in domains)
+    assert [t["name"] for t in result["tools"]] == expected
+    assert all("parameters" not in t for t in result["tools"])
+    summary = result["catalog_summary"]
+    assert summary["total"] == len(expected)
+    assert tuple(summary["by_effect"].get(effect.value, 0) for effect in effects) == counts
+    assert set(summary["by_effect"]) <= {effect.value for effect in effects}
+    assert sum(summary["by_effect"].values()) == len(expected)
+    assert result["catalog_only"] is True and result["loaded_tools"] == []
+    assert "next_offset" not in result
     assert "secret" not in json.dumps(result)
+    assert result["discovery_cost"] == {"distinct_requests": 1, "limit": 8}
+    assert result["remaining_discoveries"] == 7
+    repeat = finder.search(arguments)
+    assert repeat["cache_hit"] and finder.requests == 1
+    assert repeat["tools"] == result["tools"] and repeat["catalog_summary"] == summary
     assert not finder.consume()
 
 
@@ -85,6 +109,8 @@ def test_finite_distinct_discovery_budget_and_cached_replay():
         finder.search({"query": f"unmatched-{index}"})
     with pytest.raises(ToolPipelineError, match="8次"):
         finder.search({"query": "ninth-distinct"})
+    with pytest.raises(ToolPipelineError, match="8次"):
+        finder.search(capability_arguments({"catalog": {}}))
     assert finder.search({"query": "unmatched-0"})["cache_hit"]
     assert finder.requests == 8
 
@@ -100,11 +126,14 @@ def test_existing_real_colloquial_corpus_directory_recovery():
     finder = CapabilityDiscovery(catalog, context={})
     lexical = finder.search({"query": case["message"]})
     # No claim that today's lexical result fails: exercise the independent escape hatch.
-    page = finder.search(capability_arguments({"catalog": {"domains": ["rss"]}}))
-    entries = list(page["tools"])
-    if page["next_offset"] is not None:
-        page = finder.search(capability_arguments({"catalog": {"domains": ["rss"], "offset": page["next_offset"]}}))
-        entries.extend(page["tools"])
+    directory = finder.search(capability_arguments({"catalog": {"domains": ["rss"]}}))
+    entries = directory["tools"]
+    expected = sorted(t.name for t in catalog.visible({}) if t.domain == "rss")
+    assert len(entries) > 12 and [t["name"] for t in entries] == expected
+    assert directory["catalog_summary"]["total"] == len(entries)
+    assert sum(directory["catalog_summary"]["by_effect"].values()) == len(entries)
+    assert directory["discovery_cost"] == {"distinct_requests": 2, "limit": 8}
+    assert "next_offset" not in directory
     assert case["required"][0] in [t["name"] for t in entries]
     assert all("parameters" not in t for t in entries)
     loaded = finder.search({"tool_names": case["required"]})
@@ -176,6 +205,8 @@ async def _native_union():
     wire_results = [json.loads(m["content"]) for m in seen[1]["messages"] if m["role"] == "tool"]
     assert len(wire_results) == 2
     for outcome, wire_result in zip(discovery_outcomes, wire_results, strict=True):
+        assert wire_result["data"]["catalog_summary"] is None
+        assert "next_offset" not in wire_result["data"]
         handle = outcome.public_content["result_handle"]
         assert handle and wire_result["result_handle"] == handle
         assert wire_result["read_tool"] == "agent.read_result"
@@ -192,4 +223,6 @@ async def _native_union():
     assert len(seen) == 3
     first_schema = next(t["function"]["parameters"] for t in seen[0]["tools"] if t["function"]["name"] == "agent__capabilities")
     assert first_schema["properties"]["queries"]["maxItems"] == 4
-    assert first_schema["properties"]["catalog"]["properties"]["limit"]["maximum"] == 12
+    catalog_schema = first_schema["properties"]["catalog"]
+    assert set(catalog_schema["properties"]) == {"domains"}
+    assert catalog_schema["additionalProperties"] is False

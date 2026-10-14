@@ -131,7 +131,7 @@ class CapabilityDiscovery:
                 "visible_count": len(visible),
                 "retained_tools": list(self._retained),
                 "retention_scope": "current_turn_only; release removes retention, not execution permission; no immediate unloading",
-                "hint": "用queries一次联合查找多组能力；词法未命中可用catalog按domains/offset分页探索，再用tool_names加载。目录摘要不等于已加载或健康。",
+                "hint": "用queries一次联合查找多组能力；词法未命中可用catalog按domains读取完整目录摘要，再用tool_names加载。目录摘要不等于已加载或健康。",
             }
         key = json.dumps([arguments, sorted(by_name)], sort_keys=True, ensure_ascii=False)
         cache_hit = key in self._cache
@@ -141,11 +141,10 @@ class CapabilityDiscovery:
                 code="capability_discovery_budget",
             )
         requested = arguments.get("tool_names", [])
-        page = arguments.get("catalog")
+        catalog_scope = arguments.get("catalog")
         window = arguments.get("window")
         missing: list[str] = []
         found: list[KernelToolSpec] = []
-        next_offset = None
         if window is not None:
             retained = tuple(dict.fromkeys([
                 *(name for name in self._retained if name not in window.get("release", [])),
@@ -158,12 +157,8 @@ class CapabilityDiscovery:
             if len(retained) > 12 or len(promised - WINDOW_UTILITIES) > self.maximum:
                 raise ToolPipelineError("保留工作集与同批已承诺工具超出窗口容量；请先释放或下一批重试。", code="capability_window_capacity")
             self._retained = retained
-        elif page is not None:
-            listing = sorted((t for t in visible if not page.get("domains") or t.domain in page["domains"]), key=lambda t: t.name)
-            offset, limit = page.get("offset", 0), page.get("limit", 12)
-            found = listing[offset:offset + limit]
-            if offset + limit < len(listing):
-                next_offset = offset + limit
+        elif catalog_scope is not None:
+            found = sorted((t for t in visible if not catalog_scope.get("domains") or t.domain in catalog_scope["domains"]), key=lambda t: t.name)
         elif cache_hit:
             names, absent = self._cache[key]
             found = [by_name[name] for name in names if name in by_name]
@@ -189,7 +184,7 @@ class CapabilityDiscovery:
         if not cache_hit:
             self.requests += 1
             self._cache[key] = (tuple(t.name for t in found), tuple(missing))
-        candidates = tuple(tool for tool in found if tool.name != DISCOVERY_TOOL) if page is None else ()
+        candidates = tuple(tool for tool in found if tool.name != DISCOVERY_TOOL) if catalog_scope is None else ()
         # Earlier successful calls in this batch retain their promised slots.
         additions = tuple(dict.fromkeys(t.name for t in (*self._pending, *candidates)))
         combined = tuple(by_name[name] for name in additions if name in by_name)
@@ -233,8 +228,11 @@ class CapabilityDiscovery:
             "remaining_discoveries": 8 - self.requests,
             "discovery_cost": {"distinct_requests": self.requests, "limit": 8},
             "cache_hit": cache_hit,
-            "next_offset": next_offset,
-            "catalog_only": page is not None,
+            "catalog_only": catalog_scope is not None,
+            "catalog_summary": {
+                "total": len(found),
+                "by_effect": dict(Counter(tool.effect.value for tool in found)),
+            } if catalog_scope is not None else None,
             "execution": "未执行任何业务动作；发现的工具仅在下一次模型调用加载。写操作仍需确认。",
         }
 

@@ -297,10 +297,14 @@ class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         {"context_requirements": frozenset({"media_item"})},
     ],
 )
-def test_hidden_or_unauthorized_capabilities_are_not_exposed(extra):
+@pytest.mark.parametrize("arguments", [
+    {"tool_names": ["secret.inspect"]}, {"catalog": {}},
+    {"catalog": {"domains": ["secret"]}},
+])
+def test_hidden_or_unauthorized_capabilities_are_not_exposed(extra, arguments):
     tool = replace(read_tool("secret.inspect", description="演员信息"), **extra)
     finder = CapabilityDiscovery(ToolCatalog([tool]), context={"owner": "owner-1"})
-    result = finder.search({"tool_names": ["secret.inspect"]})
+    result = finder.search(capability_arguments(arguments))
     assert result["tools"] == []
     assert result["loaded_tools"] == []
     assert "演员信息" not in json.dumps(result, ensure_ascii=False)
@@ -382,7 +386,7 @@ _DISCOVERY_MODES = [
 ]
 
 
-@pytest.mark.parametrize("arguments", [{}, *_DISCOVERY_MODES])
+@pytest.mark.parametrize("arguments", [{}, {"catalog": {}}, *_DISCOVERY_MODES])
 def test_discovery_each_mode_and_overview_keep_public_contract(arguments):
     _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
     assert capability_arguments(arguments).keys() == arguments.keys()
@@ -395,6 +399,28 @@ def test_discovery_all_mixed_modes_rejected_before_business_execution(left, righ
         _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
     with pytest.raises(AgentToolError):
         capability_arguments(arguments)
+
+
+@pytest.mark.parametrize("scope", [{}, {"domains": ["rss"]}])
+@pytest.mark.parametrize("legacy", [{"offset": 0}, {"limit": 12}, {"offset": 0, "limit": 12}])
+def test_catalog_legacy_pagination_rejected_by_schema_and_domain_validator(scope, legacy):
+    arguments = {"catalog": {**scope, **legacy}}
+    with pytest.raises(ToolPipelineError, match="未知参数") as error:
+        _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
+    assert error.value.code == "invalid_arguments"
+    with pytest.raises(AgentToolError, match="catalog.*domains"):
+        capability_arguments(arguments)
+
+
+@pytest.mark.parametrize("arguments", [{}, *[mode for mode in _DISCOVERY_MODES if "catalog" not in mode]])
+def test_non_catalog_modes_do_not_report_catalog_totals(arguments):
+    tool = read_tool("library.search", description="媒体库")
+    finder = CapabilityDiscovery(ToolCatalog([tool]), context={})
+    finder.window([tool])
+    result = finder.search(capability_arguments(arguments))
+    # 空参数沿用既有概况形状；不要求补一个无业务含义的null字段。
+    assert result.get("catalog_summary") is None
+    assert "next_offset" not in result
 
 
 @pytest.mark.parametrize("restriction", ["availability", "authorize", "context_requirements"])
@@ -458,25 +484,37 @@ def test_actual_filesystem_capability_survives_discovery_ranking():
     assert result["remaining_discoveries"] == 7
 
 
-def test_catalog_domain_case_normalization_keeps_filter_scope_and_pagination():
+@pytest.mark.parametrize("domain", [" RSS ", " Rſſ "])
+def test_catalog_domain_casefold_keeps_filter_scope(domain):
     tools = [read_tool("rss.item", domain="rss"), read_tool("library.item", domain="library")]
     finder = CapabilityDiscovery(ToolCatalog(tools), context={})
-    arguments = capability_arguments({"catalog": {"domains": [" RSS ", "rss"], "offset": 0, "limit": 1}})
-    assert arguments == {"catalog": {"domains": ["rss"], "offset": 0, "limit": 1}}
+    raw = {"catalog": {"domains": [domain, "rss"]}}
+    _validate_json_schema(raw, CAPABILITY_PARAMETERS)
+    arguments = capability_arguments(raw)
+    assert arguments == {"catalog": {"domains": ["rss"]}}
     result = finder.search(arguments)
     assert [t["name"] for t in result["tools"]] == ["rss.item"]
     assert result["catalog_only"] is True
     assert result["loaded_tools"] == []
-    assert result["next_offset"] is None
+    assert result["catalog_summary"]["total"] == 1
+    assert result["catalog_summary"]["by_effect"]["read"] == 1
+    assert "next_offset" not in result
+    assert not finder.consume()
 
 
 def test_ranked_discovery_is_explicitly_a_subset_not_domain_total():
     spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
-    finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(spec), *[read_tool(f"rss.item{i}", description="feed inspection", domain="rss") for i in range(9)]]), context={})
+    finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(spec), *[read_tool(f"rss.item{i}", description="feed inspection", domain="rss") for i in range(14)]]), context={})
     context = ToolContext(capability_search=finder.search)
     result = spec.context_handler({"query": "feed inspection"}, context)
     assert result.ok and len(result.data["tools"]) == 6
     assert "不是完整目录" in result.summary
-    assert any("catalog" in hint and "next_offset" in hint for hint in result.suggestions)
+    assert result.data["catalog_summary"] is None
+    assert any("catalog" in hint and "完整目录" in hint for hint in result.suggestions)
+    assert all("next_offset" not in hint for hint in result.suggestions)
     full = spec.context_handler(capability_arguments({"catalog": {"domains": ["RSS"]}}), context)
-    assert len(full.data["tools"]) == 9 and full.data["next_offset"] is None
+    assert len(full.data["tools"]) == full.data["catalog_summary"]["total"] == 14
+    assert full.data["catalog_summary"]["by_effect"]["read"] == 14
+    assert full.data["loaded_tools"] == result.data["loaded_tools"]
+    assert "next_offset" not in full.data
+    assert {t.name for t in finder.consume()} == set(result.data["loaded_tools"])

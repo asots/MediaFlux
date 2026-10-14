@@ -16,7 +16,7 @@ CAPABILITY_PARAMETERS = {
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "不知道工具名时用能力描述检索；仅单独传query。已知名称改用tool_names。",
+            "description": "按具体任务检索有限的相关工具候选，仅单独传query；完整功能清单或按读写类型汇总用catalog，不能用候选数代表全部功能。",
         },
         "queries": {
             "type": "array", "minItems": 1, "maxItems": 4,
@@ -25,12 +25,10 @@ CAPABILITY_PARAMETERS = {
         },
         "catalog": {
             "type": "object",
-            "description": "按领域分页列出目录摘要，不加载工具。domains使用概况返回的domain标识，不填中文需求描述；描述需求用query。用户要完整清单时沿next_offset自动续读，不另问是否继续。空对象浏览全部领域。",
+            "description": "一次返回所选领域的完整目录摘要及读写数量统计，不加载工具。domains使用概况返回的domain标识，不填中文需求描述；描述需求用query。空对象浏览全部领域；超大结果使用通用结果句柄读取，不接受目录分页参数。",
             "properties": {
                 "domains": {"type": "array", "minItems": 1, "maxItems": 4,
                             "items": {"type": "string", "minLength": 1, "maxLength": 80}},
-                "offset": {"type": "integer", "minimum": 0, "maximum": 10000},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
             },
             "additionalProperties": False,
         },
@@ -85,18 +83,15 @@ def capability_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             raise AgentToolError("queries 必须是1至4组能力描述。")
         return {"queries": list(dict.fromkeys(capability_arguments({"query": q})["query"] for q in queries))}
     if "catalog" in arguments:
-        page = arguments["catalog"]
-        if not isinstance(page, dict) or set(page) - {"domains", "offset", "limit"}:
-            raise AgentToolError("catalog 只允许 domains、offset、limit。")
-        domains = page.get("domains", [])
+        scope = arguments["catalog"]
+        if not isinstance(scope, dict) or set(scope) - {"domains"}:
+            raise AgentToolError("catalog 只允许 domains，返回所选范围的完整目录摘要。")
+        domains = scope.get("domains", [])
         if (not isinstance(domains, list) or len(domains) > 4
-                or ("domains" in page and not domains)
+                or ("domains" in scope and not domains)
                 or any(not isinstance(d, str) or not 1 <= len(d.strip()) <= 80 for d in domains)):
             raise AgentToolError("domains 必须是1至4个领域名称。")
-        offset, limit = page.get("offset", 0), page.get("limit", 12)
-        if type(offset) is not int or not 0 <= offset <= 10000 or type(limit) is not int or not 1 <= limit <= 12:
-            raise AgentToolError("目录 offset 必须为0至10000整数，limit为1至12整数。")
-        return {"catalog": {"domains": list(dict.fromkeys(d.strip().casefold() for d in domains)), "offset": offset, "limit": limit}}
+        return {"catalog": {"domains": list(dict.fromkeys(d.strip().casefold() for d in domains))} if domains else {}}
     if "query" in arguments:
         query = arguments["query"]
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
@@ -125,7 +120,7 @@ def discover_capabilities(
         True, "completed",
         "已查询相关能力候选（不是完整目录），尚未执行业务操作。" if ranked else "已查询项目能力，尚未执行业务操作。",
         data=data,
-        suggestions=["要列全某领域的能力，请用catalog按领域分页，并沿next_offset继续；不能把本次候选数当作该领域工具总数。"] if ranked else [],
+        suggestions=["要列全某领域的能力，请用catalog按领域读取完整目录；不能把本次候选数当作该领域工具总数。"] if ranked else [],
     )
 
 

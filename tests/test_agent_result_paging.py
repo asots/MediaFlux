@@ -9,10 +9,19 @@ from unittest.mock import AsyncMock
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.model import ModelMessage
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import (
+    InMemoryRateLimiter,
+    ToolCallContext,
+    ToolPipeline,
+    ToolPipelineError,
+)
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.state import CancellationToken, retain_conversation
-from app.agent.model_context_budget import _compact_chain, compact_tool_content, decode_tool_content
+from app.agent.model_context_budget import (
+    _compact_chain,
+    compact_tool_content,
+    decode_tool_content,
+)
 from app.agent.models import ToolResult
 from tests.support import IsolatedDatabaseTestCase
 
@@ -132,7 +141,7 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
                                         for row in view["truncation"]), path)
                 self.assertFalse(any(row["path"] == "/chapter" for row in view["truncation"]))
             page = (await read("/truncation"))["data"]
-            expected = list({"key": k, "value": v} for k, v in value.items()) if isinstance(value, dict) else value
+            expected = [{"key": k, "value": v} for k, v in value.items()] if isinstance(value, dict) else value
             self.assertEqual(page["items"], expected if isinstance(value, (dict, list, str)) else [expected])
             self.assertEqual((await read("/data/description", 9990, 10))["data"]["items"], "D" * 10)
         for value in values:
@@ -633,4 +642,61 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
             with self.assertRaises(ToolPipelineError) as expired:
                 await reader.execute("agent.read_result", {"handle": handle, "path": "/data/items"}, context=context)
             self.assertEqual(expired.exception.code, "reference_invalid")
+        asyncio.run(run())
+
+    def test_complete_capability_catalog_uses_existing_result_reader_when_large(self):
+        """真实目录→Pipeline→SQLite冷启动→通用读取；不调用外部模型或业务工具。"""
+        from app.agent.domain_catalog import build_tool_specs
+        from app.agent.kernel.discovery import CapabilityDiscovery
+        from app.agent.kernel.ports.existing_actions import adapt_tool_spec
+        from tests.test_agent_kernel_core import read_tool
+
+        async def run():
+            executed = []
+            tools = [read_tool(f"sample.item{i:02d}", domain="sample", description="read capability " * 45,
+                               handler=lambda *_: executed.append(True)) for i in range(30)]
+            spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
+            hidden = replace(read_tool("sample.hidden", domain="sample"), authorize=lambda _: False)
+            catalog = ToolCatalog([adapt_tool_spec(spec), *tools, hidden])
+            finder = CapabilityDiscovery(catalog, context={})
+            store = SQLiteKernelStore(secret_provider=lambda: "catalog-complete-test")
+            lease, _ = await store.begin_turn(owner="owner", session_id="catalog", request_id="query")
+            context = ToolCallContext(owner="owner", session_id="catalog", request_id=lease.request_id,
+                                      turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(),
+                                      report_progress=AsyncMock(), capability_search=finder.search)
+            pipeline = ToolPipeline(catalog=catalog, state_store=store, reference_store=store,
+                                    projector=DefaultProjector(max_model_chars=2000))
+            result = await pipeline.execute("agent.capabilities", {"catalog": {"domains": ["sample"]}}, context=context)
+            wire = json.loads(result.outcome.model_content)
+            self.assertLessEqual(len(result.outcome.model_content), 2000)
+            handle = wire["result_handle"]
+            await store.commit(lease, conversation=[ModelMessage(role="tool", tool_name="agent.capabilities",
+                                                               content=result.outcome.model_content).to_dict()])
+            cold = SQLiteKernelStore(secret_provider=lambda: "catalog-complete-test")
+            manifest = await cold.resolve(handle, owner="owner", session_id="catalog", expected_kind="tool_result")
+            chunks = [await cold.resolve(ref, owner="owner", session_id="catalog", expected_kind="tool_result_part")
+                      for ref in manifest["parts"]]
+            original = json.loads("".join(chunks))["data"]
+            self.assertEqual(original["catalog_summary"], {"total": 30, "by_effect": {"read": 30}})
+            self.assertEqual(len(original["tools"]), 30)
+            self.assertNotIn("next_offset", original)
+            self.assertEqual(original["loaded_tools"], [])
+            reader = ToolPipeline(catalog=ToolCatalog([]), state_store=cold, reference_store=cold,
+                                  projector=DefaultProjector(max_model_chars=2000),
+                                  rate_limiter=InMemoryRateLimiter(limit=10000))
+            names, offset = [], 0
+            for _ in range(31):
+                page = await reader.execute("agent.read_result", {"handle": handle, "path": "/data/tools",
+                                                                 "offset": offset, "limit": 30}, context=context)
+                self.assertLessEqual(len(page.outcome.model_content), 2000)
+                data = json.loads(page.outcome.model_content)["data"]
+                self.assertEqual(data["total"], 30)
+                names.extend(item["name"] for item in data["items"])
+                if data["next_offset"] is None:
+                    break
+                self.assertGreater(data["next_offset"], offset)
+                offset = data["next_offset"]
+            self.assertEqual(names, [tool.name for tool in tools])
+            self.assertEqual(executed, [])
+            self.assertEqual(finder.requests, 1)
         asyncio.run(run())

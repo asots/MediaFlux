@@ -752,7 +752,7 @@ def register_specs(
             description=(
                 "回答 MediaFlux Media Agent 是谁、能做什么，并列出当前可以读取或经确认执行的项目能力；"
                 "一次只传一种参数：已知工具名只用tool_names，不再附加query；"
-                "不知道工具名用query（单需求）或queries（多需求）；catalog只浏览目录；window只管理已加载工作集；空对象查看概况。"
+                "列全某领域功能或按读写类型汇总用catalog，不必先搜索；query/queries只查找具体任务的相关工具；window只管理已加载工作集；空对象查看概况。"
                 "搜索或按名称加载的Schema在下一次模型调用生效。当前工具不足时先查询，不可直接声称未挂载。"
                 "跨阶段仍需使用的已加载工具用window.retain保留，window.release释放；仅本轮有效且受容量与当前权限限制。"
             ),
