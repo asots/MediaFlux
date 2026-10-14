@@ -112,6 +112,7 @@ class ToolCallContext:
     delivery_route: Mapping[str, Any] = field(default_factory=dict)
     confirmed_effect: PipelineResult | None = None
     current_task: dict | None = None
+    active_effect_plan: EffectPlan | None = None
     user_source: str = ""
     user_history: tuple[str, ...] = ()
     user_reply_context: Mapping[str, Any] = field(default_factory=dict)
@@ -137,6 +138,7 @@ class PipelineResult:
     effect_plan: EffectPlan | None = None
     elapsed_ms: int = 0
     task_patch: TaskPatch | None = None
+    prepared_effect: PreparedEffect | None = None
     recovered_failures: tuple[str, ...] = ()
 
 
@@ -173,6 +175,10 @@ class EffectLifecycle(Protocol):
         self, *, prepared: PreparedEffect, context: ToolCallContext
     ) -> None:
         del prepared, context
+
+    def substep_started(self, *, plan: EffectPlan) -> None:
+        """已消费的组合票据内，在每项写入前登记子操作；不再创建或消费票据。"""
+        del plan
 
     def completed(self, *, plan: EffectPlan, value: Any, elapsed_ms: int) -> None:
         del plan, value, elapsed_ms
@@ -453,6 +459,9 @@ class ToolPipeline:
                 read=self._replace_schema_failure, availability=lambda context: False,
                 metadata={"kernel_utility": True},
             ))
+        from .batch_effects import batch_tool
+        if not catalog.has("agent.batch") and (batch := batch_tool(self)) is not None:
+            catalog.register(batch)
         if not catalog.has("agent.task"):
             catalog.register(task_tool())
         if not catalog.has("agent.read_result"):
@@ -609,6 +618,7 @@ class ToolPipeline:
         arguments: Mapping[str, Any] | None,
         *,
         context: ToolCallContext,
+        _prepare_only: bool = False,
         _returned_read=None,
         _read_admitted: asyncio.Event | None = None,
         _read_publication_lock: asyncio.Lock | None = None,
@@ -808,6 +818,9 @@ class ToolPipeline:
             prepared=prepared_value,
             context=context,
         )
+        if _prepare_only:
+            return PipelineResult(tool=tool, arguments=normalized, prepared_effect=prepared_value,
+                                  outcome=self.projector.project(prepared_value.preview))
         try:
             with session_scope_guard(context.owner, context.session_id):
                 if not await self.state_store.is_current(context.lease):
@@ -988,28 +1001,7 @@ class ToolPipeline:
                 origin=effect_origin(current, context, plan),
             )
             context = replace(context, completion_scope=completion_scope)
-            resolved_arguments = await self._authorize(tool, dict(plan.arguments), context, confirmation=True)
-            value = await _invoke(
-                tool.execute_confirmed,
-                resolved_arguments,
-                plan.snapshot_fingerprint,
-                context,
-                protection=context,
-            )
-            if tool.verify is not None:
-                verified = await _invoke(
-                    tool.verify,
-                    resolved_arguments,
-                    value,
-                    context,
-                    protection=context,
-                )
-                if verified is False:
-                    raise ToolPipelineError(
-                        "写后验证失败", code="post_write_verification_failed"
-                    )
-                if verified is not True and verified is not None:
-                    value = verified
+            value = await self._run_effect(plan, context=context)
         except ToolPipelineError as exc:
             self._notify_effect(
                 "failed", plan=plan, code=exc.code,
@@ -1039,6 +1031,35 @@ class ToolPipeline:
             effect_plan=plan,
             elapsed_ms=elapsed_ms,
         )
+
+    async def _run_effect(self, plan: EffectPlan, *, context: ToolCallContext):
+        tool = self.catalog.get(plan.tool_name)
+        if tool.effect is ToolEffect.READ or tool.effect is not plan.effect:
+            raise ToolPipelineError("确认计划风险类型不匹配", code="confirmation_invalid")
+        context = replace(context, active_effect_plan=plan)
+        resolved_arguments = await self._authorize(tool, dict(plan.arguments), context, confirmation=True)
+        value = await _invoke(
+            tool.execute_confirmed,
+            resolved_arguments,
+            plan.snapshot_fingerprint,
+            context,
+            protection=context,
+        )
+        if tool.verify is not None:
+            verified = await _invoke(
+                tool.verify,
+                resolved_arguments,
+                value,
+                context,
+                protection=context,
+            )
+            if verified is False:
+                raise ToolPipelineError(
+                    "写后验证失败", code="post_write_verification_failed"
+                )
+            if verified is not True and verified is not None:
+                value = verified
+        return value
 
     async def cancel_effect(
         self, plan_id: str, *, lease: PublicationLease,

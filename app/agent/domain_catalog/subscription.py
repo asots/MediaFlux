@@ -603,6 +603,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="media.set_preferences",
+            batch_confirmation=True,
             description="预检并在用户确认后按字段更新结构化媒体偏好；本地推荐和资源排序使用这些默认偏好，单次显式参数（包括空数组、0、False）优先。按身份隔离，不修改系统全局配置。",
             risk=RiskLevel.LOW_WRITE,
             parameters={

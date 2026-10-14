@@ -203,6 +203,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
             "source_kind": spec.source_kind,
             "freshness": spec.freshness,
             "parallel_read": spec.parallel_read,
+            **({"batch_confirmation": True} if spec.batch_confirmation else {}),
             "workflow": spec.workflow,
             "workflow_stage": spec.workflow_stage,
             "related_tools": _related_tools(spec),

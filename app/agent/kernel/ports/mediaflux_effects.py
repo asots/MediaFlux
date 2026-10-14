@@ -11,6 +11,7 @@ from typing import Any
 from app import config
 from app.agent.action_history import (
     record_confirmation_error,
+    record_confirmation_claimed,
     record_confirmation_interrupted,
     record_confirmed_result,
 )
@@ -121,6 +122,9 @@ class MediaFluxEffectLifecycle:
         self, *, prepared: PreparedEffect, context: ToolCallContext
     ) -> None:
         self._release_followups(prepared, context)
+
+    def substep_started(self, *, plan: EffectPlan) -> None:
+        record_confirmation_claimed(**self._audit_fields(plan), action_arguments=dict(plan.arguments))
 
     def completed(self, *, plan: EffectPlan, value: Any, elapsed_ms: int) -> None:
         runtime = self.missing_media_runtime

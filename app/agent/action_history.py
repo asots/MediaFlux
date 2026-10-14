@@ -19,6 +19,7 @@ from app.modules.web_secret import get_web_secret
 logger = get_logger(__name__)
 
 _TOOL_LABELS = {
+    "agent.batch": "组合变更",
     "activity.follow": "活动跟踪开启",
     "activity.unfollow": "活动跟踪停用",
     "action.undo.execute": "可逆操作回退",
