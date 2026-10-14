@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from unittest.mock import patch
 
 from app.agent.domain_catalog import build_tool_specs
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolEffect
+from app.agent.kernel.discovery import CapabilityDiscovery
 from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
 from app.agent.kernel.ports.existing_actions import (
     adapt_tool_spec,
@@ -104,7 +106,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
                     parameters={"type": "object", "properties": {}, "additionalProperties": False},
                     validator=lambda arguments: arguments, requires_confirmation=True,
                     context_confirmation_preparer=lambda _args, _ctx: (ToolResult(True, "ready", "预检"), "fingerprint"),
-                    context_confirmed_handler=lambda _args, _snapshot, _ctx: domain_result,
+                    context_confirmed_handler=lambda _args, _snapshot, _ctx, result=domain_result: result,
                     post_write_verifier=lambda _args, result: result)
                 catalog = catalog_from_tool_specs([spec])
                 state = InMemorySessionStateStore()
@@ -471,14 +473,19 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_capabilities_returns_compact_domain_summary(self) -> None:
         catalog = catalog_from_tool_specs(build_tool_specs())
         state = InMemorySessionStateStore()
+        discovery = CapabilityDiscovery(catalog, context={})
         result = await ToolPipeline(catalog=catalog, state_store=state).execute(
             "agent.capabilities",
             {},
-            context=await context_for(state),
+            context=replace(await context_for(state), capability_search=discovery.search),
         )
 
         public = result.outcome.public_content
-        self.assertEqual(public["data"]["total_tools"], len(build_tool_specs()))
+        # 全目录还可能包含当前上下文不可见的内核工具。
+        self.assertGreater(public["data"]["total_tools"], 0)
+        self.assertLessEqual(public["data"]["total_tools"], len(catalog))
+        self.assertEqual(public["data"]["total_tools"], sum(g["tool_count"] for g in public["data"]["groups"]))
+        self.assertEqual(public["data"]["total_tools"], public["data"]["discovery"]["visible_count"])
         self.assertGreaterEqual(len(public["data"]["groups"]), 6)
         self.assertNotIn("tools", public["data"])
         self.assertNotIn("parameters", str(public))

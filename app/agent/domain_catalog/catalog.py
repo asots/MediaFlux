@@ -39,9 +39,6 @@ class ToolSpecCollector:
             raise ValueError(f"duplicate tool: {spec.name}")
         self.items.append(spec)
 
-    def capabilities(self) -> list[dict]:
-        return [item.public_dict() for item in self.items]
-
 
 _REGISTRARS = (
     register_activity_specs,

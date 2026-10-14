@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import replace
+from itertools import combinations
 from unittest.mock import patch
 
 import pytest
 
 from app.agent.capability_discovery_actions import (
+    CAPABILITY_PARAMETERS,
     capability_arguments,
     web_capability_status,
 )
@@ -26,11 +28,16 @@ from app.agent.kernel.discovery import CapabilityDiscovery
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import (
+    ToolPipeline,
+    ToolPipelineError,
+    _validate_json_schema,
+)
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.models import ToolContext
 from tests.test_agent_kernel_core import ScriptedModel, collect, read_tool
 
 
@@ -366,3 +373,67 @@ def test_web_configuration_is_not_confused_with_provider_reachability(
 def test_discovery_arguments_are_bounded(arguments):
     with pytest.raises(AgentToolError):
         capability_arguments(arguments)
+
+
+_DISCOVERY_MODES = [
+    {"query": "媒体库"}, {"queries": ["媒体库", "资源搜索"]},
+    {"tool_names": ["library.search"]}, {"catalog": {"domains": ["rss"]}},
+    {"window": {"retain": ["library.search"]}},
+]
+
+
+@pytest.mark.parametrize("arguments", [{}, *_DISCOVERY_MODES])
+def test_discovery_each_mode_and_overview_keep_public_contract(arguments):
+    _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
+    assert capability_arguments(arguments).keys() == arguments.keys()
+
+
+@pytest.mark.parametrize("left,right", list(combinations(_DISCOVERY_MODES, 2)))
+def test_discovery_all_mixed_modes_rejected_before_business_execution(left, right):
+    arguments = {**left, **right}
+    with pytest.raises(ToolPipelineError):
+        _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
+    with pytest.raises(AgentToolError):
+        capability_arguments(arguments)
+
+
+@pytest.mark.parametrize("restriction", ["availability", "authorize", "context_requirements"])
+def test_overview_uses_same_live_visible_catalog_as_discovery(restriction):
+    spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
+    allowed = [False]
+    options = ({restriction: lambda _: allowed[0]} if restriction != "context_requirements"
+               else {restriction: frozenset({"resource_candidates"})})
+    hidden = replace(read_tool("library.private"), **options)
+    finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(spec), hidden]), context={})
+    context = ToolContext(capability_search=finder.search)
+    result = spec.context_handler({}, context)
+    assert result.ok and result.status == "success"
+    assert result.data["total_tools"] == result.data["discovery"]["visible_count"] == 1
+    assert sum(g["tool_count"] for g in result.data["groups"]) == 1
+    assert finder.search({"tool_names": [hidden.name]})["loaded_tools"] == []
+    assert "private" not in json.dumps(result.to_dict())
+    allowed[0] = True
+    finder.context["reference_kinds"] = ["resource_candidates"]
+    refreshed = spec.context_handler({}, context)
+    assert refreshed.data["total_tools"] == refreshed.data["discovery"]["visible_count"] == 2
+    assert sum(g["tool_count"] for g in refreshed.data["groups"]) == 2
+    assert finder.search({"tool_names": [hidden.name]})["loaded_tools"] == [hidden.name]
+
+
+def test_overview_without_session_catalog_does_not_fall_back_to_global_registry():
+    spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
+    result = spec.context_handler({}, ToolContext())
+    assert not result.ok and result.status == "unavailable"
+    assert "total_tools" not in result.data
+
+
+@pytest.mark.parametrize("name,group_title", [
+    ("guangya.fs.query", "光鸭云盘"), ("library.batch_presence", "媒体与媒体库"),
+])
+def test_overview_groups_by_runtime_domain_instead_of_tool_name_prefix(name, group_title):
+    specs = {spec.name: spec for spec in build_tool_specs()}
+    finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(specs["agent.capabilities"]), adapt_tool_spec(specs[name])]), context={})
+    result = specs["agent.capabilities"].context_handler({}, ToolContext(capability_search=finder.search))
+    groups = {group["title"]: group["tool_count"] for group in result.data["groups"]}
+    assert groups[group_title] == 1
+    assert "其他项目能力" not in groups

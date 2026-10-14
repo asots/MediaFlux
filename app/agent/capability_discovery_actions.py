@@ -10,17 +10,18 @@ from app.agent.models import ToolContext, ToolResult
 
 CAPABILITY_PARAMETERS = {
     "type": "object",
+    "description": "每次最多一个顶层字段，不能混用模式；空对象查询概况。已知工具名称用tool_names，无需同时描述query。",
     "properties": {
         "query": {
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "描述需要查找的项目能力，不必知道工具名称。",
+            "description": "不知道工具名时用能力描述检索；仅单独传query。已知名称改用tool_names。",
         },
         "queries": {
             "type": "array", "minItems": 1, "maxItems": 4,
             "items": {"type": "string", "minLength": 1, "maxLength": 200},
-            "description": "一次联合检索最多4组能力；共享有限工具窗口，下一轮生效。",
+            "description": "仅单独传queries，联合检索最多4组能力；共享有限工具窗口，下一轮生效。",
         },
         "catalog": {
             "type": "object",
@@ -48,7 +49,7 @@ CAPABILITY_PARAMETERS = {
             "maxItems": 6,
             "minItems": 1,
             "items": {"type": "string", "maxLength": 120},
-            "description": "查询已知能力并加载其Schema，最多6个。与query二选一。",
+            "description": "已知工具名称时仅传tool_names，最多6个；不再附加query、queries、catalog或window。",
         },
     },
     "additionalProperties": False,

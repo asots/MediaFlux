@@ -640,17 +640,21 @@ def register_specs(
         )
     )
 
-    def capabilities(_arguments: dict[str, Any]) -> ToolResult:
-        tools = registry.capabilities()
+    def capabilities_with_context(arguments, context):
+        result = discover_capabilities(arguments, context)
+        if arguments or not result.ok:
+            return result
+        discovery = result.data
+        counts = {item["domain"]: item["count"] for item in discovery["domains"]}
         groups = (
             (
                 "媒体与媒体库",
-                {"library", "provider", "playback"},
+                {"library", "media_library", "provider", "playback"},
                 "查询 Jellyfin/Emby、媒体总量、单部收录、缺集与播放状态",
             ),
             (
                 "资源发现",
-                {"discovery", "indexer", "resource", "web"},
+                {"discovery", "indexer", "resource", "resource_search", "web", "bangumi", "rating", "research", "official_progress"},
                 "查询 TMDB/Bangumi、推荐公开内容、搜索资源站并读取公开网页",
             ),
             (
@@ -660,69 +664,61 @@ def register_specs(
             ),
             (
                 "光鸭云盘",
-                {"cloud", "guangya"},
+                {"cloud", "cloud_account", "cloud_files", "guangya"},
                 "浏览和检索云盘；预览后创建目录、改名、移动、整理或离线转存",
             ),
             (
                 "订阅与自动化",
-                {"rss", "media", "automation"},
+                {"rss", "media", "automation", "subscriptions"},
                 "管理 RSS 规则和媒体追更订阅，检查自动化执行状态",
             ),
             (
                 "STRM 与本地整理",
-                {"strm", "local_media", "organize"},
+                {"strm", "local_media", "organize", "recognition"},
                 "检查或触发 STRM、本地媒体识别、整理和入库复核",
             ),
             (
                 "项目运维",
-                {"agent", "workspace", "config", "feature", "telegram"},
+                {"activity", "agent", "workspace", "config", "feature", "telegram"},
                 "查看系统健康、配置、任务与审计；配置变更均需人工确认",
             ),
         )
-        prefixes = [str(item.get("name") or "").partition(".")[0] for item in tools]
         capability_groups: list[dict[str, Any]] = []
         assigned: set[str] = set()
         for title, members, description in groups:
-            count = sum(1 for prefix in prefixes if prefix in members)
+            count = sum(counts.get(domain, 0) for domain in members)
             if not count:
                 continue
             assigned.update(members)
             capability_groups.append(
                 {"title": title, "description": description, "tool_count": count}
             )
-        remaining = sum(1 for prefix in prefixes if prefix and prefix not in assigned)
+        remaining = sum(count for domain, count in counts.items() if domain not in assigned)
         if remaining:
             capability_groups.append(
                 {
                     "title": "其他项目能力",
-                    "description": "当前注册表中的其他受控读取与确认后执行能力",
+                    "description": "当前会话目录中的其他受控读取与确认后执行能力",
                     "tool_count": remaining,
                 }
             )
         return ToolResult(
             ok=True,
             status="success",
-            summary=f"当前提供 {len(tools)} 个受控项目能力，写操作统一经过人工确认",
+            summary=f"当前会话可查询 {discovery['visible_count']} 个受控项目能力，写操作统一经过人工确认",
             data={
-                "total_tools": len(tools),
+                "total_tools": discovery["visible_count"],
                 "groups": capability_groups,
+                "discovery": discovery,
                 "write_policy": "只读能力可直接执行；写入和危险操作只生成冻结计划，确认后由确定性代码执行。",
             },
             evidence=[
-                Evidence("agent_registry", "能力来自服务端显式工具注册表。", _now())
+                Evidence("agent_registry", "能力来自当前会话可见且获授权的服务端目录；已注册不等于运行健康。", _now())
             ],
             suggestions=[
-                "可以问：查看系统简报、检查项目配置、诊断下载队列、诊断 RSS 订阅、测试 Jellyfin 或 Emby 连接、关闭媒体探索（需确认）、预览光鸭整理计划、立即整理光鸭云盘、查看 STRM 同步进度、在媒体库找一部影片、从外部影视源搜索一部影片、推荐几部电影或电视剧、查看今天有什么番剧、搜索某部影片的资源、核对某部剧是否缺集、检查某部剧是否有更新。"
+                "可用 query 描述需求或用 tool_names 指定已知工具；catalog 按返回的领域名浏览。概况仅说明当前目录范围，不代表已执行或网络健康。"
             ],
         )
-
-    def capabilities_with_context(arguments, context):
-        if arguments:
-            return discover_capabilities(arguments, context)
-        result = capabilities({})
-        if context.capability_search is not None:
-            result.data["discovery"] = context.capability_search({})
-        return result
 
     registry.register(
         ToolSpec(
@@ -755,13 +751,13 @@ def register_specs(
             name="agent.capabilities",
             description=(
                 "回答 MediaFlux Media Agent 是谁、能做什么，并列出当前可以读取或经确认执行的项目能力；"
-                "传query可从全项目发现需要的原子工具，或传tool_names核实可用状态，"
-                "并在下一次模型调用加载Schema。当前工具不足时先查询，不可直接声称未挂载。"
+                "一次只传一种参数：已知工具名只用tool_names，不再附加query；"
+                "不知道工具名用query（单需求）或queries（多需求）；catalog只浏览目录；window只管理已加载工作集；空对象查看概况。"
+                "搜索或按名称加载的Schema在下一次模型调用生效。当前工具不足时先查询，不可直接声称未挂载。"
                 "跨阶段仍需使用的已加载工具用window.retain保留，window.release释放；仅本轮有效且受容量与当前权限限制。"
             ),
             risk=RiskLevel.READ,
             parameters=CAPABILITY_PARAMETERS,
-            handler=capabilities,
             context_handler=capabilities_with_context,
             validator=capability_arguments,
             domains=("agent", "system"),
