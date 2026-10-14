@@ -1,8 +1,5 @@
 """ID32: real ingest DTOs through Session, offline business boundaries only."""
 import asyncio
-import json
-import os
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -67,7 +64,6 @@ def test_ingest_followup_explanation(unresolved, foreign):
                     wire = "\n".join(m.content for m in request.messages if m.role == "tool")
                     assert '"downloading"' in wire and '"organize_status"' in wire
                     assert EXPLANATION not in wire
-                    Path(os.environ["TMPDIR"], f"wire-{unresolved}-{foreign}.json").write_text(json.dumps({"tool_messages": wire}, ensure_ascii=False))
                 async for event in super().stream(request, cancellation=cancellation):
                     yield event
         model = EvidenceModel([
