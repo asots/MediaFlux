@@ -214,7 +214,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="library.search_missing_episode_resources",
-            description="先确认指定季集属于已播缺集，再按当前身份保存的资源偏好排序；本次 preference_overrides 优先于长期偏好（空数组/0/any 可取消对应约束），不会自动下载。",
+            description="仅用于补缺；普通指定季集找资源用 indexer.search_resources，无须证明缺失。先确认指定季集属于已播缺集，再按当前身份保存的资源偏好排序；本次 preference_overrides 优先于长期偏好（空数组/0/any 可取消对应约束），不会自动下载。",
             risk=RiskLevel.READ,
             domains=("resource_search", "library"),
             source_kind="resource_index",
@@ -255,7 +255,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="library.search_missing_season_resources",
-            description="单部按query/season核对；多部缺集找资源必须一次传items（最多12部/季），无需逐部重搜。每部可传episodes指定1到3个集号（例如两部S03E04/S01E07分别传[4]/[7]），不传则搜索最早缺集；每部最多搜索3个已播缺集，按偏好选可核验覆盖候选，统一最多12项全局编号和一个resource_candidates_ref，随后一次ingest.submit预检整批。未覆盖/季集映射未知/站点失败逐部报告，不等于全网无资源；不自动下载。",
+            description="仅用于媒体库补缺；普通指定季集找资源用 indexer.search_resources，不要求缺集审计。单部按query/season核对；多部缺集找资源必须一次传items（最多12部/季），无需逐部重搜。每部可传episodes指定1到3个集号（例如两部S03E04/S01E07分别传[4]/[7]），不传则搜索最早缺集；每部最多搜索3个已播缺集，按偏好选可核验覆盖候选，统一最多12项全局编号和一个resource_candidates_ref，随后一次ingest.submit预检整批。未覆盖/季集映射未知/站点失败逐部报告，不等于全网无资源；不自动下载。",
             risk=RiskLevel.READ,
             domains=("resource_search", "library"),
             source_kind="resource_index",

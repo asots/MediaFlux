@@ -254,6 +254,7 @@ def _verification(
         )[:80],
         "missing_count": _bounded_count(data.get("missing_count")),
         "verified_missing": verified,
+        "resource_search_attempted": False,
     }
 
 
@@ -276,7 +277,25 @@ def _season_verification(
         )[:80],
         "missing_count": _bounded_count(data.get("missing_count")),
         "verified_missing": False,
+        "resource_search_attempted": False,
     }
+
+
+def _not_missing_result(verification: dict[str, Any], audit: ToolResult) -> ToolResult:
+    target = f"第 {verification['season']} 季" + (
+        f"第 {verification['episode']} 集" if "episode" in verification else "指定集"
+    )
+    return ToolResult(
+        False,
+        "not_missing",
+        target + "未确认缺失，未执行资源站检索；不能据此判断没有资源",
+        data={"verification": verification, "episodes": []},
+        evidence=list(audit.evidence),
+        suggestions=[
+            "若用户要找指定资源而非补缺，继续用 indexer.search_resources 按片名、season、episode 检索；"
+            "无需让用户再次授权只读查询。若只问是否有缺集更新，则到此结束，不展示资源卡。"
+        ],
+    )
 
 
 def _episode_search_arguments(arguments: dict[str, Any], title: str) -> dict[str, Any]:
@@ -312,14 +331,7 @@ def search_missing_episode_resources(
 
     if not audit.ok or audit.status != "updates_available":
         if audit.status == "up_to_date":
-            return ToolResult(
-                False,
-                "not_missing",
-                f"第 {arguments['season']} 季第 {arguments['episode']} 集未被确认缺失",
-                data={"verification": verification},
-                evidence=list(audit.evidence),
-                suggestions=["可重新核对季集编号，或直接进行普通资源搜索。"],
-            )
+            return _not_missing_result(verification, audit)
         return ToolResult(
             False,
             audit.status,
@@ -343,18 +355,12 @@ def search_missing_episode_resources(
             suggestions=["请重新审计指定季集后再搜索。"],
         )
     if not target_missing:
-        return ToolResult(
-            False,
-            "not_missing",
-            f"第 {arguments['season']} 季第 {arguments['episode']} 集未被确认缺失",
-            data={"verification": verification},
-            evidence=list(audit.evidence),
-            suggestions=["可重新核对季集编号，或直接进行普通资源搜索。"],
-        )
+        return _not_missing_result(verification, audit)
 
     verification["verified_missing"] = True
     search_args = _episode_search_arguments(arguments, verification["title"])
     searched = search_resources(search_args)
+    verification["resource_search_attempted"] = True
     search_data = searched.data if isinstance(searched.data, dict) else {}
     ranked_search = rank_episode_search(
         search_data,
@@ -431,14 +437,7 @@ def search_missing_season_resources(
 
     if not audit.ok or audit.status != "updates_available":
         if audit.status == "up_to_date":
-            return ToolResult(
-                False,
-                "not_missing",
-                f"第 {arguments['season']} 季{'指定集' if requested_episodes else ''}没有确认缺集",
-                data={"verification": verification, "episodes": []},
-                evidence=list(audit.evidence),
-                suggestions=["可重新核对季度，或直接进行普通资源搜索。"],
-            )
+            return _not_missing_result(verification, audit)
         return ToolResult(
             False,
             audit.status,
@@ -481,14 +480,7 @@ def search_missing_season_resources(
         missing.append({"season": season, "episode": episode})
     missing.sort(key=lambda item: item["episode"])
     if not missing:
-        return ToolResult(
-            False,
-            "not_missing",
-            f"第 {arguments['season']} 季{'指定集' if requested_episodes else ''}没有确认缺集",
-            data={"verification": verification, "episodes": []},
-            evidence=list(audit.evidence),
-            suggestions=["可重新核对季度，或直接进行普通资源搜索。"],
-        )
+        return _not_missing_result(verification, audit)
 
     verification["verified_missing"] = True
     verification["missing_count"] = len(missing)
@@ -517,6 +509,7 @@ def search_missing_season_resources(
             per_episode_arguments, verification["title"]
         )
         searched = search_resources(search_args, timeout_seconds=remaining_seconds)
+        verification["resource_search_attempted"] = True
         raw_search_data = searched.data if isinstance(searched.data, dict) else {}
         search_data = rank_episode_search(
             raw_search_data,
@@ -654,6 +647,8 @@ def _search_missing_resource_batch(
             "ok": result.ok,
             "status": result.status,
             "summary": result.summary[:160],
+            "resource_search_attempted": verification.get("resource_search_attempted"),
+            "suggestions": list(result.suggestions),
             "positions": [],
             "review_positions": [],
             "uncovered_episodes": [],
@@ -788,6 +783,9 @@ def _search_missing_resource_batch(
         f"已核对 {len(groups)} 部/季，{proved_groups} 部有可提交候选"
         f"，{review_groups} 部找到待核对候选，共展示 {len(presented)} 项"
     )
+    unsearched = sum(group["resource_search_attempted"] is False for group in groups)
+    if unsearched:
+        summary += f"；{unsearched} 部未执行资源站检索，不能据此判断没有资源"
     result = ToolResult(
         any(item.ok for item in results),
         status,

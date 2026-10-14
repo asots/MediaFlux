@@ -234,6 +234,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(result.status, "inconclusive")
             search.assert_not_called()
+            self.assertFalse(result.data["verification"]["resource_search_attempted"])
 
     def test_only_searches_after_exact_missing_episode_is_verified(self):
         arguments = missing_episode_resource_arguments(
@@ -266,6 +267,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "success")
         self.assertTrue(result.data["verification"]["verified_missing"])
+        self.assertTrue(result.data["verification"]["resource_search_attempted"])
         self.assertEqual(result.data["verification"]["tmdb_id"], "12345")
         self.assertEqual(
             result.data["search"]["items"][0]["result_id"], "safe-result-id-1234"
@@ -476,6 +478,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             result = search_missing_episode_resources(arguments)
         self.assertTrue(result.ok)
         self.assertTrue(result.data["verification"]["verified_missing"])
+        self.assertTrue(result.data["verification"]["resource_search_attempted"])
         self.assertEqual(result.data["verification"]["library_name"], "美女库")
         audit.assert_called_once_with(
             {
@@ -513,6 +516,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertEqual(result.status, "unavailable")
         self.assertEqual(result.error, "safe indexer error")
         self.assertTrue(result.data["verification"]["verified_missing"])
+        self.assertTrue(result.data["verification"]["resource_search_attempted"])
         self.assertEqual(result.data["search"]["query"], "示例剧 S02E03")
         self.assertIn("agent_verification", [item.source for item in result.evidence])
         serialized = repr(result.to_dict())
@@ -553,6 +557,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(result.status, status)
             search.assert_not_called()
+            self.assertFalse(result.data["verification"]["resource_search_attempted"])
 
     def test_season_search_processes_verified_missing_episodes_in_order(self):
         arguments = missing_season_resource_arguments(
@@ -596,6 +601,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertEqual(result.data["remaining"], 0)
         self.assertEqual(result.data["failed"], 0)
         self.assertTrue(result.data["verification"]["verified_missing"])
+        self.assertTrue(result.data["verification"]["resource_search_attempted"])
         self.assertEqual(result.data["verification"]["missing_count"], 3)
         self.assertEqual(
             [item["episode_label"] for item in result.data["episodes"]],
@@ -644,6 +650,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(result.status, status)
             search.assert_not_called()
+            self.assertFalse(result.data["verification"]["resource_search_attempted"])
 
     def test_season_search_preserves_partial_results_and_remaining_count(self):
         arguments = missing_season_resource_arguments({"query": "示例剧", "season": 2})
@@ -768,6 +775,34 @@ class MultiWorkResourceTests(unittest.TestCase):
         self.assertEqual(result.status, "not_missing")
         self.assertIn("指定集", result.summary)
         search.assert_not_called()
+
+    def test_batch_distinguishes_skipped_search_from_empty_search_and_unknown_failure(self):
+        args = missing_season_resource_arguments({"items": [
+            {"query": title, "season": 1, "episodes": [7]}
+            for title in ("已在库", "缺集", "审计故障")
+        ]})
+        def audit(arguments, **kwargs):
+            if arguments["query"] == "审计故障":
+                raise RuntimeError("audit unavailable")
+            return _audit_result(
+                status="up_to_date" if arguments["query"] == "已在库" else "updates_available",
+                missing=[] if arguments["query"] == "已在库" else [{"season": 1, "episode": 7}],
+            )
+        with (
+            patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit),
+            patch("app.agent.episode_resource_actions.search_resources", return_value=_search_result(status="empty", items=[])) as search,
+            patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
+        ):
+            result = search_missing_season_resources(args)
+        search.assert_called_once()
+        groups = result.data["groups"]
+        self.assertEqual([g["resource_search_attempted"] for g in groups], [False, True, None])
+        self.assertIn("未执行资源站检索", groups[0]["summary"])
+        self.assertIn("indexer.search_resources", " ".join(groups[0]["suggestions"]))
+        self.assertIn("1 部未执行资源站检索", result.summary)
+        self.assertEqual(result.references, [])
+        self.assertEqual(result.data["items"], [])
+        self.assertEqual(result.data["recommended_positions"], [])
 
     def test_batch_exposes_unproved_arc_candidate_without_preselecting_it(self):
         from types import SimpleNamespace
@@ -993,6 +1028,7 @@ class MissingResourceInventoryFreshnessTests(unittest.TestCase):
                     self.assertFalse(result.data["verification"]["verified_missing"])
                 else:
                     self.assertTrue(result.data["verification"]["verified_missing"])
+                    self.assertTrue(result.data["verification"]["resource_search_attempted"])
                     if mode == "season":
                         self.assertEqual((result.data["missing_total"], result.data["processed"]), (3, 3))
 
