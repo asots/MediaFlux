@@ -47,6 +47,12 @@ PREFERENCE_PROPERTIES: dict[str, Any] = {
     "min_rating": {"type": "number", "minimum": 0, "maximum": 10},
     "exclude_played": {"type": "boolean"},
 }
+PREFERENCE_PROPERTIES["preferred_resolution"]["description"] = (
+    "软偏好/排序优先级。例如‘默认优先4K’只设置本字段为2160p，不同时设置最低分辨率。"
+)
+PREFERENCE_PROPERTIES["minimum_resolution"]["description"] = (
+    "硬性最低画质过滤；仅用户明确要求至少/不得低于某分辨率时设置。‘优先4K’不代表排除1080p，不应改动此字段。"
+)
 
 RESOURCE_PREFERENCE_FIELDS = (
     "preferred_resolution", "minimum_resolution", "preferred_hdr", "preferred_codecs",

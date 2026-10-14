@@ -31,6 +31,23 @@ from app.repositories.media_experience import (
     today_content_summary,
 )
 
+_PREFERENCE_LABELS = {
+    "preferred_server": "首选媒体服务器", "preferred_download_target": "默认下载目标",
+    "preferred_resolution": "首选分辨率", "minimum_resolution": "最低分辨率",
+    "preferred_hdr": "首选动态范围", "preferred_codecs": "首选编码",
+    "preferred_subtitles": "首选字幕", "preferred_audio_languages": "首选音轨语言",
+    "preferred_release_groups": "首选发布组", "excluded_keywords": "排除关键词",
+    "preferred_genres": "偏好题材", "excluded_genres": "排除题材",
+    "max_episode_size_gb": "单集最大大小（GiB，0为不限）", "min_rating": "最低评分",
+    "exclude_played": "排除已看内容",
+}
+
+
+_PREFERENCE_VALUES = {
+    "any": "不限", "dolby_vision": "杜比视界", "hdr10": "HDR10", "hdr10+": "HDR10+", "sdr": "SDR",
+    "guangya": "光鸭", "qb": "qBittorrent", "both": "两者", "jellyfin": "Jellyfin", "emby": "Emby",
+}
+
 _RULE_FIELDS = {
     "enabled",
     "notify_on_missing",
@@ -304,11 +321,20 @@ def prepare_set_preferences(
     current = get_media_preferences(_owner_digest(context))
     proposed = {key: arguments.get(key, current[key]) for key in PREFERENCE_FIELDS}
     snapshot = {"current": current, "proposed": proposed}
+    changes = []
+    for key, value in arguments.items():
+        if isinstance(value, list):
+            text = "、".join(value) or "清空"
+        elif isinstance(value, bool):
+            text = "是" if value else "否"
+        else:
+            text = _PREFERENCE_VALUES.get(str(value), str(value))
+        changes.append(f"{_PREFERENCE_LABELS[key]}：{text}")
     return ToolResult(
         True,
         "confirmation_required",
         "确认后将保存当前会话的显式媒体偏好",
-        data={"current": _public_preferences(current), "proposed": proposed},
+        data={"current": _public_preferences(current), "proposed": proposed, "effects": changes},
     ), _fingerprint(snapshot)
 
 

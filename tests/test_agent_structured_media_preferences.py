@@ -87,6 +87,13 @@ def test_structured_preferences_freeze_then_persist_merge_and_owner_isolation(pr
     assert preview.status == "confirmation_required"
     assert not get_preferences({}, context).data["explicit"]
     assert preview.data["proposed"]["preferred_release_groups"] == ["BlackTV"]
+    assert "首选分辨率：2160p" in preview.data["effects"]
+    assert "首选编码：hevc、av1" in preview.data["effects"]
+    assert "首选动态范围：杜比视界" in preview.data["effects"]
+    assert "排除已看内容：是" in preview.data["effects"]
+    from app.agent.public_safety import sanitize_public_text
+    public_changes = sanitize_public_text("；".join(preview.data["effects"]), limit=2000)
+    assert "首选分辨率:2160p" in public_changes and "内部状态" not in public_changes
     result = set_preferences_confirmed(updates, fingerprint, context)
     assert result.ok and result.data["preferred_resolution"] == "2160p"
     assert result.data["preferred_codecs"] == ["hevc", "av1"]
