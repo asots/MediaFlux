@@ -20,24 +20,15 @@ class AgentKernelCapabilityCorpusTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.session = build_agent_kernel(model=NoModel())
 
-    def test_global_capability_question_prefers_agent_catalog_over_cloud_catalog(
-        self,
-    ) -> None:
-        selection = self.session.retriever.retrieve(
-            "你是谁？你能做什么？",
-            self.session.catalog,
-            context={
-                "owner": "corpus-owner",
-                "session_id": "corpus-session",
-                "channel": "test",
-                "reference_kinds": (),
-            },
-        )
-        self.assertIn("agent.capabilities", selection.names)
-        self.assertGreater(
-            selection.scores["agent.capabilities"],
-            selection.scores["guangya.capabilities"],
-        )
+    def test_global_and_cloud_questions_use_one_capability_catalog(self) -> None:
+        for message in ("你是谁？你能做什么？", "列出光鸭能力和哪些操作需要确认"):
+            with self.subTest(message=message):
+                selection = self.session.retriever.retrieve(
+                    message, self.session.catalog,
+                    context={"owner": "corpus-owner", "session_id": "corpus-session", "channel": "test"},
+                )
+                self.assertIn("agent.capabilities", selection.names)
+                self.assertNotIn("guangya.capabilities", selection.names)
 
     def test_real_failure_corpus_retrieves_required_atomic_capabilities(self) -> None:
         failures: list[str] = []

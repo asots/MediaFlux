@@ -94,7 +94,6 @@ _REQUIRED_PROJECT_TOOLS = {
     "media.recently_added",
     "media.recently_played",
     "media.recommend_from_library",
-    "guangya.capabilities",
     "guangya.account.status",
     "guangya.connection_status",
     "guangya.fs.query",

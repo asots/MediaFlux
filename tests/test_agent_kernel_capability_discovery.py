@@ -518,3 +518,24 @@ def test_ranked_discovery_is_explicitly_a_subset_not_domain_total():
     assert full.data["loaded_tools"] == result.data["loaded_tools"]
     assert "next_offset" not in full.data
     assert {t.name for t in finder.consume()} == set(result.data["loaded_tools"])
+
+
+def test_cloud_inventory_has_one_authoritative_session_catalog():
+    specs = build_tool_specs()
+    assert 'guangya.capabilities' not in {s.name for s in specs}
+    catalog = ToolCatalog(adapt_tool_spec(s) for s in specs)
+    visible = [t for t in catalog.visible() if t.name.startswith('guangya.')]
+    domains = sorted({t.domain for t in visible})
+    finder = CapabilityDiscovery(catalog, context={})
+    result = finder.search({'catalog': {'domains': domains}})
+    returned = {t['name']: t for t in result['tools']}
+    assert {t.name for t in visible} <= returned.keys()
+    assert all(returned[t.name]['effect'] == t.effect.value for t in visible)
+    assert result['catalog_only'] and not result['loaded_tools']
+    assert result['catalog_summary']['total'] == len(result['tools'])
+    assert not any('upload' in name for name in returned)
+
+    # 当前授权/可见性裁掉的工具不能从另一份静态清单重新出现。
+    restricted = ToolCatalog([t for t in catalog.visible() if t.name != 'guangya.recycle.clear'])
+    restricted_result = CapabilityDiscovery(restricted, context={}).search({'catalog': {'domains': domains}})
+    assert 'guangya.recycle.clear' not in {t['name'] for t in restricted_result['tools']}

@@ -150,7 +150,6 @@ _TOOL_RATE_LIMITS = {
     "provider.change.preview": 4,
     "provider.change.execute": 3,
     "provider.job.status": 12,
-    "guangya.capabilities": 12,
     "guangya.account.status": 8,
     "guangya.connection_status": 4,
     "guangya.fs.query": 8,

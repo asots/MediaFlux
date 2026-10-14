@@ -52,10 +52,8 @@ from app.agent.guangya_schedule_config_actions import (
     summarize_guangya_organize_schedule_policy,
 )
 from app.agent.guangya_workspace_actions import (
-    guangya_capabilities_arguments,
     guangya_fs_query_arguments,
     query_guangya_filesystem,
-    summarize_guangya_capabilities,
 )
 from app.agent.models import (
     RiskLevel,
@@ -83,30 +81,6 @@ from .shared import (
 def register_specs(
     registry, *, resource_store, active_ingest_store, ingest_actions
 ) -> None:
-    registry.register(
-        ToolSpec(
-            name="guangya.capabilities",
-            description=(
-                "读取 Agent 当前开放的光鸭业务能力与安全边界。列出通用文件读取、受控写入、"
-                "回收站和确认策略；不返回 Provider 原始 SDK、凭据或对象 ID。"
-            ),
-            risk=RiskLevel.READ,
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
-            handler=summarize_guangya_capabilities,
-            validator=guangya_capabilities_arguments,
-            domains=("cloud_files", "organize", "storage_hygiene"),
-            source_kind="guangya_capability_policy",
-            freshness="derived",
-            examples=(
-                "光鸭 Agent 现在能读取和操作什么",
-                "列出光鸭能力和哪些操作需要确认",
-            ),
-        )
-    )
     registry.register(
         ToolSpec(
             name="guangya.connection_status",

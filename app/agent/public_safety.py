@@ -121,7 +121,6 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "discovery.watchlist_summaries": "探索收藏列表",
     "downloads.diagnose_queue": "下载队列检查",
     "downloads.retry_submission": "重新提交下载请求",
-    "guangya.capabilities": "光鸭能力清单",
     "guangya.account.status": "光鸭账号状态",
     "guangya.connection_status": "光鸭连接检查",
     "guangya.directory_scrape.inspect": "光鸭刮削检查",

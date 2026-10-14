@@ -13,7 +13,7 @@ import httpx
 from app.agent import guangya_account_actions as account_actions
 from app.agent import guangya_recycle_actions as recycle_actions
 from app.agent import guangya_share_actions as share_actions
-from app.agent import guangya_workspace_actions as workspace_actions
+from app.agent.domain_catalog import build_tool_specs
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
@@ -171,11 +171,10 @@ class GuangYaSdkClientTests(unittest.TestCase):
                 with self.assertRaises(GuangYaWriteRejected):
                     _Client(raw).create_user_share(["file-1"], title="Probe")
 
-    def test_agent_capability_summary_keeps_local_upload_disabled(self) -> None:
-        result = workspace_actions.summarize_guangya_capabilities({})
-
-        self.assertNotIn("local_upload", result.data["write_operations"])
-        self.assertEqual(result.data["agent_disabled_operations"], ["local_upload"])
+    def test_agent_catalog_keeps_local_upload_disabled(self) -> None:
+        cloud = [spec for spec in build_tool_specs() if spec.name.startswith("guangya.")]
+        self.assertTrue(cloud)
+        self.assertFalse(any("upload" in spec.name for spec in cloud))
 
 
 class GuangYaLocalUploadTests(unittest.TestCase):
