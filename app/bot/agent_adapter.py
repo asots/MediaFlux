@@ -174,7 +174,7 @@ class TelegramAgentExecutor:
         self._limits = (max_queries, max_controls)
         self._lock = threading.RLock()
         self._pool: ThreadPoolExecutor | None = None
-        self._jobs: dict[Future, bool] = {}
+        self._jobs: dict[Future, tuple[bool, tuple[str, int] | None]] = {}
         self._closing = True
         self._cancellation = CancellationToken()
 
@@ -189,14 +189,20 @@ class TelegramAgentExecutor:
             self._closing = False
             return True
 
-    def submit(self, function, *args, control: bool = False) -> Future | None:
+    def submit(
+        self, function, *args, control: bool = False,
+        message_key: tuple[str, int] | None = None,
+    ) -> Future | None:
         with self._lock:
-            if self._closing or sum(kind == control for kind in self._jobs.values()) >= self._limits[control]:
+            if self._closing or sum(kind == control for kind, _ in self._jobs.values()) >= self._limits[control]:
+                return None
+            # 同一张卡从预检到最终编辑只有一个写者，旧回调不能覆盖后续确认卡。
+            if message_key is not None and any(key == message_key for _, key in self._jobs.values()):
                 return None
             context = copy_context()
             context.run(AGENT_CANCELLATION.set, self._cancellation)
             future = self._pool.submit(context.run, function, *args)
-            self._jobs[future] = control
+            self._jobs[future] = (control, message_key)
             future.add_done_callback(self._finished)
             return future
 

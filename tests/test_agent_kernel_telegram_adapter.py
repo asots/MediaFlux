@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import types
 import unittest
+from contextlib import contextmanager
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, patch
 
@@ -105,6 +106,14 @@ class FakeBot:
 
     def stop_polling(self):
         pass
+
+
+class RegisteredFakeBot(FakeBot, test_production.TelegramBotTests.FakeBot):
+    """同时复用消息记录和正式注册装饰器，不绕过 handler → executor。"""
+
+    def __init__(self):
+        FakeBot.__init__(self)
+        test_production.TelegramBotTests.FakeBot.__init__(self)
 
 
 class FakeDraftBot(FakeBot):
@@ -1479,6 +1488,368 @@ class TelegramAgentExecutorTests(unittest.TestCase):
         finally:
             release_effect.set()
             executor.stop(timeout=3)
+
+    @contextmanager
+    def _registered_executor(self, *, max_queries=2, max_controls=2):
+        import threading
+        from app.bot import handlers
+
+        bot = RegisteredFakeBot()
+        executor = adapter.TelegramAgentExecutor(
+            max_queries=max_queries, max_controls=max_controls,
+        )
+        submissions, finished = [], {}
+        submit, finish = executor.submit, executor._finished
+
+        def record_submit(function, *args, **kwargs):
+            future = submit(function, *args, **kwargs)
+            submissions.append((future, kwargs))
+            return future
+
+        def record_finished(future):
+            try:
+                finish(future)
+            finally:
+                finished.setdefault(future, threading.Event()).set()
+
+        values = {"TG_CHAT_ID": "-100", "TG_AGENT_ALLOWED_USER_IDS": "7"}
+        with patch.object(adapter, "AGENT_EXECUTOR", executor), patch.object(
+            handlers, "get", side_effect=lambda key, default="": values.get(key, default)
+        ), patch.object(executor, "submit", side_effect=record_submit), patch.object(
+            executor, "_finished", side_effect=record_finished
+        ):
+            handlers._register_commands(bot, test_production.TelegramBotTests._telebot_types())
+            try:
+                yield bot, executor, submissions, finished
+            finally:
+                self.assertTrue(executor.stop(timeout=3), "测试必须释放全部受控任务")
+
+    @staticmethod
+    def _registered_callback(bot, call):
+        return next(
+            handler for filters, handler in bot.callback_handlers
+            if filters.get("func") and filters["func"](call)
+        )
+
+    def _wait_for_job_release(self, future, finished):
+        import threading
+
+        self.assertTrue(
+            finished.setdefault(future, threading.Event()).wait(3),
+            "Future.result() 可能先于 _finished；必须等真实 job/key 清理完毕",
+        )
+
+    def test_registered_callback_message_key_covers_all_agent_callback_routes(self):
+        import threading
+
+        for data, handler_name, control in (
+            ("agk:c:plan_1234567890abcdef", "handle_agent_callback", True),
+            ("agp:status", "handle_agent_patrol_callback", False),
+            ("tgm:abcdefgh", "handle_agent_model_callback", True),
+        ):
+            with self.subTest(data=data):
+                entered, release = threading.Event(), threading.Event()
+
+                def callback(*args):
+                    entered.set()
+                    self.assertTrue(release.wait(3))
+
+                with patch.object(adapter, handler_name, side_effect=callback) as execution, \
+                        self._registered_executor() as (bot, executor, submissions, finished):
+                    try:
+                        call = Call(data, Message(user_id=0, message_id=33))
+                        self._registered_callback(bot, call)(call)
+                        self.assertTrue(entered.wait(2))
+                        job, kwargs = submissions[0]
+                        self.assertEqual(kwargs.get("message_key"), ("-100", 33))
+                        self.assertEqual(kwargs["control"], control)
+                        self.assertEqual(execution.call_count, 1)
+                        release.set()
+                        job.result(2)
+                        self._wait_for_job_release(job, finished)
+                    finally:
+                        release.set()
+
+    def test_registered_callback_duplicate_keeps_real_kernel_next_approval(self):
+        import threading
+        from app.agent.confirmation import ConfirmationStore
+        from app.agent.kernel.capabilities import (
+            CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect,
+        )
+        from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+        from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+        from app.agent.kernel.persistence import SQLiteKernelStore
+        from app.agent.kernel.pipeline import ToolPipeline
+        from app.agent.kernel.session import AgentSession
+        from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
+        from tests.support import isolated_test_database
+        from tests.test_agent_kernel_core import ScriptedModel
+
+        entered, release = threading.Event(), threading.Event()
+        executions = []
+
+        def execute(*args):
+            executions.append("old-plan")
+            return {"ok": True, "summary": "旧计划已完成"}
+
+        def tool(name, summary):
+            return KernelToolSpec(
+                name=name, domain="download", description=summary, examples=(summary,),
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                effect=ToolEffect.WRITE,
+                prepare=lambda *_: PreparedEffect(
+                    preview={"summary": summary}, snapshot_fingerprint=name,
+                ),
+                execute_confirmed=execute,
+            )
+
+        def model_round(name, call_id):
+            return [
+                ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(call_id, name, {})),
+                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+            ]
+
+        class BlockingTransport(FakeTelegramTransport):
+            async def confirm(self, envelope, *, observe=None):
+                self.confirmations.append(envelope)
+                entered.set()
+                # 不等 B 的预检：新协议必须在注册入口拒绝 B。
+                if not await asyncio.to_thread(release.wait, 3):
+                    raise AssertionError("测试未放行 A")
+                return await transport.confirm(envelope, observe=observe)
+
+        with isolated_test_database("registered-callback.db"):
+            store = SQLiteKernelStore(secret_provider=lambda: "registered-callback-test-secret")
+            catalog = ToolCatalog([
+                tool("download.pause", "旧计划：暂停下载"),
+                tool("download.resume", "新计划：恢复下载"),
+            ])
+            model = ScriptedModel([
+                model_round("download.pause", "old-write"),
+                model_round("download.resume", "next-write"),
+            ])
+            session = AgentSession(
+                model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                pipeline=ToolPipeline(
+                    catalog=catalog, state_store=store,
+                    effect_store=ConfirmationEffectPlanStore(ConfirmationStore()),
+                ),
+                state_store=store,
+            )
+            transport = TelegramKernelTransport(session)
+            gated_transport = BlockingTransport(None)
+            owner = adapter.telegram_agent_owner(-100, 7)
+            session_id = adapter.telegram_agent_session_id(-100, 7)
+            preview = asyncio.run(transport.query(QueryEnvelope(
+                owner=owner, session_id=session_id, message="先暂停下载，再预览恢复下载",
+            )))
+            self.assertIsNotNone(preview.approval)
+            source = Message("旧确认卡", user_id=0, message_id=33)
+            call_a = Call(f"agk:c:{preview.approval.plan_id}", source)
+            call_b = Call(call_a.data, source)
+            call_a.id, call_b.id = "callback-A", "callback-B"
+            runtime = types.SimpleNamespace(telegram=gated_transport, store=store)
+
+            with patch.object(adapter, "telegram_agent_access", return_value="allowed"), \
+                    patch.object(adapter.agent_rate_limiter, "allow", return_value=True), \
+                    patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime), \
+                    patch.object(adapter, "_settle_candidate_draft"), \
+                    patch.object(adapter, "handle_agent_callback", wraps=adapter.handle_agent_callback) as execution, \
+                    self._registered_executor(max_queries=0, max_controls=2) as (bot, executor, submissions, finished):
+                try:
+                    callback = self._registered_callback(bot, call_a)
+                    callback(call_a)
+                    job_a = submissions[0][0]
+                    self.assertTrue(entered.wait(2))
+                    initial_edits = list(bot.edits)
+                    self.assertTrue(initial_edits)
+                    callback(call_b)
+                    self.assertIsNone(submissions[1][0], "同物理卡片必须在 executor 入口拒绝")
+                    self.assertEqual(execution.call_count, 1, "B 不得进入 handle_agent_callback")
+                    self.assertEqual(len(gated_transport.confirmations), 1)
+                    self.assertEqual(bot.edits, initial_edits, "被拒 B 只能 ACK，不能修改原卡")
+                    self.assertEqual(bot.answers[-1][0], call_b.id)
+                    self.assertTrue(bot.answers[-1][2]["show_alert"])
+                    self.assertIn("正忙", bot.answers[-1][1])
+
+                    release.set()
+                    job_a.result(3)
+                    self._wait_for_job_release(job_a, finished)
+                    state = asyncio.run(store.load(owner=owner, session_id=session_id))
+                    new_plan = state.pending_effect_plan_id
+                    self.assertTrue(new_plan)
+                    self.assertNotEqual(new_plan, preview.approval.plan_id)
+                    self.assertEqual(executions, ["old-plan"])
+                    self.assertEqual(len(model.requests), 2)
+                    final_card = bot.edits[-1]
+                    self.assertEqual(final_card[1:3], (-100, 33))
+                    self.assertIn("旧计划已完成", final_card[0])
+                    self.assertIn("新计划：恢复下载", final_card[0])
+                    self.assertEqual(
+                        [(button.text, button.callback_data) for button in final_card[3]["reply_markup"].buttons],
+                        [("确认执行", f"agk:c:{new_plan}"), ("取消", f"agk:x:{new_plan}"),
+                         ("只解释影响", f"agk:e:{new_plan}")],
+                    )
+                    self.assertEqual(bot.sent, [])
+                    self.assertEqual(bot.replies, [])
+
+                    # 完成后同物理卡片可再入；陈旧 plan 由既有 adapter 预检拒绝。
+                    call_b.id = "callback-after-completion"
+                    edits_before_retry = list(bot.edits)
+                    callback(call_b)
+                    retry_job = submissions[2][0]
+                    self.assertIsNotNone(retry_job)
+                    retry_job.result(2)
+                    self._wait_for_job_release(retry_job, finished)
+                    self.assertEqual(execution.call_count, 2)
+                    self.assertEqual(len(gated_transport.confirmations), 1)
+                    self.assertEqual(bot.edits, edits_before_retry)
+                    self.assertIn("已处理或被替代", bot.answers[-1][1])
+                finally:
+                    release.set()
+
+    def test_registered_callback_distinct_messages_run_in_parallel(self):
+        import threading
+
+        entered = [threading.Event(), threading.Event()]
+        release = threading.Event()
+
+        def callback(bot, call, telebot):
+            entered[call.message.message_id - 33].set()
+            self.assertTrue(release.wait(3))
+
+        with patch.object(adapter, "handle_agent_callback", side_effect=callback) as execution, \
+                self._registered_executor(max_queries=0, max_controls=2) as (bot, executor, submissions, finished):
+            try:
+                for index in range(2):
+                    call = Call("agk:c:plan_1234567890abcdef", Message(user_id=0, message_id=33 + index))
+                    call.id = f"callback-{index}"
+                    self._registered_callback(bot, call)(call)
+                self.assertTrue(all(event.wait(2) for event in entered), "不同卡片不能被串行化")
+                self.assertTrue(all(job is not None for job, _ in submissions))
+                self.assertEqual(execution.call_count, 2)
+                self.assertEqual(bot.answers, [])
+                self.assertEqual(bot.edits, [])
+                release.set()
+                for job, _ in submissions:
+                    job.result(2)
+                    self._wait_for_job_release(job, finished)
+            finally:
+                release.set()
+
+    def test_registered_callback_releases_message_key_on_completion_and_exception(self):
+        import threading
+
+        for failure in (None, RuntimeError("callback failed"), asyncio.CancelledError("callback cancelled")):
+            with self.subTest(outcome=type(failure).__name__):
+                entered, release = threading.Event(), threading.Event()
+
+                def callback(bot, call, telebot):
+                    if call.id == "first":
+                        entered.set()
+                        self.assertTrue(release.wait(3))
+                        if failure is not None:
+                            raise failure
+                    return call.id
+
+                with patch.object(adapter, "handle_agent_callback", side_effect=callback) as execution, \
+                        self._registered_executor(max_queries=0, max_controls=2) as (bot, executor, submissions, finished):
+                    try:
+                        call = Call("agk:c:plan_1234567890abcdef", Message(user_id=0, message_id=33))
+                        call.id = "first"
+                        registered = self._registered_callback(bot, call)
+                        registered(call)
+                        first_job = submissions[0][0]
+                        self.assertTrue(entered.wait(2))
+                        duplicate = Call(call.data, call.message)
+                        duplicate.id = "duplicate"
+                        registered(duplicate)
+                        self.assertIsNone(submissions[1][0])
+                        self.assertEqual(execution.call_count, 1)
+                        self.assertEqual(bot.answers[-1][0], duplicate.id)
+                        release.set()
+                        if failure is None:
+                            self.assertEqual(first_job.result(2), "first")
+                        else:
+                            with self.assertRaises(type(failure)):
+                                first_job.result(2)
+                        self._wait_for_job_release(first_job, finished)
+                        retry = Call(call.data, call.message)
+                        retry.id = "retry"
+                        registered(retry)
+                        retry_job = submissions[2][0]
+                        self.assertIsNotNone(retry_job, "完成或异常后必须释放同一 message key")
+                        self.assertEqual(retry_job.result(2), "retry")
+                        self._wait_for_job_release(retry_job, finished)
+                        self.assertEqual(execution.call_count, 2)
+                    finally:
+                        release.set()
+
+    def test_registered_stop_retains_control_capacity_and_messages_have_no_key(self):
+        import threading
+
+        callback_entered, query_entered, stopped = (threading.Event() for _ in range(3))
+        release = threading.Event()
+
+        def callback(*args):
+            callback_entered.set()
+            self.assertTrue(release.wait(3))
+
+        def query(*args):
+            query_entered.set()
+            self.assertTrue(release.wait(3))
+
+        with patch.object(adapter, "handle_agent_callback", side_effect=callback) as execution, \
+                patch.object(adapter, "handle_agent_message", side_effect=query), \
+                patch.object(adapter, "handle_agent_stop", side_effect=lambda *args: stopped.set()), \
+                self._registered_executor(max_queries=1, max_controls=2) as (bot, executor, submissions, finished):
+            try:
+                source = Message("检查媒体库", user_id=0, message_id=33)
+                call = Call("agk:c:plan_1234567890abcdef", source)
+                call.id = "callback-A"
+                registered = self._registered_callback(bot, call)
+                registered(call)
+                self.assertTrue(callback_entered.wait(2))
+                duplicate = Call(call.data, source)
+                duplicate.id = "callback-B"
+                registered(duplicate)
+                self.assertIsNone(submissions[1][0])
+                self.assertEqual(execution.call_count, 1)
+                self.assertEqual(bot.answers[-1][0], duplicate.id)
+
+                # 即使物理坐标相同，普通 message /stop 也没有 callback key。
+                message = Message("检查媒体库", message_id=33)
+                receive = next(
+                    handler for filters, handler in bot.message_handlers
+                    if filters.get("func") and filters.get("content_types") == ["text"]
+                    and filters["func"](message)
+                )
+                receive(message)
+                self.assertTrue(query_entered.wait(2))
+                query_job, query_kwargs = submissions[2]
+                self.assertIsNone(query_kwargs.get("message_key"))
+                self.assertFalse(query_kwargs["control"])
+                self.assertIsNotNone(query_job)
+
+                stop = next(
+                    handler for filters, handler in bot.message_handlers
+                    if "stop" in filters.get("commands", ())
+                )
+                stop(Message("/stop", message_id=33))
+                stop_job, stop_kwargs = submissions[3]
+                self.assertIsNone(stop_kwargs.get("message_key"))
+                self.assertTrue(stop_kwargs["control"])
+                self.assertIsNotNone(stop_job, "拒绝重复 callback 不得耗尽 control 容量")
+                self.assertTrue(stopped.wait(2), "/stop 必须在 A 与普通查询阻塞时仍可执行")
+                stop_job.result(2)
+                self._wait_for_job_release(stop_job, finished)
+                release.set()
+                for job, _ in submissions:
+                    if job is not None:
+                        job.result(2)
+                        self._wait_for_job_release(job, finished)
+            finally:
+                release.set()
 
     def test_registered_handlers_return_while_queries_run_and_controls_still_dispatch(self):
         import threading

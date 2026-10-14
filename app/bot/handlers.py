@@ -1408,7 +1408,9 @@ def _register_commands(bot, telebot):
         raise RuntimeError("上一代 Telegram Agent 任务尚未结束")
 
     def submit_agent(function, *args, source, control=False):
-        if AGENT_EXECUTOR.submit(function, *args, control=control) is not None:
+        message = getattr(source, "message", None)
+        message_key = (str(message.chat.id), int(message.message_id)) if message is not None else None
+        if AGENT_EXECUTOR.submit(function, *args, control=control, message_key=message_key) is not None:
             return
         notice = "Media Agent 正忙或正在停止，请稍后重试。"
         if getattr(source, "message", None) is not None:
