@@ -110,16 +110,7 @@ def validate_proposal(value: dict) -> dict:
     operation = value.get("operation")
     if operation not in _OPERATION_FIELDS:
         raise ValueError("invalid task operation")
-    _object(value, {"operation", "expected", *_OPERATION_FIELDS[operation]})
-    expected = value["expected"]
-    if expected is not None:
-        _object(expected, set(IDENTITY))
-        _text(expected["task_id"], 64)
-        for key in ("epoch", "revision"):
-            if type(expected[key]) is not int or expected[key] < 1:
-                raise ValueError("invalid task version")
-    elif operation != "create":
-        raise ValueError("task identity required")
+    _object(value, {"operation", *_OPERATION_FIELDS[operation]})
     if "source" in value:
         _text(value["source"], 2048)
     if operation in {"create", "revise"}:
@@ -175,7 +166,7 @@ def proposal(arguments: dict, context: Any) -> TaskPatch:
         if not any(source in text for text in history):
             raise ValueError("task source must be current admitted user text or verified history for create")
     return TaskPatch(
-        args["expected"],
+        identity(context.current_task),
         args["operation"],
         args,
         context.request_id,
@@ -194,7 +185,7 @@ def observation_patch(
     call_id: str,
     observations: dict[str, dict | None] | None,
 ) -> TaskPatch | None:
-    if not task or task["status"] == "cancelled" or not observations:
+    if not task or task["status"] in {"complete", "cancelled"} or not observations:
         return None
     facts = {}
     for component, fact in observations.items():
@@ -263,8 +254,8 @@ def reduce_task(
     operation, args = patch.operation, patch.payload
     checkpoint_evidence: dict[str, str] = {}
     if operation == "create":
-        if current is not None and current["status"] != "cancelled":
-            raise TaskConflict("cancel existing task before create")
+        if current is not None and current["status"] not in {"complete", "cancelled"}:
+            raise TaskConflict("finish or cancel existing task before create")
         task = {"v": 1, "task_id": patch.new_id, "epoch": 1, "revision": 0}
     else:
         if current is None or current["status"] == "cancelled":
@@ -400,15 +391,6 @@ def _task_input_schema() -> dict:
     text = {"type": "string", "minLength": 1}
     properties = {
         "operation": {"type": "string", "enum": list(_OPERATION_FIELDS)},
-        "expected": {
-            "type": ["object", "null"],
-            "properties": {
-                "task_id": {**text, "maxLength": 64},
-                **{key: {"type": "integer", "minimum": 1} for key in ("epoch", "revision")},
-            },
-            "required": list(IDENTITY), "additionalProperties": False,
-            "description": "null only for first create; otherwise exact committed task_id/epoch/revision.",
-        },
         "source": {
             **text, "maxLength": 2048,
             "description": "Exact user quote. Create accepts original user history; revise/cancel require current user text.",
@@ -463,15 +445,14 @@ def _task_input_schema() -> dict:
     }
     return {
         "type": "object", "properties": properties,
-        "required": ["operation", "expected"], "additionalProperties": False,
+        "required": ["operation"], "additionalProperties": False,
         "oneOf": [
             {
                 "properties": {
-                    **{key: {} for key in ("expected", *fields)},
+                    **{key: {} for key in fields},
                     "operation": {"enum": [operation]},
-                    **({"expected": {"type": "object"}} if operation != "create" else {}),
                 },
-                "required": ["operation", "expected", *fields],
+                "required": ["operation", *fields],
                 "additionalProperties": False,
             }
             for operation, fields in _OPERATION_FIELDS.items()
@@ -492,7 +473,7 @@ def task_tool():
             "not connectivity/repairs. No write authority. "
             "create accepts exact current/historical user source; revise/cancel require current user source. "
             "checkpoint uses task.verified_facts evidence_ids (not artifact refs), plus blockers. "
-            "expected=null only for first create, otherwise exact task_id/epoch/revision."
+            "Version checks are server-owned. Create replaces complete/cancelled tasks; finish or cancel active tasks first."
         ),
         examples=("持久任务清单 检查点 剩余义务 恢复", "persistent task checklist checkpoint resume remaining obligations"),
         input_schema=_task_input_schema(),

@@ -175,20 +175,15 @@ def test_stale_cleanup_preserves_newer_authority(winner):
             lease, state = await runtime.store.claim_continuation(stale, runtime.session.continuation_binding)
             task = state.metadata['task']
             await runtime.store.commit(lease, task_patch=TaskPatch(identity(task), 'cancel',
-                {'operation': 'cancel', 'expected': identity(task), 'source': GOAL}, 'source', GOAL))
+                {'operation': 'cancel', 'source': GOAL}, 'source', GOAL))
             if winner in {'task', 'new_wait'}:
                 script = WaitScript()
                 if winner == 'task':
                     script.steps = ['discover', 'create', 'finish']
                 script.prefix = 'new-task'
-                cancelled = await runtime.store.load(owner=OWNER, session_id='wait-control')
-                from unittest.mock import patch
-                from tests.test_agent_task_first_slice import declaration
-                args = {**declaration(), 'expected': identity(cancelled.metadata['task'])}
                 runtime.session.model = script.adapter
-                with patch('tests.test_agent_read_wait_lifecycle.declaration', return_value=args):
-                    events = [e async for e in runtime.session.run(AgentInput(message=GOAL, owner=OWNER,
-                        session_id='wait-control', request_id='new-source'))]
+                events = [e async for e in runtime.session.run(AgentInput(message=GOAL, owner=OWNER,
+                    session_id='wait-control', request_id='new-source'))]
                 assert events[-1].payload.get('status') == ('waiting' if winner == 'new_wait' else 'success')
         before = await runtime.store.load(owner=OWNER, session_id='wait-control')
         if winner in {'task', 'new_wait'}:

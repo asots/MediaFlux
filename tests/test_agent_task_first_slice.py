@@ -32,7 +32,6 @@ OWNER = web_kernel_owner("admin")
 def declaration():
     return {
         "operation": "create",
-        "expected": None,
         "source": GOAL,
         "root_goal": GOAL,
         "constraints": ["仅观察、不修改"],
@@ -124,9 +123,6 @@ class NativeScript:
                 "agent__task",
                 {
                     "operation": "checkpoint",
-                    "expected": {
-                        k: task.get(k) for k in ("task_id", "epoch", "revision")
-                    },
                     "evidence_ids": [
                         f["evidence_id"]
                         for f in task.get("verified_facts", [])

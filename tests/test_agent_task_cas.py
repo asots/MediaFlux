@@ -32,12 +32,12 @@ def task_store(tmp_path):
     db.configure_database(previous[0], test_mode=previous[1])
 
 
-def control(args):
-    return proposal(args, SimpleNamespace(request_id="request", user_source=GOAL))
+def control(args, task=None):
+    return proposal(args, SimpleNamespace(request_id="request", user_source=GOAL, current_task=task))
 
 
 def command(task, operation, **extra):
-    return control({"operation": operation, "expected": identity(task), **extra})
+    return control({"operation": operation, **extra}, task)
 
 
 def observe(task, component="tmdb", *, success=True, owner=OWNER):
@@ -260,8 +260,8 @@ def test_evidence_scope_lifecycle_and_component_blockers():
     )
     assert done["status"] == "complete"
     revised = declaration()
-    revised.update(operation="revise", expected=identity(done))
-    changed = apply(done, control(revised))
+    revised.update(operation="revise")
+    changed = apply(done, control(revised, done))
     assert changed["epoch"] == 2 and changed["verified_facts"] == []
     with pytest.raises(ValueError):
         apply(
@@ -272,8 +272,7 @@ def test_evidence_scope_lifecycle_and_component_blockers():
     with pytest.raises(TaskConflict):
         apply(cancelled, control(declaration()))
     replacement = declaration()
-    replacement["expected"] = identity(cancelled)
-    fresh = apply(cancelled, control(replacement))
+    fresh = apply(cancelled, control(replacement, cancelled))
     assert fresh["task_id"] != cancelled["task_id"] and (
         fresh["epoch"],
         fresh["revision"],
@@ -354,8 +353,8 @@ def test_blocker_origins_coexist_and_remain_bounded():
         with pytest.raises(ValueError):
             command(task, "checkpoint", evidence_ids=[], blockers=values)
     revised = declaration()
-    revised.update(operation="revise", expected=identity(task))
-    assert apply(task, control(revised))["blockers"] == []
+    revised.update(operation="revise")
+    assert apply(task, control(revised, task))["blockers"] == []
 
 
 
@@ -454,8 +453,8 @@ def test_snapshot_reclamation_keeps_cas_and_epoch_fences():
         apply(task, stale)
     assert task == before
     revised = declaration()
-    revised.update(operation="revise", expected=identity(task))
-    task = apply(task, control(revised))
+    revised.update(operation="revise")
+    task = apply(task, control(revised, task))
     before = deepcopy(task)
     with pytest.raises(ValueError, match="invalid evidence scope"):
         apply(task, command(task, "checkpoint", evidence_ids=[evidence], blockers=[]))
@@ -702,3 +701,41 @@ def test_diagnosis_network_claims_are_not_configuration_evidence(invalid_header)
         **invalid_header,
     })
     assert observe_configuration(result, {}) == {"tmdb": None, "qbittorrent": None}
+
+
+@pytest.mark.parametrize("terminal", ["complete", "cancelled"])
+def test_terminal_task_can_be_replaced_without_model_supplied_versions(terminal):
+    def apply(task, patch):
+        return reduce_task(task, patch, owner=OWNER, session_id="cas")
+
+    task = apply(None, control(declaration()))
+    task = apply(task, observe_batch(task))
+    old_evidence = [fact["evidence_id"] for fact in task["verified_facts"]]
+    task = apply(task, command(task, "checkpoint", evidence_ids=old_evidence, blockers=[]))
+    if terminal == "cancelled":
+        task = apply(task, command(task, "cancel", source=GOAL))
+    snapshot = deepcopy(task)
+    assert observe(task) is None
+    assert observe(task, success=False) is None
+    assert observe_batch(task, failed=("qbittorrent",)) is None
+    assert task == snapshot  # unrelated reads cannot reopen a terminal checklist
+
+    patch = control(declaration(), task)
+    assert patch.expected == identity(task) and "expected" not in patch.payload
+    fresh = apply(task, patch)
+    assert fresh["task_id"] != task["task_id"]
+    assert (fresh["epoch"], fresh["revision"], fresh["status"]) == (1, 1, "partial")
+    assert fresh["verified_facts"] == fresh["blockers"] == []
+    with pytest.raises(ValueError, match="evidence scope"):
+        apply(fresh, command(fresh, "checkpoint", evidence_ids=old_evidence, blockers=[]))
+    with pytest.raises(TaskConflict):
+        apply(fresh, patch)  # the same model observation cannot replace a newer task
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_new_task_cannot_replace_unfinished_work(blocked):
+    task = reduce_task(None, control(declaration()), owner=OWNER, session_id="cas")
+    if blocked:
+        task = reduce_task(task, observe(task, success=False), owner=OWNER, session_id="cas")
+    with pytest.raises(TaskConflict, match="finish or cancel"):
+        reduce_task(task, control(declaration(), task), owner=OWNER, session_id="cas")

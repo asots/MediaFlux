@@ -108,7 +108,6 @@ def commit_store(request):
 def _task_create_arguments(source: str) -> dict:
     return {
         "operation": "create",
-        "expected": None,
         "source": source,
         "root_goal": "仅观察当前配置，不做修改。",
         "constraints": ["只读"],
@@ -127,7 +126,6 @@ def _task_revise_arguments(source: str) -> dict:
     arguments = _task_create_arguments(source)
     arguments.update(
         operation="revise",
-        expected={"task_id": "existing-task", "epoch": 1, "revision": 1},
     )
     return arguments
 
@@ -135,7 +133,6 @@ def _task_revise_arguments(source: str) -> dict:
 def _task_cancel_arguments(source: str) -> dict:
     return {
         "operation": "cancel",
-        "expected": {"task_id": "existing-task", "epoch": 1, "revision": 1},
         "source": source,
     }
 
@@ -585,6 +582,7 @@ def test_task_create_can_cite_exact_trusted_saved_user_request():
         request_id="new-request",
         user_source=CURRENT_USER_REQUEST,
         user_history=(EARLY_USER_REQUEST,),
+        current_task=None,
     )
 
     patch = task_tool().read(_task_create_arguments(EARLY_USER_REQUEST), context)
@@ -600,6 +598,7 @@ def test_task_revise_and_cancel_remain_limited_to_current_user_source():
         request_id="new-request",
         user_source=CURRENT_USER_REQUEST,
         user_history=(EARLY_USER_REQUEST,),
+        current_task=None,
     )
     tool = task_tool()
 
@@ -623,6 +622,7 @@ def test_task_create_rejects_assistant_and_tool_text_as_historical_sources():
         request_id="new-request",
         user_source=CURRENT_USER_REQUEST,
         user_history=(EARLY_USER_REQUEST,),
+        current_task=None,
     )
     tool = task_tool()
 

@@ -27,7 +27,6 @@ QUERY = "持久任务清单 检查点 恢复"
 def proposal(source=GOAL, unsupported=False):
     return {
         "operation": "create",
-        "expected": None,
         "source": source,
         "root_goal": source,
         "constraints": [CONSTRAINT],
@@ -147,9 +146,6 @@ class QueryTaskScript(NativeScript):
                 self.task_name,
                 {
                     "operation": "checkpoint",
-                    "expected": {
-                        k: self.latest[k] for k in ("task_id", "epoch", "revision")
-                    },
                     "evidence_ids": [
                         f["evidence_id"]
                         for f in self.latest["verified_facts"]
@@ -616,7 +612,7 @@ def test_literal_optins_visibility_related_and_description():
             "task.verified_facts evidence_ids",
             "not artifact refs",
             "blockers",
-            "task_id/epoch/revision",
+            "Version checks are server-owned",
         ):
             assert contract in text
 
@@ -645,14 +641,14 @@ def test_admitted_multiline_file_goal_is_task_data_not_a_public_summary_filter()
 
     source = '为 /临时验收/test.txt 准备一天分享。\n先建立任务清单，未经确认不得分享。'
     args = {
-        'operation': 'create', 'expected': None, 'source': source,
+        'operation': 'create', 'source': source,
         'root_goal': '为 /临时验收/test.txt 准备分享确认卡',
         'constraints': ['只操作 /临时验收/test.txt', '未经用户确认不分享'],
         'obligations': [{'id': 'prepare', 'description': '核对 /临时验收/test.txt 并生成确认卡',
                          'required': True, 'acceptance': {
                              'kind': 'plan_prepared', 'criterion': '/临时验收/test.txt 的预览等待人工确认'}}],
     }
-    context = SimpleNamespace(request_id='task-file-goal', user_source=source)
+    context = SimpleNamespace(request_id='task-file-goal', user_source=source, current_task=None)
     task = reduce_task(None, make_patch(args, context), owner=OWNER, session_id='file-goal')
     assert task['source_quote'] == source
     assert task['root_goal'] == args['root_goal']
@@ -679,13 +675,12 @@ def test_task_text_still_rejects_credentials_and_terminal_controls(unsafe):
 def test_task_published_schema_matches_operation_required_and_allowed_fields(operation):
     from app.agent.kernel.pipeline import _validate_json_schema, ToolPipelineError
     from app.agent.kernel.task_state import task_tool, validate_proposal
-    expected = {'task_id': 'existing-task', 'epoch': 1, 'revision': 35}
     if operation in {'create', 'revise'}:
-        args = {**proposal(), 'operation': operation, 'expected': None if operation == 'create' else expected}
+        args = {**proposal(), 'operation': operation}
     elif operation == 'checkpoint':
-        args = {'operation': operation, 'expected': expected, 'evidence_ids': ['known-proof'], 'blockers': []}
+        args = {'operation': operation, 'evidence_ids': ['known-proof'], 'blockers': []}
     else:
-        args = {'operation': operation, 'expected': expected, 'source': GOAL}
+        args = {'operation': operation, 'source': GOAL}
     schema = task_tool().input_schema
     _validate_json_schema(args, schema)
     assert validate_proposal(args) == args
@@ -696,12 +691,12 @@ def test_task_published_schema_matches_operation_required_and_allowed_fields(ope
     extra = 'source' if operation == 'checkpoint' else 'evidence_ids'
     with pytest.raises(ToolPipelineError):
         _validate_json_schema({**args, extra: GOAL if extra == 'source' else []}, schema)
-    for bad_expected in ('not-an-identity', {}, {'task_id': 'task', 'epoch': 0, 'revision': 1}):
+    # Retired model-supplied version arguments are rejected, not silently adapted.
+    for retired in (None, {'task_id': 'existing-task', 'epoch': 1, 'revision': 35}):
         with pytest.raises(ToolPipelineError):
-            _validate_json_schema({**args, 'expected': bad_expected}, schema)
-    if operation != 'create':
-        with pytest.raises(ToolPipelineError):
-            _validate_json_schema({**args, 'expected': None}, schema)
+            _validate_json_schema({**args, 'expected': retired}, schema)
+        with pytest.raises(ValueError):
+            validate_proposal({**args, 'expected': retired})
 
 
 @pytest.mark.parametrize('acceptance', [

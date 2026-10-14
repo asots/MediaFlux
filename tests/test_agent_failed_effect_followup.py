@@ -96,7 +96,7 @@ class FailedEffectScript(NativeScript):
                     "agent.capabilities", {"tool_names": ["agent.task"]},
                 ),
                 "core_task": ("agent.task", {
-                    "operation": "create", "expected": None, "source": GOAL,
+                    "operation": "create", "source": GOAL,
                     "root_goal": GOAL, "constraints": ["不能自动执行 B"],
                     "obligations": [{
                         "id": "media-rename", "description": "核对媒体文件实际改名状态",

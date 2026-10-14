@@ -146,9 +146,10 @@ def test_private_call_id_stays_internal_and_native(storage):
     asyncio.run(run())
 
 
-def test_same_batch_stale_expected_keeps_first_reported_blocker(storage):
+def test_same_batch_server_snapshot_keeps_first_reported_blocker(storage):
     def batch(calls):
         blockers(["first-blocker"])(calls)
+        assert "expected" not in json.loads(calls[0]["function"]["arguments"])
         second = deepcopy(calls[0])
         second["id"] += "-second"
         blockers(["stale-second-blocker"])([second])
