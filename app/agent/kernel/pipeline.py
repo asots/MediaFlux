@@ -18,7 +18,7 @@ from app.concurrency import CrossLoopAsyncLock
 
 from .capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from . import error_repair
-from .task_state import TaskPatch, task_tool, observation_patch
+from .task_state import TaskPatch, task_tool, observation_patch, read_observations
 from .effects import (
     ConfirmationEffectPlanStore,
     EffectPlan,
@@ -733,6 +733,13 @@ class ToolPipeline:
             if isinstance(value, TaskPatch):
                 value = {"ok": True, "summary": "Task proposal"}
             projected = self.projector.project(value)
+            if not tool.metadata.get("kernel_utility"):
+                observed = read_observations(context.current_task, tool.name, normalized, projected.public_content)
+                if observed:
+                    combined = {**(patch.payload["observations"] if patch else {}), **observed}
+                    patch = observation_patch(context.current_task, owner=context.owner,
+                        session_id=context.session_id, tool=tool.name, call_id=context.call_id,
+                        observations=combined)
             if _returned_read is not None:
                 from .state import _CancelledReadInline
                 from .projection import _model_safe

@@ -1,0 +1,335 @@
+"""F09：事后 READ 回执显式关联；共用配置账本、SQLite CAS 和真实 Kernel。"""
+
+import asyncio
+import json
+import socket
+from copy import deepcopy
+from dataclasses import asdict, replace
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from app.agent.kernel import bootstrap, task_state
+from app.agent.kernel.bootstrap import build_agent_kernel_runtime
+from app.agent.kernel.capabilities import ToolCatalog
+from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+from app.agent.kernel.state import AgentInput, retain_conversation
+from app.agent.models import ToolResult
+from app.agent.provider_actions import get_provider_gateway
+from app.agent.provider_models import ProviderProfileView
+from tests.test_agent_kernel_core import ScriptedModel
+from tests.test_agent_task_cas import command, observe
+from tests.test_agent_task_cas import task_store as isolated_store
+from tests.test_agent_task_first_slice import OWNER, declaration
+
+GOAL = "观察 TMDB 配置，读取 Jellyfin 库名和类型；仅观察、不修改。"
+TOOL = "provider.query"
+ARGS = {"profile_ref": "media:1", "operation": "media.libraries.list", "arguments": {}}
+OTHER = {**ARGS, "operation": "media.items.counts"}
+SUMMARY = "读取到 Jellyfin 库名和类型"
+SUCCESS = {"ok": True, "status": "success", "summary": SUMMARY, "data": {"items": []}}
+task_store = isolated_store
+
+
+def declared(*, mixed=False, goals=("libraries",)):
+    value = declaration()
+    value.update(source=GOAL, root_goal=GOAL)
+    value["obligations"] = value["obligations"][:1] if mixed else []
+    value["obligations"] += [
+        {"id": goal, "description": "观察 " + goal, "required": True,
+         "acceptance": {"kind": "observed_read", "criterion": "读取 Jellyfin 库名和类型：" + goal}}
+        for goal in goals
+    ]
+    return value
+
+
+def control(value, task=None):
+    return task_state.proposal(value, SimpleNamespace(
+        request_id="read-request", user_source=GOAL, current_task=task,
+    ))
+
+
+def apply(task, task_patch):
+    return task_state.reduce_task(task, task_patch, owner=OWNER, session_id="cas")
+
+
+def new_task(**kwargs):
+    return apply(None, control(declared(**kwargs)))
+
+
+def read_patch(task, result=SUCCESS, *, arguments=ARGS, call_id="read-call"):
+    observations = task_state.read_observations(task, TOOL, deepcopy(arguments), deepcopy(result))
+    return task_state.observation_patch(
+        task, owner=OWNER, session_id="cas", tool=TOOL, call_id=call_id, observations=observations,
+    )
+
+
+def read(task, result=SUCCESS, **kwargs):
+    task_patch = read_patch(task, result, **kwargs)
+    return apply(task, task_patch) if task_patch is not None else task
+
+
+def checkpoint(task, bindings=None, *, evidence_ids=None):
+    values = {"evidence_ids": ([f["evidence_id"] for f in task["verified_facts"]]
+                               if evidence_ids is None else evidence_ids), "blockers": []}
+    if bindings is not None:
+        values["read_evidence"] = bindings
+    return apply(task, command(task, "checkpoint", **values))
+
+
+def reads(task):
+    return [f for f in task["verified_facts"] if "query_key" in f]
+
+
+def tool_round(calls):
+    return [*(ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(
+        f"call-{index}-{tool}", tool, args,
+    )) for index, (tool, args) in enumerate(calls)),
+        ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")]
+
+
+class TaskModel(ScriptedModel):
+    """复用脚本模型，只在收到实际回执后生成 checkpoint；不代替任务执行器。"""
+
+    def __init__(self, calls, *, goals=()):
+        super().__init__([tool_round([("agent.capabilities", {
+            "tool_names": ["agent.task", TOOL, "config.explain_component"],
+        })]), tool_round(calls)])
+        self.goals = goals
+
+    async def stream(self, request, *, cancellation):
+        if not self.rounds:
+            if self.goals is not None:
+                outputs = [json.loads(m.content) for m in request.messages if m.role == "tool"]
+                task = next(v["task"] for v in reversed(outputs) if v.get("task"))
+                facts = [f for f in reads(task) if f["tool"] == TOOL]
+                args = {"operation": "checkpoint", "blockers": [],
+                        "evidence_ids": [f["evidence_id"] for f in task["verified_facts"]]}
+                if self.goals:
+                    args["read_evidence"] = dict(zip(self.goals, [f["evidence_id"] for f in facts]))
+                self.rounds.append(tool_round([("agent.task", args)]))
+            self.rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="已报告观察，不推断全量或写入完成。"),
+                                ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
+        async for event in super().stream(request, cancellation=cancellation):
+            yield event
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    def denied(*_args, **_kwargs):
+        raise AssertionError("F09 tests must not access the network")
+    monkeypatch.setattr(socket.socket, "connect", denied)
+    monkeypatch.setattr(socket.socket, "connect_ex", denied)
+
+
+@pytest.fixture
+def backend(task_store, monkeypatch):
+    gateway = get_provider_gateway()
+    profile = ProviderProfileView("media:1", "media", "fixture Jellyfin", "online")
+    monkeypatch.setattr(gateway, "profiles", lambda provider="": [profile] if provider in ("", "media") else [])
+    calls = []
+
+    def query(*, context, **arguments):
+        calls.append(deepcopy(arguments))
+        return ToolResult(**deepcopy(SUCCESS))
+    monkeypatch.setattr(gateway, "query", query)
+    return calls
+
+
+async def seed(store, value):
+    lease, _ = await store.begin_turn(owner=OWNER, session_id="cas", request_id="read-request")
+    return await store.commit(lease, task_patch=control(value))
+
+
+async def turn(store, calls, *, goals=(), message=GOAL):
+    model = TaskModel(calls, goals=goals)
+    runtime = build_agent_kernel_runtime(model=model, store=store)
+    events = [e async for e in runtime.session.run(AgentInput(message=message, owner=OWNER, session_id="cas"))]
+    saved = await store.load(owner=OWNER, session_id="cas")
+    assert not any(e.type.value == "tool.failed" for e in events)
+    return saved, model, events
+
+
+@pytest.mark.parametrize("configuration_first", [True, False])
+def test_configuration_history_and_two_domain_cold_recovery(task_store, backend, configuration_first):
+    async def run():
+        await seed(task_store, declared(mixed=True))
+        config_call = ("config.explain_component", {"component": "tmdb"})
+        first = config_call if configuration_first else (TOOL, ARGS)
+        second = (TOOL, ARGS) if configuration_first else config_call
+        saved, _, events = await turn(task_store, [first], goals=() if configuration_first else ("libraries",))
+        task = saved.metadata["task"]
+        assert task["status"] == events[-1].payload["task"]["status"] == "partial"
+        assert [o["state"] for o in task["obligations"]] == (
+            ["verified", "pending"] if configuration_first else ["pending", "verified"])
+        retained = retain_conversation(saved.conversation + [{"role": "user", "content": "保留的新回合"}], maximum_bytes=100)
+        assert GOAL not in json.dumps(retained, ensure_ascii=False)
+        lease, _ = await task_store.begin_turn(owner=OWNER, session_id="cas", request_id="prune")
+        await task_store.commit(lease, conversation=retained)
+        fresh = SQLiteKernelStore(secret_provider=lambda: "task-test-only")
+        assert (await fresh.load(owner=OWNER, session_id="cas")).metadata["task"] == task
+        end, model, events = await turn(fresh, [second], goals=("libraries",) if configuration_first else (), message="继续")
+        final = end.metadata["task"]
+        assert final["status"] == events[-1].payload["task"]["status"] == "complete"
+        assert final["task_id"] == task["task_id"] and final["epoch"] == task["epoch"]
+        assert all(f in final["verified_facts"] for f in task["verified_facts"] if any(
+            f["evidence_id"] in o["evidence_ids"] for o in task["obligations"]))
+        assert GOAL in json.dumps(asdict(model.requests[0]), ensure_ascii=False)
+        assert backend == [ARGS]
+        business_calls = [e.payload["tool"] for e in events if e.type.value == "tool.started" and not e.payload["tool"].startswith("agent.")]
+        assert business_calls == [second[0]]
+        [configuration] = [f for f in final["verified_facts"] if f.get("component") == "tmdb"]
+        assert configuration["verifier_version"] == "configuration-v1"
+    asyncio.run(run())
+
+
+def test_actual_receipt_requires_explicit_association_not_just_evidence_ids():
+    task = new_task(goals=("libraries", "remaining"))
+    result = {**SUCCESS, "data": {"items": [{"raw": "do-not-copy-result"}], "has_more": True}}
+    task = checkpoint(read(task, result))
+    [fact] = reads(task)
+    assert all(o["state"] == "pending" for o in task["obligations"])
+    assert fact["tool"] == TOOL and fact["summary"] and fact["status"] == "success"
+    assert fact["query_key"].startswith("read:") and len(fact["summary"]) <= 240
+    assert "do-not-copy-result" not in json.dumps(task)
+    task = checkpoint(task, {"libraries": fact["evidence_id"]})
+    assert [o["state"] for o in task["obligations"]] == ["verified", "pending"]
+    assert task["status"] == "partial"
+    assert task_state.task_projection(task)["remaining_obligation_ids"] == ["remaining"]
+
+
+def test_read_link_does_not_require_duplicating_receipt_in_configuration_ids():
+    task = read(new_task())
+    [fact] = reads(task)
+    assert checkpoint(task, {"libraries": fact["evidence_id"]}, evidence_ids=[])["status"] == "complete"
+
+
+@pytest.mark.parametrize("invalid", ["unknown-goal", "fake-id", "config-receipt"])
+def test_checkpoint_rejects_invalid_associations(invalid):
+    task = new_task(mixed=True)
+    task = read(task)
+    task = apply(task, observe(task))
+    read_id = reads(task)[0]["evidence_id"]
+    bindings, selected = {"libraries": read_id}, None
+    if invalid == "unknown-goal":
+        bindings = {"unknown": read_id}
+    elif invalid == "fake-id":
+        bindings = {"libraries": "forged"}
+    else:
+        bindings = {"libraries": next(f["evidence_id"] for f in task["verified_facts"] if "component" in f)}
+    before = deepcopy(task)
+    with pytest.raises(ValueError):
+        checkpoint(task, bindings, evidence_ids=selected)
+    assert task == before
+
+
+@pytest.mark.parametrize("status", ["failed", "partial", "pending", "queued", "running"])
+def test_failed_or_queued_read_stays_pending_without_poisoning_future_success(status):
+    task = read(new_task(), {**SUCCESS, "status": status, "ok": status != "failed"})
+    assert task["verified_facts"] == [] and task["blockers"] == []
+    assert checkpoint(task)["obligations"][0]["state"] == "pending"
+    task = read(task)
+    [fact] = reads(task)
+    assert checkpoint(task, {"libraries": fact["evidence_id"]})["status"] == "complete"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("owner", "other-owner"), ("session_id", "other-session"),
+    ("task_id", "other-task"), ("epoch", 999),
+])
+def test_foreign_scope_receipts_cannot_be_associated(field, value):
+    task = read(new_task())
+    fact = reads(task)[0]
+    fact["scope"][field] = value
+    with pytest.raises(ValueError):
+        checkpoint(task, {"libraries": fact["evidence_id"]})
+
+
+def test_sqlite_read_receipts_keep_same_cas_and_revision_epoch_fences(task_store):
+    async def run():
+        initial = await seed(task_store, declared())
+        lease, _ = await task_store.begin_turn(owner=OWNER, session_id="cas", request_id="observe")
+        task = initial.metadata["task"]
+        first, stale = read_patch(task), read_patch(task, call_id="stale")
+        saved = await task_store.commit(lease, task_patch=first)
+        with pytest.raises(task_state.TaskConflict):
+            await task_store.commit(lease, task_patch=stale)
+        assert (await task_store.load(owner=OWNER, session_id="cas")).metadata["task"] == saved.metadata["task"]
+        old_id = reads(saved.metadata["task"])[0]["evidence_id"]
+        revised = await task_store.commit(lease, task_patch=control(
+            {**declared(), "operation": "revise"}, saved.metadata["task"]))
+        current = revised.metadata["task"]
+        assert current["epoch"] == 2 and current["verified_facts"] == []
+        with pytest.raises(task_state.TaskConflict):
+            await task_store.commit(lease, task_patch=stale)
+        with pytest.raises(ValueError):
+            checkpoint(current, {"libraries": old_id}, evidence_ids=[old_id])
+        assert (await task_store.load(owner=OWNER, session_id="cas")).metadata["task"] == current
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["tracked", "untracked", "configuration-only"])
+def test_same_round_tracked_reads_keep_both_receipts_and_ordinary_reads_stay_parallel(task_store, backend, mode):
+    async def run():
+        active = peak = 0
+        calls, together = [], asyncio.Event()
+        async def handler(arguments, context):
+            nonlocal active, peak
+            calls.append(deepcopy(arguments))
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                together.set()
+            try:
+                if mode != "tracked":
+                    await asyncio.wait_for(together.wait(), timeout=2)
+                else:
+                    await asyncio.sleep(0)
+                return ToolResult(**deepcopy(SUCCESS))
+            finally:
+                active -= 1
+        def catalog(specs):
+            original = catalog_from_tool_specs(specs)
+            return ToolCatalog([replace(original.get(s.name), read=handler, metadata={
+                **original.get(s.name).metadata, "parallel_read": True,
+            }) if s.name == TOOL else original.get(s.name) for s in specs])
+        if mode != "untracked":
+            await seed(task_store, declared(mixed=mode == "configuration-only",
+                                           goals=() if mode == "configuration-only" else ("libraries", "counts")))
+        with patch.object(bootstrap, "catalog_from_tool_specs", catalog):
+            saved, _, events = await turn(task_store, [(TOOL, ARGS), (TOOL, OTHER)],
+                                         goals=("libraries", "counts") if mode == "tracked" else None)
+        assert calls == [ARGS, OTHER] and active == 0
+        assert peak == (1 if mode == "tracked" else 2)
+        if mode == "tracked":
+            task = saved.metadata["task"]
+            assert task["status"] == events[-1].payload["task"]["status"] == "complete"
+            assert len(reads(task)) == len({f["query_key"] for f in reads(task)}) == 2
+            assert len({f["call_id"] for f in reads(task)}) == 2
+            assert all(o["state"] == "verified" and len(o["evidence_ids"]) == 1 for o in task["obligations"])
+        elif mode == "untracked":
+            assert "task" not in saved.metadata
+        else:
+            assert saved.metadata["task"]["verified_facts"] == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("distinct", [False, True])
+def test_forty_read_observations_are_count_and_byte_bounded_preserving_linked_receipts(distinct):
+    task = read(new_task(goals=("libraries", "remaining")))
+    linked = reads(task)[0]["evidence_id"]
+    task = checkpoint(task, {"libraries": linked})
+    for index in range(40):
+        arguments = {**ARGS, "arguments": {"page": index if distinct else 0}}
+        result = {**SUCCESS, "summary": "只读观测摘要中文内容" * 45}
+        task = read(task, result, arguments=arguments, call_id=f"stress-{index}")
+        assert len(task["verified_facts"]) <= 32
+        assert len(json.dumps(task, ensure_ascii=False, separators=(",", ":")).encode()) <= 16 * 1024
+        assert any(f["evidence_id"] == linked for f in reads(task))
+        assert task["obligations"][0]["evidence_ids"] == [linked]
+        assert task["obligations"][1]["state"] == "pending"
+    if not distinct:
+        assert len(reads(task)) <= 3

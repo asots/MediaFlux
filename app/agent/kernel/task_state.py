@@ -5,6 +5,7 @@ Task declarations are data, never write authorization or a second execution loop
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import time
@@ -110,7 +111,8 @@ def validate_proposal(value: dict) -> dict:
     operation = value.get("operation")
     if operation not in _OPERATION_FIELDS:
         raise ValueError("invalid task operation")
-    _object(value, {"operation", *_OPERATION_FIELDS[operation]})
+    optional = {"read_evidence"} if operation == "checkpoint" else set()
+    _object(value, {"operation", *_OPERATION_FIELDS[operation], *(optional & value.keys())})
     if "source" in value:
         _text(value["source"], 2048)
     if operation in {"create", "revise"}:
@@ -139,6 +141,12 @@ def validate_proposal(value: dict) -> dict:
         if len(set(ids)) != len(ids):
             raise ValueError("duplicate obligation id")
     if operation == "checkpoint":
+        links = value.get("read_evidence", {})
+        if type(links) is not dict or len(links) > 16:
+            raise ValueError("invalid read evidence links")
+        for obligation_id, evidence_id in links.items():
+            _text(obligation_id, 64)
+            _text(evidence_id, 64)
         for evidence in _array(value["evidence_ids"], 32):
             _text(evidence, 64)
         for blocker in _array(value["blockers"], 16):
@@ -176,6 +184,45 @@ def proposal(arguments: dict, context: Any) -> TaskPatch:
     )
 
 
+def tracks_read(task: dict | None, tool: str) -> bool:
+    return bool(task and task["status"] not in {"complete", "cancelled"}
+                and not tool.startswith("agent.") and any(
+                    o["acceptance"]["kind"] == "observed_read" and o["state"] != "verified"
+                    for o in task["obligations"]))
+
+
+def read_observations(task: dict | None, tool: str, arguments: dict, result: dict | None) -> dict:
+    """记录实际成功READ回执，不要求模型提前编写调用，也不将探索失败变成整项任务的永久阻塞。"""
+    if not tracks_read(task, tool) or not result or result.get("ok") is not True:
+        return {}
+    from app.agent.public_view import public_result_state
+    from app.agent.public_safety import sanitize_public_text
+    if (str(result.get("status", "success")).strip().casefold() not in {
+            "ok", "success", "completed", "healthy", "ready", "found", "not_found", "empty"}
+            or public_result_state(result) != "success"):
+        return {}
+    encoded = json.dumps([tool, arguments], sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"), allow_nan=False)
+    key = "read:" + hashlib.sha256(encoded.encode()).hexdigest()
+    return {key: {"query_key": key, "status": "success",
+                  "summary": sanitize_public_text(result.get("summary") or tool, limit=240) or tool}}
+
+
+def _read_key(key: str) -> bool:
+    return (isinstance(key, str) and len(key) == 69 and key.startswith("read:")
+            and all(c in "0123456789abcdef" for c in key[5:]))
+
+
+def _fact_key(fact: dict) -> str:
+    return fact["component"] if fact["verifier_version"] == "configuration-v1" else fact["query_key"]
+
+
+def _matches(fact: dict, acceptance: dict) -> bool:
+    if acceptance["kind"] == "observed_component":
+        return fact["verifier_version"] == "configuration-v1" and fact["component"] == acceptance["component"]
+    return acceptance["kind"] == "observed_read" and fact["verifier_version"] == "read-v1"
+
+
 def observation_patch(
     task: dict | None,
     *,
@@ -189,61 +236,50 @@ def observation_patch(
         return None
     facts = {}
     for component, fact in observations.items():
-        if component not in COMPONENTS:
+        configuration = component in COMPONENTS
+        if not configuration and (not _read_key(component) or not tracks_read(task, tool)):
             continue
+        selector = "component" if configuration else "query_key"
         facts[component] = None if fact is None else {
             **fact,
             "evidence_id": secrets.token_urlsafe(18),
             "task_id": task["task_id"], "epoch": task["epoch"],
             "tool": tool, "call_id": call_id,
-            "verifier_version": "configuration-v1", "observed_at": time.time(),
+            "verifier_version": "configuration-v1" if configuration else "read-v1", "observed_at": time.time(),
             "scope": {"owner": owner, "session_id": session_id, "task_id": task["task_id"],
-                      "epoch": task["epoch"], "component": component},
+                      "epoch": task["epoch"], selector: component},
         }
     return TaskPatch(identity(task), "observe", {"observations": facts}, "", "") if facts else None
 
 
 def valid_fact(fact: dict, task: dict, *, owner: str, session_id: str) -> bool:
-    keys = {
-        "component",
-        "status",
-        "enabled",
-        "probe_mode",
-        "network_accessed",
-        "evidence_id",
-        "task_id",
-        "epoch",
-        "tool",
-        "call_id",
-        "verifier_version",
-        "observed_at",
-        "scope",
-    }
-    if type(fact) is not dict or set(fact) != keys:
+    if type(fact) is not dict or fact.get("verifier_version") not in {"configuration-v1", "read-v1"}:
+        return False
+    configuration = fact["verifier_version"] == "configuration-v1"
+    selector = "component" if configuration else "query_key"
+    keys = {selector, "status", "evidence_id", "task_id", "epoch", "tool", "call_id",
+            "verifier_version", "observed_at", "scope"}
+    keys |= {"enabled", "probe_mode", "network_accessed"} if configuration else {"summary"}
+    if set(fact) != keys:
         return False
     for key in ("evidence_id", "task_id", "tool", "call_id", "verifier_version"):
         if type(fact[key]) is not str or not 1 <= len(fact[key]) <= 64:
             return False
-    return (
-        fact["component"] in COMPONENTS
-        and fact["status"] in {"ready", "incomplete", "not_configured"}
-        and type(fact["enabled"]) is bool
-        and fact["network_accessed"] is False
-        and fact["probe_mode"] == "configuration_only"
-        and fact["verifier_version"] == "configuration-v1"
-        and type(fact["observed_at"]) in (float, int)
-        and type(fact["epoch"]) is int
-        and fact["epoch"] == task["epoch"]
-        and fact["task_id"] == task["task_id"]
-        and fact["scope"]
-        == {
-            "owner": owner,
-            "session_id": session_id,
-            "task_id": task["task_id"],
-            "epoch": task["epoch"],
-            "component": fact["component"],
-        }
-    )
+    if configuration:
+        valid_payload = (fact["component"] in COMPONENTS
+                         and fact["status"] in {"ready", "incomplete", "not_configured"}
+                         and type(fact["enabled"]) is bool and fact["network_accessed"] is False
+                         and fact["probe_mode"] == "configuration_only")
+    else:
+        valid_payload = (_read_key(fact["query_key"]) and fact["status"] == "success"
+                         and not fact["tool"].startswith("agent.")
+                         and type(fact["summary"]) is str and 0 < len(fact["summary"]) <= 240)
+    return (valid_payload and type(fact["observed_at"]) in (float, int)
+            and type(fact["epoch"]) is int and fact["epoch"] == task["epoch"]
+            and fact["task_id"] == task["task_id"]
+            and fact["scope"] == {"owner": owner, "session_id": session_id,
+                                  "task_id": task["task_id"], "epoch": task["epoch"],
+                                  selector: fact[selector]})
 
 
 def reduce_task(
@@ -253,6 +289,7 @@ def reduce_task(
         raise TaskConflict("task revision changed")
     operation, args = patch.operation, patch.payload
     checkpoint_evidence: dict[str, str] = {}
+    read_links: dict[str, str] = {}
     if operation == "create":
         if current is not None and current["status"] not in {"complete", "cancelled"}:
             raise TaskConflict("finish or cancel existing task before create")
@@ -283,15 +320,17 @@ def reduce_task(
         task["status"] = "cancelled"
     elif operation == "observe":
         for component, fact in args["observations"].items():
-            if component not in COMPONENTS:
+            if component not in COMPONENTS and not _read_key(component):
                 raise ValueError("unsupported observation component")
             marker = {"origin": "query", "component": component, "epoch": task["epoch"],
                       "text": "query:" + component}
             if fact is None:
+                if _read_key(component):
+                    raise ValueError("failed READ is not observation evidence")
                 if marker not in task["blockers"]:
                     task["blockers"].append(marker)
             else:
-                if fact.get("component") != component or not valid_fact(fact, task, owner=owner, session_id=session_id):
+                if not valid_fact(fact, task, owner=owner, session_id=session_id) or _fact_key(fact) != component:
                     raise ValueError("invalid observation evidence")
                 task["verified_facts"].append(deepcopy(fact))
                 task["blockers"] = [b for b in task["blockers"] if not (
@@ -299,7 +338,12 @@ def reduce_task(
     elif operation == "checkpoint":
         validate_proposal(args)
         facts = {f["evidence_id"]: f for f in task["verified_facts"]}
-        for evidence_id in args["evidence_ids"]:
+        read_links = args.get("read_evidence", {})
+        obligations = {o["id"]: o for o in task["obligations"]}
+        for oid in read_links:
+            if oid not in obligations or obligations[oid]["acceptance"]["kind"] != "observed_read":
+                raise ValueError("read evidence must name a declared READ obligation")
+        for evidence_id in {*args["evidence_ids"], *read_links.values()}:
             fact = facts.get(evidence_id)
             if not fact or not valid_fact(
                 fact, task, owner=owner, session_id=session_id
@@ -308,7 +352,7 @@ def reduce_task(
         checkpoint_evidence = {
             fact["component"]: fact["evidence_id"]
             for fact in task["verified_facts"]
-            if fact["evidence_id"] in args["evidence_ids"]
+            if fact["verifier_version"] == "configuration-v1" and fact["evidence_id"] in args["evidence_ids"]
         }
         task["blockers"] = [
             b for b in task["blockers"] if b["origin"] == "query"
@@ -323,10 +367,13 @@ def reduce_task(
                 if (
                     not fact
                     or not valid_fact(fact, task, owner=owner, session_id=session_id)
-                    or obligation["acceptance"]
-                    != {"kind": "observed_component", "component": fact["component"]}
+                    or not _matches(fact, obligation["acceptance"])
                 ):
                     raise ValueError("invalid linked evidence")
+            if evidence_id := read_links.get(obligation["id"]):
+                if not _matches(facts[evidence_id], obligation["acceptance"]):
+                    raise ValueError("read obligation requires actual READ evidence")
+                obligation["evidence_ids"] = [evidence_id]
             # 先完整校验旧关联，再按登记顺序规范化；不能自动关联新观察。
             existing = set(obligation["evidence_ids"])
             obligation["evidence_ids"] = [eid for eid in facts if eid in existing][-1:]
@@ -336,7 +383,7 @@ def reduce_task(
                     obligation["evidence_ids"] = [evidence_id]
             obligation["state"] = (
                 "blocked"
-                if obligation["acceptance"]["kind"] != "observed_component"
+                if obligation["acceptance"]["kind"] not in {"observed_component", "observed_read"}
                 else "verified"
                 if obligation["evidence_ids"]
                 else "pending"
@@ -351,19 +398,21 @@ def reduce_task(
         )
         # 状态快照不是审计日志：保留所有义务引用和每个组件最新登记的观察。
         linked = {eid for o in task["obligations"] for eid in o["evidence_ids"]}
-        latest = {f["component"]: f["evidence_id"] for f in task["verified_facts"]}
+        latest = {_fact_key(f): f["evidence_id"] for f in task["verified_facts"]}
         task["verified_facts"] = [
             f for f in task["verified_facts"]
-            if f["evidence_id"] in linked or f["evidence_id"] == latest[f["component"]]
+            if f["evidence_id"] in linked or f["evidence_id"] == latest[_fact_key(f)]
         ]
     task["revision"] += 1
-    _array(task["verified_facts"], 32)
     _array(task["blockers"], 16)
-    if (
-        len(json.dumps(task, ensure_ascii=False, separators=(",", ":")).encode())
-        > 16 * 1024
-    ):
-        raise ValueError("task capacity exceeded")
+    # 清单不是审计日志：按数量和字节统一淘汰最早的未关联回执，不能丢掉完成依据。
+    linked = {eid for o in task["obligations"] for eid in o["evidence_ids"]}
+    while (len(task["verified_facts"]) > 32
+           or len(json.dumps(task, ensure_ascii=False, separators=(",", ":")).encode()) > 16 * 1024):
+        oldest = next((f for f in task["verified_facts"] if f["evidence_id"] not in linked), None)
+        if oldest is None:
+            raise ValueError("task capacity exceeded")
+        task["verified_facts"].remove(oldest)
     return task
 
 
@@ -401,7 +450,7 @@ def _task_input_schema() -> dict:
             "items": {**text, "maxLength": 512},
         },
         "obligations": {
-            "description": "Required observable business checks only, not answer-writing or checklist-management steps. For configuration checks use observed_component; other acceptance kinds remain blocked.",
+            "description": "Required observable business checks only, not answer-writing or checklist-management steps. Use observed_component for configuration checks. Use observed_read with a plain-language criterion for other read-only goals; do not guess future tool names or arguments. Link actual successful READ receipts afterwards using read_evidence. Other acceptance kinds remain blocked.",
             "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": True,
             "items": {
                 "type": "object", "required": ["id", "description", "required", "acceptance"],
@@ -412,7 +461,7 @@ def _task_input_schema() -> dict:
                     "required": {"type": "boolean", "enum": [True]},
                     "acceptance": {
                         "type": "object",
-                        "description": "Observed_component requires an observation, even incomplete/not_configured satisfies it. It does not require fixing configuration or proving connectivity. Other goals remain blocked.",
+                        "description": "Observed_component requires an observation, even incomplete/not_configured satisfies it. It does not require fixing configuration or proving connectivity. observed_read describes the requested observation, not a future tool call. The model relates actual READ receipts to the criterion; the server verifies receipt origin/scope, not natural-language semantics, exhaustive pages or completed writes. Other goals remain blocked.",
                         "oneOf": [
                             {
                                 "properties": {
@@ -433,6 +482,11 @@ def _task_input_schema() -> dict:
                 },
             },
         },
+        "read_evidence": {
+            "type": "object", "maxProperties": 16,
+            "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64},
+            "description": "Checkpoint only: map each observed_read obligation ID to its actual task.verified_facts evidence_id after checking the result meets its criterion. Not future tool names, artifact refs or invented receipts. Omit for configuration-only checkpoints.",
+        },
         "evidence_ids": {
             "type": "array", "maxItems": 32, "uniqueItems": True,
             "items": {**text, "maxLength": 64},
@@ -450,6 +504,7 @@ def _task_input_schema() -> dict:
             {
                 "properties": {
                     **{key: {} for key in fields},
+                    **({"read_evidence": {}} if operation == "checkpoint" else {}),
                     "operation": {"enum": [operation]},
                 },
                 "required": ["operation", *fields],
@@ -468,12 +523,12 @@ def task_tool():
         domain="agent",
         effect=ToolEffect.READ,
         description=(
-            "持久任务清单、检查点与恢复 / persistent task checklist checkpoint. "
-            "TMDB/qB configuration observations from config.diagnose or config.explain_component are verifiable, "
-            "not connectivity/repairs. No write authority. "
-            "create accepts exact current/historical user source; revise/cancel require current user source. "
-            "checkpoint uses task.verified_facts evidence_ids (not artifact refs), plus blockers. "
-            "Version checks are server-owned. Create replaces complete/cancelled tasks; finish or cancel active tasks first."
+            "持久任务清单/检查点/恢复。TMDB/qB: config.diagnose/config.explain_component observations, "
+            "not connectivity/repairs. observed_read记录其他只读检查目标，不预猜调用；读后用read_evidence关联真实回执。"
+            "No write authority. create accepts exact current/historical user source; "
+            "revise/cancel require current user source. "
+            "checkpoint: task.verified_facts evidence_ids (not artifact refs), blockers. "
+            "Version checks are server-owned."
         ),
         examples=("持久任务清单 检查点 剩余义务 恢复", "persistent task checklist checkpoint resume remaining obligations"),
         input_schema=_task_input_schema(),

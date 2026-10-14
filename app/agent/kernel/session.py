@@ -1,7 +1,7 @@
 """唯一的 MODEL -> TOOL -> MODEL Agent 决策循环。"""
 
 from __future__ import annotations
-from .task_state import TaskPatch, reduce_task, task_projection
+from .task_state import tracks_read, TaskPatch, reduce_task, task_projection
 
 import asyncio
 import json
@@ -150,8 +150,8 @@ _INITIAL_PLANNING_ROUNDS = 12
 _MAX_PARALLEL_READS = 4
 
 
-def _independent_read(tool) -> bool:
-    return (tool.effect is ToolEffect.READ and tool.observe is None
+def _independent_read(tool, task=None) -> bool:
+    return (tool.effect is ToolEffect.READ and tool.observe is None and not tracks_read(task, tool.name)
             and tool.metadata.get("parallel_read") is True
             and not tool.metadata.get("kernel_utility")
             and tool.metadata.get("source_kind") not in {"resource_index", "resource_presentation"})
@@ -1223,7 +1223,7 @@ class AgentSession:
                         selected_model_names.add(repair_tool.model_name)
                         tool_definitions = tuple(t for t in tool_definitions if t["name"] != repair_tool.model_name) + (repair_tool.model_definition(),)
                     request_tools = () if final_synthesis_round or explaining else tool_definitions
-                    parallel_reads = tuple(tool.model_name for tool in selected_tools if _independent_read(tool)) if (
+                    parallel_reads = tuple(tool.model_name for tool in selected_tools if _independent_read(tool, state.metadata.get("task"))) if (
                         request_tools and not confirming and not tool_context.diagnostic_only
                         and not tool_context.selection_arguments and not tool_context.schema_replacements
                     ) else ()
@@ -1562,7 +1562,7 @@ class AgentSession:
                         and not tool_context.diagnostic_only and not tool_context.selection_arguments
                         and all(call.argument_error is None
                             and (call.name in selected_names or call.name in selected_model_names)
-                            and _independent_read(self.catalog.get(call.name)) for call in calls))
+                            and _independent_read(self.catalog.get(call.name), state.metadata.get("task")) for call in calls))
                     ready: dict[str, PipelineResult | BaseException] = {}
                     read_contexts: dict[str, ToolCallContext] = {}
 
