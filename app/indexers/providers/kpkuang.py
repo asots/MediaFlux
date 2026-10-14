@@ -19,15 +19,31 @@ from ..errors import (
     IndexerChallengeRequired,
     IndexerError,
     IndexerInvalidResponse,
+    IndexerQueryRejected,
     IndexerRateLimited,
     IndexerResponseTooLarge,
     IndexerSecurityError,
     IndexerTimeout,
     IndexerUnavailable,
 )
-from ..models import IndexerCapabilities, IndexerItem, IndexerMediaSearchRequest, IndexerPage, IndexerProviderError, IndexerSearchRequest
+from ..models import (
+    IndexerCapabilities,
+    IndexerItem,
+    IndexerMediaSearchRequest,
+    IndexerPage,
+    IndexerProviderError,
+    IndexerSearchRequest,
+)
 from ..ranking import candidate_sort_key, rank_item
-from .base import DirectResultAdapter, fixed_host_join, is_likely_challenge_page, magnet_infohash, parse_size_bytes, report_page
+from ..release import parse_indexer_release_position
+from .base import (
+    DirectResultAdapter,
+    fixed_host_join,
+    is_likely_challenge_page,
+    magnet_infohash,
+    parse_size_bytes,
+    report_page,
+)
 
 # Base64 仅用于避免在源码中直写站点和接口地址，不提供保密性。
 _CONFIG_B64 = (
@@ -71,6 +87,13 @@ class KPkuangAdapter(DirectResultAdapter):
     async def search(self, request: IndexerSearchRequest) -> IndexerPage:
         if request.page > 1:
             return self._page(request, [])
+        # 与站点搜索框一致：短词是输入限制，不是上游故障；由服务尝试下一别名。
+        query = request.query.strip()
+        if len(query) < 5 and len(re.findall(r"[\u4e00-\u9fa5]", query)) < 2:
+            raise IndexerQueryRejected(
+                "KPkuang requires two Chinese characters or five characters",
+                public_message="该站点要求至少两个中文字符或总长度至少 5，请换用完整片名或别名",
+            )
         # 实站偶发返回code=0/js空串，稍后同词却有资源；不能当成“无资源”。
         # 仅对这类可恢复响应补查一次，仍受service整轮时间预算约束。
         candidates = None
@@ -113,10 +136,25 @@ class KPkuangAdapter(DirectResultAdapter):
             if not set(probe.match_reasons) & {"title_exact", "title_contains", "title_similar"}:
                 continue
             ranked.append((index, candidate, probe))
+        # 后续季的年份可能不同于剧集首播年；只有明确目标季证据才可越过年份筛选。
+        season_matches = {
+            index for index, candidate, probe in ranked
+            if request.media_type != "movie" and request.season is not None and request.season > 1
+            and {"season_match", "episode_exact", "episode_range"} & set(probe.match_reasons)
+            and parse_indexer_release_position(str(candidate["title"]), media_title=request.query)["season"] == request.season
+        }
         if request.year is not None:
-            exact_year = [entry for entry in ranked if entry[1]["year"] == request.year]
-            ranked = exact_year or [entry for entry in ranked if entry[1]["year"] is None]
-        ranked.sort(key=lambda entry: ("title_exact" not in entry[2].match_reasons, candidate_sort_key((0, entry[0], entry[2]), request.sort_mode)))
+            exact_year = any(entry[1]["year"] == request.year for entry in ranked)
+            ranked = [
+                entry for entry in ranked
+                if entry[0] in season_matches or entry[1]["year"] == request.year
+                or (not exact_year and entry[1]["year"] is None)
+            ]
+        ranked.sort(key=lambda entry: (
+            entry[0] not in season_matches,
+            "title_exact" not in entry[2].match_reasons,
+            candidate_sort_key((0, entry[0], entry[2]), request.sort_mode),
+        ))
         candidates = [entry[1] for entry in ranked]
         if not candidates:
             return self._page(request, [])
@@ -149,11 +187,6 @@ class KPkuangAdapter(DirectResultAdapter):
                     self._check_download_url(download.url, candidate["id"])
                     download_soup = self._parse_main_page(self._body(download.body), "download")
                     items.extend(self._parse_magnets(download_soup, candidate, detail_url, seen_hashes))
-                    if request.episode is not None and any(
-                        {"episode_exact", "episode_range"} & set(rank_item(item, media=media, fallback_query=request.query).match_reasons)
-                        for item in items
-                    ):
-                        break  # 精确季集已在匹配作品中找到，无需再抓相似分册的巨型目录。
                 except IndexerError as exc:
                     errors.append(exc)
                     if isinstance(exc, _STOP_CANDIDATE_ERRORS):
@@ -170,6 +203,11 @@ class KPkuangAdapter(DirectResultAdapter):
                     ),
                     complete=False,
                 ))
+                if request.episode is not None and any(
+                    {"episode_exact", "episode_range"} & set(rank_item(item, media=media, fallback_query=request.query).match_reasons)
+                    for item in items
+                ):
+                    break  # 先交付已取得的候选；后续别名超时也不能抹掉精确季集结果。
 
         if errors and successful_details == 0:
             raise fatal_error or errors[0]

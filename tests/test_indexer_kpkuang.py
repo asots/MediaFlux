@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from app.indexers.errors import (
     IndexerChallengeRequired,
     IndexerInvalidResponse,
+    IndexerQueryRejected,
     IndexerRateLimited,
     IndexerResponseTooLarge,
     IndexerSecurityError,
@@ -17,7 +18,11 @@ from app.indexers.errors import (
 from app.indexers.http import IndexerHttpResponse
 from app.indexers.models import IndexerMediaSearchRequest, IndexerSearchRequest
 from app.indexers.providers.base import magnet_infohash, page_observer
-from app.indexers.providers.kpkuang import KPKUANG_HOST_CONFIG, KPkuangAdapter, MAX_RESPONSE_BYTES
+from app.indexers.providers.kpkuang import (
+    KPKUANG_HOST_CONFIG,
+    MAX_RESPONSE_BYTES,
+    KPkuangAdapter,
+)
 from app.indexers.ranking import rank_item
 
 API = str(KPKUANG_HOST_CONFIG["api_search_url"])
@@ -105,6 +110,7 @@ class KPkuangTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_transient_empty_envelope_is_rechecked_but_never_called_no_results(self):
         from unittest.mock import AsyncMock, patch
+
         from app.indexers.errors import IndexerUnavailable
         for recover in (True, False):
             calls = []
@@ -139,9 +145,102 @@ class KPkuangTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(page.items), 1)
         self.assertEqual(http.calls, [API, detail_url(1), down_url(1)])
 
+    async def test_short_queries_are_rejected_before_http(self):
+        for query in ("1917", "Up", "Dune", "影", "影1"):
+            with self.subTest(query=query):
+                http = FakeHttp({})
+                with self.assertRaises(IndexerQueryRejected):
+                    await KPkuangAdapter(http=http).search(IndexerSearchRequest.create(query))
+                self.assertEqual(http.calls, [])
+
+    async def test_supported_query_thresholds_reach_search(self):
+        for query in ("三体", "影视1", "Alien", "1917特别版"):
+            with self.subTest(query=query):
+                http = FakeHttp({API: response(API, api([]))})
+                page = await KPkuangAdapter(http=http).search(IndexerSearchRequest.create(query))
+                self.assertEqual(page.items, [])
+                self.assertEqual(http.calls, [API])
+
+    async def test_target_season_survives_year_filter_and_precedes_premiere(self):
+        candidates = [candidate(i, "Example Show", 2023) for i in (1, 2, 3)]
+        candidates.append(candidate(4, "Example Show S02", 2026))
+        http = FakeHttp({
+            API: response(API, api(candidates)),
+            detail_url(4): response(detail_url(4), detail_html(4)),
+            down_url(4): response(down_url(4), download_html([
+                ("Example.Show.2026.S02E12.1080p", magnet("e" * 40)),
+            ])),
+        })
+        page = await KPkuangAdapter(http=http).search(IndexerSearchRequest.create(
+            "Example Show", year=2023, media_type="tv", season=2, episode=12,
+        ))
+        self.assertEqual(len(page.items), 1)
+        self.assertEqual(http.calls, [API, detail_url(4), down_url(4)])
+
+    async def test_chinese_season_catalogue_uses_shared_position_parser(self):
+        http = FakeHttp({
+            API: response(API, api([candidate(1, "测试剧 第二季", 2026)])),
+            detail_url(1): response(detail_url(1), detail_html(1)),
+            down_url(1): response(down_url(1), download_html([("测试剧.2026.S02E12", magnet("b" * 40))])),
+        })
+        page = await KPkuangAdapter(http=http).search(IndexerSearchRequest.create(
+            "测试剧", year=2023, media_type="tv", season=2, episode=12,
+        ))
+        self.assertEqual(len(page.items), 1)
+        self.assertEqual(http.calls, [API, detail_url(1), down_url(1)])
+
+    async def test_first_season_year_still_separates_same_named_adaptations(self):
+        http = FakeHttp({
+            API: response(API, api([candidate(1, "三体", 2023), candidate(2, "三体 第一季", 2024)])),
+            detail_url(1): response(detail_url(1), detail_html(1)),
+            down_url(1): response(down_url(1), download_html([("三体.2023.S01E01", magnet("a" * 40))])),
+        })
+        page = await KPkuangAdapter(http=http).search(IndexerSearchRequest.create(
+            "三体", year=2023, media_type="tv", season=1, episode=1,
+        ))
+        self.assertEqual(len(page.items), 1)
+        self.assertEqual(http.calls, [API, detail_url(1), down_url(1)])
+
+    async def test_wrong_season_or_unproven_year_does_not_bypass_filter(self):
+        for title, media_type, season in (
+            ("Example Show S01", "tv", 2),
+            ("Example Show S01", "tv", 1),
+            ("Example Show", "tv", 2),
+            ("Example Show E12", "tv", 1),
+            ("Example Show S02", "movie", 2),
+            ("Example Show S02", "tv", None),
+        ):
+            with self.subTest(title=title, media_type=media_type, season=season):
+                http = FakeHttp({API: response(API, api([candidate(1, title, 2026)]))})
+                page = await KPkuangAdapter(http=http).search(IndexerSearchRequest.create(
+                    "Example Show", year=2023, media_type=media_type, season=season, episode=12,
+                ))
+                self.assertEqual(page.items, [])
+                self.assertEqual(http.calls, [API])
+
+    async def test_exact_episode_is_reported_before_early_return(self):
+        http = FakeHttp({
+            API: response(API, api([candidate(1, "Example Show", 2023)])),
+            detail_url(1): response(detail_url(1), detail_html(1)),
+            down_url(1): response(down_url(1), download_html([("S01E01.1080p", magnet("f" * 40))])),
+        })
+        reported = []
+        token = page_observer.set(lambda site, page: reported.append((site, page)))
+        try:
+            page = await KPkuangAdapter(http=http).search(IndexerSearchRequest.create(
+                "Example Show", year=2023, season=1, episode=1,
+            ))
+        finally:
+            page_observer.reset(token)
+        self.assertEqual(len(page.items), 1)
+        self.assertTrue(reported)
+        self.assertEqual(reported[-1][0], "kpkuang")
+        self.assertFalse(reported[-1][1].complete)
+        self.assertEqual(reported[-1][1].items, page.items)
+
     async def test_numeric_title_does_not_override_catalogue_year(self):
-        routes = {API: response(API, api([candidate(7, "1917", 2019)])), detail_url(7): response(detail_url(7), detail_html(7)), down_url(7): response(down_url(7), download_html([("1917.2019.1080p", magnet("d" * 40))]))}
-        page = await KPkuangAdapter(http=FakeHttp(routes)).search(IndexerSearchRequest.create("1917", year=2019, media_type="movie"))
+        routes = {API: response(API, api([candidate(7, "1917 特别版", 2019)])), detail_url(7): response(detail_url(7), detail_html(7)), down_url(7): response(down_url(7), download_html([("1917.2019.1080p", magnet("d" * 40))]))}
+        page = await KPkuangAdapter(http=FakeHttp(routes)).search(IndexerSearchRequest.create("1917 特别版", year=2019, media_type="movie"))
         self.assertEqual(len(page.items), 1)
 
     def test_encoded_api_matches_the_verified_source_configuration(self):

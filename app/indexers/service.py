@@ -1035,7 +1035,7 @@ class IndexerService:
                 fallback_query=query,
             ):
                 break
-            if merged_items and site_id in {"nyaa", "dygang", "ys5266"} and attempts < len(queries):
+            if merged_items and site_id in {"nyaa", "dygang", "ys5266", "kpkuang"} and attempts < len(queries):
                 # 平滑查询间先交付已知结果，下一别名失败/取消不抹掉已返回证据。
                 report_page(site_id, IndexerPage(
                     items=list(merged_items), page=page, has_more=has_more,
