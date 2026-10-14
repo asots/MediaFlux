@@ -861,6 +861,62 @@ class LocalMediaServiceTests(IsolatedDatabaseTestCase):
             self.assertIn("封神第二部：战火西岐 (2025) {tmdb-1155281}", target.parent.name)
             self.assertIn("封神第二部：战火西岐.2025", target.name)
 
+    def test_manual_tv_preview_keeps_attached_sequence_episode_numbers(self):
+        parser = TMDBScraper("offline-fixture")
+        self.addCleanup(parser.close)
+
+        class SequenceScraper(SharedPositionFakeScraper):
+            def parse_media(self, filename, parent_path="", match=None):
+                return parser.parse_media(filename, parent_path, match)
+
+            def get_detail(self, tmdb_id, media_type, *, force_refresh=False):
+                return {
+                    **super().get_detail(tmdb_id, media_type),
+                    "id": int(tmdb_id),
+                    "seasons": [
+                        {"season_number": 1, "episode_count": 97},
+                        {"season_number": 2, "episode_count": 61},
+                    ],
+                }
+
+        for start, width, mode in ((1, 2, "auto"), (98, 3, "absolute")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root_raw:
+                root = Path(root_raw)
+                source_root = root / f"05 龙珠改：魔人布欧篇 {mode}"
+                target_root = root / "library"
+                source_root.mkdir()
+                target_root.mkdir()
+                for episode in range(start, start + 4):
+                    name = f"龙珠改布欧篇{episode:0{width}d}（龙论版）.mp4"
+                    (source_root / name).write_bytes(b"video")
+                source_id = self._source(source_root, target_root, "tv")
+                service = LocalMediaService(scraper=SequenceScraper(MatchResult(
+                    tmdb_id="42", title="龙珠改", year="2009", media_type="tv",
+                    confidence=1.0,
+                )))
+                self.addCleanup(service.close)
+                inspection = service.inspect_source("admin", source_id, source_root)
+                with patch(
+                    "app.modules.local_media_service.OrganizeRules.from_config",
+                    return_value=OrganizeRules(
+                        small_file_mb=0, media_info_enabled=False,
+                        region_split=False, year_split=False,
+                    ),
+                ):
+                    preview = service.preview(
+                        "admin", inspection["inspection_id"], tmdb_id="42",
+                        media_type="tv", season_override=2, numbering_mode=mode,
+                    )
+                self.assertEqual(preview["status"], "planned")
+                self.assertEqual(len(preview["plans"]), 4)
+                for episode, plan in enumerate(preview["plans"], 1):
+                    self.assertIn(f"S02E{episode:02d}", plan["target_name"])
+                for offset, match in enumerate(preview["matches"]):
+                    self.assertEqual(match["source_episode"], start + offset)
+                    self.assertEqual(match["episode_mapping"]["source_episode"], start + offset)
+                self.assertEqual(len(list(source_root.glob("*.mp4"))), 4)
+                self.assertEqual(list(target_root.iterdir()), [])
+
     def test_auto_multi_video_directory_prefers_episode_evidence_over_generic_folder_name(self):
         with tempfile.TemporaryDirectory() as root_raw:
             root = Path(root_raw)

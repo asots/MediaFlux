@@ -241,16 +241,29 @@ class DirectoryMediaInspector:
             replace(item, file=snapshots_by_id[item.file.file_id])
             for item in video_identities
         ]
-        videos, pending_videos = self._select_primary_media_group(normalized_identities)
+        videos, pending_videos = self._select_primary_media_group(
+            normalized_identities, allow_attached_sequence=not rules.nsfw_exclusive,
+        )
         special_only = bool(normalized_identities) and all(
             item.special for item in normalized_identities
         )
         source_identity = str(parsed_dir.get("title") or source.name or "").strip()
-        requires_manual_match = special_only and self._ambiguous_special_source(source_identity)
-        manual_match_reason = (
-            "目录中仅有 OVA/特典等特殊内容，且缺少可确认的作品名，请人工选择 TMDB 媒体"
-            if requires_manual_match else ""
+        inferred_sequence = any(
+            item.episode is not None and snapshots_by_id[item.file_id].episode is None
+            and item.season != 0
+            for item in videos
         )
+        requires_manual_match = inferred_sequence or (
+            special_only and self._ambiguous_special_source(source_identity)
+        )
+        manual_match_reason = ""
+        if inferred_sequence:
+            manual_match_reason = (
+                "已根据同目录连续编号推断集号，尚未确认作品身份，"
+                "请人工选择 TMDB 剧集并核对季号和预览集号"
+            )
+        elif requires_manual_match:
+            manual_match_reason = "目录中仅有 OVA/特典等特殊内容，且缺少可确认的作品名，请人工选择 TMDB 媒体"
 
         if pending_videos:
             companions = self._safe_companions_for_videos(videos, companions)
@@ -607,16 +620,68 @@ class DirectoryMediaInspector:
             videos[index] = replace(item, season=0, episode=int(desired))
         return videos
 
+    @staticmethod
+    def _infer_attached_episode_sequence(
+        identities: list[_VideoIdentity],
+    ) -> list[_VideoIdentity]:
+        """仅在目录内推断紧贴片名的连续集号，不改变单文件解析。
+
+        仅选中目录直属文件参与：至少四个同标题、同版本且等宽连续的
+        补零编号。不跨子目录推断，避免漏掉子目录季号。年份/显式身份/
+        已有季集证据不参与推断；最终仍需人工
+        选剧并核对位置，不能用这类弱证据自动匹配或合并两个作品。
+        """
+        pattern = re.compile(
+            r"(?P<title>.*[\u3400-\u9fff])(?P<episode>[0-9]{2,3})"
+            r"(?P<edition>\([^()]{1,24}版\))$"
+        )
+        groups: dict[tuple[str, str, int], list[tuple[_VideoIdentity, re.Match[str]]]] = {}
+        for item in identities:
+            if (
+                item.special or item.file.relative_dir or item.file.season is not None
+                or item.file.episode is not None or item.year or item.tmdb_id
+            ):
+                continue
+            stem = item.file.name.rsplit(".", 1)[0]
+            normalized = unicodedata.normalize("NFKC", stem)
+            # 用户格式或统一解析器已改写的身份不从原名重新覆盖。
+            if normalized != unicodedata.normalize("NFKC", item.title):
+                continue
+            match = pattern.fullmatch(normalized)
+            if not match or len(re.findall(r"[\u3400-\u9fff]", match["title"])) < 3:
+                continue
+            key = (match["title"], match["edition"], len(match["episode"]))
+            groups.setdefault(key, []).append((item, match))
+        replacements = {}
+        for group in groups.values():
+            numbers = sorted(int(match["episode"]) for _, match in group)
+            if (
+                len(numbers) < 4 or numbers[0] < 1 or numbers[-1] > 500
+                or numbers != list(range(numbers[0], numbers[0] + len(numbers)))
+                or not any(match["episode"].startswith("0") for _, match in group)
+            ):
+                continue
+            for item, match in group:
+                replacements[item.file.file_id] = replace(
+                    item, title=match["title"], media_type="tv",
+                    file=replace(item.file, episode=int(match["episode"])),
+                )
+        return [replacements.get(item.file.file_id, item) for item in identities]
+
     @classmethod
     def _select_primary_media_group(
         cls,
         identities: list[_VideoIdentity],
+        *,
+        allow_attached_sequence: bool = False,
     ) -> tuple[list[MediaSnapshot], list[PendingMedia]]:
         """选择唯一明确的主媒体组，并隔离极少量低信息异常视频。
 
         明确可识别的第二部媒体仍然拒绝；只有类似 ``x.mp4``、``sample.mp4``
         这种无法建立稳定标题身份的文件，才允许留在原目录等待人工处理。
         """
+        if allow_attached_sequence:
+            identities = cls._infer_attached_episode_sequence(identities)
         special = [item for item in identities if item.special]
         special_files = [item.file for item in special]
         regular = [item for item in identities if not item.special]

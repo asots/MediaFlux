@@ -837,10 +837,16 @@ class LocalMediaService:
         ]
         try:
             selected_videos, pending_videos = (
-                DirectoryMediaInspector._select_primary_media_group(identities)
+                DirectoryMediaInspector._select_primary_media_group(
+                    identities, allow_attached_sequence=media_type == "tv",
+                )
             )
         except DirectoryScrapeRequestError as exc:
             raise LocalMediaServiceError(str(exc)) from exc
+        for item in selected_videos:
+            if item.episode is not None and snapshots_by_id[item.file_id].episode is None:
+                # 批次推断的位置是源编号，不能在绝对集号映射后回退成目标编号。
+                source_positions_by_file_id[item.file_id] = (item.season, item.episode)
 
         companions: list[MediaSnapshot] = []
         for relative_dir, items in scan_result.companion_files.items():
