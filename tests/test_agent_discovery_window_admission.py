@@ -249,3 +249,18 @@ def test_window_has_hard_business_and_utility_bounds(maximum):
         maximum=maximum,
     )
     assert len(finder.window(business)) == maximum + 3
+
+
+@pytest.mark.parametrize("opted_in", [False, True])
+def test_unmatched_kernel_utility_cannot_enter_via_workflow_neighbor(opted_in):
+    utility = replace(read_tool("agent.utility", description="unrelated internal helper"),
+                      metadata={"kernel_utility": True, "query_discoverable": opted_in})
+    target = replace(read_tool("metadata.find", description="quasar lookup"),
+                     metadata={"related_tools": [utility.name]})
+    finder = CapabilityDiscovery(ToolCatalog([capability_tool(), target, utility]), context={})
+    result = finder.search({"query": "quasar"})
+    assert result["loaded_tools"] == [target.name]
+    assert utility.name not in {tool["name"] for tool in result["tools"]}
+    # 明确按名称查询仍可加载；这里修的是自动补位，不是取消工具权限。
+    explicit = finder.search({"tool_names": [utility.name]})
+    assert utility.name in explicit["loaded_tools"]

@@ -251,7 +251,8 @@ class CapabilityDiscovery:
                 names = (names,)
             if isinstance(names, (list, tuple, set, frozenset)):
                 related.update(str(name) for name in names)
-        neighbors = [tool for tool in visible if tool.name in related and tool not in positive]
+        neighbors = [tool for tool in visible if tool.name in related and tool not in positive
+                     and not tool.metadata.get("kernel_utility")]
         return (positive + neighbors)[:6]
 
     def checkpoint(self) -> tuple[tuple[KernelToolSpec, ...], tuple[str, ...]]:
