@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 DISCOVERY_TOOL = "agent.capabilities"
 # Only these bounded kernel utilities are exempt from the business window.
-WINDOW_UTILITIES = frozenset({DISCOVERY_TOOL, "agent.read_result", "agent.task"})
+WINDOW_UTILITIES = frozenset({DISCOVERY_TOOL, "agent.read_result", "agent.task", "agent.pending_plan"})
 
 
 class CapabilityDiscovery:
@@ -76,6 +76,8 @@ class CapabilityDiscovery:
             ordered.append(visible["agent.read_result"])
         if self.context.get("has_task") and "agent.task" in visible:
             ordered.append(visible["agent.task"])
+        if self.context.get("has_pending_effect") and "agent.pending_plan" in visible:
+            ordered.append(visible["agent.pending_plan"])
         business_count = 0
         retained = tuple(visible[name] for name in self._retained if name in visible)
         for tool in (*retained, *additions, *previous):

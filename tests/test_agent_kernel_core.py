@@ -2474,7 +2474,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(lifecycle.cancelled_plans), 1)
         self.assertEqual(lifecycle.cancelled_plans[0].tool_name, "download.pause")
 
-    async def test_new_turn_discards_unconfirmed_effect_without_leaving_stale_state(
+    async def test_explicit_cancel_discards_unconfirmed_effect_without_leaving_stale_state(
         self,
     ) -> None:
         tool = KernelToolSpec(
@@ -2505,6 +2505,11 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                         ModelEventType.TOOL_CALL_COMPLETED,
                         tool_call=ModelToolCall("write", "download.pause", {}),
                     ),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+                ],
+                [
+                    ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
+                               tool_call=ModelToolCall("cancel", "agent.pending_plan", {"operation": "cancel"})),
                     ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
                 ],
                 [

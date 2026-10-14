@@ -63,7 +63,8 @@ async def lifecycle(mode):
             body = json.loads(request.content)
             wires.append(body)
             n = len(wires)
-            if n == 1 or (mode == "replacement" and n == 2):
+            if n == 1 or (mode in ("cancel", "replacement") and n == 2):
+                cancelling = mode == "cancel" and n == 2
                 delta = {
                     "tool_calls": [
                         {
@@ -71,8 +72,14 @@ async def lifecycle(mode):
                             "id": f"native-{n}",
                             "type": "function",
                             "function": {
-                                "name": tool.model_name,
-                                "arguments": json.dumps({"step": n}),
+                                "name": (
+                                    catalog.get("agent.pending_plan").model_name
+                                    if cancelling
+                                    else tool.model_name
+                                ),
+                                "arguments": json.dumps(
+                                    {"operation": "cancel"} if cancelling else {"step": n}
+                                ),
                             },
                         }
                     ]
@@ -151,7 +158,7 @@ async def lifecycle(mode):
             text = {
                 "explain": "这张卡有什么影响？只解释，不修改计划。",
                 "cancel": "算了，放弃原任务。",
-                "scope": "改成另外两个对象。",
+                "scope": "先看看另外两个对象，不修改原计划。",
                 "replacement": "改成第二个对象。",
             }[mode]
             if mode == "explain":
@@ -162,16 +169,22 @@ async def lifecycle(mode):
                 )
                 assert follow.status == "success", follow
                 assert not wires[-1].get("tools")
-                restored = await session().pipeline.get_pending_plan(
-                    owner="owner", session_id=mode
-                )
-                assert restored == frozen
             else:
                 follow = await consume_events(
                     session().run(
                         AgentInput(message=text, owner="owner", session_id=mode)
                     )
                 )
+            if mode in ("explain", "scope"):
+                assert follow.status == "success", follow
+                assert follow.tool_calls == ()
+                restored = await session().pipeline.get_pending_plan(
+                    owner="owner", session_id=mode
+                )
+                assert restored == frozen
+            elif mode == "cancel":
+                assert follow.status == "success", follow
+                assert follow.tool_calls == ("agent.pending_plan",)
             assert writes == []
         if mode == "expiry":
             now[0] = frozen.expires_at + 1
@@ -181,7 +194,7 @@ async def lifecycle(mode):
         result = await consume_events(
             session().confirm(owner="owner", session_id=mode, plan_id=plan)
         )
-        await consume_events(
+        replay = await consume_events(
             session().confirm(owner="owner", session_id=mode, plan_id=plan)
         )
         cold = await SQLiteKernelStore().load(owner="owner", session_id=mode)
@@ -198,19 +211,30 @@ async def lifecycle(mode):
             "native_call_replayed": any("native-1" in json.dumps(x) for x in wires[1:]),
             "cold_pending": cold.pending_effect_plan_id,
         }
-        if mode == "explain":
+        assert replay.status == "failed", replay
+        assert replay.error_code == "confirmation_invalid", replay
+        if mode in ("explain", "scope"):
             assert after.generation == before.generation + 1
+            assert after.pending_effect_plan_id == plan
             assert after.metadata["pending_effect_binding"] == {
                 "plan_id": plan,
                 "plan_generation": before.generation,
             }
-        if mode in ("direct", "explain"):
+        if mode in ("direct", "explain", "scope"):
             assert writes == [{"arguments": {"step": 1}, "snapshot": "frozen-1"}], (
                 record
             )
             assert result.status == "success"
         else:
             assert writes == [], record
+            assert result.status == "failed", record
+            assert result.error_code == (
+                "authorization_denied" if mode == "permission" else "confirmation_invalid"
+            ), record
+        if mode == "cancel":
+            assert after.pending_effect_plan_id == "", record
+        if mode != "replacement":
+            assert cold.pending_effect_plan_id == "", record
         if mode == "replacement":
             assert after.pending_effect_plan_id not in ("", plan)
             assert cold.pending_effect_plan_id == after.pending_effect_plan_id

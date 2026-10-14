@@ -53,5 +53,8 @@ class AgentKernelCapabilityCorpusTests(unittest.TestCase):
                     f"{case['id']}: missing={missing}, selected={list(selection.names)}"
                 )
             self.assertGreaterEqual(len(selection.tools), 6)
-            self.assertLessEqual(len(selection.tools), 12)
+            business = [tool for tool in selection.tools if not tool.metadata.get("kernel_utility")]
+            self.assertLessEqual(len(business), self.session.retriever.maximum)
+            utilities = {tool.name for tool in selection.tools if tool.metadata.get("kernel_utility")}
+            self.assertLessEqual(utilities, {"agent.batch", "agent.task", "agent.pending_plan"})
         self.assertEqual(failures, [], "\n".join(failures))

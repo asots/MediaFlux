@@ -463,6 +463,17 @@ class ToolPipeline:
         from .batch_effects import batch_tool
         if not catalog.has("agent.batch") and (batch := batch_tool(self)) is not None:
             catalog.register(batch)
+        if not catalog.has("agent.pending_plan") and any(
+            tool.effect is not ToolEffect.READ for tool in catalog.visible()
+        ):
+            catalog.register(KernelToolSpec(
+                name="agent.pending_plan", domain="agent", effect=ToolEffect.READ,
+                description="管理当前会话唯一待确认计划：inspect查看原卡；用户明确取消/放弃时用cancel撤销原卡。只控制未执行的确认票据，不执行或撤销业务操作，不支持确认。普通讨论无需重做预览；修改用原写工具重新预检，系统替换旧卡。",
+                input_schema={"type": "object", "required": ["operation"], "additionalProperties": False,
+                              "properties": {"operation": {"type": "string", "enum": ["inspect", "cancel"]}}},
+                read=self._pending_plan, examples=("取消这张确认卡", "查看待确认计划"),
+                metadata={"kernel_utility": True, "query_discoverable": True},
+            ))
         if not catalog.has("agent.task"):
             catalog.register(task_tool())
         if not catalog.has("agent.read_result"):
@@ -797,6 +808,11 @@ class ToolPipeline:
 
         if tool.prepare is None:  # pragma: no cover - ToolSpec 已校验
             raise ToolPipelineError("工具不支持预检", code="confirmation_not_supported")
+        # 讨论保留原票据；只有已校验并准入的新写预检才能替换它。
+        # 必须在领域prepare之前撤销：部分领域预检会替换自己的冻结快照。
+        current = await self.state_store.load(owner=context.owner, session_id=context.session_id)
+        if current.pending_effect_plan_id:
+            await self.cancel_effect(current.pending_effect_plan_id, lease=context.lease)
         prepared_value = await _invoke(tool.prepare, resolved, context)
         if isinstance(prepared_value, ToolOutcome):
             if prepared_value.public_content.get("ok") is not True or prepared_value.public_content.get("status") != "no_changes":
@@ -1062,6 +1078,20 @@ class ToolPipeline:
             if verified is not True and verified is not None:
                 value = verified
         return value
+
+    async def _pending_plan(self, arguments: dict[str, Any], context: ToolCallContext) -> dict[str, Any]:
+        with session_scope_guard(context.owner, context.session_id, kind="effect"):
+            if not await self.state_store.is_current(context.lease):
+                raise StalePublicationError("turn lost publication authority")
+            state = await self.state_store.load(owner=context.owner, session_id=context.session_id)
+            plan = await self.get_pending_plan(owner=context.owner, session_id=context.session_id, scoped=True)
+            if arguments["operation"] == "cancel" or plan is None:
+                cancelled = bool(state.pending_effect_plan_id) and await self._cancel_effect_scoped(
+                    state.pending_effect_plan_id, lease=context.lease)
+                return {"ok": True, "status": "completed", "summary": "已取消原确认卡，未执行业务操作" if cancelled else "当前没有有效的待确认计划",
+                        "data": {"pending": False, "cancelled": cancelled}}
+            return {"ok": True, "status": "completed", "summary": "原确认卡仍有效，尚未执行",
+                    "data": {"pending": True, "preview": plan.public_result, "confirmation": plan.confirmation_contract}}
 
     async def cancel_effect(
         self, plan_id: str, *, lease: PublicationLease,

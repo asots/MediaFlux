@@ -893,8 +893,8 @@ class InMemorySessionStateStore:
             if pending_guard is not None:
                 pending_guard.check(state)
             else:
-                # Only a checked explanation transition may carry a frozen
-                # plan's authority across publication generations.
+                # Only a checked pending guard may carry a frozen plan across
+                # discussion generations; it never changes the approved scope.
                 state.metadata.pop("pending_effect_binding", None)
             _consume_delivered_effect_receipts(state)
             state.generation = generation

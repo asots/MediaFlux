@@ -1185,7 +1185,7 @@
         explain.type = 'button';
         explain.dataset.effectExplain = approval.plan_id || '';
         actions.append(cancel, explain, confirm);
-        status.append(element('p', 'agent-confirmation-copy', '只解释会保留本卡；直接发送普通消息将替换待确认计划。'));
+        status.append(element('p', 'agent-confirmation-copy', '普通讨论会保留本卡；取消或新的变更预检才会使原卡失效，有效期不延长。'));
         card.append(head, intro);
         if (facts.childElementCount) card.append(facts);
         if (scope) card.append(scope);
@@ -1196,6 +1196,7 @@
     }
 
     function showApproval(turn, approval) {
+        if (approval.plan_id) expireVisibleApprovals(String(approval.plan_id));
         cancelTurnMarkdownRender(turn);
         turn.pendingMarkdown = '';
         const card = buildApproval(approval);
@@ -1316,13 +1317,17 @@
         if (!group) scrollToBottom();
     }
 
-    function expireVisibleApprovals() {
+    function expireVisibleApprovals(keepPlanId = '') {
         transcript?.querySelectorAll('.agent-confirmation-card[data-plan-id]').forEach((card) => {
+            if (card.dataset.planId === keepPlanId || card.classList.contains('is-expired')) return;
             card.classList.add('is-expired');
             card.querySelectorAll('button').forEach((button) => { button.disabled = true; });
             const status = card.querySelector('.agent-confirmation-preflight span');
-            if (status) status.textContent = '已由新的任务替代，本计划不会执行。';
+            if (status) status.textContent = keepPlanId
+                ? '已由新的计划替代，本计划不会执行。'
+                : '该计划已取消或失效，不能再确认。';
         });
+        syncCandidateButtons();
     }
 
     function rememberCandidateEffectResult(turn, result) {
@@ -1350,7 +1355,6 @@
         case 'turn.started':
             turn.confirmationRequested = payload.kind === 'confirmation';
             turn.streamDisplayEnabled = payload.stream_display_enabled !== false;
-            if (turn.boundSelection) expireVisibleApprovals();
             setTurnStatus(turn, payload.kind === 'confirmation' ? '正在执行已确认计划' : '正在理解任务');
             break;
         case 'capabilities.selected':
@@ -1554,6 +1558,34 @@
         if (active.kernelGeneration != null && turn.generation != null
             && String(turn.generation) !== String(active.kernelGeneration)) return false;
         return true;
+    }
+
+    async function reconcilePendingApprovals(active) {
+        if (!isCurrentActiveRequest(active)
+            || !transcript?.querySelector('.agent-confirmation-card[data-plan-id]:not(.is-expired)')) return;
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        const timeout = window.setTimeout(abort, 3000);
+        active.controller.signal.addEventListener('abort', abort, {once: true});
+        try {
+            const payload = await fetchJSON(`/api/agent/sessions/${encodeURIComponent(active.sessionId)}`, {
+                signal: controller.signal, cache: 'no-store',
+                headers: {'X-Agent-Request-Id': active.requestId},
+            });
+            if (!isCurrentActiveRequest(active) || payload?.session_id !== active.sessionId) return;
+            // protected 会暂时隐藏已接管的票据；其它活动轮次也不能作为本轮的撤卡依据。
+            if (payload.active_turn && (payload.active_turn.protected || !sameActiveTurn(payload.active_turn, active))) return;
+            // 缺少本轮终态的旧/缺省快照不能证明票据已撤销。
+            if (!sameActiveTurn(payload.last_turn, active)
+                || !['completed', 'failed', 'cancelled'].includes(payload.last_turn.status)) return;
+            if (payload.pending_approval === null) expireVisibleApprovals();
+            else if (payload.pending_approval?.plan_id) expireVisibleApprovals(String(payload.pending_approval.plan_id));
+        } catch (_) {
+            // 无法核实就保留原卡，不把网络故障伪装成取消，也不重放写操作。
+        } finally {
+            window.clearTimeout(timeout);
+            active.controller.signal.removeEventListener('abort', abort);
+        }
     }
 
     function activeProgressText(turn, active) {
@@ -1884,7 +1916,6 @@
         const message = text.trim();
         ++sessionLoadGeneration;
         expireCandidateCards();
-        expireVisibleApprovals();
         appendUser(message);
         const turn = createAssistantTurn();
         turn.requestMessage = message;
@@ -1921,6 +1952,8 @@
                 startActiveObservation(active);
                 return;
             }
+            await reconcilePendingApprovals(active);
+            if (!isCurrentActiveRequest(active)) return;
             announce(responseStatus, turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : '本轮回复已结束');
             startReceiptObservation(active);
             refreshSessions({quiet: true});
@@ -2795,9 +2828,9 @@
                 if (active.cancelAccepted && isTerminalEvent(event)) return;
                 const payload = event.payload || {};
                 consumeTerminalTask(event);
-                if (event.type === 'turn.started') expireVisibleApprovals();
                 if (event.type === 'effect.approval_required' && payload.plan) {
                     const plan = payload.plan;
+                    if (plan.plan_id) expireVisibleApprovals(String(plan.plan_id));
                     const card = buildApproval({plan_id: plan.plan_id, effect: plan.effect, preview: plan.preview, confirmation: plan.confirmation, expires_at: plan.expires_at, result: payload.result});
                     card._candidateSelection = selection;
                     state.output.replaceChildren(card);
@@ -2817,6 +2850,8 @@
             if (!isCurrentActiveRequest(active)) return;
             if (!terminalEvent || active.cancelAccepted) startActiveObservation(active);
             else {
+                await reconcilePendingApprovals(active);
+                if (!isCurrentActiveRequest(active)) return;
                 announce(responseStatus, terminalEvent.type === 'turn.cancelled' ? '请求已停止' : '预检已完成');
                 startReceiptObservation(active);
                 refreshSessions({quiet: true});

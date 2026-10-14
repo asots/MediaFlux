@@ -94,6 +94,7 @@ _PUBLIC_TOOL_LABELS: dict[str, str] = {
     "agent.read_result": "工具结果续读",
     "agent.repair": "修正工具参数",
     "agent.batch": "组合变更",
+    "agent.pending_plan": "待确认计划",
     "agent.capabilities": "Agent 能力查询",
     "agent.job_status": "后台检查进度",
     "automation.diagnose_pipeline": "自动化链路诊断",
