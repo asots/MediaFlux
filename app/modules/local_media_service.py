@@ -2037,6 +2037,7 @@ class LocalMediaService:
                     cleanup_candidates,
                     allowed_root=Path(source.local_root),
                     selected_path=Path(task.content_path),
+                    source_parent_dirs={item.source.parent for item in result.moved},
                     remove_empty_dirs=bool(rules.clean_empty),
                 )
                 warnings.extend(cleanup_result.warnings)

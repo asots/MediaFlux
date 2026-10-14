@@ -77,10 +77,12 @@ def enqueue_confirmation_cleanup(conn, *, token: str, timestamp: str) -> int | N
         confirmation['confirmation_actor'] == 'agent' and isinstance(candidates, list)
         and any(isinstance(item, dict) and item.get('provider') == 'clean_title' for item in candidates)
     )
+    # 早期自动清洗未持久化策略但不曾授权删除；新执行明确记录 cleanup_empty。
+    # 不因当前开关开启而给旧成功票据补发删除权限。
+    cleanup_policy = stats.get('download_staging_policy') or ('retained' if agent_clean else '')
     identity['_cleanup_disabled'] = (
-        stats.get('download_staging_policy') == 'retained'
+        cleanup_policy == 'retained'
         or (isinstance(payload.get('rules'), dict) and payload['rules'].get('clean_empty') is False)
-        or agent_clean
     )
     conn.execute(
         'INSERT INTO download_staging_reconcile '

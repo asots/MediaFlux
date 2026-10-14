@@ -2070,6 +2070,8 @@ def _confirmation_result_event(
         failed
         or unresolved
         or warnings
+        or stats.get("empty_dir_cleanup_failed")
+        or stats.get("source_dir_cleanup_failed")
         or (strm and not strm.get("ok") and not strm.get("skipped"))
     )
     result_label = (
@@ -2078,6 +2080,9 @@ def _confirmation_result_event(
     if unresolved:
         result_label += f" · 待确认 {unresolved}"
     actor_label = "Agent 确认" if actor == "agent" else "人工确认"
+    # 下载目录收尾在确认终态落盘后执行，也可能延迟重试；不要把收尾前的
+    # 数量冻结进确认 outbox，最终结果沿用下载事务自己的通知/记录。
+    download_cleanup = bool(stats.get("download_staging_identity"))
     return NotificationEvent(
         f"⚠️ {actor_label}整理部分完成" if partial else f"✅ {actor_label}整理完成",
         fields=(
@@ -2086,6 +2091,11 @@ def _confirmation_result_event(
             ("源文件目录", _confirmation_source_display(payload)),
             NOTIFICATION_SECTION_BREAK,
             ("执行结果", result_label),
+            *(( ("目录清理", "由下载流程核验收尾，结果见下载记录"), ) if download_cleanup else ()),
+            *(( ("空目录清理", f"已清理 {safe_int(stats.get('empty_dirs_cleaned'), 0, minimum=0)} 个"), )
+              if "empty_dirs_cleaned" in stats and not download_cleanup else ()),
+            *(( ("目录保留说明", "；".join(stats["empty_dir_cleanup_reasons"])), )
+              if stats.get("empty_dir_cleanup_reasons") and not download_cleanup else ()),
             ("STRM 状态", _terminal_status_label(strm_label)),
             ("媒体库刷新", _terminal_status_label(
                 refresh_label, media_library=True,
@@ -2441,6 +2451,59 @@ def _finalize_confirmed_downloads(payload: dict, client, stats: dict, rules: Org
     return request_ids
 
 
+def _cleanup_confirmed_source(payload: dict, organizer: Organizer, rules: OrganizeRules, stats: dict) -> None:
+    """仅沿本次成功移动的原父链收尾；不扫描其他子树或接管下载隔离目录。"""
+    if not rules.clean_empty or not stats.get("moved") or any(
+        stats.get(key) for key in (
+            "failed", "need_confirm", "stopped", "scan_errors",
+            "replacement_cleanup_failed", "audit_failures",
+        )
+    ):
+        return
+    from app.modules.download_staging_cleanup import source_inside_protected_staging
+    from app.modules.organize_tasks import _cleanup_manual_source_root
+
+    try:
+        source_id = str(payload.get("source_dir_id") or "").strip()
+        parent_id = str(payload.get("source_parent_id") or "").strip()
+        if not source_id or not parent_id:
+            raise RuntimeError("来源目录身份缺失，已保留空目录")
+        staging_ids = set(db.list_protected_guangya_staging_ids())
+        if source_inside_protected_staging(organizer.client, parent_id, staging_ids):
+            Organizer._append_reason(
+                stats, "empty_dir_cleanup_reasons", "下载隔离目录由下载收尾处理，未执行通用清理", limit=8,
+            )
+            return
+        # 先核实整条父链属于冻结来源，再从里向外删空；不能越过原来源边界。
+        parents: list[str] = []
+        current = parent_id
+        while current not in parents and len(parents) < 64:
+            parents.append(current)
+            if current == source_id:
+                break
+            if current == "0":
+                raise RuntimeError("原父目录已不在确认来源内，已保留空目录")
+            info = organizer.client.file_info(current)
+            if info is None or not info.is_dir or not str(info.parent_id or "").strip():
+                raise RuntimeError("来源父链无法确认，已保留空目录")
+            current = str(info.parent_id)
+        else:
+            raise RuntimeError("来源父链异常，已保留空目录")
+        for directory_id in parents:
+            cleaned = int(stats.get("empty_dirs_cleaned", 0) or 0)
+            _cleanup_manual_source_root(
+                organizer, directory_id, "", rules, stats, trigger_type="manual",
+            )
+            if int(stats.get("empty_dirs_cleaned", 0) or 0) == cleaned:
+                break  # 非空、受保护或清理失败时，不再向上尝试。
+    except Exception as exc:  # noqa: BLE001 - 收尾不能把已提交的入库变成失败或重放移动。
+        logger.warning("确认入库后源目录收尾失败 type=%s", type(exc).__name__)
+        stats["source_dir_cleanup_failed"] = int(stats.get("source_dir_cleanup_failed", 0) or 0) + 1
+        Organizer._append_reason(
+            stats, "empty_dir_cleanup_reasons", f"源目录收尾失败，已保留: {exc}", limit=8,
+        )
+
+
 def _execute_guangya_confirmation(
     token: str, payload: dict, candidate: dict, *,
     selected_index: int, chat_id: str, actor: str = "human"
@@ -2520,8 +2583,9 @@ def _execute_guangya_confirmation(
             str(item.get("file_id") or "") for item in (*files, *companions)
             if str(item.get("file_id") or "")
         }
-        # 自动清洗不授权清理源空目录或旧版本，规则快照验证仍针对原配置。
-        execution_rules = replace(current_rules, clean_empty=False) if write_boundary else current_rules
+        # 季集研究仍不扩大删除授权；清洗入库遵循清空目录开关，旧版本替换
+        # 继续由写边界禁止。源空目录只在成功后沿已确认父链复核，不扫描其他子树。
+        execution_rules = replace(current_rules, clean_empty=False) if episode_boundary else current_rules
         organizer = Organizer(
             client=client,
             **({"before_plan_write": write_boundary} if write_boundary is not None else {}),
@@ -2610,8 +2674,10 @@ def _execute_guangya_confirmation(
             from app.repositories.download_staging import staging_identity_snapshot
             # 记录执行前身份，禁止终态提交期间的同源重绑定获得新的清理授权。
             stats["download_staging_identity"] = staging_identity_snapshot(download_owners[0])
-        if not execution_rules.clean_empty:
-            stats["download_staging_policy"] = "retained"
+        if download_owners or not execution_rules.clean_empty:
+            stats["download_staging_policy"] = "cleanup_empty" if execution_rules.clean_empty else "retained"
+        if not download_owners:
+            _cleanup_confirmed_source(payload, organizer, execution_rules, stats)
         terminal_event = _confirmation_result_event(
             payload, candidate, stats, actor=actor
         )

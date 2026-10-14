@@ -1483,6 +1483,8 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
         ), patch(
             "app.modules.organize_confirmations.Organizer", FakeOrganizer,
         ), patch(
+            "app.modules.organize_confirmations._cleanup_confirmed_source",
+        ) as cleanup, patch(
             "app.modules.organize_confirmations.get", return_value="8",
         ), patch(
             "app.modules.telegram_notification_center.publish_notification_thread",
@@ -1492,6 +1494,9 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
             ),
         ):
             result = callbacks[0]()
+        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args.args[0]["source_parent_id"], "parent")
+        self.assertEqual(cleanup.call_args.args[2], rules)
         self.assertEqual(result["stats"], {"moved": 1})
         self.assertEqual(
             [item for item in calls if isinstance(item, tuple)],

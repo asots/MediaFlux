@@ -532,12 +532,44 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.cloud.reads, reads)
 
     def test_clean_title_execution_policy_survives_restart_and_current_enabled_rules(self):
-        db.update_organize_confirmation('done', result_json=json.dumps({
+        with db.get_conn() as conn:
+            conn.execute("UPDATE organize_confirmations SET payload_json=? WHERE token='done'", (
+                json.dumps({**self.payload, 'rules': {'clean_empty': True},
+                            'candidates': [{'provider': 'clean_title'}]}),
+            ))
+        db.update_organize_confirmation('done', confirmation_actor='agent', result_json=json.dumps({
             'moved': 1, 'download_staging_policy': 'retained',
         }))
         self.enqueue()
         self.drain()
         self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'skipped')
+        self.assertEqual(self.cloud.reads, [])
+
+    def test_agent_clean_title_with_enabled_policy_can_cleanup_after_restart(self):
+        with db.get_conn() as conn:
+            conn.execute("UPDATE organize_confirmations SET payload_json=? WHERE token='done'", (
+                json.dumps({**self.payload, 'rules': {'clean_empty': True},
+                            'candidates': [{'provider': 'clean_title'}]}),
+            ))
+        db.update_organize_confirmation('done', confirmation_actor='agent', result_json=json.dumps({
+            'moved': 1, 'download_staging_policy': 'cleanup_empty',
+        }))
+        self.enqueue()
+        self.drain()
+        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'completed')
+        self.assertEqual(self.cloud.deleted, ['stage'])
+
+    def test_legacy_agent_clean_without_saved_policy_never_gains_delete_authority(self):
+        with db.get_conn() as conn:
+            conn.execute("UPDATE organize_confirmations SET payload_json=? WHERE token='done'", (
+                json.dumps({**self.payload, 'rules': {'clean_empty': True},
+                            'candidates': [{'provider': 'clean_title'}]}),
+            ))
+        db.update_organize_confirmation('done', confirmation_actor='agent')
+        self.assertEqual(queue.discover_legacy_confirmation_cleanup(), 1)
+        self.drain()
+        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'skipped')
+        self.assertEqual(self.cloud.deleted, [])
         self.assertEqual(self.cloud.reads, [])
 
     def test_cleanup_failure_in_fast_path_does_not_poison_success_evidence_for_retry(self):

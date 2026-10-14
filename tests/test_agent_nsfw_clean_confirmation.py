@@ -16,6 +16,7 @@ from app.modules.organize_execution import execute_organize_plans
 from app.modules.scraper import MatchResult
 from tests.support import IsolatedDatabaseTestCase
 from tests.test_agent_nsfw_clean_review import clean_payload
+from tests.test_download_staging_cleanup_lifecycle import _CloudTree
 
 
 class CleanConfirmationTests(IsolatedDatabaseTestCase):
@@ -60,7 +61,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
             patch.object(confirmations, "wake_confirmation_dispatcher")
         )
 
-    def ticket(self, *, running=False):
+    def ticket(self, *, running=False, actor="agent"):
         token = "frozen-clean-test"
         db.create_organize_confirmation(
             token=token,
@@ -76,7 +77,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         db.update_organize_confirmation(token, review_status="running")
         if running:
             db.claim_organize_confirmation(
-                token, chat_id="100", selected_index=0, actor="agent"
+                token, chat_id="100", selected_index=0, actor=actor
             )
             self.assertIsNotNone(db.claim_queued_organize_confirmation(token))
         return token
@@ -184,16 +185,17 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         self.assertEqual(db.get_organize_confirmation(token)["status"], "failed")
         self.assertEqual(self.pending_manual(), [])
 
-    def run_worker(self, *, decision="new", revoke=False, fail_after_commit=False):
-        token = self.ticket(running=True)
+    def run_worker(self, *, decision="new", revoke=False, fail_after_commit=False, actor="agent", provider="clean_title"):
+        token = self.ticket(running=True, actor=actor)
         calls = []
         outer = self
         plan = SimpleNamespace(
             file_id="file-0", action="move", conflict_decision=decision
         )
 
-        class FakeOrganizer:
+        class FakeOrganizer(Organizer):
             def __init__(self, **kwargs):
+                super().__init__(**kwargs)
                 self.guard = kwargs.get("before_plan_write")
 
             def _validate_target_outside_source(self, *_args):
@@ -206,10 +208,14 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
                 if not kwargs["dry_run"]:
                     if revoke:
                         outer.enabled = False
-                    self.guard(plan, "commit")
+                    if self.guard:
+                        self.guard(plan, "commit")
                     if fail_after_commit:
                         raise RuntimeError("injected move failure")
-                return [plan], {} if kwargs["dry_run"] else {"moved": 1}
+                    cloud.children["parent"].remove("file-0")
+                    remote.parent_id = "archive"
+                    cloud.children["archive"].append("file-0")
+                return [plan], {} if kwargs["dry_run"] else {"moved": 1, "empty_dirs_cleaned": 0}
 
             @staticmethod
             def trigger_post_actions(*_args, **_kwargs):
@@ -218,16 +224,23 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         remote = GuangYaFile(
             "file-0", "ABC-123.mp4", False, size=1024, parent_id="parent"
         )
+        cloud = _CloudTree()
+        cloud.add_dir("parent", "source")
+        cloud.add_dir("archive", "0")
+        cloud.nodes["file-0"] = remote
+        cloud.children["parent"].append("file-0")
+        self.cloud = cloud
         with (
-            patch.object(
-                confirmations,
-                "GuangYaClient",
-                return_value=SimpleNamespace(file_info=lambda _: remote),
-            ),
+            patch.object(confirmations, "GuangYaClient", return_value=cloud),
+            patch("app.modules.organize_tasks.config.get", side_effect=lambda key, default="": (
+                '[{"id":"source","name":"Source"}]' if key == "GY_ORGANIZE_SOURCE_DIRS" else default
+            )),
+            patch.object(db, "list_protected_guangya_staging_ids", return_value=[]),
+            patch.object(confirmations, "_record_confirmation_learning", return_value=[]),
             patch.object(
                 confirmations,
                 "_resolve_guangya_confirmation_candidate",
-                return_value=(object(), object(), {}, "clean_title"),
+                return_value=(object(), object(), {}, provider),
             ),
             patch.object(confirmations, "FixedMatchScraper", return_value=object()),
             patch.object(confirmations, "Organizer", FakeOrganizer),
@@ -238,13 +251,15 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
                 self.candidate,
                 selected_index=0,
                 chat_id="100",
-                actor="agent",
+                actor=actor,
             )
         return token, result, calls
 
-    def test_success_disables_empty_directory_cleanup_and_labels_fallback(self):
+    def test_success_cleans_only_empty_source_parent_and_labels_fallback(self):
         token, result, calls = self.run_worker()
-        self.assertEqual(calls, [(True, False), (False, False)])
+        self.assertEqual(calls, [(True, True), (False, True)])
+        self.assertEqual(self.cloud.deleted, ["parent"])
+        self.assertEqual(result["stats"]["empty_dirs_cleaned"], 1)
         self.assertEqual(result["stats"]["moved"], 1)
         row = db.get_organize_confirmation(token)
         self.assertEqual(row["status"], "completed")
@@ -258,19 +273,76 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         self.assertIn("Agent", event.title)
         self.assertIn("清洗入库 · 无完整元数据", str(event.fields))
 
+    def test_human_clean_confirmation_cleans_source_parent(self):
+        _, result, _ = self.run_worker(actor="human")
+        self.assertEqual(self.cloud.deleted, ["parent"])
+        self.assertEqual(result["stats"]["empty_dirs_cleaned"], 1)
+
+    def test_human_video_confirmation_cleans_source_parent(self):
+        _, result, _ = self.run_worker(actor="human", provider="tmdb")
+        self.assertEqual(self.cloud.deleted, ["parent"])
+        self.assertEqual(result["stats"]["empty_dirs_cleaned"], 1)
+
+    def test_cleanup_toggle_off_also_keeps_agent_clean_source(self):
+        self.rules.clean_empty = False
+        self.payload["rules"] = confirmations.organize_rules_snapshot(self.rules)
+        _, result, calls = self.run_worker()
+        self.assertEqual(calls, [(True, False), (False, False)])
+        self.assertEqual(self.cloud.deleted, [])
+        self.assertEqual(result["stats"]["moved"], 1)
+
+    def test_agent_clean_download_uses_staging_finalizer_not_generic_cleanup(self):
+        from app.modules.process_lock import CrossProcessLock
+
+        request_id, _ = db.create_download_request("agent-clean-download", "magnet")
+        db.update_download_request(
+            request_id, targets="guangya", status="completed", gy_status="completed",
+            gy_isolated=1, gy_target_dir="parent", gy_staging_parent_dir="source", gy_staging_name="parent",
+            gy_staging_cleanup_status="retained", organize_started=1,
+            organize_status="requires_manual", organize_task_id="clean-task",
+            gy_task_id="cloud-task", gy_task_ids='["cloud-task"]',
+        )
+        self.payload.update(source_dir_id="parent", download_request_ids=[request_id], organize_task_id="clean-task")
+        self.payload["_notification_suppressed"] = False
+        lock = CrossProcessLock("guangya-organize", directory=self.test_db_path.parent)
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+        with (
+            patch.object(confirmations, "_cleanup_confirmed_source") as generic_cleanup,
+            patch.object(confirmations, "_dispatch_due_confirmation_delivery"),
+            patch("app.modules.organize_tasks.get_organize_manager", return_value=SimpleNamespace(_lock=lock)),
+            patch("app.modules.telegram_download_lifecycle.publish_download_lifecycle"),
+        ):
+            token, result, _ = self.run_worker()
+        generic_cleanup.assert_not_called()
+        event = confirmations.deserialize_notification_event(db.get_organize_confirmation_delivery(token)["event_json"])
+        self.assertNotIn("已清理 0 个", str(event.fields))
+        self.assertIn(("目录清理", "由下载流程核验收尾，结果见下载记录"), event.fields)
+        self.assertEqual(result["stats"]["download_staging_policy"], "cleanup_empty")
+        row = db.get_download_request(request_id)
+        self.assertEqual(row["organize_status"], "completed")
+        self.assertEqual(row["gy_staging_cleanup_status"], "completed")
+        self.assertEqual(self.cloud.deleted, ["parent"])
+        self.assertNotIn("source", self.cloud.deleted)
+        self.assertNotIn("archive", self.cloud.deleted)
+        self.assertGreater(result["stats"]["empty_dirs_cleaned"], 0)
+
     def test_preflight_conflict_and_late_revocation_remain_manual(self):
         with self.assertRaises(DirectoryScrapeConflictError):
             self.run_worker(decision="replace")
+        self.assertEqual(self.cloud.deleted, [])
         self.assertEqual(len(self.pending_manual()), 1)
 
     def test_after_preflight_authorization_can_be_revoked(self):
         with self.assertRaises(DirectoryScrapeConflictError):
             self.run_worker(revoke=True)
+        self.assertEqual(self.cloud.deleted, [])
         self.assertEqual(len(self.pending_manual()), 1)
 
     def test_after_write_attempt_does_not_issue_blind_retry(self):
         with self.assertRaises(RuntimeError):
             self.run_worker(fail_after_commit=True)
+        self.assertEqual(self.cloud.deleted, [])
         self.assertEqual(self.pending_manual(), [])
 
     def real_execution(self, *, snapshot_hook=None, conflict="new", target_files=()):

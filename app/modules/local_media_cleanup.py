@@ -97,9 +97,10 @@ def delete_cleanup_items(
     *,
     allowed_root: Path,
     selected_path: Path | None = None,
+    source_parent_dirs: Iterable[Path] = (),
     remove_empty_dirs: bool = True,
 ) -> CleanupResult:
-    """复核快照后隔离并删除确定垃圾；源与回收区都固定到目录句柄。"""
+    """安全删除确定垃圾，并从已删除/成功移动的来源目录向上清理空目录。"""
     root = Path(allowed_root).expanduser().resolve(strict=False)
     adapter = LocalFilesystemAdapter(root)
     result = CleanupResult()
@@ -237,13 +238,18 @@ def delete_cleanup_items(
         if not remove_empty_dirs:
             return result
 
-        selected = Path(selected_path).expanduser().resolve(strict=False) if selected_path else None
+        parent_dirs.update(
+            Path(directory).expanduser().absolute() for directory in source_parent_dirs
+        )
+        selected = Path(selected_path).expanduser().absolute() if selected_path else None
         if selected:
             try:
-                selected = assert_within(selected, root)
+                assert_within(selected, root)
                 relative_selected = selected.relative_to(root)
                 selected_fd = open_source_parent(relative_selected)
-            except (OSError, PathMappingError):
+            except PathMappingError:
+                parent_dirs.add(selected)
+            except (OSError, ValueError):
                 parent_dirs.add(selected.parent)
             else:
                 os.close(selected_fd)
@@ -252,8 +258,10 @@ def delete_cleanup_items(
         warned_path_change = False
         for directory in sorted(parent_dirs, key=lambda item: len(item.parts), reverse=True):
             try:
-                relative = assert_within(directory, root).relative_to(root)
-            except PathMappingError as exc:
+                assert_within(directory, root)
+                # 保留声明路径，由逐段 O_NOFOLLOW 句柄拒绝链接替换，而非清理链接目标。
+                relative = directory.relative_to(root)
+            except ValueError as exc:
                 if not warned_path_change:
                     result.warnings.append(f"来源目录已变化，跳过空目录清理: {exc}")
                     warned_path_change = True

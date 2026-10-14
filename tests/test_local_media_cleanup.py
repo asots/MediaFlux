@@ -303,5 +303,168 @@ class LocalMediaCleanupTests(unittest.TestCase):
             self.assertIn(str(group), result.removed_dirs)
 
 
+    def test_moved_source_parents_remove_nested_branches_without_scanning_siblings(self):
+        with tempfile.TemporaryDirectory() as root_raw:
+            root = Path(root_raw)
+            group = root / "Show"
+            first = group / "Disc 1" / "Season 01"
+            second = group / "Disc 2" / "Season 02"
+            untouched = root / "Unrelated" / "Empty"
+            for directory in (first, second, untouched):
+                directory.mkdir(parents=True)
+
+            result = delete_cleanup_items(
+                [], allowed_root=root, selected_path=group,
+                source_parent_dirs=[first, second, first],
+            )
+
+            self.assertFalse(group.exists())
+            self.assertTrue(root.is_dir())
+            self.assertTrue(untouched.is_dir())
+            self.assertEqual(
+                set(result.removed_dirs),
+                {str(first), str(first.parent), str(second), str(second.parent), str(group)},
+            )
+            self.assertEqual(len(result.removed_dirs), 5)
+            self.assertEqual(result.warnings, [])
+
+    def test_moved_source_parents_are_kept_when_empty_cleanup_is_disabled(self):
+        with tempfile.TemporaryDirectory() as root_raw:
+            root = Path(root_raw)
+            nested = root / "Show" / "Season 01"
+            nested.mkdir(parents=True)
+
+            result = delete_cleanup_items(
+                [], allowed_root=root, selected_path=root,
+                source_parent_dirs=[nested], remove_empty_dirs=False,
+            )
+
+            self.assertTrue(nested.is_dir())
+            self.assertEqual(result.removed_dirs, [])
+
+    def test_moved_source_parents_never_remove_configured_root(self):
+        with tempfile.TemporaryDirectory() as root_raw:
+            root = Path(root_raw)
+
+            result = delete_cleanup_items(
+                [], allowed_root=root, selected_path=root, source_parent_dirs=[root],
+            )
+
+            self.assertTrue(root.is_dir())
+            self.assertEqual(result.removed_dirs, [])
+            self.assertEqual(result.warnings, [])
+
+    def test_moved_source_parent_with_remaining_files_is_not_removed(self):
+        with tempfile.TemporaryDirectory() as root_raw:
+            root = Path(root_raw)
+            nested = root / "Show" / "Season 01"
+            nested.mkdir(parents=True)
+            unknown = nested / "notes.txt"
+            unknown.write_bytes(b"keep")
+
+            result = delete_cleanup_items(
+                [], allowed_root=root, selected_path=root, source_parent_dirs=[nested],
+            )
+
+            self.assertEqual(unknown.read_bytes(), b"keep")
+            self.assertTrue(nested.is_dir())
+            self.assertEqual(result.removed_dirs, [])
+            self.assertEqual(result.warnings, [])
+
+    def test_moved_source_parent_outside_root_is_retained(self):
+        with tempfile.TemporaryDirectory() as root_raw, tempfile.TemporaryDirectory() as outside_raw:
+            root = Path(root_raw)
+            outside = Path(outside_raw) / "Empty"
+            outside.mkdir()
+
+            result = delete_cleanup_items(
+                [], allowed_root=root, selected_path=root, source_parent_dirs=[outside],
+            )
+
+            self.assertTrue(outside.is_dir())
+            self.assertEqual(result.removed_dirs, [])
+            self.assertTrue(any("跳过空目录清理" in item for item in result.warnings))
+
+    def test_moved_source_parents_never_follow_leaf_or_intermediate_symlinks(self):
+        for inside_root in (True, False):
+            for intermediate in (True, False):
+                with (
+                    self.subTest(inside_root=inside_root, intermediate=intermediate),
+                    tempfile.TemporaryDirectory() as root_raw,
+                    tempfile.TemporaryDirectory() as outside_raw,
+                ):
+                    root = Path(root_raw)
+                    target = (root if inside_root else Path(outside_raw)) / "Keep"
+                    target.mkdir()
+                    link = root / "Moved"
+                    link.symlink_to(target, target_is_directory=True)
+                    directory = link
+                    if intermediate:
+                        (target / "Empty").mkdir()
+                        directory = link / "Empty"
+
+                    result = delete_cleanup_items(
+                        [], allowed_root=root, selected_path=root,
+                        source_parent_dirs=[directory],
+                    )
+
+                    self.assertTrue(link.is_symlink())
+                    self.assertTrue(target.is_dir())
+                    if intermediate:
+                        self.assertTrue((target / "Empty").is_dir())
+                    self.assertEqual(result.removed_dirs, [])
+                    self.assertTrue(any("跳过空目录清理" in item for item in result.warnings))
+
+    def test_moved_source_parent_handle_does_not_follow_concurrent_symlink_swap(self):
+        with tempfile.TemporaryDirectory() as root_raw, tempfile.TemporaryDirectory() as outside_raw:
+            root = Path(root_raw)
+            container = root / "Container"
+            nested = container / "Empty"
+            nested.mkdir(parents=True)
+            outside = Path(outside_raw)
+            outside_empty = outside / "Empty"
+            outside_empty.mkdir()
+            displaced = root / "Container-pinned"
+            original_rmdir = os.rmdir
+            swapped = False
+
+            def swap_parent_then_remove(path, *args, **kwargs):
+                nonlocal swapped
+                if not swapped and str(path) == "Empty" and kwargs.get("dir_fd") is not None:
+                    swapped = True
+                    container.rename(displaced)
+                    container.symlink_to(outside, target_is_directory=True)
+                    try:
+                        return original_rmdir(path, *args, **kwargs)
+                    finally:
+                        container.unlink()
+                        displaced.rename(container)
+                return original_rmdir(path, *args, **kwargs)
+
+            with patch("app.modules.local_media_cleanup.os.rmdir", side_effect=swap_parent_then_remove):
+                result = delete_cleanup_items(
+                    [], allowed_root=root, selected_path=root, source_parent_dirs=[nested],
+                )
+
+            self.assertTrue(swapped)
+            self.assertFalse(container.exists())
+            self.assertTrue(outside_empty.is_dir())
+            self.assertEqual(set(result.removed_dirs), {str(nested), str(container)})
+
+    def test_selected_symlink_does_not_remove_unrelated_empty_directory(self):
+        with tempfile.TemporaryDirectory() as root_raw:
+            root = Path(root_raw)
+            target = root / "Keep"
+            target.mkdir()
+            selected = root / "Selected"
+            selected.symlink_to(target, target_is_directory=True)
+
+            result = delete_cleanup_items([], allowed_root=root, selected_path=selected)
+
+            self.assertTrue(selected.is_symlink())
+            self.assertTrue(target.is_dir())
+            self.assertEqual(result.removed_dirs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

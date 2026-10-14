@@ -236,6 +236,30 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertEqual(db.get_organize_log(self.log_id)['current_parent_id'], parent.file_id)
         self.assertNotIn('leaf', self.cloud.nodes)
 
+    def test_confirmation_cleanup_receipts_preserve_return_with_companions(self):
+        from app.modules.organize_confirmations import _cleanup_confirmed_source
+
+        self.cloud.add("subtitle", "leaf", "Original.S01E01.zh.srt")
+        self._add_item("subtitle", "subtitle")
+        # 入库沿真实事务执行，改由确认入口收尾，验证使用同一种可回退删除审计。
+        with patch.object(self.service, "_finalize_reorganized_source", return_value=[]):
+            self.assertTrue(self._reorganize()["success"])
+        stats = {"moved": 1}
+        _cleanup_confirmed_source(
+            {"source_dir_id": "source", "source_parent_id": "leaf"},
+            self.service.organizer, self.rules, stats,
+        )
+        self.assertEqual(self.cloud.deleted, ["leaf", "source"])
+        self.assertEqual(stats["empty_dirs_cleaned"], 2)
+        result = self.service.return_to_source(
+            self.log_id, "return-confirmed-cleanup", self.service.detail(self.log_id)["version"],
+        )
+        self.assertTrue(result["success"])
+        parent = self.cloud.file_info(self.cloud.nodes["video"].parent_id)
+        self.assertEqual((parent.name, self.cloud.file_info(parent.parent_id).name),
+                         ("Season 1", "Synthetic source"))
+        self.assertEqual(self.cloud.nodes["subtitle"].parent_id, parent.file_id)
+
     def test_cleaned_source_is_recreated_for_revert(self):
         self._reorganize()
         self.assertTrue(self.service.revert_latest(
