@@ -2,7 +2,7 @@
 
 MediaFlux 运行在容器/Linux 路径空间中，而 Jellyfin/Emby 可能通过另一套
 POSIX、Windows 盘符或 UNC 路径访问同一目录。本模块提供显式、最长前缀优先
-的单向映射，避免路径失配时误降级为全局媒体库扫描。
+的路径映射，刷新使用正向映射，明确删除使用严格反向解析。
 """
 from __future__ import annotations
 
@@ -230,6 +230,26 @@ def apply_media_server_path_mapping(
         if mapping.matches(normalized):
             return mapping.apply(normalized), mapping
     return normalized, None
+
+
+def reverse_media_server_path_mapping(
+    raw_path: str,
+    mappings: Iterable[MediaServerPathMapping],
+) -> tuple[str, MediaServerPathMapping]:
+    """按最长服务器前缀反查；缺失或同前缀歧义必须拒绝，不能原样降级。"""
+    candidates = []
+    for mapping in mappings:
+        reverse = MediaServerPathMapping(mapping.server_prefix, mapping.local_prefix)
+        if reverse.matches(raw_path):
+            candidates.append((mapping, reverse.apply(raw_path)))
+    if not candidates:
+        raise MediaServerPathMappingError("节目路径未命中媒体服务器映射")
+    longest = max(len(mapping.server_prefix) for mapping, _ in candidates)
+    selected = [(mapping, path) for mapping, path in candidates if len(mapping.server_prefix) == longest]
+    if len({path for _, path in selected}) != 1:
+        raise MediaServerPathMappingError("节目路径命中多个 MF 目录，无法唯一定位")
+    mapping, path = selected[0]
+    return path, mapping
 
 
 def configured_media_server_refresh_options(server_type: str) -> dict[str, object]:

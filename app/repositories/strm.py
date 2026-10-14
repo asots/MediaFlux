@@ -205,6 +205,15 @@ def list_strm_installation_rows(
         ).fetchall()
 
 
+def list_strm_file_owners(file_id: str) -> list[sqlite3.Row]:
+    """枚举同一云端文件的 STRM 引用，避免单项删除破坏其他来源。"""
+    with db.get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM strm_index WHERE file_id=? AND source LIKE 'guangya:%'",
+            (str(file_id),),
+        ).fetchall()
+
+
 def list_strm_path_owners(strm_path: str) -> list[sqlite3.Row]:
     """跨来源查询目标路径所有者，防止清理复用路径或其他来源的文件。"""
     with db.get_conn() as conn:

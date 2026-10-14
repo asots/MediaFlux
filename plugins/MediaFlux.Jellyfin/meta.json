@@ -1,0 +1,14 @@
+{
+  "guid": "9037f29f-2ebc-4b8a-952f-960e24402bb5",
+  "name": "MediaFlux",
+  "version": "0.1.1.0",
+  "targetAbi": "12.2.0.0",
+  "owner": "MediaFlux",
+  "category": "General",
+  "overview": "Jellyfin 明确删除与 MediaFlux 光鸭文件联动",
+  "description": "默认关闭；复用 MF 媒体库和路径映射，仅在明确删除电影或单集并通过身份、权限校验后联动云端。",
+  "timestamp": "2026-10-14T00:00:00Z",
+  "status": "Active",
+  "autoUpdate": false,
+  "assemblies": ["MediaFlux.Jellyfin.dll"]
+}
