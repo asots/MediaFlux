@@ -9,6 +9,35 @@ from app.agent import feature_gate as gate
 from tests import test_first_run as support
 
 
+@pytest.mark.parametrize('agent_enabled', ['0', '1'])
+def test_startup_rejects_configuration_mismatch_before_migration(agent_enabled):
+    from app.main import _initialize_runtime_storage
+    from tests.test_setup_bootstrap_support import initialize_paths
+
+    with patch.dict(os.environ):
+        case = support.FirstRunTests()
+        case.setUp()
+        try:
+            initialize_paths(case.paths, {'AGENT_ENABLED': agent_enabled})
+            case._reload_runtime_modules()
+            with case.database.get_conn() as conn:
+                conn.execute('PRAGMA user_version=0')
+            # A different file must not cause migrations or recovery writes
+            # before the existing installation/configuration binding is checked.
+            with case.paths.env_file.open('a') as stream:
+                stream.write('\nWEB_HOST=127.0.0.2\n')
+            before_db = case.paths.database_path.read_bytes()
+            before_config = case.paths.env_file.read_bytes()
+            with patch.object(case.database, 'init_db', wraps=case.database.init_db) as init:
+                with pytest.raises(gate.RuntimeFenceError, match='^runtime_snapshot_mismatch$'):
+                    _initialize_runtime_storage()
+                init.assert_not_called()
+            assert case.paths.database_path.read_bytes() == before_db
+            assert case.paths.env_file.read_bytes() == before_config
+        finally:
+            case.tearDown()
+
+
 @pytest.mark.parametrize('secret', [True, False], ids=['lifespan', 'pre-secret'])
 @pytest.mark.parametrize('configuration', ['file', 'environment'])
 @pytest.mark.parametrize('schema', ['zero-byte', 'empty-sqlite', 'unrelated', 'settings-only', 'name-only', 'legacy'])

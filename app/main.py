@@ -302,7 +302,8 @@ def _initialize_runtime_storage() -> None:
                 fence = read_runtime_fence(conn)
                 if fence.phase != "stable":
                     raise RuntimeFenceError("runtime_fence_changing")
-                config.capture_runtime_config_snapshot()
+                if fence.config_digest != config.capture_runtime_config_snapshot().config_digest:
+                    raise RuntimeFenceError("runtime_snapshot_mismatch")
         database.init_db()
         if not established:
             # 旧版允许只用部署环境变量。首次建立 fence 前补齐空文件，
