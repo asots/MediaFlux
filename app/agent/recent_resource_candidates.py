@@ -24,7 +24,8 @@ _ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 _ALLOWED_MATCH = {"exact_episode", "episode_pack", "season_pack", "unknown"}
 _ALLOWED_DOWNLOAD_STATE = {"ready", "resolvable"}
 _ALLOWED_DOWNLOAD_KINDS = {"magnet", "torrent"}
-_MAX_CANDIDATES = 12
+# 业务容量与 indexer.search_resources 的最大结果数一致；模型/展示预算不裁剪此快照。
+MAX_RESOURCE_CANDIDATES = 50
 _CONTEXT_TYPE = "resource_candidates"
 logger = logging.getLogger(__name__)
 
@@ -465,7 +466,7 @@ def _safe_snapshot(result: ToolResult) -> dict[str, Any]:
             seen_result_ids.add(projected["result_id"])
             projected["position"] = len(candidates) + 1
             candidates.append(projected)
-            if len(candidates) >= _MAX_CANDIDATES:
+            if len(candidates) >= MAX_RESOURCE_CANDIDATES:
                 break
         return {
             "search_status": _safe_text(str(result.status or ""), 40),
@@ -539,8 +540,8 @@ def _safe_snapshot(result: ToolResult) -> dict[str, Any]:
         verification_context,
     ) in search_entries:
         raw_candidates = search_data.get("items")
-        for raw in raw_candidates[:50] if isinstance(raw_candidates, list) else []:
-            if len(candidates) >= _MAX_CANDIDATES:
+        for raw in raw_candidates[:MAX_RESOURCE_CANDIDATES] if isinstance(raw_candidates, list) else []:
+            if len(candidates) >= MAX_RESOURCE_CANDIDATES:
                 break
             quality = raw.get("quality") if isinstance(raw, dict) else None
             if not isinstance(quality, dict) or quality.get("eligible") is not True:
@@ -747,7 +748,7 @@ def validate_safe_resource_snapshot(value: Any) -> dict[str, Any] | None:
     if (
         search_status != value.get("search_status")
         or not isinstance(raw_candidates, list)
-        or len(raw_candidates) > _MAX_CANDIDATES
+        or len(raw_candidates) > MAX_RESOURCE_CANDIDATES
     ):
         return None
     candidates: list[dict[str, Any]] = []

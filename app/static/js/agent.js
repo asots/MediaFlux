@@ -2705,7 +2705,7 @@
     function renderCandidateView(turn, view) {
         if (!view || !Array.isArray(view.items) || typeof view.ref !== 'string' || !Number.isFinite(view.expires_at)) return;
         if (turn.candidateGroup?.dataset.candidateView === view.ref) return turn.candidateGroup;
-        const items = view.items.filter(item => typeof item?.title === 'string' && Number.isInteger(item.position) && item.position > 0 && item.position <= 12).slice(0, 12);
+        const items = view.items.filter(item => typeof item?.title === 'string' && Number.isInteger(item.position) && item.position > 0);
         if (!items.length) return;
         const previousGroup = turn.candidateGroup;
         const group = element('section', 'agent-candidates');

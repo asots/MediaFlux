@@ -217,7 +217,7 @@ class AgentIngestArgumentTests(unittest.TestCase):
     def test_resource_inspection_rejects_explicit_invalid_positions(self):
         invalid_positions = (
             [], None, True, False, 1, "1", {}, (1,),
-            [True], [False], [1, True], [0], [-1], [13], [1, 13],
+            [True], [False], [1, True], [0], [-1], [51], [1, 51],
             [1.0], ["1"], [None],
         )
         for positions in invalid_positions:

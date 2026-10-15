@@ -20,6 +20,7 @@ from app.agent.async_bridge import (
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolResult
 from app.agent.recent_resource_candidates import (
+    MAX_RESOURCE_CANDIDATES,
     attach_resource_candidate_reference,
 )
 from app.clients.guangya import GuangYaClient, close_guangya_client
@@ -183,8 +184,8 @@ def search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         )
     sort_mode = sort_mode.strip().lower()
     limit = arguments.get("limit", 20)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
-        raise AgentToolError("limit 必须是 1 到 50 的整数")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESOURCE_CANDIDATES:
+        raise AgentToolError(f"limit 必须是 1 到 {MAX_RESOURCE_CANDIDATES} 的整数")
 
     sites = normalize_search_sites(arguments.get("sites", []))
 

@@ -54,7 +54,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
         valid = [
             {"source_type": "resource_candidates"},
             {"source_type": "resource_candidates", "input": "", "positions": [3, 1, 3], "resource_candidates_ref": reference},
-            {"source_type": "resource_candidates", "positions": [12, 1] * 7},
+            {"source_type": "resource_candidates", "positions": [50, 1] * 7},
             {"input": magnet}, {"source_type": "direct_url", "input": magnet},
         ]
         for arguments in valid:
@@ -66,7 +66,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
             {"source_type": "resource_candidates", "input": reference, "positions": [3, 1]},
             {"source_type": "resource_candidates", "positions": []},
             {"source_type": "resource_candidates", "positions": [True]},
-            {"source_type": "resource_candidates", "positions": [13]},
+            {"source_type": "resource_candidates", "positions": [51]},
             {"source_type": "auto", "input": magnet, "positions": [1]},
             {"input": magnet, "resource_candidates_ref": reference},
         ]

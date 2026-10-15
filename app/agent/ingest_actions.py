@@ -30,6 +30,7 @@ from app.agent.indexer_candidate_actions import IndexerCandidateActions, select_
 from app.agent.media_consumption_actions import explicit_preferred_download_target
 from app.agent.models import Evidence, ToolContext, ToolReference, ToolResult
 from app.agent.recent_resource_candidates import (
+    MAX_RESOURCE_CANDIDATES,
     RecentResourceCandidateStore,
     normalize_resource_search_id,
 )
@@ -54,7 +55,6 @@ _INGEST_SOURCE_TYPES = frozenset(
 )
 _SUBMIT_SOURCE_TYPES = frozenset({"direct_url", "guangya_share", "resource_candidates"})
 _TARGETS = frozenset({"qb", "guangya", "both"})
-_MAX_RESOURCE_POSITIONS = 12
 _MAX_SHARE_POSITIONS = 200
 _OPAQUE_REFERENCE_RE = re.compile(r"^ref_[A-Za-z0-9_-]{16,160}$")
 _INGEST_REFERENCE_VERSION = 1
@@ -291,7 +291,7 @@ def ingest_inspect_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if "positions" in arguments:
         if source_type != "resource_candidates":
             raise AgentToolError("只有资源候选检查接受 positions")
-        normalized["positions"] = _positions(arguments["positions"], maximum=_MAX_RESOURCE_POSITIONS, required=True)
+        normalized["positions"] = _positions(arguments["positions"], maximum=MAX_RESOURCE_CANDIDATES, required=True)
     raw_reference = arguments.get("resource_candidates_ref")
     if source_type == "resource_candidates":
         if raw_reference not in (None, ""):
@@ -353,7 +353,7 @@ def ingest_submit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             raise AgentToolError("target 仅支持 preferred、qb、guangya 或 both")
         positions = _positions(
             arguments.get("positions"),
-            maximum=_MAX_RESOURCE_POSITIONS,
+            maximum=MAX_RESOURCE_CANDIDATES,
             required=source_type == "resource_candidates",
         )
         if source_type == "direct_url" and positions:
@@ -433,7 +433,7 @@ class IngestActions:
                     "最近资源候选不存在或已过期，请重新搜索",
                     code="precondition_failed",
                 )
-            selected = select_resource_candidates(candidates[:_MAX_RESOURCE_POSITIONS], arguments.get("positions"))
+            selected = select_resource_candidates(candidates, arguments.get("positions"))
             public_candidates = [
                 {
                     "position": item["position"],

@@ -15,6 +15,7 @@ from app.agent.indexer_actions import (
 from app.agent.models import ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import sanitize_resource_title
 from app.agent.recent_resource_candidates import (
+    MAX_RESOURCE_CANDIDATES,
     RecentResourceCandidateStore,
     normalize_resource_search_id,
     restore_resource_candidate_reference,
@@ -40,11 +41,11 @@ def present_candidates_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     positions = arguments.get("positions")
     if (
         not isinstance(positions, list)
-        or len(positions) > 12
-        or any(type(position) is not int or not 1 <= position <= 12 for position in positions)
+        or len(positions) > MAX_RESOURCE_CANDIDATES
+        or any(type(position) is not int or not 1 <= position <= MAX_RESOURCE_CANDIDATES for position in positions)
         or len(set(positions)) != len(positions)
     ):
-        raise AgentToolError("positions 必须是 0 到 12 个不重复的 1 到 12 整数")
+        raise AgentToolError(f"positions 必须是 0 到 {MAX_RESOURCE_CANDIDATES} 个不重复的 1 到 {MAX_RESOURCE_CANDIDATES} 整数")
     return {
         "resource_candidates_ref": reference.strip(),
         "positions": list(positions),

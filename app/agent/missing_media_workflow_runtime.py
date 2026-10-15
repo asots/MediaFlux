@@ -74,7 +74,7 @@ class MissingMediaWorkflowRuntime:
         contexts: list[dict[str, Any] | None] = []
         selected_refs: list[dict[str, Any]] = []
         try:
-            for raw in candidates[:12]:
+            for raw in candidates:
                 if not isinstance(raw, dict):
                     contexts.append(None)
                     continue
@@ -103,7 +103,7 @@ class MissingMediaWorkflowRuntime:
             logger.warning(
                 "Agent 补库候选状态推进失败 type=%s", type(exc).__name__
             )
-            return tuple(None for _item in candidates[:12])
+            return tuple(None for _item in candidates)
         return tuple(contexts)
 
     def release_followups(self, *, owner: str, followups: Any) -> None:
@@ -135,7 +135,7 @@ class MissingMediaWorkflowRuntime:
 
         raw_items = data.get("items")
         if isinstance(raw_items, list):
-            for index, raw in enumerate(raw_items[:12]):
+            for index, raw in enumerate(raw_items):
                 if not isinstance(raw, dict):
                     continue
                 context = contexts[index] if index < len(contexts) else None
@@ -145,7 +145,7 @@ class MissingMediaWorkflowRuntime:
                     result=item_result,
                     verification_context=context,
                 )
-            for context in contexts[len(raw_items[:12]) :]:
+            for context in contexts[len(raw_items) :]:
                 self.release_followups(owner=owner, followups=(context,))
             return
 

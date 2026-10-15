@@ -153,7 +153,7 @@ def candidate_result_lines(data: Mapping[str, Any]) -> list[str]:
     labels = {"submitted": "已提交", "duplicate": "已存在，未重复添加", "failed": "提交失败",
               "partial": "部分目标成功", "manual_review": "结果未知，请先核验"}
     lines = []
-    for item in data["items"][:12]:
+    for item in data["items"]:
         if not isinstance(item, Mapping):
             continue
         position = item.get("position")

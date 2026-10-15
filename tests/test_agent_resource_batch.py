@@ -62,7 +62,7 @@ def _batch_result():
     {"ref": "ref_" + "x" * 24, "position": 1},
     _selection({"selection_ref": "ref_" + "x" * 24}, [1, 1]),
     _selection({"selection_ref": "ref_" + "x" * 24}, [True]),
-    _selection({"selection_ref": "ref_" + "x" * 24}, [13]),
+    _selection({"selection_ref": "ref_" + "x" * 24}, [51]),
     _selection({"selection_ref": "ref_" + "x" * 24}, [1], "preferred"),
     {"ref": "ref_" + "x" * 24, "positions": [], "target": "qb"},
 ])

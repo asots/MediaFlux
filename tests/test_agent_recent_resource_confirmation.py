@@ -130,16 +130,16 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["candidates"][6]["title"], "理想禁区 07 黑历史 1080P")
         self.assertTrue(all(item["match"] == "unknown" for item in snapshot["candidates"]))
 
-    def test_snapshot_limit_dedup_and_ineligible_filter_keep_dense_positions(self):
+    def test_snapshot_dedup_and_ineligible_filter_keep_all_dense_positions(self):
         candidates = [_candidate(f"bounded-resource-{i:03d}", rank=i + 1) for i in range(15)]
         result = _single_result(*candidates)
         result.data["search"]["items"].insert(0, result.data["search"]["items"][0])
         result.data["search"]["items"][3]["quality"]["eligible"] = False
         attach_resource_candidate_reference(result)
         snapshot = restore_resource_candidate_reference(result.references[0].value)
-        self.assertEqual(len(snapshot["candidates"]), 12)
-        self.assertEqual([item["position"] for item in snapshot["candidates"]], list(range(1, 13)))
-        self.assertEqual(len({item["result_id"] for item in snapshot["candidates"]}), 12)
+        self.assertEqual(len(snapshot["candidates"]), 14)
+        self.assertEqual([item["position"] for item in snapshot["candidates"]], list(range(1, 15)))
+        self.assertEqual(len({item["result_id"] for item in snapshot["candidates"]}), 14)
         self.assertNotIn("bounded-resource-002", [item["result_id"] for item in snapshot["candidates"]])
 
     def test_private_reference_restores_verified_candidate_after_process_restart(self):
@@ -291,7 +291,7 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         self.assertNotIn("magnet:", repr(snapshot))
         self.assertNotIn("secret.example", repr(snapshot))
 
-    def test_generic_projection_collects_first_twelve_actionable_items(self):
+    def test_generic_projection_keeps_all_twenty_actionable_items(self):
         store = RecentResourceCandidateStore()
         unavailable = []
         for index in range(12):
@@ -302,17 +302,17 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
             unavailable.append(candidate)
         actionable = [
             _candidate(f"actionable-resource-{index:04d}", title=f"Actionable {index}")
-            for index in range(13)
+            for index in range(20)
         ]
         store.capture(
             owner="session-a", result=_generic_result(*unavailable, *actionable)
         )
         candidates = store.get(owner="session-a")["candidates"]
-        self.assertEqual(len(candidates), 12)
+        self.assertEqual(len(candidates), 20)
         self.assertEqual(candidates[0]["title"], "Actionable 0")
-        self.assertEqual(candidates[-1]["title"], "Actionable 11")
+        self.assertEqual(candidates[-1]["title"], "Actionable 19")
         self.assertEqual(
-            [candidate["position"] for candidate in candidates], list(range(1, 13))
+            [candidate["position"] for candidate in candidates], list(range(1, 21))
         )
 
     def test_generic_candidate_snapshot_requires_current_single_format(self):

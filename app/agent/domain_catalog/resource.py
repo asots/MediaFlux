@@ -25,6 +25,7 @@ from app.agent.models import (
     RiskLevel,
     ToolSpec,
 )
+from app.agent.recent_resource_candidates import MAX_RESOURCE_CANDIDATES
 
 
 def register_specs(
@@ -120,7 +121,7 @@ def register_specs(
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 50,
+                        "maximum": MAX_RESOURCE_CANDIDATES,
                         "default": 20,
                     },
                 },
@@ -158,12 +159,12 @@ def register_specs(
                     },
                     "positions": {
                         "type": "array",
-                        "maxItems": 12,
+                        "maxItems": MAX_RESOURCE_CANDIDATES,
                         "uniqueItems": True,
                         "items": {
                             "type": "integer",
                             "minimum": 1,
-                            "maximum": 12,
+                            "maximum": MAX_RESOURCE_CANDIDATES,
                         },
                         "description": "要展示的原候选位置；允许空数组以明确清除本轮候选展示。",
                     },
@@ -208,7 +209,7 @@ def register_specs(
                     "input": {"type": "string", "maxLength": 8192, "description": "仅用于原始下载/分享链接；候选快照引用应填 resource_candidates_ref，不填 input。"},
                     "positions": {
                         "type": "array", "minItems": 1,
-                        "items": {"type": "integer", "minimum": 1, "maximum": 12},
+                        "items": {"type": "integer", "minimum": 1, "maximum": MAX_RESOURCE_CANDIDATES},
                         "description": "仅resource_candidates可用；按请求顺序去重，省略读取全部。不是集号，不会提交下载。",
                     },
                     "resource_candidates_ref": {
@@ -285,6 +286,14 @@ def register_specs(
                     },
                 },
                 "additionalProperties": False,
+                "anyOf": [
+                    {"properties": {
+                        "source_type": {"enum": ["resource_candidates"]},
+                        "positions": {"maxItems": MAX_RESOURCE_CANDIDATES,
+                                      "items": {"maximum": MAX_RESOURCE_CANDIDATES}},
+                    }},
+                    {"properties": {"source_type": {"enum": ["direct_url", "guangya_share"]}}},
+                ],
             },
             validator=ingest_submit_arguments,
             requires_confirmation=True,

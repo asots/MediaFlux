@@ -19,6 +19,7 @@ from app.agent.indexer_actions import search_arguments as indexer_search_argumen
 from app.agent.media_preference_policy import validate_resource_preference_overrides
 from app.agent.models import Evidence, ToolContext, ToolResult
 from app.agent.recent_resource_candidates import (
+    MAX_RESOURCE_CANDIDATES,
     attach_resource_candidate_reference,
     merge_resource_candidate_references,
 )
@@ -114,7 +115,7 @@ def missing_episode_resource_arguments(arguments: dict[str, Any]) -> dict[str, A
     validate_enabled_search_sites(sites)
 
     limit = arguments.get("limit", 20)
-    _positive_int(limit, name="limit", maximum=50)
+    _positive_int(limit, name="limit", maximum=MAX_RESOURCE_CANDIDATES)
     normalized = {
         "query": query,
         "tmdb_id": tmdb_id,
@@ -712,7 +713,7 @@ def _search_missing_resource_batch(
                 chosen = None
                 prior = None
                 reason = "identity_conflict"
-            elif chosen is not None and not prior and len(presented) >= 12:
+            elif chosen is not None and not prior and len(presented) >= MAX_RESOURCE_CANDIDATES:
                 chosen = None
                 reason = "candidate_limit"
             elif review is not None:

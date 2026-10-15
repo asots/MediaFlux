@@ -447,7 +447,7 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
 
     def test_present_candidates_rejects_invalid_or_missing_positions(self):
         reference = "ref_" + "a" * 16
-        for positions in ([0], [13], [1, 1]):
+        for positions in ([0], [51], [1, 1]):
             with self.subTest(positions=positions), self.assertRaises(AgentToolError):
                 present_candidates_arguments(
                     {"resource_candidates_ref": reference, "positions": positions}

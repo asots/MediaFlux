@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agent.public_safety import sanitize_resource_title
-from app.agent.recent_resource_candidates import validate_safe_resource_snapshot
+from app.agent.recent_resource_candidates import (
+    MAX_RESOURCE_CANDIDATES,
+    validate_safe_resource_snapshot,
+)
 from app.sensitive_data import is_sensitive_key, redact_sensitive_text
 
 from .projection import DefaultProjector, _model_safe
@@ -65,8 +68,8 @@ def normalize_selection(value: Any) -> dict[str, Any]:
     if (
         not isinstance(value, dict) or set(value) != {"ref", "positions", "target"}
         or not isinstance(value["ref"], str) or not _REF_RE.fullmatch(value["ref"])
-        or not isinstance(value["positions"], list) or not 1 <= len(value["positions"]) <= 12
-        or any(type(pos) is not int or not 1 <= pos <= 12 for pos in value["positions"])
+        or not isinstance(value["positions"], list) or not 1 <= len(value["positions"]) <= MAX_RESOURCE_CANDIDATES
+        or any(type(pos) is not int or not 1 <= pos <= MAX_RESOURCE_CANDIDATES for pos in value["positions"])
         or len(set(value["positions"])) != len(value["positions"])
         or value["target"] not in ("qb", "guangya", "both")
     ):
