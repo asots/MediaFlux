@@ -3,7 +3,8 @@ from pathlib import Path
 import unittest
 import asyncio
 from bs4 import BeautifulSoup
-from app.indexers.errors import IndexerResultExpired, IndexerUnavailable
+from app.indexers.errors import IndexerResultExpired, IndexerSecurityError, IndexerUnavailable
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
 from app.indexers.models import IndexerMediaSearchRequest, IndexerSearchRequest
@@ -59,6 +60,110 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
             search += f'<a href="/search/{prefix}/2">下一页</a>'
         rows = ''.join(f'<div class="module-row-info"><a class="module-row-text" href="/tdown/{i}.html">{prefix} S01E{i:02d} [1GiB]</a></div>' for i in range(count, 0, -1))
         return search.encode(), ('<div id="download-list">' + rows + '</div>').encode()
+
+    @classmethod
+    def partial_detail_http(cls, status):
+        search, detail = cls.catalog_html(3)
+        search += b'<div class="module-item"><a class="module-item-title" href="/detail/bad.html">Demo</a></div>'
+        http = FakeHttpClient(_EMPTY)
+        http.responses = [search, detail, b'private upstream detail failed']
+        http.status_codes = [200, 200, status]
+        return http, search, detail
+
+    async def test_partial_details_keep_candidates_and_errors_in_later_windows(self):
+        for status, code in ((404, 'result_expired'), (503, 'unavailable')):
+            with self.subTest(status=status):
+                http, _search, _detail = self.partial_detail_http(status)
+                service = IndexerService(
+                    registry=IndexerRegistry({'btbtla': BTBtlaAdapter(http=http, page_size=2)}),
+                    result_store=IndexerResultStore(), max_results_per_site=2,
+                )
+                self.addAsyncCleanup(service.aclose)
+                pages = [await service.search('Demo', page=page, site_ids=('btbtla',)) for page in (1, 2)]
+                self.assertEqual([len(page.items) for page in pages], [2, 1])
+                self.assertEqual([page.has_more for page in pages], [True, False])
+                self.assertEqual(len({item.result_id for page in pages for item in page.items}), 3)
+                for page in pages:
+                    self.assertTrue(page.partial)
+                    self.assertEqual([(error.site_id, error.code) for error in page.errors], [('btbtla', code)])
+                    self.assertNotIn('private', page.errors[0].message)
+                    self.assertTrue(all(service.get_result(item.result_id).detail_url == item.detail_url
+                                        for item in page.items))
+                repeated = await service.search('Demo', site_ids=('btbtla',))
+                self.assertTrue(repeated.cached)
+                self.assertTrue(repeated.partial)
+                self.assertEqual(len(http.calls), 3)
+
+    async def test_partial_catalog_and_service_cache_expire_before_full_success_ttl(self):
+        http, search, detail = self.partial_detail_http(404)
+        recovered = detail.replace(b'/tdown/1.html', b'/tdown/recovered.html')
+        http.responses.extend([search, detail, recovered])
+        clock = [0.0]
+        adapter = BTBtlaAdapter(http=http, monotonic=lambda: clock[0])
+        service = IndexerService(
+            registry=IndexerRegistry({'btbtla': adapter}), result_store=IndexerResultStore(),
+            clock=lambda: datetime(2026, 10, 15, tzinfo=timezone.utc) + timedelta(seconds=clock[0]),
+        )
+        self.addAsyncCleanup(service.aclose)
+        first = await service.search('Demo', site_ids=('btbtla',))
+        self.assertTrue(first.partial)
+        clock[0] = 16
+        refreshed = await service.search('Demo', site_ids=('btbtla',))
+        self.assertFalse(refreshed.cached)
+        self.assertFalse(refreshed.partial)
+        self.assertFalse(refreshed.errors)
+        self.assertEqual(len(refreshed.items), 4)
+        self.assertEqual(len(http.calls), 6)
+
+    async def test_all_failed_details_keep_mirror_fallback_and_failure(self):
+        search, detail = self.catalog_html(1)
+        for status in (429, 503):
+            with self.subTest(status=status):
+                http = FakeHttpClient(_EMPTY)
+                http.responses = [search, b'failed', search, detail]
+                http.status_codes = [200, status, 200, 200]
+                page = await BTBtlaAdapter(http=http).search(IndexerSearchRequest.create('Demo'))
+                self.assertEqual(len(page.items), 1)
+                self.assertFalse(page.errors)
+                self.assertEqual(len(http.calls), 4)
+                self.assertTrue(all(call['url'].startswith('https://btbtlb.com/') for call in http.calls[2:]))
+        http = FakeHttpClient(b'failed', status_code=503)
+        http.responses = [search, b'failed', search, b'failed']
+        http.status_codes = [200, 503, 200, 503]
+        adapter = BTBtlaAdapter(http=http)
+        with self.assertRaises(IndexerUnavailable):
+            await adapter.search(IndexerSearchRequest.create('Demo'))
+        self.assertFalse(adapter._catalogs)
+        self.assertEqual(len(http.calls), 4)
+
+    async def test_security_and_cancellation_block_partial_catalog_publication(self):
+        for failure in (IndexerSecurityError('unsafe detail'), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__):
+                http, _search, _detail = self.partial_detail_http(200)
+                original_get = http.get
+                async def get(url, **kwargs):
+                    response = await original_get(url, **kwargs)
+                    if '/detail/bad.html' in url:
+                        raise failure
+                    return response
+                http.get = get
+                adapter = BTBtlaAdapter(http=http)
+                with self.assertRaises(type(failure)):
+                    await adapter.search(IndexerSearchRequest.create('Demo'))
+                self.assertFalse(adapter._catalogs)
+                self.assertEqual(len(http.calls), 3)
+
+    async def test_hard_failure_after_expired_detail_still_uses_mirror(self):
+        for status in (503, 429):
+            with self.subTest(status=status):
+                http, search, detail = self.partial_detail_http(200)
+                http.responses = [search, b'expired', b'unavailable', search, detail, detail]
+                http.status_codes = [200, 404, status, 200, 200, 200]
+                page = await BTBtlaAdapter(http=http).search(IndexerSearchRequest.create('Demo'))
+                self.assertEqual(len(page.items), 3)
+                self.assertFalse(page.errors)
+                self.assertEqual(len(http.calls), 6)
+                self.assertTrue(all(call['url'].startswith('https://btbtlb.com/') for call in http.calls[3:]))
 
     async def test_resource_pages_keep_all_old_episodes_without_refetching(self):
         search, detail = self.catalog_html(95)
@@ -130,6 +235,44 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service.aclose()
 
+    async def test_duplicate_only_native_page_keeps_errors_before_next_page(self):
+        for status, code in ((404, 'result_expired'), (503, 'unavailable')):
+            with self.subTest(status=status):
+                http, partial_search, detail = self.partial_detail_http(status)
+                first_search, _ = self.catalog_html(3, next_native=True)
+                third_search, third_detail = self.catalog_html(1)
+                http.responses = [
+                    first_search, detail,
+                    partial_search + b'<a href="/search/Demo/3">next</a>', detail, b'failed',
+                    third_search, third_detail.replace(b'/tdown/1.html', b'/tdown/new.html'),
+                ]
+                http.status_codes = [200, 200, 200, 200, status, 200, 200]
+                service = IndexerService(
+                    registry=IndexerRegistry({'btbtla': BTBtlaAdapter(http=http, page_size=3)}),
+                    result_store=IndexerResultStore(), max_results_per_site=3,
+                )
+                self.addAsyncCleanup(service.aclose)
+                first = await service.search('Demo', site_ids=('btbtla',))
+                self.assertEqual(len(first.items), 3)
+                self.assertTrue(first.has_more)
+                second = await service.search('Demo', page=2, site_ids=('btbtla',))
+                self.assertTrue(second.partial)
+                self.assertEqual(second.items, [])
+                self.assertEqual([(error.site_id, error.code) for error in second.errors], [('btbtla', code)])
+                self.assertTrue(second.has_more)
+                self.assertEqual(len(http.calls), 5)
+                repeated = await service.search('Demo', page=2, site_ids=('btbtla',))
+                self.assertFalse(repeated.cached)  # 空 partial 不进服务缓存，目录仍复用错误窗口。
+                self.assertEqual(repeated.errors, second.errors)
+                self.assertTrue(repeated.partial)
+                self.assertEqual(len(http.calls), 5)
+                third = await service.search('Demo', page=3, site_ids=('btbtla',))
+                self.assertEqual([item.detail_url for item in third.items], [BTBtlaAdapter.base_url + 'tdown/new.html'])
+                self.assertFalse(third.has_more)
+                self.assertFalse(third.partial)
+                self.assertTrue(all(service.get_result(item.result_id) for item in first.items))
+                self.assertEqual(len(http.calls), 7)
+
     async def test_failed_following_native_page_does_not_erase_valid_windows(self):
         search, detail = self.catalog_html(1, next_native=True)
         http = FakeHttpClient(search)
@@ -197,7 +340,7 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(last.total_items,6)
         catalog=next(iter(adapter._catalogs.values()))
         self.assertEqual(len(catalog.pages),100)
-        self.assertEqual(sum(map(len,catalog.pages)),100)
+        self.assertEqual(sum(len(page.items) for page in catalog.pages),100)
         service=IndexerService(registry=IndexerRegistry({'btbtla':adapter}),result_store=IndexerResultStore(),max_results_per_site=1)
         try:
             result=await service.search('Demo',page=100,site_ids=('btbtla',),sort_mode='source_order')

@@ -15,13 +15,14 @@ from bs4 import BeautifulSoup
 from app.concurrency import CrossLoopAsyncLock
 from ..config import BTBTLA_URL, BTBTLA_MIRROR_URL
 from ..errors import (
+    IndexerError,
     IndexerInvalidResponse,
     IndexerRateLimited,
     IndexerResultExpired,
     IndexerSecurityError,
     IndexerUnavailable,
 )
-from ..models import IndexerCapabilities, IndexerItem, IndexerMediaSearchRequest, IndexerPage, IndexerSearchRequest, ResolvedDownload
+from ..models import IndexerCapabilities, IndexerItem, IndexerMediaSearchRequest, IndexerPage, IndexerProviderError, IndexerSearchRequest, ResolvedDownload
 from ..ranking import candidate_sort_key, rank_item
 from .base import IndexerAdapter, fixed_host_join, is_likely_challenge_page, magnet_infohash, parse_size_bytes, require_html_response
 
@@ -45,7 +46,7 @@ _ACCESS_BLOCK_MARKERS = (
 @dataclass(slots=True)
 class _ResourcePages:
     expires_at: float
-    pages: list[list[IndexerItem]]
+    pages: list[IndexerPage]
     next_native_page: int | None = 1
     truncated_count: int = 0
 
@@ -102,9 +103,7 @@ class BTBtlaAdapter(IndexerAdapter):
             for old_key in list(self._catalogs):
                 if self._catalogs[old_key].expires_at <= now:
                     del self._catalogs[old_key]
-            catalog = self._catalogs.get(key)
-            if catalog is None:
-                catalog = _ResourcePages(now + self.cache_ttl_seconds, [])
+            catalog = self._catalogs.get(key) or _ResourcePages(now + self.cache_ttl_seconds, [])
             fetches = 0
             while len(catalog.pages) < request.page and catalog.next_native_page is not None:
                 if fetches == 2:
@@ -116,18 +115,19 @@ class BTBtlaAdapter(IndexerAdapter):
                 )
                 ranked = [rank_item(item, media=media, fallback_query=request.query) for item in native.items]
                 ranked = [entry[1] for entry in sorted(enumerate(ranked), key=lambda entry: candidate_sort_key((0, entry[0], entry[1]), request.sort_mode))]
-                known = {item.detail_url for page_items in catalog.pages for item in page_items if item.detail_url}
+                known = {item.detail_url for resource_page in catalog.pages for item in resource_page.items if item.detail_url}
                 ranked = [item for item in ranked if not item.detail_url or item.detail_url not in known]
                 fetches += 1
                 room = (_MAX_CATALOG_PAGES - len(catalog.pages)) * self.page_size
                 catalog.truncated_count += max(0, len(ranked) - room)
                 ranked = ranked[:room]
-                windows = [ranked[offset:offset + self.page_size] for offset in range(0, len(ranked), self.page_size)]
-                # 过滤后空页优先在同一预算内补取下一原生页；连续空页仍受两次读取限制。
-                if not windows and (not native.has_more or fetches == 2):
-                    windows = [[]]
-                catalog.pages.extend(windows)
-                if not any(catalog.pages):
+                catalog.pages.extend(replace(native, items=ranked[offset:offset + self.page_size]) for offset in range(0, len(ranked), self.page_size))
+                # 含错误的空页直接交付；仅无错误空页在两次读取预算内补取下一原生页。
+                if not ranked and (native.errors or not native.has_more or fetches == 2):
+                    catalog.pages.append(replace(native, items=[]))
+                if native.errors:
+                    catalog.expires_at = min(catalog.expires_at, self._monotonic() + 15)
+                elif not any(resource_page.items for resource_page in catalog.pages):
                     catalog.expires_at = min(catalog.expires_at, self._monotonic() + 8)
                 catalog.next_native_page = (
                     catalog.next_native_page + 1
@@ -139,12 +139,12 @@ class BTBtlaAdapter(IndexerAdapter):
                     self._catalogs.popitem(last=False)
             if request.page > len(catalog.pages):
                 return IndexerPage([], request.page, False, True)
-            return IndexerPage(
-                items=[replace(item) for item in catalog.pages[request.page - 1]],
+            resource_page = catalog.pages[request.page - 1]
+            return replace(
+                resource_page, items=[replace(item) for item in resource_page.items],
                 page=request.page,
                 has_more=request.page < len(catalog.pages) or catalog.next_native_page is not None,
-                pagination_supported=True,
-                total_items=(len(catalog.pages[-1]) + catalog.truncated_count)
+                total_items=(len(resource_page.items) + catalog.truncated_count)
                 if request.page == len(catalog.pages) and catalog.truncated_count else None,
             )
 
@@ -209,9 +209,8 @@ class BTBtlaAdapter(IndexerAdapter):
                                    self._search_candidate_score(query, candidate[0])[1]),
             reverse=True,
         )[:self.max_detail_candidates]
-        items: list[IndexerItem] = []
-        seen_urls: set[str] = set()
-        detail_error: IndexerInvalidResponse | IndexerResultExpired | None = None
+        items: dict[str | None, IndexerItem] = {}
+        errors: list[IndexerError] = []
         matched_tier = None
         for title, detail_url, category, candidate_year in ranked_candidates:
             tier = (self._search_candidate_score(query, title)[0], year is not None and candidate_year == year)
@@ -234,24 +233,23 @@ class BTBtlaAdapter(IndexerAdapter):
                     and not detail_soup.select(".module-row-info")
                 ):
                     raise IndexerInvalidResponse("BTBtla detail page omitted the resource list")
-            except (IndexerInvalidResponse, IndexerResultExpired) as exc:
-                detail_error = detail_error or exc
+            except IndexerSecurityError:
+                raise
+            except IndexerError as exc:
+                errors.append(exc)
+                if not isinstance(exc, (IndexerInvalidResponse, IndexerResultExpired)):
+                    if not items:
+                        raise
+                    break
                 continue
             for item in detail_items:
-                if item.detail_url and item.detail_url in seen_urls:
-                    continue
-                if item.detail_url:
-                    seen_urls.add(item.detail_url)
-                items.append(item)
-            if detail_items:
-                matched_tier = tier
-        if not items and detail_error is not None:
-            raise detail_error
+                items.setdefault(item.detail_url, item)
+            matched_tier = tier
+        if not items and errors:
+            raise errors[0]
         return IndexerPage(
-            items=items,
-            page=request.page,
-            has_more=has_more,
-            pagination_supported=True,
+            list(items.values()), request.page, has_more, True,
+            errors=tuple(IndexerProviderError(self.site_id, error.code, error.public_message) for error in errors),
         )
 
     async def resolve(self, stored_result: IndexerItem) -> ResolvedDownload:
