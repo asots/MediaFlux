@@ -75,7 +75,9 @@ def recover_pending_paths(
     reported_paths = set(stats.get("changed_strm_paths") or [])
     after_id = 0
     while not _stopped(stats, should_stop):
-        batch = db.list_strm_path_cleanup(source_key, after_id=after_id)
+        batch = db.list_strm_path_cleanup(
+            source_key, after_id=after_id, only_file_ids=only_file_ids,
+        )
         if not batch:
             return
         after_id = int(batch[-1]["id"])
@@ -85,8 +87,6 @@ def recover_pending_paths(
             if _stopped(stats, should_stop):
                 break
             file_id = str(row["file_id"])
-            if only_file_ids is not None and file_id not in only_file_ids:
-                continue
             path = _managed_path(row["strm_path"], strm_root)
             if path is None:
                 _blocked(
@@ -102,7 +102,9 @@ def recover_pending_paths(
                     if current is None:
                         current = {
                             str(item["file_id"]): item
-                            for item in db.list_strm_index(source_key)
+                            for item in db.list_strm_index(
+                                source_key, only_file_ids=only_file_ids,
+                            )
                         }
                     active = current.get(file_id)
                     replacement = (

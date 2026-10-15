@@ -1257,7 +1257,6 @@ def commit_strm_metadata_job(
         raise ValueError("元数据准备结果无效")
     rel_dir = str(prepared_job.get("rel_dir") or job.get("rel_dir") or "")
     expected = _metadata_target(remote, rel_dir, strm_root)
-    source_id = str(job.get("source_id") or "")
     metadata_source_key = f"guangya-meta:{source_id}"
     existing_rows = db.list_strm_installation_rows(
         metadata_source_key, file_id, str(expected)
@@ -1265,28 +1264,35 @@ def commit_strm_metadata_job(
     current = next(
         (row for row in existing_rows if str(row["file_id"]) == file_id), None
     )
+    cleaned = 0
+    status = "skipped"
     if current and _metadata_state_matches(current, remote, expected):
         if prepared is not None:
             prepared.temp.unlink(missing_ok=True)
-        return {
-            "status": "skipped", "file_id": file_id,
-            "path": str(expected), "cleaned": 0, "refresh_paths": [str(expected)],
-        }
-    if prepared is None:
-        raise RuntimeError("已安装元数据在准备后发生变化，等待重新下载")
-    cleaned = _install_metadata_candidate(
-        remote, rel_dir, expected, strm_root, metadata_source_key,
-        existing_rows, "", should_stop=should_stop, prepared=prepared,
+    else:
+        if prepared is None:
+            raise RuntimeError("已安装元数据在准备后发生变化，等待重新下载")
+        cleaned = _install_metadata_candidate(
+            remote, rel_dir, expected, strm_root, metadata_source_key,
+            existing_rows, "", should_stop=should_stop, prepared=prepared,
+        )
+        status = "completed"
+    # 正常安装与中断复用只从持久凭据恢复旧路径；冻结策略先提交刷新，
+    # 再确认凭据，故随后 ACK 失败或退出也不会丢失旧目录变化。
+    recovery = {"metadata_cleaned": 0}
+    recover_pending_paths(
+        metadata_source_key, strm_root, recovery,
+        valid_ids={file_id}, only_file_ids={file_id}, should_stop=should_stop,
+        on_refresh_paths=StrmRefreshPolicy(**json.loads(job.get("refresh_policy_json") or "{}")),
     )
+    if recovery.get("stopped"):
+        raise _STRMStopped("元数据旧路径交接已停止，保留任务待重试")
     # 失败台账与任务 ACK/刷新交接由 settle_strm_metadata_job 同事务确认；
     # 安装器只返回已验证的落盘事实，不能提前关闭尚未交接的旧失败项。
-    refresh_paths = [str(expected)]
-    if cleaned and current:
-        refresh_paths.append(str(current["strm_path"]))
     return {
-        "status": "completed", "file_id": file_id,
-        "path": str(expected), "cleaned": int(cleaned or 0),
-        "refresh_paths": refresh_paths,
+        "status": status, "file_id": file_id,
+        "path": str(expected), "cleaned": cleaned + recovery["metadata_cleaned"],
+        "refresh_paths": [str(expected)],
     }
 
 

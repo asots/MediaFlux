@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -77,6 +79,120 @@ os._exit(74)
 
 
 class StrmMoveRecoveryTests(unittest.TestCase):
+    def test_scoped_recovery_does_not_read_unrelated_receipts_or_index_rows(self):
+        from app.modules.strm_recovery import recover_pending_paths
+
+        measurements = []
+        for unrelated in (400, 4000):
+            with self.subTest(unrelated=unrelated), isolated_test_database(), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                sync(root, "New")
+                current = next(root.rglob("*.strm"))
+                old = current.parent.parent / "Old" / "Copy.strm"
+                old.parent.mkdir()
+                old.write_bytes(current.read_bytes())
+                fingerprint = strm._content_fingerprint(old)
+                with db.get_conn() as conn:
+                    conn.executemany(
+                        "INSERT INTO strm_index(source,file_id,strm_path,content_fingerprint,created_at) VALUES(?,?,?,?,?)",
+                        [("guangya:source", f"unrelated-{i}", str(root / f"unused-{i}"), fingerprint, db.now()) for i in range(unrelated)],
+                    )
+                db.enqueue_strm_path_cleanup([
+                    {"source": "guangya:source", "file_id": f"unrelated-{i}",
+                     "strm_path": str(root / f"unused-old-{i}"), "content_fingerprint": fingerprint}
+                    for i in range(unrelated)
+                ] + [{"source": "guangya:source", "file_id": "video", "strm_path": str(old),
+                      "content_fingerprint": fingerprint}])
+                real_get_conn = db.get_conn
+                cold_steps, operation_steps, statements = [], [], []
+
+                @contextmanager
+                def measured():
+                    steps = [0]
+
+                    def count():
+                        steps[0] += 1
+                        return 0
+
+                    with real_get_conn() as conn:
+                        conn.set_progress_handler(count, 1)
+                        # 单独记录新连接首次 prepare 的 schema 初始化；LIMIT 0
+                        # 不访问凭据行，不 ANALYZE，也不改变被测查询的执行计划。
+                        conn.execute("SELECT 1 FROM strm_path_cleanup LIMIT 0").fetchall()
+                        cold_steps.append(steps[0])
+                        steps[0] = 0
+                        start = len(statements)
+                        conn.set_trace_callback(lambda sql: statements.append((steps[0], sql)))
+                        yield conn
+                    operation_steps.append(steps[0])
+                    trace = statements[start:]
+                    statements[start:] = [
+                        ((trace[i + 1][0] if i + 1 < len(trace) else steps[0]) - before, sql)
+                        for i, (before, sql) in enumerate(trace)
+                    ]
+
+                stats = STRMScheduler._empty_stats()
+                refreshed = []
+                with patch.object(db, "get_conn", measured):
+                    recover_pending_paths(
+                        "guangya:source", str(root), stats, valid_ids={"video"},
+                        only_file_ids={"video"}, on_refresh_paths=refreshed.extend,
+                    )
+                self.assertFalse(old.exists())
+                self.assertFalse(stats["clean_skipped"], stats)
+                self.assertIn(str(old.parent), refreshed)
+                with db.get_conn() as conn:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM strm_path_cleanup").fetchone()[0], unrelated)
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM strm_index").fetchone()[0], unrelated + 1)
+                    plans = [
+                        [row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}")]
+                        for _, sql in statements if sql.startswith("SELECT")
+                    ]
+                measured_steps = sum(operation_steps)
+                print("SCOPED_RECOVERY_SQL", {"unrelated": unrelated, "cold_steps": cold_steps,
+                      "operation_steps": operation_steps, "statements": statements, "plans": plans})
+                self.assertLess(measured_steps, 4000, statements)
+                measurements.append(measured_steps)
+        self.assertLessEqual(abs(measurements[1] - measurements[0]), 100, measurements)
+
+    def test_scoped_receipt_query_keeps_global_id_paging_and_empty_scope(self):
+        with isolated_test_database():
+            db.enqueue_strm_path_cleanup([
+                {"source": "guangya:source", "file_id": ("a", "b", "unrelated")[i % 3],
+                 "strm_path": f"/unused/{i}", "content_fingerprint": "sha256:unused"}
+                for i in range(756)
+            ])
+            with db.get_conn() as conn:
+                conn.executemany(
+                    "INSERT INTO strm_index(source,file_id,strm_path,created_at) VALUES(?,?,?,?)",
+                    [("guangya:source", fid, f"/unused/{fid}", db.now()) for fid in ("a", "b", "unrelated")],
+                )
+            real_get_conn = db.get_conn
+
+            @contextmanager
+            def limited():
+                with real_get_conn() as conn:
+                    conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 8)
+                    yield conn
+
+            scope = {"a", "b"} | {f"not-present-{i}" for i in range(2000)}
+            with patch.object(db, "get_conn", limited):
+                self.assertEqual(db.list_strm_path_cleanup("guangya:source", only_file_ids=set()), [])
+                self.assertEqual(db.list_strm_index("guangya:source", only_file_ids=set()), [])
+                self.assertEqual(
+                    {row["file_id"] for row in db.list_strm_index("guangya:source", only_file_ids=scope)},
+                    {"a", "b"},
+                )
+                rows = []
+                while page := db.list_strm_path_cleanup(
+                    "guangya:source", only_file_ids=scope,
+                    after_id=int(rows[-1]["id"]) if rows else 0,
+                ):
+                    rows.extend(page)
+            self.assertEqual(len(rows), 504)
+            self.assertEqual({row["file_id"] for row in rows}, {"a", "b"})
+            self.assertEqual([row["id"] for row in rows], sorted({row["id"] for row in rows}))
+
     def test_process_exit_at_each_install_boundary_converges(self):
         for stage in ("before_index", "after_index", "after_delete"):
             with (

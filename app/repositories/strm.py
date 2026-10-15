@@ -184,10 +184,17 @@ def upsert_strm_index_batch(
         _delete_conflicting_indexes(conn, source, all_conflicts, now_str)
 
 
-def list_strm_index(source: str = "guangya") -> list[sqlite3.Row]:
+def list_strm_index(
+    source: str = "guangya", *, only_file_ids: set[str] | None = None,
+) -> list[sqlite3.Row]:
+    where = "source=?"
+    params: list[Any] = [source]
+    if only_file_ids is not None:
+        where += " AND file_id IN (SELECT value FROM json_each(?))"
+        params.append(json.dumps(sorted(only_file_ids)))
     with db.get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM strm_index WHERE source=? ORDER BY id", (source,)
+            f"SELECT * FROM strm_index WHERE {where} ORDER BY id", params,
         ).fetchall()
 
 
@@ -250,12 +257,24 @@ def enqueue_strm_path_cleanup(items: list[dict[str, str]]) -> int:
 
 def list_strm_path_cleanup(
     source: str, *, after_id: int = 0, limit: int = 500,
+    only_file_ids: set[str] | None = None,
 ) -> list[sqlite3.Row]:
     """按不可变 ID 分页；保留被所有权校验阻止的凭据而不阻塞后面的任务。"""
+    where = "source=?"
+    params: list[Any] = [str(source)]
+    if only_file_ids is not None:
+        # 先由 (source,file_id) 覆盖索引定位，再按主键分页，避免 SQLite
+        # 为满足 ORDER BY id 而选择 (source,id) 后遍历所有无关凭据。
+        where = (
+            "id IN (SELECT id FROM strm_path_cleanup WHERE source=? "
+            "AND file_id IN (SELECT value FROM json_each(?)))"
+        )
+        params.append(json.dumps(sorted(only_file_ids)))
+    params.extend((int(after_id), max(1, min(int(limit), 1000))))
     with db.get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM strm_path_cleanup WHERE source=? AND id>? "
-            "ORDER BY id LIMIT ?", (str(source), int(after_id), max(1, min(int(limit), 1000))),
+            f"SELECT * FROM strm_path_cleanup WHERE {where} AND id>? ORDER BY id LIMIT ?",
+            params,
         ).fetchall()
 
 
