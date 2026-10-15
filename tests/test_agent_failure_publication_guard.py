@@ -16,7 +16,8 @@ from tests.test_agent_read_wait_lifecycle import (
 
 
 @pytest.mark.parametrize("phase", ["before_append", "after_append", "not_cancelled"])
-def test_cold_cancel_blocks_late_terminal_failure(phase):
+@pytest.mark.parametrize("terminal", ["turn.failed", "turn.completed"])
+def test_cold_cancel_blocks_late_terminal_failure(phase, terminal):
     async def run():
         clock = [100]
         _, candidate = await parked_runtime(clock)
@@ -25,10 +26,12 @@ def test_cold_cancel_blocks_late_terminal_failure(phase):
         store = SQLiteKernelStore(clock=lambda: clock[0])
         runtime = build_agent_kernel_runtime(model=script.adapter, store=store)
         runtime.session.continuation_binding = _capture_creation_binding()
-        async def failed_read(arguments, context):
-            raise ToolPipelineError("fixture READ failure", code="fixture_read_error")
+        async def read(arguments, context):
+            if terminal == "turn.failed":
+                raise ToolPipelineError("fixture READ failure", code="fixture_read_error")
+            return {"ok": True, "summary": "fixture READ success"}
         tool = runtime.session.catalog.get('web.search')
-        runtime.session.catalog._tools['web.search'] = replace(tool, read=failed_read)
+        runtime.session.catalog._tools['web.search'] = replace(tool, read=read)
         entered, release = threading.Event(), threading.Event()
         append = store._append_event_sync
         delivered = []
@@ -40,7 +43,7 @@ def test_cold_cancel_blocks_late_terminal_failure(phase):
                 yield event
 
         def gate(event, owner, *args):
-            if event.type.value != "turn.failed":
+            if event.type.value != terminal:
                 return append(event, owner, *args)
             if phase == "after_append":
                 append(event, owner, *args)
@@ -64,10 +67,17 @@ def test_cold_cancel_blocks_late_terminal_failure(phase):
                 release.set()
                 await asyncio.wait_for(worker, 5)
                 events = await cold.store.list_events(owner=OWNER, session_id="wait-control")
-                failures = [e for e in events if e["type"] == "turn.failed"]
-                assert len(failures) == (0 if phase == "before_append" else 1)
-                assert ("turn.failed" in delivered) is (phase == "not_cancelled")
+                state = await cold.store.load(owner=OWNER, session_id="wait-control")
+                terminals = [e for e in events if e["type"] == terminal]
+                if terminal == "turn.completed":
+                    # 初始 waiting 也是 completed 事件；仅成功用例排除该历史轮次。
+                    terminals = [e for e in terminals if e["turn_id"] == state.metadata["read_wait"]["resume_turn_id"]]
+                assert len(terminals) == (0 if phase == "before_append" else 1)
+                assert (terminal in delivered) is (phase == "not_cancelled")
                 assert "turn.started" in delivered
+                assert state.metadata["active_publication"]["status"] == (
+                    "finished" if phase == "not_cancelled" else "cancelled"
+                )
             finally:
                 release.set()
                 worker.cancel()

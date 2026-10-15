@@ -631,7 +631,6 @@ class AgentSession:
                     return
             guarded_failure = lease is not None and token is not None and not confirming
             try:
-                await record_continuation_event(event, reason=code)
                 if self.journal is not None:
                     append_for_turn = getattr(self.journal, "append_for_turn", None)
                     if guarded_failure and append_for_turn is not None:
@@ -642,6 +641,8 @@ class AgentSession:
                         await self.journal.append(event, owner=agent_input.owner)
                 if guarded_failure and not await self.state_store.is_current(lease):
                     return
+                # finish 会关闭取消窗口；只能在 journal I/O 后核实发布权再登记。
+                await record_continuation_event(event, reason=code)
             except StalePublicationError:
                 # Cancellation may win during the journal transaction itself.
                 # Do not replace the rejected failure with another late event.
@@ -807,7 +808,6 @@ class AgentSession:
                     payload = {**(payload or {}), "turn_status": (payload or {}).get("status", "failed" if event_type is AgentEventType.TURN_FAILED else "cancelled"),
                                "task": task_projection(state.metadata.get("task"))}
                 event = factory.create(event_type, payload, **extra)
-                await record_continuation_event(event)
                 if self.journal is not None:
                     append_for_turn = getattr(self.journal, "append_for_turn", None)
                     if not confirming and append_for_turn is not None:
@@ -817,6 +817,7 @@ class AgentSession:
                 if (not confirming and event_type is not AgentEventType.TURN_STARTED
                         and not await self.state_store.is_current(lease)):
                     raise StalePublicationError("event revoked during journal I/O")
+                await record_continuation_event(event)
                 await queue.put(event)
 
             await publish(
@@ -1904,13 +1905,13 @@ class AgentSession:
                     AgentEventType.TURN_CANCELLED,
                     {"reason": str(exc) or (token.reason if token else "cancelled"), **settlement, **await terminal_task("cancelled")},
                 )
+                if self.journal is not None:
+                    await self.journal.append(event, owner=agent_input.owner)
                 if lease is not None and lease.continuation_id:
                     try:
                         await record_continuation_event(event)
                     except (StalePublicationError, SessionBusyError):
                         pass  # A newer user owns the session; never publish an old delivery into it.
-                if self.journal is not None:
-                    await self.journal.append(event, owner=agent_input.owner)
                 await queue.put(event)
         except SelectionInvalidError as exc:
             failure_factory = EventFactory(
