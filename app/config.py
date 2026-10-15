@@ -27,13 +27,7 @@ from app.runtime_paths import get_runtime_paths
 
 # 程序目录仅供读取；运行数据统一由 RuntimePaths 指定。
 PATHS = get_runtime_paths()
-BASE_DIR = PATHS.program_dir
-DATA_DIR = PATHS.data_dir
-# 兼容既有调用方：DB_DIR 过去承载所有可写状态的根目录。
-DB_DIR = DATA_DIR
-CONFIG_DIR = PATHS.config_dir
 ENV_FILE = PATHS.env_file
-TEMPLATE_ENV = PATHS.program_dir / ".env.example"
 
 _lock = threading.RLock()
 _cache: dict[str, str] | None = None

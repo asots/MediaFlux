@@ -141,8 +141,8 @@ class RuntimePathConsumerTests(unittest.TestCase):
                         guangya.TOKEN_FILE,
                     )
                     self.assertEqual(database.resolve_db_path(), paths.database_path)
-                    self.assertEqual(config.DATA_DIR, paths.data_dir)
-                    self.assertEqual(config.CONFIG_DIR, paths.config_dir)
+                    self.assertEqual(config.PATHS.data_dir, paths.data_dir)
+                    self.assertEqual(config.PATHS.config_dir, paths.config_dir)
                     self.assertEqual(config.ENV_FILE, paths.env_file)
                     self.assertEqual(logger.LOG_DIR, paths.log_dir)
                     self.assertEqual(guangya.TOKEN_FILE, paths.token_file)
