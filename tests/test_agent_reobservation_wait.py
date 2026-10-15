@@ -110,9 +110,7 @@ def assert_private(case, scripts, state):
     assert "reobservation_source" not in exposed
     for script in scripts:
         assert len(script.requests) == len(script.model_requests)
-        for request in script.requests:
-            assert [row["content"] for row in request["messages"]
-                    if row["role"] == "user"] == [GOAL]
+        script.assert_user_inputs([GOAL])
 
 
 @pytest.mark.parametrize("tracked_task", [False, True])
@@ -183,7 +181,9 @@ def test_synchronous_failed_confirm_uses_effect_wait_with_or_without_task(native
         assert not any(event.type is AgentEventType.EFFECT_COMPLETED for event in events)
         original_receipt = receipt(state, plan_id)
         followup = case.script.requests[3 if tracked_task else 1]
-        assert any(row.get("content") == original_receipt["content"] for row in followup["messages"])
+        assert any(row.get("role") == "user" and row.get("content") == (
+            "运行时执行结果通知（不是用户新指令或新增写入授权）：\n" + original_receipt["content"]
+        ) for row in followup["messages"])
         duplicate, unchanged = await case.confirm(plan_id)
         assert duplicate[-1].type is AgentEventType.TURN_FAILED
         assert unchanged.metadata["effect_waits"][plan_id] == row

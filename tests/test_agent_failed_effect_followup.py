@@ -337,9 +337,7 @@ class NativeCase:
 
     def assert_source(self, state, original_users):
         assert self.users(state) == original_users, f"{OFFLINE}：确认/诊断不得新增虚构 user 消息"
-        for request in self.script.requests:
-            users = [row["content"] for row in request["messages"] if row["role"] == "user"]
-            assert users == [GOAL], f"{OFFLINE}：模型 wire 丢失原话或追加了合成 user"
+        self.script.assert_user_inputs([GOAL])
 
     def assert_failure(self, events, state, plan_id):
         failed = [e for e in events if e.type is AgentEventType.EFFECT_FAILED]
@@ -769,7 +767,7 @@ def test_new_user_supersedes_failed_diagnosis_and_preserves_publication_facts(ca
             case.assert_failure(old_events, saved, plan_a)
             assert case.users(saved) == source_users + [{"role": "user", "content": new_message}]
             assert len(fresh_model.requests) == len(fresh_model.model_requests) == 1
-            assert [row["content"] for row in fresh_model.requests[0]["messages"] if row["role"] == "user"] == [GOAL, new_message]
+            fresh_model.assert_user_inputs([GOAL, new_message])
             assert not any(e.payload.get("tool") == READ for e in old_events if e.type is AgentEventType.TOOL_STARTED)
             assert saved.metadata["confirmed_publication"] == before.metadata["confirmed_publication"]
             assert not saved.pending_effect_plan_id

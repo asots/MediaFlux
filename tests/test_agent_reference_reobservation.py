@@ -264,8 +264,7 @@ class Case:
         assert [row for row in state.conversation if row.get("role") == "user"] == (
             [{"role": "user", "content": GOAL}] if present else []
         ), f"{OFFLINE}：不得从确认按钮、模型或工具回执制造新 user goal"
-        for wire in self.script.requests:
-            assert [row["content"] for row in wire["messages"] if row.get("role") == "user"] == [GOAL]
+        self.script.assert_user_inputs([GOAL])
 
     def assert_counts(self, *, reads, prepares, attempts, mutations, models):
         assert len(self.domain.reads) == reads

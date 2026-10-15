@@ -235,8 +235,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert len(rereads) == 1 and rereads[0]["arguments"] == {"operation": "reobserve"}
             assert any(json.loads(row["content"]).get("status") == "confirmation_stale"
                        for row in script.requests[2]["messages"] if row.get("role") == "tool")
-            for wire in script.requests:
-                assert [row["content"] for row in wire["messages"] if row.get("role") == "user"] == [GOAL]
+            script.assert_user_inputs([GOAL])
             view = TurnViewBuilder()
             for event in recovered:
                 view.apply(event)
@@ -273,8 +272,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             for plan_id in (old.plan_id, new.plan_id):
                 assert len([row for row in final.conversation if row.get("completion_receipt_id") == plan_id]) == 1
             assert len(script.requests) == len(script.model_requests) == 4 and not script.steps
-            for wire in script.requests:
-                assert [row["content"] for row in wire["messages"] if row.get("role") == "user"] == [GOAL]
+            script.assert_user_inputs([GOAL])
 
             public = json.dumps(script.requests + [event.to_dict() for event in initial + recovered + completed])
             for private in ("reobservation_source", "source_observations", "source_root", "credential_generation"):

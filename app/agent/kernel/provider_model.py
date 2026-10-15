@@ -632,6 +632,13 @@ def _history_for_protocol(
     if protocol != "anthropic_messages":
         history.append(native_text_message(protocol, "system", system_prompt))
     for message in messages:
+        if message.completion_receipt_id:
+            # 回执是运行时的新输入，不是模型此前的回答。统一投影为输入通知，
+            # 否则解释预览后确认时，模型会继续回答旧问题，甚至否认已完成的写入。
+            # 不伪造工具调用、不改持久化用户历史，也不授予后续写操作权限。
+            message = replace(message, role="user", content=(
+                "运行时执行结果通知（不是用户新指令或新增写入授权）：\n" + message.content
+            ))
         if any(call.argument_error for call in message.tool_calls):
             state = message.provider_state
             if state is None or (state.protocol, state.model, state.endpoint) != (protocol, model, endpoint):

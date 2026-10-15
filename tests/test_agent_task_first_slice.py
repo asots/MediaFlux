@@ -83,6 +83,21 @@ class NativeScript:
             ),
         )
 
+    def assert_user_inputs(self, expected_users):
+        """原话必须完整；额外 wire 输入只能逐项对应本次请求的真实运行时回执。"""
+        assert len(self.requests) == len(self.model_requests)
+        for request, wire in zip(self.model_requests, self.requests, strict=True):
+            messages = request["messages"]
+            assert [row["content"] for row in messages if row["role"] == "user"] == expected_users
+            inputs = []
+            for row in messages:
+                if row.get("completion_receipt_id"):
+                    assert row["role"] == "assistant" and not row.get("tool_calls")
+                    inputs.append("运行时执行结果通知（不是用户新指令或新增写入授权）：\n" + row["content"])
+                elif row["role"] == "user":
+                    inputs.append(row["content"])
+            assert [row["content"] for row in wire["messages"] if row["role"] == "user"] == inputs
+
     async def respond(self, request):
         body = json.loads(request.content)
         self.requests.append(body)

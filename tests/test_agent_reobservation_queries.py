@@ -516,8 +516,7 @@ def test_native_failed_confirmation_passes_actual_private_prepare_source_to_reob
                                               if event.type is AgentEventType.MODEL_STARTED)
         assert any(json.loads(row["content"]).get("data", {}).get("reobservation", {}).get("complete") is True
                    for row in resumed_wire["messages"] if row.get("role") == "tool")
-        for wire in case.script.requests:
-            assert [row["content"] for row in wire["messages"] if row.get("role") == "user"] == [GOAL]
+        case.script.assert_user_inputs([GOAL])
         serialized = json.dumps(case.script.requests + [event.to_dict() for event in case.events])
         assert "private-provider-" not in serialized and "reobservation_source" not in serialized
         assert case.provider.writes == []
