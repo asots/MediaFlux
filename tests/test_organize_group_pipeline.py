@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import unittest
 from unittest.mock import patch
+
+from tests.support import isolated_test_database
 
 from app.clients.guangya import GuangYaFile
 from app.modules.organize import (
@@ -258,6 +261,29 @@ class GroupEnumerationTests(unittest.TestCase):
         self.assertEqual(
             [task.group_id for task in enumeration.tasks], ["root", "group-a"]
         )
+
+    def test_protected_staging_is_reported_without_entering_the_directory(self):
+        client = _TreeClient({
+            "root": [_dir("stage", "MF-101-FixtureRelease", "root")],
+            "stage": [_video("blocked", "123.mp4", "stage")],
+        }, root_name="NewNsfw")
+
+        enumeration = self._enumerate(client, protected_staging_ids={"stage"})
+
+        self.assertTrue(enumeration.complete)
+        self.assertEqual(client.calls, ["root"])
+        blocked = enumeration.protected_staging_dirs
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["file_id"], "stage")
+        self.assertEqual(blocked[0]["source_dir_id"], "root")
+        self.assertEqual(blocked[0]["path"], "NewNsfw/MF-101-FixtureRelease")
+        self.assertIn("未扫描", blocked[0]["reason"])
+        self.assertIn("核验", blocked[0]["reason"])
+
+    def test_configured_source_protection_is_not_reported_as_a_download(self):
+        enumeration = self._enumerate(_sample_tree(), protected_source_ids={"group-b"})
+
+        self.assertEqual(enumeration.protected_staging_dirs, [])
 
     def test_unreadable_source_fails_closed_without_partial_tasks(self):
         client = _sample_tree()
@@ -529,6 +555,71 @@ class GroupPipelineExecutionTests(unittest.TestCase):
         self.assertEqual(stats["source_groups_total"], 3)
         self.assertEqual(stats["source_groups_completed"], 3)
         self.assertEqual(stats["moved"], 3)
+        self.assertTrue(stats["scan_complete"])
+        self.assertEqual(stats["protected_staging_dirs"], [])
+
+    def test_protected_download_makes_the_scan_partial_and_keeps_safe_media(self):
+        for pipeline in (False, True):
+            with self.subTest(group_pipeline=pipeline):
+                client = _TreeClient({
+                    "root": [
+                        _dir("stage", "MF-101-FixtureRelease", "root"),
+                        _dir("safe", "Normal fixture", "root"),
+                    ],
+                    "stage": [_dir("inner", "123", "stage")],
+                    "inner": [_video("blocked", "123.mp4", "inner")],
+                    "safe": [_video("normal", "Normal.mkv", "safe")],
+                }, root_name="NewNsfw")
+                harness = _PipelineHarness(client)
+
+                plans, stats = harness.run(
+                    group_pipeline=pipeline, require_complete_scan=True,
+                    protected_staging_ids={"stage"},
+                )
+
+                self.assertEqual([plan.file_id for plan in plans], ["normal"])
+                self.assertEqual(stats["moved"], 1)
+                self.assertFalse(stats["scan_complete"])
+                self.assertEqual(stats["scan_errors"], [])
+                self.assertEqual(len(stats["protected_staging_dirs"]), 1)
+                self.assertIn("MF-101-FixtureRelease", stats["skip_reasons"][0])
+                self.assertNotIn("stage", client.calls)
+                self.assertNotIn("inner", client.calls)
+
+    def test_nested_protected_staging_is_reported_in_both_scan_modes(self):
+        for pipeline in (False, True):
+            with self.subTest(group_pipeline=pipeline):
+                client = _TreeClient({
+                    "root": [_dir("bundle", "Bundle", "root")],
+                    "bundle": [_dir("stage", "MF-102-FixtureRelease", "bundle")],
+                    "stage": [_video("blocked", "123.mp4", "stage")],
+                }, root_name="NewNsfw")
+                harness = _PipelineHarness(client)
+
+                plans, stats = harness.run(
+                    group_pipeline=pipeline, require_complete_scan=True,
+                    protected_staging_ids={"stage"},
+                )
+
+                self.assertEqual(plans, [])
+                self.assertEqual(stats["moved"], 0)
+                self.assertFalse(stats["scan_complete"])
+                self.assertEqual(stats["protected_staging_dirs"][0]["path"],
+                                 "NewNsfw/Bundle/MF-102-FixtureRelease")
+                self.assertNotIn("stage", client.calls)
+
+    def test_empty_frozen_members_do_not_report_directories_outside_scope(self):
+        client = _TreeClient({
+            "root": [_dir("stage", "MF-103-FixtureRelease", "root")],
+        })
+
+        plans, stats = _PipelineHarness(client).run(
+            source_member_ids=frozenset(), protected_staging_ids={"stage"},
+        )
+
+        self.assertEqual(plans, [])
+        self.assertEqual(stats["protected_staging_dirs"], [])
+        self.assertTrue(stats["scan_complete"])
 
     def test_first_group_latency_does_not_grow_with_remaining_groups(self):
         tree = {"root": [_dir(f"group-{i}", f"作品 {i}", "root") for i in range(100)]}
@@ -897,6 +988,92 @@ class TaskStateProjectionTests(unittest.TestCase):
         self.assertEqual(result.get("changed_target_dirs"), ["剧集/作品 Q/Season 01"])
 
 
+class ProtectedStagingTaskTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(isolated_test_database())
+        self.enterContext(patch.object(
+            socket.socket, "connect", side_effect=AssertionError("unexpected network"),
+        ))
+
+    def _run(self, *, gy_status="completed", safe_media=False):
+        from app import database as db
+        from app.modules import organize_tasks as tasks_module
+
+        request_id, _ = db.create_download_request("staging-scan-fixture", "magnet")
+        db.update_download_request(
+            request_id, status="completed" if gy_status == "completed" else "downloading",
+            gy_status=gy_status, gy_target_dir="stage", gy_isolated=1,
+            gy_staging_name="MF-101-FixtureRelease", gy_staging_parent_dir="old-parent",
+            gy_staging_cleanup_status="retained", gy_settle_stable_count=2,
+            gy_settle_snapshot="old-stable-snapshot", organize_status="requires_manual",
+            organize_started=1, organize_task_id="old-confirmation-task",
+        )
+        tree = {
+            "root": [_dir("stage", "MF-101-FixtureRelease", "root")],
+            "stage": [_dir("inner", "123", "stage")],
+            "inner": [_video("blocked", "123.mp4", "inner")],
+        }
+        if safe_media:
+            tree["root"].append(_video("safe", "Normal.mkv", "root"))
+        client = _TreeClient(tree, root_name="NewNsfw")
+        harness = _PipelineHarness(client)
+        manager = tasks_module.OrganizeTaskManager()
+        manager._task = {"id": "protected-task", "status": "running", "stats": {}}
+        self.assertTrue(manager._lock.acquire(blocking=False))
+        with patch.object(Organizer, "_build_plans", harness._build_plans), patch(
+            "app.modules.organize.execute_organize_plans", side_effect=harness._execute,
+        ), patch.object(Organizer, "trigger_post_actions"), patch.object(
+            Organizer, "_validate_target_outside_source",
+        ), patch.object(manager, "_wake_download_tracker"), patch.object(
+            tasks_module, "resolve_organize_workers", return_value=1,
+        ):
+            manager._run(
+                "protected-task", 0, [{"id": "root", "name": "NewNsfw"}],
+                harness.rules, trigger_type="telegram", client=client,
+            )
+        return manager.task_status(), client, db.get_download_request(request_id)
+
+    def test_completed_moved_staging_is_explicitly_partial_without_releasing_protection(self):
+        from app import database as db
+
+        task, client, row = self._run()
+
+        self.assertEqual(task["status"], "partial")
+        self.assertEqual(task["stats"]["total"], 0)
+        self.assertFalse(task["stats"]["scan_complete"])
+        self.assertIn("受保护下载目录", task["message"])
+        self.assertIn("MF-101-FixtureRelease", task["message"])
+        self.assertIn("MF-101-FixtureRelease", task["error"])
+        self.assertEqual(task["result"]["status"], "partial")
+        self.assertEqual(task["result"]["protected_staging_dirs"][0]["file_id"], "stage")
+        self.assertIn("MF-101-FixtureRelease", task["result"]["skip_reasons"][0])
+        self.assertEqual(task["result"]["sources"][0]["status"], "partial")
+        self.assertNotIn("stage", client.calls)
+        self.assertIn("stage", db.list_protected_guangya_staging_ids())
+        self.assertEqual(row["gy_staging_parent_dir"], "old-parent")
+        self.assertEqual(row["gy_staging_cleanup_status"], "retained")
+        self.assertEqual(row["organize_status"], "requires_manual")
+        self.assertEqual(row["organize_task_id"], "old-confirmation-task")
+        from app.bot.handlers import _organize_terminal_progress
+
+        self.assertIn("MF-101-FixtureRelease", _organize_terminal_progress(task))
+
+    def test_active_download_stays_blocked_while_ordinary_media_can_be_organized(self):
+        task, client, _row = self._run(gy_status="downloading", safe_media=True)
+
+        self.assertEqual(task["status"], "partial")
+        self.assertEqual(task["stats"]["moved"], 1)
+        self.assertNotIn("stage", client.calls)
+        self.assertNotIn("inner", client.calls)
+
+    def test_unknown_download_is_not_admitted_even_with_old_stable_snapshot(self):
+        task, client, _row = self._run(gy_status="")
+
+        self.assertEqual(task["status"], "partial")
+        self.assertEqual(task["stats"]["moved"], 0)
+        self.assertNotIn("stage", client.calls)
+
+
 class GroupPipelineRollbackTests(unittest.TestCase):
     """回退开关：保留旧整源执行入口。"""
 
@@ -911,6 +1088,8 @@ class GroupPipelineRollbackTests(unittest.TestCase):
         self.assertEqual(len([item for item in harness.events if item.startswith("execute:")]), 1)
         self.assertEqual(batches, [3])
         self.assertNotIn("group_results", stats)
+        self.assertTrue(stats["scan_complete"])
+        self.assertEqual(stats["protected_staging_dirs"], [])
 
     def test_preview_keeps_whole_source_arbitration(self):
         harness = _PipelineHarness(_sample_tree())

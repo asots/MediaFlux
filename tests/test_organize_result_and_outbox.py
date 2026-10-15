@@ -49,6 +49,58 @@ class OrganizeResultSchemaTests(unittest.TestCase):
         self.assertEqual(result["groups"], [])
         self.assertEqual(result["strm"], {})
 
+    def test_protected_download_directories_survive_result_serialization(self):
+        blocked = [{
+            "file_id": "stage", "source_dir_id": "source",
+            "path": "NewNsfw/MF-101-FixtureRelease", "reason": "受保护下载目录未扫描",
+        }]
+        result = build_organize_result(
+            {"scan_complete": False, "protected_staging_dirs": blocked}, status="partial",
+        )
+
+        self.assertEqual(result["protected_staging_dirs"], blocked)
+        self.assertFalse(result["scan_complete"])
+        self.assertEqual(read_organize_result(result)["protected_staging_dirs"], blocked)
+        self.assertEqual(build_organize_result({}, status="completed")["protected_staging_dirs"], [])
+        self.assertTrue(build_organize_result({}, status="completed")["scan_complete"])
+
+    def test_protected_download_prevents_a_success_notification(self):
+        from app.modules.organize import Organizer
+        from app.modules.telegram_organize_lifecycle import build_organize_lifecycle_event
+
+        _groups, stats = Organizer._notification_projection({
+            "total": 0, "scan_complete": False,
+            "protected_staging_dirs": [{"file_id": "stage", "path": "NewNsfw/MF-fixture",
+                                        "reason": "受保护下载目录未扫描"}],
+        })
+        event = build_organize_lifecycle_event(
+            stats, source_name="NewNsfw", strm_status="未启用", media_refresh="未触发",
+        )
+
+        self.assertEqual(event.state, "partial")
+        self.assertIn("部分完成", event.title)
+
+    def test_protected_downloads_allow_only_confirmed_incremental_postprocessing(self):
+        from unittest.mock import patch
+
+        from app.modules.organize import Organizer, OrganizeRules
+
+        for changes in ([], [{"rel_dir": "Normal", "name": "Normal.mkv"}]):
+            with self.subTest(has_changes=bool(changes)):
+                stats = {"moved": 1, "scan_complete": False, "strm_changes": changes,
+                         "protected_staging_dirs": [{"file_id": "stage"}]}
+                rules = OrganizeRules(link_strm=True, notify_enabled=False, library_notify=False)
+                with patch.object(Organizer, "_post_organize_link") as link, patch.object(
+                    Organizer, "_schedule_agent_recognition_reviews",
+                ):
+                    Organizer.trigger_post_actions(stats, rules, notify_result=False)
+
+                if changes:
+                    self.assertTrue(link.call_args.kwargs["force_incremental"])
+                else:
+                    link.assert_not_called()
+                    self.assertTrue(stats["strm"]["skipped"])
+
     def test_legacy_stats_payload_is_still_readable(self):
         legacy = {"total": 4, "moved": 3, "status": "completed"}
 

@@ -81,6 +81,8 @@ def build_organize_result(
         "confirmations": _text_list(stats.get("confirmations")),
         "confirmation_groups": _dict_list(stats.get("confirmation_groups")),
         "scan_errors": _text_list(stats.get("scan_errors")),
+        "scan_complete": stats.get("scan_complete") is not False,
+        "protected_staging_dirs": _dict_list(stats.get("protected_staging_dirs")),
         "skip_reasons": _text_list(stats.get("skip_reasons")),
         "sources": _dict_list(source_results),
     }
@@ -157,8 +159,13 @@ def _format_scan_summary(stats: dict) -> str:
             parts.append(f"{label} {value}")
     if count("stopped"):
         parts.append("已停止")
+    if stats.get("protected_staging_dirs"):
+        parts.append(f"受保护下载目录 {len(stats['protected_staging_dirs'])} 个未扫描")
     if not stats.get("scan_complete", True) or count("scan_limited"):
-        parts.append(f"扫描不完整({stats.get('scan_limit_kind') or '未知原因'})")
+        kind = stats.get("scan_limit_kind") or (
+            "下载目录受保护" if stats.get("protected_staging_dirs") else "未知原因"
+        )
+        parts.append(f"扫描不完整({kind})")
     errors = stats.get("scan_errors") or []
     if errors:
         parts.append(f"扫描错误 {len(errors)}")

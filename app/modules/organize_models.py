@@ -114,6 +114,8 @@ class OrganizeContext:
     require_complete_scan: bool = False
     media_probe_cache_only: bool | None = None
     protected_source_ids: frozenset[str] = frozenset()
+    # 来源根保护与下载隔离保护共用扫描边界；后者需额外报告被排除的范围。
+    protected_staging_ids: frozenset[str] = frozenset()
     automatic: bool = False
     # 组级流水线的实时进度回调；只用于观测，异常不得影响整理结果。
     group_progress: Callable[[dict], None] | None = None

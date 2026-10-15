@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from app.logger import get_logger
-from app.modules.organize_scan import filter_source_entries
+from app.modules.organize_scan import filter_source_entries, record_protected_staging
 
 logger = get_logger("app.modules.organize")
 
@@ -172,6 +172,7 @@ class GroupEnumeration:
     complete: bool = True
     errors: list[str] = field(default_factory=list)
     source_root_name: str = ""
+    protected_staging_dirs: list[dict[str, str]] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         return bool(self.tasks)
@@ -315,6 +316,7 @@ def enumerate_group_tasks(
     source_name: str = "",
     video_exts: set[str] | frozenset[str],
     protected_source_ids: set[str] | frozenset[str] = frozenset(),
+    protected_staging_ids: set[str] | frozenset[str] = frozenset(),
     trigger: str = "manual",
     nsfw_enabled: bool = False,
     cancelled: Callable[[], bool] | None = None,
@@ -330,6 +332,7 @@ def enumerate_group_tasks(
     protected = {
         str(item).strip() for item in (protected_source_ids or set()) if str(item).strip()
     }
+    protected.update(protected_staging_ids)
     protected.discard(source_dir_id)
     root_name = str(source_name or "").strip()
 
@@ -401,11 +404,19 @@ def enumerate_group_tasks(
             ))
 
     seen_dirs: set[str] = set()
+    exclusions: dict = {}
     for item in entries:
         if not getattr(item, "is_dir", False):
             continue
         child_id = str(getattr(item, "file_id", "") or "").strip()
-        if not child_id or child_id in protected or child_id in seen_dirs:
+        if not child_id or child_id in seen_dirs:
+            continue
+        if child_id in protected:
+            if child_id in protected_staging_ids:
+                record_protected_staging(
+                    exclusions, source_dir_id=source_dir_id, file_id=child_id,
+                    path=f"{root_name}/{getattr(item, 'name', '') or child_id}".strip("/"),
+                )
             continue
         seen_dirs.add(child_id)
         name = str(getattr(item, "name", "") or "").strip()
@@ -444,7 +455,10 @@ def enumerate_group_tasks(
         replace(task, index=position, total=total)
         for position, task in enumerate(tasks, start=1)
     ]
-    return GroupEnumeration(tasks=tasks, complete=True, source_root_name=root_name)
+    return GroupEnumeration(
+        tasks=tasks, complete=True, source_root_name=root_name,
+        protected_staging_dirs=exclusions.get("protected_staging_dirs", []),
+    )
 
 
 # ===== 组级统计合并 =====
@@ -629,6 +643,7 @@ def resolve_group_status(stats: dict, *, error: str = "") -> str:
     unsafe = (
         int((stats or {}).get("failed", 0) or 0)
         or (stats or {}).get("scan_errors")
+        or (stats or {}).get("protected_staging_dirs")
         or int((stats or {}).get("replacement_cleanup_failed", 0) or 0)
         or int((stats or {}).get("audit_failures", 0) or 0)
         or int((stats or {}).get("empty_dir_cleanup_failed", 0) or 0)

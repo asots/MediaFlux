@@ -1384,7 +1384,7 @@ class Organizer:
             "metadata_moved": 0, "stopped": 0, "skipped": 0,
             "conflict": 0, "failed": 0,
             "subtitle_moved": 0, "subtitle_skipped": 0,
-            "subtitle_reasons": [], "scan_errors": [],
+            "subtitle_reasons": [], "scan_errors": [], "protected_staging_dirs": [],
             "scan_complete": True, "scan_limited": 0,
             "scan_limit_kind": "", "scan_dirs": 0,
             "scan_entries": 0, "scan_duplicate_dirs": 0,
@@ -2464,6 +2464,7 @@ class Organizer:
             or stats.get("stopped")
             or stats.get("failed")
             or stats.get("scan_errors")
+            or stats.get("protected_staging_dirs")
             or stats.get("replacement_cleanup_failed")
             or stats.get("audit_failures")
         )
@@ -2524,6 +2525,7 @@ class Organizer:
         unsafe_partial = bool(
             stats.get("failed")
             or stats.get("scan_errors")
+            or stats.get("protected_staging_dirs")
             or stats.get("replacement_cleanup_failed")
         )
         if rules.link_strm and stats.get("moved", 0) and (
@@ -2553,6 +2555,7 @@ class Organizer:
                  require_complete_scan: bool = False,
                  media_probe_cache_only: bool | None = None,
                  protected_source_ids: set[str] | None = None,
+                 protected_staging_ids: set[str] | frozenset[str] = frozenset(),
                  automatic: bool = False,
                  group_progress: Callable[[dict], None] | None = None,
                  group_pipeline: bool = True,
@@ -2594,6 +2597,7 @@ class Organizer:
                 for item in (protected_source_ids or set())
                 if str(item).strip()
             ),
+            protected_staging_ids=frozenset(protected_staging_ids),
             automatic=bool(automatic),
             group_progress=group_progress,
             group_pipeline=bool(group_pipeline),
@@ -3214,11 +3218,17 @@ class Organizer:
             source_name=context.source_name,
             video_exts=self.video_exts(rules),
             protected_source_ids=set(context.protected_source_ids),
+            protected_staging_ids=context.protected_staging_ids,
             trigger="automatic" if context.automatic else "manual",
             nsfw_enabled=rules.nsfw_enabled,
             cancelled=context.cancelled,
             source_member_ids=context.source_member_ids,
         )
+        if enumeration.protected_staging_dirs:
+            stats["scan_complete"] = False
+            stats["protected_staging_dirs"] = enumeration.protected_staging_dirs
+            for blocked in enumeration.protected_staging_dirs:
+                self._append_reason(stats, "skip_reasons", blocked["reason"])
         if not enumeration.complete:
             # 部分列表不得冒充完整枚举：漏掉的媒体组会让后续清理误判来源已空。
             stats["scan_complete"] = False
@@ -3420,6 +3430,7 @@ class Organizer:
         unsafe_partial = bool(
             stats.get("failed")
             or stats.get("scan_errors")
+            or stats.get("protected_staging_dirs")
             or stats.get("replacement_cleanup_failed")
             or stats.get("empty_dir_cleanup_failed")
             or stats.get("source_dir_cleanup_failed")
@@ -3828,6 +3839,7 @@ class Organizer:
             unsafe_partial = bool(
                 stats.get("failed")
                 or stats.get("scan_errors")
+                or stats.get("protected_staging_dirs")
                 or stats.get("replacement_cleanup_failed")
                 or stats.get("empty_dir_cleanup_failed")
                 or stats.get("source_dir_cleanup_failed")

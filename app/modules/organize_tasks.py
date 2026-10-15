@@ -132,6 +132,9 @@ def _unresolved_skip_count(plans: Any) -> int:
 
 def _merge_source_stats(aggregate: dict[str, object], stats: dict[str, Any]) -> None:
     """稳定合并单来源统计，供串行与并行调度复用。"""
+    aggregate["scan_complete"] = bool(
+        aggregate.get("scan_complete", True) and stats.get("scan_complete", True)
+    )
     for key, value in stats.items():
         if (
             isinstance(value, int)
@@ -145,7 +148,7 @@ def _merge_source_stats(aggregate: dict[str, object], stats: dict[str, Any]) -> 
     aggregate["strm_force_full"] = bool(
         aggregate.get("strm_force_full") or stats.get("strm_force_full")
     )
-    for key in ("media_items", "confirmation_groups", "group_results"):
+    for key in ("media_items", "confirmation_groups", "group_results", "protected_staging_dirs"):
         values = stats.get(key) or []
         if isinstance(values, list):
             aggregate.setdefault(key, []).extend(
@@ -228,6 +231,7 @@ def _publish_download_lifecycles(
 _SOURCE_ROOT_CLEANUP_UNSAFE_STATS = (
     "failed",
     "scan_errors",
+    "protected_staging_dirs",
     "stopped",
     "replacement_cleanup_failed",
     "audit_failures",
@@ -252,14 +256,16 @@ def _protected_organize_root_ids(rules: OrganizeRules) -> tuple[set[str], str]:
     return protected, error
 
 
-def _protected_source_ids(sources: list[dict[str, str]]) -> set[str]:
+def _protected_source_ids(
+    sources: list[dict[str, str]], *, staging_ids: set[str] | None = None,
+) -> set[str]:
     """合并本轮来源与所有活动下载隔离目录，阻止跨任务误删。"""
     protected = {
         str(source.get("id") or "").strip()
         for source in sources
         if str(source.get("id") or "").strip()
     }
-    protected.update(db.list_protected_guangya_staging_ids())
+    protected.update(db.list_protected_guangya_staging_ids() if staging_ids is None else staging_ids)
     return protected
 
 
@@ -1668,7 +1674,8 @@ class OrganizeTaskManager:
             if not _credential_snapshot_is_current(client, expected_credential_generation):
                 raise RuntimeError("光鸭登录凭据已变化，已拒绝执行整理")
             organizer = Organizer(client=client) if client is not None else Organizer()
-            protected_source_ids = _protected_source_ids(sources)
+            protected_staging_ids = db.list_protected_guangya_staging_ids()
+            protected_source_ids = _protected_source_ids(sources, staging_ids=protected_staging_ids)
             worker_budget = resolve_organize_workers()
             source_worker_count = min(worker_budget, max(1, len(sources)))
             source_rules = [
@@ -1841,6 +1848,7 @@ class OrganizeTaskManager:
                         source_name=source_name,
                         require_complete_scan=True,
                         protected_source_ids=protected_source_ids,
+                        protected_staging_ids=protected_staging_ids,
                         automatic=trigger_type in {"cron", "download", "telegram"},
                         group_progress=_publish_group_progress,
                         planning_workers=group_worker_budget,
@@ -1868,7 +1876,8 @@ class OrganizeTaskManager:
                             trigger_type=trigger_type,
                         )
                     terminal = (
-                        "stopped" if self._cancel_event.is_set() else "completed"
+                        "stopped" if self._cancel_event.is_set()
+                        else "partial" if stats.get("protected_staging_dirs") else "completed"
                     )
                     _publish_source_runtime(index, status=terminal)
                     return index, source, stats, None
@@ -1902,6 +1911,8 @@ class OrganizeTaskManager:
                 if stats is None:
                     return
                 completed[index] = {**source, "stats": stats}
+                if stats.get("protected_staging_dirs"):
+                    completed[index]["status"] = "partial"
                 _merge_source_stats(aggregate, stats)
                 with self._state_lock:
                     if self._task.get("id") == task_id:
@@ -1993,6 +2004,7 @@ class OrganizeTaskManager:
             partial = bool(
                 int(aggregate.get("failed", 0) or 0)
                 or aggregate.get("scan_errors")
+                or aggregate.get("protected_staging_dirs")
                 or int(aggregate.get("replacement_cleanup_failed", 0) or 0)
                 or int(aggregate.get("empty_dir_cleanup_failed", 0) or 0)
                 or int(aggregate.get("source_dir_cleanup_failed", 0) or 0)
@@ -2059,6 +2071,11 @@ class OrganizeTaskManager:
                 "整理任务已停止" if stopped
                 else ("整理任务部分完成" if partial else "整理任务已完成")
             )
+            blocked_reason = ""
+            if not stopped and aggregate.get("protected_staging_dirs"):
+                blocked = aggregate["protected_staging_dirs"]
+                blocked_reason = "；".join(item["reason"] for item in blocked[:3])
+                message = f"整理任务部分完成，{len(blocked)} 个受保护下载目录未扫描：{blocked[0]['path']}"
             finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if status == "completed":
                 cleanup = self._cleanup_download_staging(organizer, download_request_ids or [], sources, rules=rules)
@@ -2081,11 +2098,13 @@ class OrganizeTaskManager:
                 source_results=source_results,
                 notification_sent=notification_sent,
                 task_id=task_id,
+                error=blocked_reason,
             )
             with self._state_lock:
                 self._task.update({
                     "status": status,
                     "message": message,
+                    "error": blocked_reason,
                     "current_source": "",
                     "group_progress": {},
                     "finished_at": finished_at,

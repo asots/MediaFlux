@@ -56,6 +56,39 @@ def _immediate_operation_manager() -> SimpleNamespace:
 
 
 class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
+    def test_requires_manual_request_cannot_reenter_download_admission(self):
+        request_id, _ = db.create_download_request("manual-staging-reentry-fixture", "magnet")
+        db.update_download_request(
+            request_id, targets="guangya", status="completed", gy_status="completed",
+            gy_isolated=1, gy_target_dir="stage", gy_staging_cleanup_status="retained",
+            organize_started=1, organize_status="requires_manual", organize_task_id="old-task",
+        )
+
+        self.assertFalse(db.claim_download_request_organize(request_id))
+        self.assertEqual(db.get_download_request(request_id)["organize_status"], "requires_manual")
+        self.assertIn("stage", db.list_protected_guangya_staging_ids())
+
+    def test_moved_staging_cannot_reuse_a_previous_stable_snapshot(self):
+        tracker = DownloadTracker()
+        row = {
+            "id": 7, "gy_isolated": 1, "gy_target_dir": "stage",
+            "gy_staging_parent_dir": "old-parent", "gy_staging_name": "MF-7-Fixture",
+            "gy_status": "completed", "gy_settle_stable_count": 2,
+            "gy_settle_snapshot": "old-stable-snapshot",
+        }
+        cloud = SimpleNamespace(
+            logged_in=True, close=Mock(), file_info=Mock(return_value=GuangYaFile(
+                "stage", "MF-7-Fixture", True, parent_id="new-parent",
+            )),
+        )
+        with patch("app.modules.download_tracker.GuangYaClient", return_value=cloud), patch.object(
+            tracker, "_fail_settle",
+        ) as fail, patch.object(tracker, "_scan_staging_snapshot") as scan:
+            self.assertFalse(tracker._staging_ready_for_organize(row))
+
+        scan.assert_not_called()
+        self.assertIn("身份已变化", fail.call_args.args[1])
+
     def test_download_staging_identity_is_bound_before_provider_write(self):
         request_id, created = db.create_download_request(
             "staging-bind-before-provider",

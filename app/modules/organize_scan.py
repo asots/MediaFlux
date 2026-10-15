@@ -36,6 +36,29 @@ def filter_source_entries(
     return [item for item in entries if str(item.file_id) in source_member_ids]
 
 
+def record_protected_staging(
+    stats: dict, *, source_dir_id: str, file_id: str, path: str,
+) -> None:
+    """已知保护排除不是读取失败，但不能冒充整源扫描完成。"""
+    blocked = stats.setdefault("protected_staging_dirs", [])
+    if any(item["source_dir_id"] == source_dir_id and item["file_id"] == file_id
+           for item in blocked):
+        return
+    reason = (
+        f"受保护下载目录「{path}」（ID: {file_id}）未扫描："
+        "下载隔离目录仍可能被写入或等待核验；已移动目录需核验归属，未自动接管"
+    )
+    blocked.append({
+        "source_dir_id": source_dir_id, "file_id": file_id,
+        "path": path, "reason": reason,
+    })
+    stats["scan_complete"] = False
+    reasons = stats.setdefault("skip_reasons", [])
+    if reason not in reasons and len(reasons) < 20:
+        reasons.append(reason)
+    logger.warning("%s", reason)
+
+
 @dataclass(frozen=True)
 class ScanRestriction:
     """把一次扫描限制在单个媒体组子树内。
@@ -150,7 +173,7 @@ class OrganizerScanner:
         restriction: ScanRestriction | None = None,
     ) -> OrganizeScanResult:
         started = time.monotonic()
-        protected_sources = set(context.protected_source_ids)
+        protected_sources = set(context.protected_source_ids) | set(context.protected_staging_ids)
         protected_sources.discard(context.source_dir_id)
         source_root_name = context.source_name.strip()
         try:
@@ -323,6 +346,13 @@ class OrganizerScanner:
                     continue
                 child_id = str(item.file_id or "").strip()
                 if not child_id or child_id in accumulator.protected_sources:
+                    if child_id in context.protected_staging_ids:
+                        sub = f"{rel}/{item.name}" if rel else item.name
+                        record_protected_staging(
+                            stats, source_dir_id=context.source_dir_id,
+                            file_id=child_id,
+                            path=f"{accumulator.source_root_name}/{sub}".strip("/"),
+                        )
                     continue
                 sub = f"{rel}/{item.name}" if rel else item.name
                 child_group_id = child_id if depth == 0 else source_group_id
