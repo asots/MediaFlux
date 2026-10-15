@@ -268,7 +268,7 @@ class AgentKernelApiTests(unittest.TestCase):
         self.assertEqual(len(self.web.confirmations), 1)
 
     def test_confirmation_continuation_statuses_are_not_http_conflicts(self):
-        for status, expected in (("success", 200), ("partial", 200), ("approval_required", 200), ("failed", 409)):
+        for status, expected in (("success", 200), ("partial", 200), ("approval_required", 200), ("waiting", 200), ("failed", 409), ("cancelled", 409)):
             with self.subTest(status=status), patch.object(self.web, "confirm_view", new=AsyncMock(return_value=TurnView(
                 session_id="session_1234567890", turn_id="confirmed", request_id="confirmed-request", status=status,
             ))):
@@ -277,6 +277,30 @@ class AgentKernelApiTests(unittest.TestCase):
                 })
                 self.assertEqual(response.status_code, expected, response.text)
                 self.assertEqual(response.json()["status"], status)
+
+    def test_waiting_snapshot_preserves_public_answer_and_handoff_status(self):
+        owner = "webk:v1:" + "a" * 64
+        session_id = "session_1234567890"
+        self.runtime.store.state.conversation = [{"role": "user", "content": "等待查询"}]
+        self.runtime.store.add_event(owner=owner, session_id=session_id, event={
+            "type": "turn.completed", "request_id": "waiting-request", "turn_id": "waiting-turn",
+            "payload": {"status": "waiting", "answer": "查询已保存等待；尚未完成。"},
+        })
+        response = self.client.get(f"/api/agent/sessions/{session_id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["turn_status"], "waiting")
+        self.assertEqual(payload["last_turn"]["status"], "waiting")
+        self.assertEqual(payload["messages"][-1], {"role": "assistant", "content": "查询已保存等待；尚未完成。"})
+        self.assertEqual(self.runtime.store.state.conversation, [{"role": "user", "content": "等待查询"}])
+
+    def test_read_wait_uses_shared_result_observation_count(self):
+        for status, count in (("pending", 1), ("claimed", 1), ("running", 1), ("terminal", 0), ("cancelled", 0)):
+            with self.subTest(status=status):
+                self.runtime.store.state.metadata = {"read_wait": {"state": status, "delivery_pending": True}}
+                response = self.client.get("/api/agent/sessions/session_1234567890")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["pending_effect_count"], count)
 
     def test_invalid_fields_are_rejected_before_kernel(self):
         response = self.client.post(

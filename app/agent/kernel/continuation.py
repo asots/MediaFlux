@@ -64,7 +64,7 @@ def history_call(state, record):
 def check_claim(state, lease, now, conn=None, *, publication=False):
     if not lease.continuation_id:
         return
-    record = for_lease(state, lease)
+    record = continuation_record(state, lease.continuation_id, lease.continuation_kind)
     if (record.get("wait_id") != lease.continuation_id
             or record.get("claim_id") != lease.continuation_claim_id
             or record.get("resume_turn_id") != lease.turn_id
@@ -97,7 +97,9 @@ def task_changed(state):
     if not isinstance(record, dict):
         return
     task = state.metadata.get("task")
-    if not task or record["task_id"] != task["task_id"] or task["status"] in {"cancelled", "complete"}:
+    # 完成业务清单不撤销当前执行租约；由同一终结事件保存最终回答/投递。
+    if (not task or record["task_id"] != task["task_id"] or task["status"] == "cancelled"
+            or (task["status"] == "complete" and record.get("state") != "running")):
         revoke(state, "task_changed")
     elif record.get("expected_task") and record["expected_task"]["epoch"] != task["epoch"]:
         revoke(state, "task_changed")
@@ -110,11 +112,30 @@ def apply_actions(state, lease, updates, now, conn=None):
             continue
         value = update.value
         operation = value["operation"]
-        if lease.continuation_kind == "effect" and lease.continuation_id:
-            apply_effect_action(state, lease, update, now, conn)
-            continue
         if conn is not None:
             require_runtime_fence(conn, update.binding.fence)
+        if operation == "finish":
+            record = continuation_record(state, lease.continuation_id, lease.continuation_kind)
+            record.update(state="terminal", terminal_reason=value["reason"])
+            if lease.continuation_kind == "effect":
+                row = state.metadata["effect_waits"][record["wait_id"]]
+                if row.get("batch_progress"):
+                    from .batch_effects import observe_batch
+                    from .state import commit_conversation
+                    from app.agent.effect_completion import _late_receipt
+                    payload = effect_payload(state, record)
+                    final = observe_batch(row, payload["origin"], payload["result"])
+                    row.update(final_result=final, receipt_message=_late_receipt(payload["seed"], final))
+                    commit_conversation(state, state.conversation)
+            if value.get("delivery_view") is not None and record.get("channel") == "telegram":
+                record.update(delivery_view=deepcopy(value["delivery_view"]), delivery_pending=True)
+            marker = state.metadata.get("active_publication") or {}
+            if marker.get("generation") == lease.generation and marker.get("request_id") == lease.request_id:
+                marker["status"] = "finished"
+            continue
+        if lease.continuation_kind == "effect" and lease.continuation_id:
+            apply_effect_action(state, lease, update, now)
+            continue
         task = state.metadata.get("task")
         record = state.metadata.get("read_wait")
         if operation == "seed":
@@ -160,6 +181,8 @@ def apply_actions(state, lease, updates, now, conn=None):
             if record["state"] in ACTIVE and not lease.continuation_id:
                 raise ValueError("another read wait is active")
             anchor = anchor_for(state, value["call_id"], permit.tool_name)
+            from app.agent.owner_routes import normalize_delivery_route
+            route = normalize_delivery_route(value["delivery_route"], channel=value["channel"], owner=state.owner)
             first = record.get("first_park_at", now)
             expires = record.get("expires_at", first + EXPIRY_SECONDS)
             if due >= expires:
@@ -168,15 +191,13 @@ def apply_actions(state, lease, updates, now, conn=None):
                           anchor=anchor, admission_fence=asdict(update.binding.fence),
                           effective_digest=update.binding.effective_digest,
                           model_policy=value["model_policy"],
-                          channel=value["channel"], source_request_id=lease.request_id,
+                          channel=value["channel"], delivery_route=route, source_request_id=lease.request_id,
                           source_turn_id=record.get("source_turn_id", lease.turn_id), publication_generation=lease.generation,
                           first_park_at=first, parked_at=now, due_at=due, expires_at=expires,
                           last_checked_at=now, claim_id=lease.continuation_claim_id, claim_until=0,
                           resume_turn_id=lease.turn_id if lease.continuation_id else "",
                           expected_task=identity(task))
             budget["wait_segments"] += 1
-        elif operation == "finish":
-            record.update(state="terminal", terminal_reason=value["reason"])
         else:
             raise ValueError("invalid read wait operation")
 
@@ -244,9 +265,9 @@ EFFECT_ACTIVE_SECONDS = 1800
 EFFECT_PENDING = {"waiting", "pending", "claimed", "running"}
 
 
-def for_lease(state, lease):
-    if lease.continuation_kind == "effect":
-        row = (state.metadata.get("effect_waits") or {}).get(lease.continuation_id) or {}
+def continuation_record(state, wait_id, kind):
+    if kind == "effect":
+        row = (state.metadata.get("effect_waits") or {}).get(wait_id) or {}
         return row.get("continuation") or {}
     return state.metadata.get("read_wait") or {}
 
@@ -298,16 +319,14 @@ def release_effect(row, now):
 
 def due_records(metadata, now):
     records = []
-    read = metadata.get("read_wait") or {}
-    if (read.get("state") in {"pending", "claimed"} and read.get("due_at", float("inf")) <= now
-            and read.get("claim_until", 0) <= now):
-        records.append(deepcopy(read))
-    for row in (metadata.get("effect_waits") or {}).values():
-        record = row.get("continuation") or {}
-        if record.get("delivery_pending") is True and record.get("due_at", 0) <= now:
-            records.append({**deepcopy(record), "kind": "effect_delivery"})
-        elif (not record.get("delivery_pending") and record.get("state") in {"pending", "claimed", "running"} and record.get("due_at", float("inf")) <= now
-                and record.get("claim_until", 0) <= now):
+    candidates = [metadata.get("read_wait") or {}, *((row.get("continuation") or {})
+                  for row in (metadata.get("effect_waits") or {}).values())]
+    for record in candidates:
+        if record.get("due_at", float("inf")) > now:
+            continue
+        # READ running 不可重放；effect 的冻结尾部保留既有租约恢复规则。
+        resumable = {"pending", "claimed", "running"} if record.get("kind") == "effect" else {"pending", "claimed"}
+        if record.get("delivery_pending") is True or (record.get("state") in resumable and record.get("claim_until", 0) <= now):
             records.append(deepcopy(record))
     return sorted(records, key=lambda r: r["due_at"])
 
@@ -382,11 +401,8 @@ def claim_effect(state, candidate, now, binding, conn=None):
         record["source_request_id"], record["wait_id"], record["claim_id"], "effect")
 
 
-def apply_effect_action(state, lease, update, now, conn):
-    check_claim(state, lease, now, conn)
-    if conn is not None:
-        require_runtime_fence(conn, update.binding.fence)
-    record = for_lease(state, lease)
+def apply_effect_action(state, lease, update, now):
+    record = continuation_record(state, lease.continuation_id, lease.continuation_kind)
     value, budget = update.value, record["budget"]
     if value["operation"] == "reserve":
         for counter, limit in (("model_spent", "model_limit"), ("tool_spent", "tool_limit")):
@@ -412,22 +428,6 @@ def apply_effect_action(state, lease, update, now, conn):
         budget["wait_segments"] += 1
         budget["wait_seconds_spent"] += due - now
         record.update(state="pending", anchor=anchor, due_at=due, claim_until=0, last_checked_at=now)
-    elif value["operation"] == "finish":
-        record.update(state="terminal", terminal_reason=value["reason"])
-        row = state.metadata["effect_waits"][record["wait_id"]]
-        if row.get("batch_progress"):
-            from .batch_effects import observe_batch
-            from .state import commit_conversation
-            from app.agent.effect_completion import _late_receipt
-            payload = effect_payload(state, record)
-            final = observe_batch(row, payload["origin"], payload["result"])
-            row.update(final_result=final, receipt_message=_late_receipt(payload["seed"], final))
-            commit_conversation(state, state.conversation)
-        if value.get("delivery_view") is not None and record.get("channel") == "telegram":
-            record.update(delivery_view=deepcopy(value["delivery_view"]), delivery_pending=True)
-        marker = state.metadata.get("active_publication") or {}
-        if marker.get("generation") == lease.generation and marker.get("request_id") == lease.request_id:
-            marker["status"] = "finished"
     else:
         raise ValueError("unsupported effect continuation transition")
 
@@ -472,39 +472,49 @@ def confirmed_result(catalog, state, record):
     ), effect_plan=plan)
 
 
-async def deliver_effect_result(store, candidate):
+@dataclass(frozen=True, slots=True)
+class _DeliveryAcknowledged:
+    record: dict
+    accepted: bool
+    expired: bool
+    now: float
+
+    def __call__(self, state):
+        record = self.record
+        current = continuation_record(state, record["wait_id"], record.get("kind"))
+        if (current.get("wait_id") == record["wait_id"] and current.get("delivery_pending") is True
+                and current.get("resume_turn_id") == record["resume_turn_id"]
+                and current.get("delivery_view") == record["delivery_view"]):
+            current["delivery_pending"] = not (self.accepted or self.expired)
+            current["delivery_state"] = "queued" if self.accepted else "expired" if self.expired else "retry_wait"
+            if self.accepted:
+                current.pop("delivery_view", None)
+            elif not self.expired:
+                current["due_at"] = self.now + CLAIM_SECONDS
+
+
+async def deliver_continuation_result(store, candidate):
     """只重投已保存的最终视图；进程重启不能再次调用模型或执行旧写操作。"""
     from app.bot.agent_adapter import prepare_agent_continuation_delivery, publish_agent_continuation_delivery
 
     state = await store.load(owner=candidate["owner"], session_id=candidate["session_id"])
-    row = (state.metadata.get("effect_waits") or {}).get(candidate["wait_id"]) or {}
-    record = row.get("continuation") or {}
-    if (record.get("delivery_pending") is not True or record.get("resume_turn_id") != candidate.get("resume_turn_id")
+    record = continuation_record(state, candidate["wait_id"], candidate.get("kind"))
+    if (record.get("wait_id") != candidate["wait_id"] or record.get("delivery_pending") is not True or record.get("resume_turn_id") != candidate.get("resume_turn_id")
             or record.get("delivery_view") != candidate.get("delivery_view")):
         return False
     now = store._clock()
     expired = now >= record["expires_at"]
     accepted = False
     if not expired:
-        source = effect_payload(state, record)
+        route = effect_payload(state, record)["origin"].get("delivery_route") if candidate.get("kind") == "effect" else record.get("delivery_route")
         payload = prepare_agent_continuation_delivery(
             record["delivery_view"], owner=state.owner, session_id=state.session_id,
-            delivery_route=source["origin"].get("delivery_route") or {},
+            delivery_route=route or {},
             delivery_id=f'{record["wait_id"]}:{record["resume_turn_id"]}',
         )
         result = await publish_agent_continuation_delivery(payload)
         accepted = result.accepted
 
-    def acknowledged(current):
-        current_record = ((current.metadata.get("effect_waits") or {}).get(candidate["wait_id"]) or {}).get("continuation") or {}
-        if (current_record.get("delivery_pending") is True
-                and current_record.get("resume_turn_id") == record["resume_turn_id"]
-                and current_record.get("delivery_view") == record["delivery_view"]):
-            current_record["delivery_pending"] = not (accepted or expired)
-            current_record["delivery_state"] = "queued" if accepted else "expired" if expired else "retry_wait"
-            if accepted:
-                current_record.pop("delivery_view", None)
-            elif not expired:
-                current_record["due_at"] = now + CLAIM_SECONDS
-    await store.update_effect_state(owner=state.owner, session_id=state.session_id, change=acknowledged)
+    await store.update_effect_state(owner=state.owner, session_id=state.session_id,
+        change=_DeliveryAcknowledged(record, accepted, expired, now))
     return accepted

@@ -685,7 +685,9 @@ def _apply_effect_state_change(
     """在副本上执行纯同步回调，并固定 publication 身份字段。"""
     updated = state.clone()
     result = change(updated)
-    for reserved in ("pending_effect_binding", "pending_effect_goal", "confirmed_publication", "active_publication", "read_wait"):
+    from .continuation import _DeliveryAcknowledged
+    reserved_fields = ("pending_effect_binding", "pending_effect_goal", "confirmed_publication", "active_publication")
+    for reserved in reserved_fields + (() if type(change) is _DeliveryAcknowledged else ("read_wait",)):
         if (reserved in updated.metadata) != (reserved in state.metadata) or updated.metadata.get(reserved) != state.metadata.get(reserved):
             raise ValueError("effect callback cannot change publication binding")
     if ("task" in updated.metadata) != ("task" in state.metadata) or updated.metadata.get("task") != state.metadata.get("task"):

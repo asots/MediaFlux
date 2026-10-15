@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from app import config
 from app.agent.feature_gate import is_agent_enabled
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
+from app.agent.kernel.continuation import ACTIVE as READ_WAIT_ACTIVE
 from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import (
     EffectEnvelope,
@@ -140,6 +141,8 @@ def _last_turn_view(
     terminal = _TERMINAL_TURNS.get(event_type)
     if terminal is not None:
         status, message = terminal
+        if status == "completed" and event.get("payload", {}).get("status") == "waiting":
+            status, message = "waiting", "本轮已交接，等待任务继续。"
     elif event_type in _KNOWN_TURN_EVENTS:
         if active_turn is not None and _matches_turn(event, active_turn):
             return None
@@ -374,7 +377,7 @@ async def confirm_action(request: Request, data: Annotated[Any, Body()] = None):
                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
             )
         view = await transport.confirm_view(envelope)
-        status_code = 200 if view.status in {"effect_completed", "success", "partial", "approval_required"} else 409
+        status_code = 200 if view.terminal and view.status not in {"failed", "cancelled"} else 409
         return api_response(view.to_dict(), status_code)
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
         return _error(exc)
@@ -495,6 +498,8 @@ async def get_session(request: Request, session_id: str):
             or (wait.get("continuation") or {}).get("state") in EFFECT_PENDING
             for wait in wait_records
         )
+        # 沿用公开计数字段；READ 等待与已确认后台操作共用结果观察器。
+        pending_effect_count += (getattr(state, "metadata", {}).get("read_wait") or {}).get("state") in READ_WAIT_ACTIVE
         pending_approval = None
         pending_plan_id = state.pending_effect_plan_id
         if pending_plan_id and not (active_turn and active_turn["protected"]):
@@ -507,6 +512,11 @@ async def get_session(request: Request, session_id: str):
         )
         terminal_payload = next((event.get("payload", {}) for event in reversed(events)
                                  if last_turn and event.get("turn_id") == last_turn["turn_id"]), {})
+        if not active_turn and last_turn and last_turn["status"] == "waiting":
+            # 等待提示属于公开响应，不写入原任务的模型历史；恢复沿用同一文本投影。
+            answer = public_conversation_messages([{"role": "assistant", "content": terminal_payload.get("answer", "")}])
+            if answer and (not messages or messages[-1] != answer[-1]):
+                messages.extend(answer)
         response = api_response(
             {
                 "session_id": normalized,

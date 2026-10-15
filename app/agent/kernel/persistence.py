@@ -191,7 +191,8 @@ class SQLiteKernelStore:
             rows = conn.execute(
                 "SELECT owner_digest,session_digest,generation,state_json,state_hmac FROM agent_kernel_sessions "
                 "WHERE json_valid(state_json) AND ("
-                "(json_extract(state_json,'$.metadata.read_wait.state') IN ('pending','claimed') "
+                "((json_extract(state_json,'$.metadata.read_wait.state') IN ('pending','claimed') "
+                "OR json_extract(state_json,'$.metadata.read_wait.delivery_pending')=1) "
                 "AND json_extract(state_json,'$.metadata.read_wait.due_at')<=?) OR EXISTS ("
                 "SELECT 1 FROM json_each(json_extract(state_json,'$.metadata.effect_waits')) AS effect "
                 "WHERE ((json_extract(effect.value,'$.continuation.state') IN ('pending','claimed','running') "

@@ -594,7 +594,7 @@ class AgentKernelBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator(".agent-streaming, .is-interrupted").count(), 0)
 
     def test_terminal_answer_releases_composer_without_waiting_for_http_eof(self):
-        for status in ("success", "partial"):
+        for status in ("success", "partial", "waiting"):
             with self.subTest(status=status):
                 page = self.make_page({"sessions": {"sessions": []}, "holdQueryOpen": True, "queryEvents": [
                     _event(1, "turn.started", {"kind": "query"}),
@@ -610,6 +610,88 @@ class AgentKernelBrowserTests(unittest.TestCase):
                 self.assertIn("DONE7788", page.locator(".agent-message-assistant").inner_text())
                 self.assertEqual(page.locator(".agent-retry-draft, .agent-cancelled, .is-interrupted").count(), 0)
                 self.assertFalse(any("/cancel" in call["url"] for call in page.evaluate("window.__kernelCalls")))
+
+    def test_waiting_handoff_preserves_live_dom_without_snapshot_recovery(self):
+        answer = "查询受到本地额度限制，已保存等待；尚未完成。"
+        page = self.make_page({"sessions": {"sessions": []}, "holdQueryOpen": True, "queryDelayMs": 100,
+            "queryEvents": [
+                _event(1, "turn.started", {"kind": "query"}),
+                _event(2, "tool.failed", {"code": "rate_limited", "message": "本地额度限制"}),
+                _event(3, "turn.completed", {"status": "waiting", "answer": answer}),
+                _event(4, "turn.failed", {"message": "迟到事件不可覆盖交接结果"}),
+            ]})
+        page.locator("#agentPrompt").fill("核对配置状态")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.locator(".agent-streaming").wait_for()
+        page.evaluate("""() => {
+            window.__waitingUser = document.querySelector('.agent-message-user');
+            window.__waitingCard = document.querySelector('.agent-result-card');
+        }""")
+        page.get_by_text(answer, exact=True).wait_for(timeout=3000)
+        page.locator("#agentStop").wait_for(state="hidden", timeout=3000)
+        self.assertTrue(page.evaluate("window.__waitingUser === document.querySelector('.agent-message-user')"))
+        self.assertTrue(page.evaluate("window.__waitingCard === document.querySelector('.agent-result-card')"))
+        self.assertEqual(page.locator(".agent-retry-draft, .agent-cancelled, .is-interrupted").count(), 0)
+        calls = page.evaluate("window.__kernelCalls")
+        query = next(index for index, call in enumerate(calls) if call["url"] == "/api/agent/query")
+        self.assertFalse(any(call["url"].startswith("/api/agent/sessions/") for call in calls[query + 1:]), calls)
+        self.assertNotIn("本轮回复已结束", page.locator("#agentResponseStatus").inner_text())
+
+    def test_cold_waiting_snapshot_renders_answer_without_failure_or_query_replay(self):
+        answer = "查询已保存等待；尚未完成。"
+        page = self.make_page({"sessions": {"sessions": [{"session_id": SESSION_ID, "title": "等待查询"}]},
+            "sessionDetails": {SESSION_ID: {
+                "messages": [{"role": "user", "content": "核对配置状态"}, {"role": "assistant", "content": answer}],
+                "turn_status": "waiting", "last_turn": {"request_id": "waiting-request", "turn_id": "waiting-turn",
+                    "status": "waiting", "message": "本轮已交接，等待任务继续。"},
+            }}}, stored_session=SESSION_ID)
+        page.get_by_text(answer, exact=True).wait_for(timeout=3000)
+        self.assertEqual(page.locator(".agent-retry-draft, .agent-cancelled, .is-interrupted").count(), 0)
+        self.assertFalse(any(call["url"] == "/api/agent/query" for call in page.evaluate("window.__kernelCalls")))
+
+    def test_waiting_observation_keeps_dom_until_resumed_answer_arrives(self):
+        waiting, final = "查询已保存等待；尚未完成。", "续行已取得真实结果。"
+        page = self.make_page({"sessions": {"sessions": []}, "queryEvents": [
+            _event(1, "turn.started", {"kind": "query"}),
+            _event(2, "turn.completed", {"status": "waiting", "answer": waiting}),
+        ]})
+        page.evaluate("""([waiting, final]) => {
+            const original = window.fetch;
+            const schedule = window.setTimeout;
+            window.setTimeout = (fn, delay, ...args) => schedule(fn, delay >= 5000 ? 40 : delay, ...args);
+            window.__waitingPolls = 0;
+            window.__waitingFinished = false;
+            window.fetch = async (url, options = {}) => {
+                const path = new URL(String(url), location.href).pathname;
+                const query = window.__kernelCalls.find(call => call.url === '/api/agent/query');
+                if (query && path.startsWith('/api/agent/sessions/') && (!options.method || options.method === 'GET')) {
+                    window.__waitingPolls++;
+                    const request = JSON.parse(query.body);
+                    const done = window.__waitingFinished;
+                    return new Response(JSON.stringify({
+                        session_id: request.session_id, draft_scope: 'a'.repeat(64), generation: done ? 2 : 1,
+                        messages: [{role: 'user', content: request.message}, {role: 'assistant', content: done ? final : waiting}],
+                        pending_effect_count: done ? 0 : 1, pending_approval: null, candidate_view: null,
+                        active_turn: null, turn_status: done ? 'success' : 'waiting',
+                        last_turn: {request_id: request.request_id, turn_id: done ? 'resumed-turn' : 'turn-' + request.request_id,
+                            status: done ? 'completed' : 'waiting'},
+                    }), {status: 200, headers: {'Content-Type': 'application/json'}});
+                }
+                return original(url, options);
+            };
+        }""", [waiting, final])
+        page.locator("#agentPrompt").fill("核对配置状态")
+        page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
+        page.get_by_text(waiting, exact=True).wait_for(timeout=3000)
+        page.evaluate("window.__waitingCard = document.querySelector('.agent-result-card')")
+        page.wait_for_function("window.__waitingPolls > 0", timeout=3000)
+        self.assertTrue(page.evaluate("window.__waitingCard === document.querySelector('.agent-result-card')"))
+        page.evaluate("window.__waitingFinished = true")
+        page.get_by_text(final, exact=True).wait_for(timeout=3000)
+        self.assertEqual(page.locator(".agent-message-user").count(), 1)
+        self.assertEqual(page.locator(".agent-message-assistant").count(), 1)
+        self.assertEqual(page.locator(".agent-retry-draft, .agent-cancelled, .is-interrupted").count(), 0)
+        self.assertEqual(sum(call["url"] == "/api/agent/query" for call in page.evaluate("window.__kernelCalls")), 1)
 
     def test_assistant_markdown_is_rendered_as_safe_semantic_dom(self) -> None:
         answer = """# 国漫推荐

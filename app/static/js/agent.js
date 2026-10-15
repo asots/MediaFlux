@@ -44,8 +44,6 @@
     const RECEIPT_POLL_LIMIT = 2880;
     const RECEIPT_OBSERVATION_MAX_MS = 24 * 60 * 60 * 1000;
     const MAX_MARKDOWN_DEPTH = 4;
-    const TERMINAL_TURN_STATUSES = ['success', 'partial', 'approval_required', 'effect_completed'];
-    const TERMINAL_LAST_TURN_STATUSES = ['completed', 'failed', 'cancelled', 'interrupted'];
     const STREAM_INTERRUPTED_NOTICE = '连接中断，后续结果尚未确认；可刷新会话核对状态，不要重复提交。';
     const CONFIRMATION_STOP_NOTICE = '已停止等待；已提交操作可能继续执行，请核对任务状态。';
     const TOOL_LABELS = {
@@ -1341,11 +1339,12 @@
     }
 
     function isTerminalEvent(event) {
-        if (!event) return false;
-        if (event.type === 'turn.failed' || event.type === 'turn.cancelled') return true;
-        return event.type === 'turn.completed' && TERMINAL_TURN_STATUSES.includes(
-            String(event.payload?.status || '').toLowerCase(),
-        );
+        return ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event?.type);
+    }
+
+    function turnNotice(status) {
+        return {waiting: '任务已交接，正在等待后续结果', approval_required: '等待下一项确认',
+            failed: '请求失败', cancelled: '请求已停止', interrupted: '请求未能完成，状态已同步'}[status] || '本轮回复已结束';
     }
 
     function applyEvent(turn, event) {
@@ -1450,13 +1449,11 @@
         }
         case 'turn.completed': {
             const status = String(payload.status || '').toLowerCase();
-            if (['success', 'partial'].includes(status)) {
-                finalizeAnswer(turn, typeof payload.answer === 'string' ? payload.answer : '');
-            } else if (status === 'effect_completed') {
-                const answer = typeof payload.answer === 'string' ? payload.answer : '';
-                if (answer.trim()) finalizeAnswer(turn, answer);
-                else finalizeError(turn, `${unconfirmedEffectMessage}服务端未提供最终答复。`);
-            }
+            turn.waiting = status === 'waiting';
+            if (status === 'approval_required') break;
+            const answer = typeof payload.answer === 'string' ? payload.answer : '';
+            if (status === 'effect_completed' && !answer.trim()) finalizeError(turn, `${unconfirmedEffectMessage}服务端未提供最终答复。`);
+            else finalizeAnswer(turn, answer);
             break;
         }
         case 'turn.failed':
@@ -1576,8 +1573,7 @@
             // protected 会暂时隐藏已接管的票据；其它活动轮次也不能作为本轮的撤卡依据。
             if (payload.active_turn && (payload.active_turn.protected || !sameActiveTurn(payload.active_turn, active))) return;
             // 缺少本轮终态的旧/缺省快照不能证明票据已撤销。
-            if (!sameActiveTurn(payload.last_turn, active)
-                || !['completed', 'failed', 'cancelled'].includes(payload.last_turn.status)) return;
+            if (!sameActiveTurn(payload.last_turn, active) || payload.last_turn.status === 'interrupted') return;
             if (payload.pending_approval === null) expireVisibleApprovals();
             else if (payload.pending_approval?.plan_id) expireVisibleApprovals(String(payload.pending_approval.plan_id));
         } catch (_) {
@@ -1679,7 +1675,7 @@
         if (!isCurrentActiveRequest(active)) return;
         // 仅已明确交接的任务继续观察；普通完成/失败/确认卡不能被一次
         // 额外的会话恢复覆盖。正在跟踪的旧任务在新回合结束后继续核验。
-        const handedOff = [...(active.turn?.effectReceipts?.values() || [])]
+        const handedOff = active.turn?.waiting || [...(active.turn?.effectReceipts?.values() || [])]
             .some(record => record.followupPending);
         if (!payload && !handedOff && !receiptObservationWindows.has(active.sessionId)) return;
         const newForegroundTurn = !active.receiptOnly
@@ -1700,7 +1696,7 @@
             return;
         }
         receiptResumeNeeded = false;
-        if (payload) scheduleReceiptObservation(active);
+        if (payload || active.turn?.waiting) scheduleReceiptObservation(active);
         else observeActiveSession(active);
     }
 
@@ -1733,16 +1729,13 @@
     }
 
     function finishObservedTurn(active, payload, lastTurn) {
-        if (!isCurrentActiveRequest(active) || !sameActiveTurn(lastTurn, active)
-            || !TERMINAL_LAST_TURN_STATUSES.includes(String(lastTurn?.status || ''))) return;
+        if (!isCurrentActiveRequest(active) || !sameActiveTurn(lastTurn, active)) return;
         clearActiveObservation(active);
         active.controller?.abort();
         renderSessionSnapshot(payload, {active, terminalTurn: lastTurn, preserveScroll: true});
         setBusy(false);
         resizePrompt();
-        announce(responseStatus, lastTurn.status === 'cancelled' ? '请求已停止'
-            : lastTurn.status === 'failed' || lastTurn.status === 'interrupted' ? '请求未能完成，状态已同步'
-                : '本轮回复已结束');
+        announce(responseStatus, turnNotice(lastTurn.status));
         refreshSessions({quiet: true});
         if (Number(payload.pending_effect_count) > 0) {
             startReceiptObservation(active, payload);
@@ -1804,10 +1797,12 @@
                 if (changed || pendingCount === 0) {
                     const lastTurn = payload.last_turn;
                     const terminalTurn = lastTurn
-                        && TERMINAL_LAST_TURN_STATUSES.includes(String(lastTurn.status || ''))
                         && lastTurn.status !== 'completed'
                         ? lastTurn : null;
-                    renderSessionSnapshot(payload, {active, terminalTurn, preserveScroll: true});
+                    // 首次观察同一交接只建立快照基线，保留正在显示的消息与卡片。
+                    if (active.receiptSnapshotKey != null || !sameActiveTurn(lastTurn, active) || lastTurn.status !== 'waiting') {
+                        renderSessionSnapshot(payload, {active, terminalTurn, preserveScroll: true});
+                    }
                     active.receiptSnapshotKey = snapshotKey;
                 }
                 if (pendingCount > 0) scheduleReceiptObservation(active);
@@ -1819,8 +1814,7 @@
             }
             active.pollDelay = SESSION_POLL_INTERVAL_MS;
             const lastTurn = payload.last_turn;
-            if (sameActiveTurn(lastTurn, active)
-                && TERMINAL_LAST_TURN_STATUSES.includes(String(lastTurn.status || ''))) {
+            if (sameActiveTurn(lastTurn, active)) {
                 finishObservedTurn(active, payload, lastTurn);
                 return;
             }
@@ -1954,7 +1948,7 @@
             }
             await reconcilePendingApprovals(active);
             if (!isCurrentActiveRequest(active)) return;
-            announce(responseStatus, turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : '本轮回复已结束');
+            announce(responseStatus, turnNotice(turn.failed ? (turn.cancelled ? 'cancelled' : 'failed') : terminalEvent.payload?.status));
             startReceiptObservation(active);
             refreshSessions({quiet: true});
         } catch (error) {
@@ -2117,9 +2111,7 @@
                 startActiveObservation(active);
                 return;
             }
-            const status = String(terminalEvent.payload?.status || '').toLowerCase();
-            announce(responseStatus, status === 'approval_required' ? '等待下一项确认'
-                : turn.failed ? (turn.cancelled ? '请求已停止' : '请求失败') : '本轮回复已结束');
+            announce(responseStatus, turnNotice(turn.failed ? (turn.cancelled ? 'cancelled' : 'failed') : terminalEvent.payload?.status));
             startReceiptObservation(active);
             refreshSessions({quiet: true});
         } catch (error) {
@@ -2438,7 +2430,7 @@
             updateActiveProgress(active, payload.active_turn);
         }
 
-        if (terminalTurn && terminalTurn.status !== 'completed') {
+        if (terminalTurn && ['failed', 'cancelled', 'interrupted'].includes(terminalTurn.status)) {
             const existingAnswer = [...(payload.messages || [])].reverse().find(message => message.role === 'assistant')?.content;
             const message = String(terminalTurn.message || (terminalTurn.status === 'cancelled'
                 ? '本轮处理已停止。' : '任务未能完成，请核对会话状态。'));
@@ -2495,8 +2487,7 @@
             if (active) {
                 renderTaskSnapshot(payload.task);
                 const lastTurn = payload.last_turn;
-                if (sameActiveTurn(lastTurn, active)
-                    && TERMINAL_LAST_TURN_STATUSES.includes(String(lastTurn.status || ''))) {
+                if (sameActiveTurn(lastTurn, active)) {
                     finishObservedTurn(active, payload, lastTurn);
                 } else if (payload.active_turn && sameActiveTurn(payload.active_turn, active)) {
                     if (payload.active_turn.status === 'cancelling') active.cancellationObserved = true;
@@ -2505,7 +2496,6 @@
             } else {
                 const lastTurn = payload.last_turn;
                 const terminalTurn = lastTurn
-                    && TERMINAL_LAST_TURN_STATUSES.includes(String(lastTurn.status || ''))
                     && lastTurn.status !== 'completed'
                     && String(lastTurn.request_id || '').trim()
                     && String(lastTurn.turn_id || '').trim()

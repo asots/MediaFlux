@@ -31,7 +31,7 @@ from . import error_repair
 from .capabilities import CapabilityRetriever, ToolCatalog, ToolEffect
 from .conversation_codec import pending_content
 from .state import _ExecutionCapacity, _PublicationFinished
-from .continuation import _ContinuationAction
+from .continuation import _ContinuationAction, continuation_record
 from .discovery import DISCOVERY_TOOL, CapabilityDiscovery
 from .events import AgentEvent, AgentEventType, EventFactory, TERMINAL_EVENT_TYPES
 from .adapters import TurnViewBuilder
@@ -238,11 +238,11 @@ class AgentSession:
 
     async def resume_wait(self, *, candidate, cancelled=lambda: False) -> bool:
         """Internal continuation: signed-store claim, no synthetic user turn."""
-        from .continuation import ACTIVE_SECONDS, EFFECT_ACTIVE_SECONDS, history_call, effect_payload, for_lease
+        from .continuation import ACTIVE_SECONDS, EFFECT_ACTIVE_SECONDS, history_call, effect_payload
         if self.continuation_binding is None or cancelled():
             return False
         current = await self.state_store.load(owner=candidate['owner'], session_id=candidate['session_id'])
-        record = ((current.metadata.get('effect_waits') or {}).get(candidate['wait_id']) or {}).get('continuation', {}) if candidate.get('kind') == 'effect' else current.metadata.get('read_wait') or {}
+        record = continuation_record(current, candidate['wait_id'], candidate.get('kind'))
         if record.get('wait_id') != candidate.get('wait_id'):
             return False
         # Admission only; the executor receives the signed original user row below.
@@ -253,11 +253,11 @@ class AgentSession:
         if claimed is None:
             return False
         lease, state = claimed
-        record = for_lease(state, lease)
+        record = continuation_record(state, lease.continuation_id, lease.continuation_kind)
         original = effect_payload(state, record) if lease.continuation_kind == 'effect' else history_call(state, record)
         user = original['origin']['goal'] if lease.continuation_kind == 'effect' else next(row for row in reversed(state.conversation) if row.get('role') == 'user')
         agent_input = replace(agent_input, message=user['content'], reply_context=user.get('reply_context') or {},
-                              delivery_route=original['origin'].get('delivery_route') or {} if lease.continuation_kind == 'effect' else {})
+                              delivery_route=(original['origin'] if lease.continuation_kind == 'effect' else record).get('delivery_route') or {})
         if cancelled():
             await self.cancel(owner=lease.owner, session_id=lease.session_id, request_id=lease.request_id)
             return False
@@ -430,17 +430,18 @@ class AgentSession:
         is_read_resume = resume_context is not None and not is_effect_resume
         continuation_view = TurnViewBuilder()
 
-        async def record_continuation_event(event):
+        async def record_continuation_event(event, *, reason=None):
             nonlocal state
             continuation_view.apply(event)
-            if lease is None or lease.continuation_kind != "effect" or not lease.continuation_id or event.type not in TERMINAL_EVENT_TYPES:
+            if lease is None or not lease.continuation_id or event.type not in TERMINAL_EVENT_TYPES:
                 return
             view = continuation_view.build()
             if view.status == "waiting":
                 return  # A trusted quota park retains its goal and cumulative budget.
             state = await self.state_store.commit(lease, updates=(_ContinuationAction("", {
-                "operation": "finish", "reason": view.status,
-                **({"delivery_view": view.to_dict()} if is_effect_resume and agent_input.channel == "telegram" else {}),
+                "operation": "finish", "reason": reason or (
+                    ("completed" if resume_read_done else "incomplete") if is_read_resume else view.status),
+                **({"delivery_view": view.to_dict()} if resume_context is not None and agent_input.channel == "telegram" and agent_input.delivery_route else {}),
             }, binding=self.continuation_binding),))
 
         def record_result(
@@ -630,11 +631,7 @@ class AgentSession:
                     return
             guarded_failure = lease is not None and token is not None and not confirming
             try:
-                if is_read_resume:
-                    state = await self.state_store.commit(lease, updates=(_ContinuationAction("", {
-                        "operation": "finish", "reason": code,
-                    }, binding=self.continuation_binding),))
-                await record_continuation_event(event)
+                await record_continuation_event(event, reason=code)
                 if self.journal is not None:
                     append_for_turn = getattr(self.journal, "append_for_turn", None)
                     if guarded_failure and append_for_turn is not None:
@@ -875,8 +872,8 @@ class AgentSession:
                 user_reply_context=telegram_reference.context_copy(agent_input.reply_context),
             )
             if is_effect_resume:
-                from .continuation import confirmed_result as restore_confirmed, for_lease
-                result = restore_confirmed(self.catalog, state, for_lease(state, lease))
+                from .continuation import confirmed_result as restore_confirmed
+                result = restore_confirmed(self.catalog, state, continuation_record(state, lease.continuation_id, lease.continuation_kind))
                 if batch_resuming:
                     from .batch_effects import resume_batch
                     progress = state.metadata["effect_waits"][lease.continuation_id].get("batch_progress")
@@ -947,8 +944,8 @@ class AgentSession:
                         state = await self.state_store.load(owner=lease.owner, session_id=lease.session_id)
                         tool_context = replace(tool_context, lease=lease)
                         if result is None:
-                            from .continuation import confirmed_result as restore_confirmed, for_lease
-                            result = restore_confirmed(self.catalog, state, for_lease(state, lease))
+                            from .continuation import confirmed_result as restore_confirmed
+                            result = restore_confirmed(self.catalog, state, continuation_record(state, lease.continuation_id, lease.continuation_kind))
                 # 写入及回执已完成：先解除保护，再读停止标记，关闭两者之间的竞态窗口。
                 scope.close()
                 await self.coordinator.unprotect(lease, token)
@@ -1035,8 +1032,8 @@ class AgentSession:
             selected_tools = () if explaining else discovery.window(selection.tools, (source_spec,) if source_spec else ())
             pending_resume_call = None
             if resume_context is not None:
-                from .continuation import for_lease, history_call
-                record = for_lease(state, lease)
+                from .continuation import history_call
+                record = continuation_record(state, lease.continuation_id, lease.continuation_kind)
                 if record.get("anchor"):
                     pending_resume_call = history_call(state, record)
                     resumed_tool = self.catalog.get(record["anchor"]["tool"])
@@ -1140,9 +1137,7 @@ class AgentSession:
                     answer, confirmed_result, results=progress_results,
                 ) if confirmed_result is not None else answer
                 messages.append(ModelMessage(role="assistant", content=public_answer, effect_plan_id=plan_id or "", provider_state=response_state))
-                await persist_conversation(wait_action=_ContinuationAction("", {
-                    "operation": "finish", "reason": "completed" if resume_read_done or lease.continuation_kind == "effect" else "incomplete",
-                }, binding=self.continuation_binding) if lease.continuation_id and lease.continuation_kind == "read_quota" else None)
+                await persist_conversation()
                 await publish(AgentEventType.TURN_COMPLETED, {
                     "status": status, "answer": public_answer, "finish_reason": reason,
                     "usage": total_usage, "model_calls": model_calls, "tool_calls": total_tool_calls,
@@ -1184,8 +1179,7 @@ class AgentSession:
             history_end = current_user_index if current_user_index is not None else next(
                 (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), len(messages))
             if resume_context is not None:
-                from .continuation import for_lease
-                record = for_lease(state, lease)
+                record = continuation_record(state, lease.continuation_id, lease.continuation_kind)
                 # Legacy non-TG waits used only the fence-bound default route.
                 # A missing TG selection has no historical authority to infer.
                 issued_model = record.get('model_policy', None if agent_input.channel == 'telegram' else "")
@@ -1280,8 +1274,7 @@ class AgentSession:
                             "依赖前项结果的参数不能猜测后提前提交；写操作与任务状态变更仍按顺序处理并等待原有确认。"
                         )
                     if self.continuation_binding is not None and (lease.continuation_id or state.metadata.get("read_wait")):
-                        from .continuation import for_lease
-                        task_budget = for_lease(state, lease)["budget"]
+                        task_budget = continuation_record(state, lease.continuation_id, lease.continuation_kind)["budget"]
                         request_system_prompt += (
                             "\n任务累计预算另行计入所有工具尝试（含发现及缓存命中）："
                             f"已用 {task_budget['tool_spent']}/{task_budget['tool_limit']}，"
@@ -1731,6 +1724,7 @@ class AgentSession:
                                         wait_action=_ContinuationAction("", {
                                             "operation": "park", "permit": exc, "call_id": call.call_id,
                                             "channel": agent_input.channel,
+                                            "delivery_route": agent_input.delivery_route,
                                             "model_policy": selected_model,
                                         }, binding=self.continuation_binding))
                                 except ValueError:
@@ -1910,7 +1904,7 @@ class AgentSession:
                     AgentEventType.TURN_CANCELLED,
                     {"reason": str(exc) or (token.reason if token else "cancelled"), **settlement, **await terminal_task("cancelled")},
                 )
-                if lease is not None and lease.continuation_kind == "effect":
+                if lease is not None and lease.continuation_id:
                     try:
                         await record_continuation_event(event)
                     except (StalePublicationError, SessionBusyError):
@@ -1944,17 +1938,13 @@ class AgentSession:
         finally:
             scope.close()
             if lease is not None and token is not None:
-                if lease.continuation_kind == "effect" and lease.continuation_id:
+                if (not lease.continuation_id
+                        or continuation_record(state, lease.continuation_id, lease.continuation_kind).get("state") in {"claimed", "running"}):
                     try:
-                        await self.state_store.commit(lease, updates=(
-                            _ContinuationAction("", {"operation": "finish", "reason": "turn_ended"}, binding=self.continuation_binding),
-                            _PublicationFinished("", None),
-                        ))
-                    except (StalePublicationError, SessionBusyError):
-                        pass
-                if not lease.continuation_id:
-                    try:
-                        await self.state_store.commit(lease, updates=(_PublicationFinished("", None),))
+                        update = _ContinuationAction("", {
+                            "operation": "finish", "reason": "turn_ended",
+                        }, binding=self.continuation_binding) if lease.continuation_id else _PublicationFinished("", None)
+                        await self.state_store.commit(lease, updates=(update,))
                     except (StalePublicationError, SessionBusyError):
                         pass
                 await self.coordinator.finish(lease, token)
