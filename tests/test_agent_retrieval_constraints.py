@@ -155,3 +155,82 @@ def test_native_session_first_window_includes_both_read_goals(catalog):
         assert {'library__search', 'library__count_series_episodes'} <= names
         assert model.requests[0].messages[-1].content == message
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('position', [0, 1], ids=['front', 'middle'])
+@pytest.mark.parametrize('ignored', ['continue', '  CONTINUE  ', '', ' \t'],
+                         ids=['current', 'normalized-current', 'empty', 'whitespace'])
+def test_ignored_raw_hints_do_not_change_history_scores_or_selection(position, ignored):
+    catalog = ToolCatalog([
+        read_tool(f'reports.{name}', description=f'{name} reports')
+        for name in ('alpha', 'beta', 'gamma', 'delta')
+    ])
+    retriever = CapabilityRetriever(minimum=1, maximum=1)
+    hints = ['alpha', 'beta', 'gamma', 'delta']
+    before = retriever.retrieve('continue', catalog, context={'recent_user_messages': hints})
+    hints.insert(position, ignored)
+    after = retriever.retrieve('continue', catalog, context={'recent_user_messages': hints})
+    assert before.names == ('reports.alpha',)
+    assert after.names == before.names
+    assert after.scores == before.scores
+
+
+@pytest.mark.parametrize('message,has_reference,expected', [
+    ('这条通知呢：本地下载整理部分完成，1 个文件归档，1 个任务待确认。', True,
+     'local_media.task_summaries'),
+    ('搜索 Jellyfin 媒体库里的《9号秘事》，不要查询 RSS。', False, 'library.search'),
+], ids=['different-current-reference', 'explicit-new-domain'])
+def test_current_reference_or_new_domain_survives_recent_tool_history(catalog, message, has_reference, expected):
+    selection = CapabilityRetriever().retrieve(message, catalog, context={
+        'recent_user_messages': ('RSS已下载过的条目为何跳过',),
+        'recent_tool_names': ('rss.diagnose', 'rss.entry_summaries'),
+        'recent_tool_weights': {'rss.diagnose': 1.0, 'rss.entry_summaries': 1.0},
+        'has_current_reference': has_reference,
+    })
+    assert expected in selection.names, selection.names
+
+
+def test_native_session_followup_first_window_retains_preference_tool(catalog):
+    """直接检验 Session 在当前 user 落盘后的首个工具窗口，不调用业务处理器。"""
+    import asyncio
+    from unittest.mock import Mock
+
+    from app.agent.kernel.events import AgentEventType
+    from app.agent.kernel.model import ModelEvent, ModelEventType
+    from app.agent.kernel.pipeline import ToolPipeline
+    from app.agent.kernel.session import AgentSession
+    from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+    from tests.test_agent_kernel_core import ScriptedModel
+
+    async def run():
+        store = InMemorySessionStateStore()
+        lease, _ = await store.begin_turn(owner='owner', session_id='preferences', request_id='seed')
+        await store.commit(lease, conversation=[
+            {'role': 'user', 'content': '把首选清晰度改为1080p，只改这一项，最低清晰度和其他偏好不动。先给确认卡，不执行。'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'call_id': 'pref-1', 'name': 'media__set_preferences',
+                'arguments': {'preferred_resolution': '1080p'},
+            }]},
+            {'role': 'tool', 'tool_name': 'media__set_preferences', 'tool_call_id': 'pref-1',
+             'content': '{"ok":true,"summary":"显式媒体偏好已保存","data":{"preferred_resolution":"1080p"}}'},
+            {'role': 'assistant', 'tool_name': 'media.set_preferences', 'content': '首选清晰度已保存为1080p。'},
+        ])
+        model = ScriptedModel([[ModelEvent(ModelEventType.TEXT_DELTA, text='已读取测试工具窗口。'),
+                                ModelEvent(ModelEventType.FINISH, finish_reason='stop')]])
+        retriever = CapabilityRetriever()
+        retriever.retrieve = Mock(wraps=retriever.retrieve)
+        session = AgentSession(model=model, catalog=catalog, retriever=retriever,
+                               state_store=store, pipeline=ToolPipeline(catalog=catalog, state_store=store))
+        message = '首选再改成720p，其他全部保持刚才的设置，先预览。'
+        events = [event async for event in session.run(AgentInput(
+            owner='owner', session_id='preferences', message=message,
+        ))]
+        assert events[-1].type == AgentEventType.TURN_COMPLETED
+        assert 'media__set_preferences' in {tool['name'] for tool in model.requests[0].tools}
+        assert model.requests[0].messages[-1].content == message
+        context = retriever.retrieve.call_args_list[0].kwargs['context']
+        assert context['recent_tool_weights']['media.set_preferences'] == 1.0
+        assert context['recent_user_messages'] == (
+            '把首选清晰度改为1080p，只改这一项，最低清晰度和其他偏好不动。先给确认卡，不执行。',
+        )
+    asyncio.run(run())

@@ -324,13 +324,13 @@ class CapabilityRetriever:
         history_scale = 0.2 if runtime.get("has_current_reference") else 1.0
         hints = []
         current_text = _normalize(message[:2_000])
-        for index, item in enumerate(raw_hints):
+        for item in raw_hints:
             text = str(item)[:2_000]
-            # Session 的持久历史已包含当前 user，不能把它再当旧线索重复加权。
+            # 调用方可能包含当前输入：不重复加权，也不占用历史衰减位置。
             if not text.strip() or _normalize(text) == current_text:
                 continue
             hint, terms, _ = _query_terms(text)
-            hints.append((terms, hint, 0.35 ** index))
+            hints.append((terms, hint, 0.35 ** len(hints)))
             if len(hints) == 3:
                 break
         raw_recent_tools = runtime.get("recent_tool_names", ())

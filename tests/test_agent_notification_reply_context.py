@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.agent.domain_catalog import build_tool_specs
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
@@ -288,3 +290,72 @@ def test_sensitive_input_or_reference_is_never_presaved_or_sent_to_model():
             assert secret not in str(events)
         assert not model.requests
     asyncio.run(scenario())
+
+
+def test_current_turn_presave_preserves_history_hints_and_tool_weights():
+    state = SessionState(owner="owner", session_id="session", conversation=[
+        {"role": "user", "content": "这条通知呢", "reply_context": {"text": NOTICE}},
+        {"role": "assistant", "content": "查询文件结果", "tool_calls": [
+            {"name": "local_media.task_summaries"},
+        ]},
+        {"role": "tool", "tool_name": "local_media.task_summaries", "content": "批次结果"},
+    ])
+    before = AgentSession._capability_retrieval_context(state)
+    state.conversation.append({
+        "role": "user", "content": "这个呢", "reply_context": {"text": "另一条当前引用"},
+    })
+    after = AgentSession._capability_retrieval_context(state, current_turn=True)
+    assert after == before
+    assert after["recent_tool_weights"] == {"local_media.task_summaries": 1.0}
+    assert NOTICE in after["recent_user_messages"][0]
+    assert "另一条当前引用" not in str(after)  # 当前引用由 caller 单独提供。
+    assert "另一条当前引用" in AgentSession._capability_retrieval_context(state)["recent_user_messages"][0]
+
+
+@pytest.mark.parametrize("current_turn", [False, True])
+def test_current_turn_tools_share_weight_and_older_turns_keep_decay(current_turn):
+    state = SessionState(owner="owner", session_id="session", conversation=[
+        {"role": "user", "content": "查媒体库"},
+        {"role": "tool", "tool_name": "library.search", "content": "媒体库结果"},
+        {"role": "user", "content": "查RSS"},
+        {"role": "tool", "tool_name": "rss.entry_summaries", "content": "RSS结果"},
+        {"role": "user", "content": "查本地任务"},
+        {"role": "assistant", "tool_calls": [
+            {"name": "local_media.task_summaries"}, {"name": "local_media.retry_task"},
+        ]},
+        {"role": "tool", "tool_name": "local_media.task_summaries", "content": "任务结果"},
+        {"role": "tool", "tool_name": "local_media.retry_task", "content": "重试结果"},
+    ])
+    if current_turn:
+        state.conversation.append({"role": "user", "content": "继续"})
+        context = AgentSession._capability_retrieval_context(state, current_turn=True)
+    else:
+        context = AgentSession._capability_retrieval_context(state)
+    assert context["recent_tool_weights"] == {
+        "local_media.task_summaries": 1.0, "local_media.retry_task": 1.0,
+        "rss.entry_summaries": 0.35, "library.search": 0.35 ** 2,
+    }
+    assert context["recent_user_messages"] == ("查本地任务", "查RSS", "查媒体库")
+
+
+@pytest.mark.parametrize("boundary_role", ["user", "tool"])
+def test_current_turn_presave_keeps_the_bounded_history_boundary(boundary_role):
+    boundary = {"role": boundary_role, "content": "保留内容" * 600}
+    if boundary_role == "tool":
+        boundary["tool_name"] = "boundary.read"
+    state = SessionState(owner="owner", session_id="session", conversation=[
+        *[item for _ in range(30) for item in (
+            {"role": "user", "content": "窗口之外"},
+            {"role": "tool", "tool_name": "outside.read", "content": "旧结果"},
+        )],
+        boundary,
+        *[{"role": "assistant", "content": "已保留结果"} for _ in range(23)],
+    ])
+    before = AgentSession._capability_retrieval_context(state)
+    assert "outside.read" not in before["recent_tool_names"]
+    if boundary_role == "user":
+        assert before["recent_user_messages"] == (boundary["content"][:2_000],)
+    else:
+        assert before["recent_tool_weights"] == {"boundary.read": 1.0}
+    state.conversation.append({"role": "user", "content": "继续"})
+    assert AgentSession._capability_retrieval_context(state, current_turn=True) == before

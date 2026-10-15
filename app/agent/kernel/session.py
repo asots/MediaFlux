@@ -1007,7 +1007,9 @@ class AgentSession:
                     "session_id": agent_input.session_id,
                     "channel": agent_input.channel,
                     "reference_kinds": tuple(state.ref_kinds | ({"telegram_reference"} if agent_input.reply_context.get("reference_handle") or any(row.get("reply_context", {}).get("reference_handle") for row in state.conversation) else set())),
-                    **self._capability_retrieval_context(state),
+                    **self._capability_retrieval_context(
+                        state, current_turn=current_user_index is not None and not sensitive_input,
+                    ),
                     "has_current_reference": bool(agent_input.reply_context.get("text")),
                 },
             )
@@ -1960,6 +1962,7 @@ class AgentSession:
     @staticmethod
     def _capability_retrieval_context(
         state: SessionState,
+        *, current_turn: bool = False,
     ) -> dict[str, Any]:
         """提取有界跨轮线索供本地召回使用，不替模型裁决用户意图。"""
         recent_users: list[str] = []
@@ -1967,7 +1970,13 @@ class AgentSession:
         seen_tools: set[str] = set()
         tool_weights: dict[str, float] = {}
         turns_back = 0
-        for item in reversed(state.conversation[-24:]):
+        history = state.conversation
+        end = len(history)
+        if current_turn:
+            # 新输入已落盘，但它不是历史回合；不能提前衰减上一轮的线索。
+            end = next((i for i in range(len(history) - 1, -1, -1)
+                        if isinstance(history[i], Mapping) and history[i].get("role") == "user"), end)
+        for item in reversed(history[max(0, end - 24):end]):
             if not isinstance(item, Mapping):
                 continue
             role = str(item.get("role") or "").strip().lower()
