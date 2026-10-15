@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -23,6 +24,94 @@ from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel, collect
+
+
+@pytest.mark.parametrize("read_access", ["allowed", "revoked", "unavailable", "write"])
+def test_confirm_readback_is_loaded_without_discovery_but_never_grants_permission(tmp_path, read_access):
+    """离线模型脚本；真实SQLite冷恢复与临时文件改名/读取，不是付费模型实测。"""
+    async def scenario():
+        source, target = tmp_path / "source.txt", tmp_path / "renamed.txt"
+        source.write_bytes(b"readback-regression")
+        writes, reads = [], []
+        authorized = True
+
+        def execute(*_):
+            source.rename(target)
+            writes.append("rename")
+            return {"ok": True, "status": "completed", "summary": "文件改名完成"}
+
+        def inspect(*_):
+            reads.append(target.read_bytes())
+            return {"ok": True, "status": "success", "summary": "已重新读取文件，内容一致"}
+
+        schema = {"type": "object", "properties": {}, "additionalProperties": False}
+        write = KernelToolSpec(
+            name="fixture.rename", domain="files", description="文件改名", input_schema=schema,
+            effect=ToolEffect.WRITE, metadata={"related_tools": ("fixture.inspect", "removed.tool")},
+            prepare=lambda *_: PreparedEffect(preview={"summary": "改名预览"}, snapshot_fingerprint="file"),
+            execute_confirmed=execute,
+        )
+        read = KernelToolSpec(
+            name="fixture.inspect", domain="files", description="核验已改名文件", input_schema=schema,
+            effect=ToolEffect.READ,
+            authorize=lambda _: authorized,
+            availability=lambda _: read_access != "unavailable", read=inspect,
+        )
+        unrelated = replace(read, name="fixture.unrelated", model_name="", effect=ToolEffect.READ,
+                            authorize=None, availability=None)
+        if read_access == "write":
+            read = replace(read, effect=ToolEffect.WRITE, read=None,
+                prepare=lambda *_: pytest.fail("不能自动加载相关写工具并为其生成新卡"),
+                execute_confirmed=lambda *_: pytest.fail("不能执行未确认写入"))
+        catalog = ToolCatalog([write, read, unrelated])
+
+        class MissedReadback(CapabilityRetriever):
+            def retrieve(self, *args, **kwargs):
+                return replace(super().retrieve(*args, **kwargs), tools=(write, unrelated))
+
+        def call(name, call_id):
+            return [ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
+                               tool_call=ModelToolCall(call_id, name, {})),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")]
+
+        def answer(text):
+            return [ModelEvent(ModelEventType.TEXT_DELTA, text=text),
+                    ModelEvent(ModelEventType.FINISH, finish_reason="stop")]
+
+        model = ScriptedModel([call(write.name, "rename"), answer("只解释预览，尚未执行。"),
+                               call(read.name, "readback"), answer("已据实际结果核对。")])
+
+        def cold_session():
+            store = SQLiteKernelStore(secret_provider=lambda: "readback-test-only")
+            return AgentSession(
+                model=model, catalog=catalog, state_store=store,
+                retriever=MissedReadback(minimum=1, maximum=2),
+                pipeline=ToolPipeline(catalog=catalog, state_store=store, reference_store=store,
+                    effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore())),
+            )
+
+        preview = await collect(cold_session().run(AgentInput(
+            message="改名后重新读取核对", owner="readback-owner", session_id="readback-session")))
+        plan_id = preview[-1].payload["plan_id"]
+        options = dict(owner="readback-owner", session_id="readback-session", plan_id=plan_id)
+        await collect(cold_session().explain(**options, message="只解释，不执行"))
+        assert model.requests[-1].tools == () and writes == [] and reads == []
+        authorized = read_access != "revoked"
+        events = await collect(cold_session().confirm(**options))
+        names = {tool["name"] for tool in model.requests[2].tools}
+        assert (read.model_name in names) == (read_access == "allowed")
+        assert len(names) <= 2  # 不扩大业务窗口。
+        assert writes == ["rename"] and not source.exists()
+        assert target.read_bytes() == b"readback-regression"
+        assert reads == ([b"readback-regression"] if read_access == "allowed" else [])
+        failures = [e.payload["code"] for e in events if e.type is AgentEventType.TOOL_FAILED]
+        assert failures == ([] if read_access == "allowed" else ["tool_not_available"])
+        assert len(model.requests) == 4  # 确认后直接读取+回答，不再发现/重试。
+        await collect(cold_session().confirm(**options))
+        assert len(model.requests) == 4 and writes == ["rename"]
+
+    with isolated_test_database("confirm-readback-contract.db"):
+        asyncio.run(scenario())
 
 
 def test_cold_explain_confirm_keep_event_and_plan_contract() -> None:

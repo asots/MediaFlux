@@ -1018,6 +1018,7 @@ class _AgentTurn:
         return True
 
     async def prepare_tools(self) -> None:
+        reference_kinds = tuple(self.state.ref_kinds | ({"telegram_reference"} if self.agent_input.reply_context.get("reference_handle") or any(row.get("reply_context", {}).get("reference_handle") for row in self.state.conversation) else set()))
         selection = None if self.explaining else self.session.retriever.retrieve(
             self.contextual_message,
             self.session.catalog,
@@ -1025,7 +1026,7 @@ class _AgentTurn:
                 "owner": self.agent_input.owner,
                 "session_id": self.agent_input.session_id,
                 "channel": self.agent_input.channel,
-                "reference_kinds": tuple(self.state.ref_kinds | ({"telegram_reference"} if self.agent_input.reply_context.get("reference_handle") or any(row.get("reply_context", {}).get("reference_handle") for row in self.state.conversation) else set())),
+                "reference_kinds": reference_kinds,
                 **self.session._capability_retrieval_context(
                     self.state, current_turn=self.current_user_index is not None and not self.sensitive_input,
                 ),
@@ -1039,7 +1040,8 @@ class _AgentTurn:
                 "request_id": self.agent_input.request_id, "channel": self.agent_input.channel,
                 "generation": self.lease.generation, "turn_id": self.lease.turn_id,
                 "has_pending_effect": bool(self.state.pending_effect_plan_id),
-                "reference_kinds": tuple(self.state.ref_kinds | ({"telegram_reference"} if self.agent_input.reply_context.get("reference_handle") or any(row.get("reply_context", {}).get("reference_handle") for row in self.state.conversation) else set())),
+                "has_task": bool(self.state.metadata.get("task")),
+                "reference_kinds": reference_kinds,
             },
             maximum=getattr(self.session.retriever, "maximum", 10),
         )
@@ -1050,8 +1052,14 @@ class _AgentTurn:
         if not (self.diagnosing_effect and source_spec is not None and source_spec.effect is ToolEffect.READ
                 and "reobserve" in source_spec.input_schema.get("properties", {}).get("operation", {}).get("enum", ())):
             source_spec = None
-        # A saved source is a retrieval hint, not an availability/authorization bypass.
-        self.selected_tools = () if self.explaining else self.discovery.window(selection.tools, (source_spec,) if source_spec else ())
+        # 真实确认结果的只读邻接优先用于核验；仍受同一窗口、可见性与授权过滤。
+        # 失败重观察保留最高优先级；加载不等于执行，更不为后续写入授予权限。
+        effect = self.tool_context.confirmed_effect
+        readbacks = tuple(self.session.catalog.get(name) for name in (
+            effect.tool.metadata.get("related_tools", ()) if effect else ()
+        ) if self.session.catalog.has(name) and self.session.catalog.get(name).effect is ToolEffect.READ)
+        self.selected_tools = () if self.explaining else self.discovery.window(
+            selection.tools, ((source_spec,) if source_spec else ()) + readbacks)
         self.pending_resume_call = None
         if self.resume_context is not None:
             from .continuation import history_call
@@ -1088,11 +1096,6 @@ class _AgentTurn:
         self.total_usage: dict[str, int] = {}
         self.observed_reads: set[tuple[str, str]] = set()
         self.tool_context = replace(self.tool_context, capability_search=self.discovery.search)
-        self.discovery.context["has_task"] = bool(self.state.metadata.get("task"))
-        if self.state.metadata.get("task") and not self.explaining:
-            self.selected_tools = self.discovery.window(self.selected_tools)
-            self.available_names = {name for tool in self.selected_tools for name in (tool.name, tool.model_name)}
-            self.tool_definitions = tuple(tool.model_definition() for tool in self.selected_tools)
 
     async def preview_selection(self) -> None:
         call = ModelToolCall(
