@@ -135,6 +135,31 @@ def test_recent_library_collision_is_published_and_rejected():
     assert transport.calls[-1][1] == {"library_name": "Drama", "limit": 8}
 
 
+@pytest.mark.parametrize("media_type", ["all", "movie", "tv", "episode"])
+def test_recent_granularity_schema_matches_domain_validation_and_provider_admission(media_type):
+    from app.agent.domain_catalog import build_tool_specs
+
+    gw, transport = gateway()
+    public = gw.capabilities(provider="media", intent="media.items.recent_added", limit=100)
+    published = next(row for row in public.data["operations"] if row["operation"] == "media.items.recent_added")
+    domain = next(spec for spec in build_tool_specs() if spec.name == "media.recently_added")
+    domain_type = domain.parameters["properties"]["media_type"]
+    assert published["parameters"]["properties"]["media_type"] == domain_type
+    assert domain_type["enum"] == ["all", "movie", "tv", "episode"]
+    arguments = {"library_name": "Drama", "limit": 3, "media_type": media_type}
+    assert domain.validator(arguments) == {"server": "auto", **arguments}
+    call(gw, arguments, "media.items.recent_added")
+    assert transport.calls == [("media.items.recent_added", arguments)]
+
+
+def test_recent_invalid_media_type_is_rejected_before_transport():
+    gw, transport = gateway()
+    with pytest.raises(ProviderGatewayError) as error:
+        call(gw, {"media_type": "anime"}, "media.items.recent_added")
+    assert error.value.code == "invalid_arguments"
+    assert transport.calls == []
+
+
 def test_playlist_unique_refs_rejected_before_preview():
     gw, transport = gateway()
     _, data = gw.artifacts.put(owner="parity", session_id="parity", provider="media",

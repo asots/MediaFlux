@@ -144,8 +144,8 @@ def recently_added_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if "library_name" in normalized and "library_ref" in normalized:
         raise AgentToolError("媒体库名称与引用只能指定一个")
     if "media_type" in arguments:
-        if arguments["media_type"] not in ("all", "movie", "tv"):
-            raise AgentToolError("media_type仅支持all、movie或tv")
+        if arguments["media_type"] not in ("all", "movie", "tv", "episode"):
+            raise AgentToolError("media_type仅支持all、movie、tv或episode")
         normalized["media_type"] = arguments["media_type"]
     return normalized
 

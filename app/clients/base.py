@@ -491,7 +491,7 @@ class MediaServerClient:
         raise NotImplementedError
 
     def recent_media(self, limit: int = 60, *, parent_id: str = "", media_type: str = "all") -> list[MediaItem]:
-        """按实际库范围及内容类型查询最近入库；不指定范围时保持全库行为。"""
+        """按实际库查询最近入库；episode 按单集 ID 去重，其余类型按作品去重。"""
         return self._recent_added(
             limit=max(1, min(int(limit or 60), 200)), parent_id=parent_id, media_type=media_type,
         )
@@ -1068,12 +1068,13 @@ class MediaServerClient:
     def _recent_added(self, limit: int = 8, *, parent_id: str = "", media_type: str = "all") -> list[MediaItem]:
         uid = self._user_id()
         normalized_limit = max(1, min(int(limit or 8), 200))
-        if media_type not in {"all", "movie", "tv"}:
-            raise ValueError("媒体类型仅支持all、movie或tv")
+        item_types = {"all": "Movie,Series,Episode", "movie": "Movie", "tv": "Series,Episode", "episode": "Episode"}
+        if media_type not in item_types:
+            raise ValueError("媒体类型仅支持all、movie、tv或episode")
         params = {
             "Recursive": "true",
             "Limit": max(30, normalized_limit * 3),
-            "IncludeItemTypes": {"all": "Movie,Series,Episode", "movie": "Movie", "tv": "Series,Episode"}[media_type],
+            "IncludeItemTypes": item_types[media_type],
             "Fields": (
                 "DateCreated,Overview,SeriesId,SeriesName,IndexNumber,"
                 "ParentIndexNumber,ImageTags," + self._RECENT_EXTRA_FIELDS + "ProductionYear,Genres,UserData"
@@ -1084,7 +1085,7 @@ class MediaServerClient:
         }
         if str(parent_id or "").strip():
             params["ParentId"] = str(parent_id).strip()
-        # 按作品 ID 去重再补页；普通首屏仍只请求一次，不为最近入库遍历整库。
+        # episode 保留同剧多集，其余按作品 ID 去重再补页；不为最近入库遍历整库。
         recent: dict[str, dict[str, Any]] = {}
         offset = 0
         while offset < 2000 and len(recent) < normalized_limit:
@@ -1093,7 +1094,7 @@ class MediaServerClient:
             raw_items, _total = self._items_payload(data)
             for raw in sorted(raw_items, key=lambda row: str(row.get("DateCreated") or ""), reverse=True):
                 key = (str(raw['SeriesId'])
-                       if str(raw.get("Type") or "").casefold() == "episode" and raw.get("SeriesId")
+                       if media_type != "episode" and str(raw.get("Type") or "").casefold() == "episode" and raw.get("SeriesId")
                        else str(raw.get("Id") or ""))
                 if key:
                     recent.setdefault(key, raw)

@@ -56,9 +56,10 @@ def test_each_current_selected_schema_survives_default_projection():
 def test_old_recent_summary_fields_are_unchanged():
     public = build_provider_catalog().get('media.items.recent_added').public_dict()
     public.pop('parameters', None)
+    description = public.pop('description')
+    assert 'media_type=episode' in description and '默认按作品去重' in description
     assert public == {
         'operation': 'media.items.recent_added', 'provider': 'media',
-        'description': '读取最近入库，可按真实媒体库名称或引用限定范围，再按作品去重；未指定库代表全库，不得声称排除了动漫库。',
         'risk': 'read', 'input_schema': 'limit:integer(default=8), library_name:string, library_ref:string, media_type:string',
         'limits': {'max_items': 20, 'timeout_seconds': 15},
     }

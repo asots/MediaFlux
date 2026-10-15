@@ -105,13 +105,18 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
             notification_rule_update_arguments({"subscription_number": 1})
 
     def test_recently_added_accepts_real_library_scope_without_changing_other_lists(self):
-        self.assertEqual(recently_added_arguments({"library_name": " 电视剧 ", "media_type": "tv"}),
-                         {"server": "auto", "limit": 8, "library_name": "电视剧", "media_type": "tv"})
+        for media_type in ("all", "movie", "tv", "episode"):
+            with self.subTest(media_type=media_type):
+                self.assertEqual(recently_added_arguments({"library_name": " 电视剧 ", "media_type": media_type}),
+                                 {"server": "auto", "limit": 8, "library_name": "电视剧", "media_type": media_type})
         for arguments in ({"library_name": ""}, {"library_name": "电视剧", "library_ref": "PO-12345678"}, {"media_type": "anime"}):
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
                 recently_added_arguments(arguments)
         with self.assertRaises(AgentToolError):
             recently_played_arguments({"library_name": "电视剧"})
+        for validator in (recently_played_arguments, continue_watching_arguments):
+            with self.subTest(validator=validator.__name__), self.assertRaises(AgentToolError):
+                validator({"media_type": "episode"})
 
     def test_recent_library_conflict_survives_public_redaction(self):
         from app.agent.public_safety import sanitize_public_text
@@ -131,9 +136,11 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
             patch("app.agent.media_consumption_actions.list_configured_profiles", return_value=[profile]),
             patch("app.agent.media_consumption_actions.get_provider_gateway", return_value=gateway),
         ):
-            result = service.invoke("media.recently_added", {"library_name": "电视剧", "media_type": "tv", "limit": 5}, owner="owner")
-        self.assertTrue(result["result"]["ok"])
-        self.assertEqual(gateway.query.call_args.kwargs["arguments"], {"limit": 5, "library_name": "电视剧", "media_type": "tv"})
+            for media_type in ("tv", "episode"):
+                with self.subTest(media_type=media_type):
+                    result = service.invoke("media.recently_added", {"library_name": "电视剧", "media_type": media_type, "limit": 5}, owner="owner")
+                    self.assertTrue(result["result"]["ok"])
+                    self.assertEqual(gateway.query.call_args.kwargs["arguments"], {"limit": 5, "library_name": "电视剧", "media_type": media_type})
 
     def test_continue_watching_uses_config_or_default_user_and_redacts_ids(
         self,

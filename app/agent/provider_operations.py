@@ -13,8 +13,8 @@ RECENT_MEDIA_PROPERTIES = {
                      "description": "服务器实际媒体库名称，精确匹配；例如电视剧。不得用类型或标签代替库范围。"},
     "library_ref": {"type": "string", "minLength": 8, "maxLength": 64,
                     "description": "media.libraries.list返回的媒体库引用，与library_name二选一"},
-    "media_type": {"type": "string", "enum": ["all", "movie", "tv"],
-                   "description": "内容类型；tv包含动漫剧集，不表示真人电视剧库"},
+    "media_type": {"type": "string", "enum": ["all", "movie", "tv", "episode"],
+                   "description": "默认all及movie/tv按作品去重；问最近几集或单集必须选episode，按单集ID保留同剧多集。tv和episode都包含动漫，库范围须另行指定。"},
 }
 
 
@@ -44,7 +44,7 @@ def build_provider_catalog() -> ProviderCatalog:
         ProviderOperationSpec(
             operation_id="media.items.recent_added",
             provider="media",
-            description="读取最近入库，可按真实媒体库名称或引用限定范围，再按作品去重；未指定库代表全库，不得声称排除了动漫库。",
+            description="读取最近入库，默认按作品去重；问最近几集或单集必须传media_type=episode，可返回同剧多集。可按真实媒体库名称或引用限定范围；未指定库代表全库，不得声称排除了动漫库。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -56,7 +56,7 @@ def build_provider_catalog() -> ProviderCatalog:
             result_kind="media_items",
             max_items=20,
             domains=("media_library", "discovery"),
-            examples=("最近入库了什么", "查看 Jellyfin 最新添加内容"),
+            examples=("最近入库了什么", "查看 Jellyfin 最新添加内容", "只看电视剧库最近入库3个单集"),
         ),
         ProviderOperationSpec(
             operation_id="media.items.recent_played",

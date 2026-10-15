@@ -241,7 +241,7 @@ class MediaServerSearchTests(unittest.TestCase):
 
     def test_recent_media_filters_library_and_type_before_fetching(self):
         for client_type in (JellyfinClient, EmbyClient):
-            for media_type, item_types in (("all", "Movie,Series,Episode"), ("tv", "Series,Episode"), ("movie", "Movie")):
+            for media_type, item_types in (("all", "Movie,Series,Episode"), ("tv", "Series,Episode"), ("movie", "Movie"), ("episode", "Episode")):
                 with self.subTest(client=client_type.__name__, media_type=media_type):
                     client = client_type("http://media.invalid", "token")
                     self.addCleanup(client.close)
@@ -254,6 +254,34 @@ class MediaServerSearchTests(unittest.TestCase):
                     self.assertEqual(params["SortBy"], "DateCreated")
                     self.assertEqual(params["Recursive"], "true")
                     self.assertEqual("SeriesPrimaryImageTag" in params["Fields"], client_type is JellyfinClient)
+
+    def test_recent_media_episode_granularity_keeps_consecutive_episodes_by_id(self):
+        rows = [
+            {"Id": f"episode-{number}", "Name": f"第{number}集", "Type": "Episode",
+             "SeriesId": "series-a", "SeriesName": "黑镜", "ParentIndexNumber": 7,
+             "IndexNumber": number, "DateCreated": f"2026-10-16T12:00:0{number}Z"}
+            for number in (4, 6, 5)
+        ]
+        rows.append({**rows[1], "DateCreated": "2026-10-16T12:00:03Z"})
+        for client_type in (JellyfinClient, EmbyClient):
+            with self.subTest(client=client_type.__name__), client_type("http://media.invalid", "token") as client:
+                client._cached_user_id = "user-1"
+                if isinstance(client, EmbyClient):
+                    client._cached_server_info = {"ProductName": "Emby", "Version": "4.9"}
+                with patch.object(client, "_request", return_value={"Items": rows}) as request:
+                    items = client.recent_media(limit=3, parent_id="tv-library", media_type="episode")
+                self.assertEqual([item.id for item in items], ["episode-6", "episode-5", "episode-4"])
+                self.assertEqual([item.series_id for item in items], ["series-a"] * 3)
+                self.assertEqual([(item.season_number, item.episode_number) for item in items], [(7, 6), (7, 5), (7, 4)])
+                self.assertEqual(request.call_count, 1)
+                params = request.call_args.kwargs["params"]
+                self.assertEqual(params["ParentId"], "tv-library")
+                self.assertEqual(params["IncludeItemTypes"], "Episode")
+                self.assertEqual(params["SortBy"], "DateCreated")
+                self.assertEqual(params["SortOrder"], "Descending")
+                with patch.object(client, "_request", return_value={"Items": rows}):
+                    items = client.recent_media(limit=4, media_type="episode")
+                self.assertEqual([item.id for item in items], ["episode-6", "episode-5", "episode-4"])
 
     def test_recent_media_fills_distinct_results_across_episode_pages(self):
         rows = [
@@ -279,6 +307,25 @@ class MediaServerSearchTests(unittest.TestCase):
                 for call in request.call_args_list:
                     self.assertEqual(call.kwargs["params"]["ParentId"], "tv-library")
                     self.assertEqual(call.kwargs["params"]["IncludeItemTypes"], "Series,Episode")
+
+    def test_recent_media_movie_granularity_keeps_distinct_work_ids(self):
+        rows = [
+            {"Id": movie_id, "Name": "同名电影", "Type": "Movie", "DateCreated": date}
+            for movie_id, date in (
+                ("movie-a", "2026-10-16T12:00:06Z"),
+                ("movie-a", "2026-10-16T12:00:05Z"),
+                ("movie-b", "2026-10-16T12:00:04Z"),
+            )
+        ]
+        for client_type in (JellyfinClient, EmbyClient):
+            with self.subTest(client=client_type.__name__), client_type("http://media.invalid", "token") as client:
+                client._cached_user_id = "user-1"
+                if isinstance(client, EmbyClient):
+                    client._cached_server_info = {"ProductName": "Emby", "Version": "4.9"}
+                with patch.object(client, "_request", return_value={"Items": rows}):
+                    items = client.recent_media(limit=3, media_type="movie")
+                self.assertEqual([item.id for item in items], ["movie-a", "movie-b"])
+                self.assertEqual([item.date_added for item in items], [rows[0]["DateCreated"], rows[2]["DateCreated"]])
 
     def test_recent_media_merges_series_and_episode_using_newest_item(self):
         payload = {"Items": [

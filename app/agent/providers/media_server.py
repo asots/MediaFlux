@@ -245,7 +245,7 @@ class MediaServerProviderTransport:
                         selected_library = matches[0]
                         library_id = str(selected_library["id"])
                     media_type = str(arguments.get("media_type") or "all")
-                    if media_type not in {"all", "movie", "tv"}:
+                    if media_type not in {"all", "movie", "tv", "episode"}:
                         raise ProviderGatewayError("媒体类型无效", code="invalid_arguments")
                     query = {"limit": limit}
                     if library_id:
@@ -253,6 +253,8 @@ class MediaServerProviderTransport:
                     if media_type != "all":
                         query["media_type"] = media_type
                     items = client.recent_media(**query)
+                    granularity = "episode" if media_type == "episode" else "work"
+                    unit = "个单集" if granularity == "episode" else "部作品"
                     scope = {"kind": "all", "media_type": media_type}
                     if selected_library:
                         scope.update(kind="library", library={
@@ -261,10 +263,10 @@ class MediaServerProviderTransport:
                         })
                     scope_note = f"仅查询媒体库：{selected_library.get('name')}" if selected_library else "查询全部可访问媒体库；未按媒体库排除动漫"
                     return ProviderPayload(
-                        summary=f"{profile.label} 返回 {len(items)} 项最近入库内容；{scope_note}",
+                        summary=f"{profile.label} 最近入库返回 {len(items)} {unit}；{scope_note}",
                         data={
                             "server_label": profile.label, "scope": scope, "scope_note": scope_note,
-                            "count": len(items),
+                            "count": len(items), "granularity": granularity,
                             "items": [self._media_item(resolve_link, item) for item in items],
                         },
                         source=f"{profile.server_type}_api",

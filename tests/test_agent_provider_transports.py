@@ -908,6 +908,113 @@ def test_emby_counts_failure_reaches_agent_instead_of_zero_inventory(monkeypatch
     assert len(paths) == 2
 
 
+@pytest.mark.parametrize("server_type", ["jellyfin", "emby"])
+@pytest.mark.parametrize("scope_key", ["library_name", "library_ref"])
+@pytest.mark.parametrize("media_type,item_types,expected_names", [
+    (None, "Movie,Series,Episode", ["第6集", "其他剧", "第三部剧"]),
+    ("all", "Movie,Series,Episode", ["第6集", "其他剧", "第三部剧"]),
+    ("tv", "Series,Episode", ["第6集", "其他剧", "第三部剧"]),
+    ("movie", "Movie", []),
+    ("episode", "Episode", ["第6集", "第5集", "第4集"]),
+])
+def test_recent_added_granularity_through_domain_provider_and_shared_clients(
+    monkeypatch, server_type, scope_key, media_type, item_types, expected_names,
+):
+    from app.agent.domain_catalog import build_tool_specs
+    from app.agent.models import ToolContext
+    from app.agent.provider_gateway import ProviderGateway
+    from app.agent.provider_operations import build_provider_catalog
+    from app.clients.emby import EmbyClient
+    from app.clients.jellyfin import JellyfinClient
+
+    profile = MediaServerProfile(
+        source=f"configured:{server_type}", server_type=server_type, label=server_type,
+        url="http://media.invalid", credential="test", enabled=True, user_id="viewer",
+    )
+    monkeypatch.setattr("app.agent.providers.media_server.list_configured_profiles", lambda: [profile])
+    monkeypatch.setattr("app.agent.media_consumption_actions.list_configured_profiles", lambda: [profile])
+    gateway = ProviderGateway(catalog=build_provider_catalog(), transports=[MediaServerProviderTransport()])
+    monkeypatch.setattr("app.agent.media_consumption_actions.get_provider_gateway", lambda: gateway)
+    folders = [
+        {"ItemId": "tv-library", "Name": "电视剧", "CollectionType": "tvshows"},
+        {"ItemId": "anime-library", "Name": "动漫", "CollectionType": "tvshows"},
+    ]
+    rows = [
+        {"Id": f"episode-{number}", "Name": f"第{number}集", "Type": "Episode",
+         "SeriesId": "series-a", "SeriesName": "黑镜", "ParentIndexNumber": 7,
+         "IndexNumber": number, "DateCreated": f"2026-10-16T12:00:0{number}Z",
+         "ParentId": "tv-library"}
+        for number in (6, 5, 4)
+    ]
+    rows.extend([
+        {**rows[0], "DateCreated": "2026-10-16T12:00:03Z"},
+        {"Id": "series-a", "Name": "黑镜", "Type": "Series",
+         "DateCreated": "2026-10-16T12:00:03Z", "ParentId": "tv-library"},
+        {"Id": "series-b", "Name": "其他剧", "Type": "Series",
+         "DateCreated": "2026-10-16T12:00:02Z", "ParentId": "tv-library"},
+        {"Id": "series-c", "Name": "第三部剧", "Type": "Series",
+         "DateCreated": "2026-10-16T12:00:01Z", "ParentId": "tv-library"},
+        {"Id": "anime-episode", "Name": "无动画标签的动漫", "Type": "Episode",
+         "SeriesId": "anime-series", "DateCreated": "2026-10-16T12:00:07Z",
+         "Genres": [], "ParentId": "anime-library"},
+        {"Id": "movie", "Name": "电影", "Type": "Movie",
+         "DateCreated": "2026-10-16T12:00:08Z", "ParentId": "movie-library"},
+    ])
+    calls = []
+
+    def request(_self, path, **kwargs):
+        if path == "/System/Info/Public":
+            return {"ProductName": server_type, "Version": "4.9"}
+        if path == "/Library/VirtualFolders/Query":
+            return {"Items": folders}
+        if path == "/Library/VirtualFolders":
+            return folders
+        assert path == "/Users/viewer/Items"
+        params = kwargs["params"]
+        calls.append(params)
+        filtered = sorted([
+            row for row in rows
+            if row["ParentId"] == params.get("ParentId")
+            and row["Type"] in params["IncludeItemTypes"].split(",")
+        ], key=lambda row: row["DateCreated"], reverse=True)
+        offset = params["StartIndex"]
+        return {"Items": filtered[offset:offset + params["Limit"]]}
+
+    monkeypatch.setattr(JellyfinClient if server_type == "jellyfin" else EmbyClient, "_request", request)
+    context = ToolContext(owner="recent-owner", session_id="recent-session")
+    if scope_key == "library_ref":
+        libraries = gateway.query(profile_ref=profile.source, operation="media.libraries.list", arguments={}, context=context)
+        scope_value = libraries.data["libraries"][0]["object_ref"]
+    else:
+        scope_value = "电视剧"
+    arguments = {"server": server_type, "limit": 3, scope_key: scope_value}
+    if media_type is not None:
+        arguments["media_type"] = media_type
+    spec = next(spec for spec in build_tool_specs() if spec.name == "media.recently_added")
+    with isolated_test_database():
+        result = spec.context_handler(spec.validator(arguments), context)
+    assert result.ok, result.summary
+    assert [item["name"] for item in result.data["items"]] == expected_names
+    assert result.data["count"] == len(expected_names)
+    assert len({item["object_ref"] for item in result.data["items"]}) == len(expected_names)
+    assert result.data["granularity"] == ("episode" if media_type == "episode" else "work")
+    assert result.data["scope"]["kind"] == "library"
+    assert result.data["scope"]["library"]["name"] == "电视剧"
+    assert result.data["scope"]["media_type"] == (media_type or "all")
+    if media_type == "episode":
+        assert [(item["series_name"], item["season_number"], item["episode_number"])
+                for item in result.data["items"]] == [("黑镜", 7, 6), ("黑镜", 7, 5), ("黑镜", 7, 4)]
+        assert "3 个单集" in result.summary
+    else:
+        assert f"{len(expected_names)} 部作品" in result.summary
+    assert len(calls) == 1
+    assert calls[0]["ParentId"] == "tv-library"
+    assert calls[0]["IncludeItemTypes"] == item_types
+    assert calls[0]["SortBy"] == "DateCreated"
+    assert calls[0]["SortOrder"] == "Descending"
+    assert calls[0]["Recursive"] == "true"
+
+
 def test_recent_added_uses_real_library_scope_and_never_genre_guessing(monkeypatch):
     from app.agent.models import ToolContext
     from app.agent.provider_gateway import ProviderGateway

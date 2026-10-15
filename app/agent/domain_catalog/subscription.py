@@ -550,7 +550,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="media.recently_added",
-            description="读取最近入库；用户指定电视剧/动漫媒体库时必须传library_name或library_ref按真实库过滤，media_type=tv不能排除动漫。",
+            description="读取最近入库，默认按作品去重；问最近几集或单集必须传media_type=episode，按单集ID保留同剧多集。指定电视剧/动漫媒体库时必须传library_name或library_ref按真实库过滤，media_type=tv或episode都不能排除动漫。",
             risk=RiskLevel.READ,
             parameters={
                 "type": "object",
@@ -564,7 +564,7 @@ def register_specs(
             context_handler=get_recently_added,
             validator=recently_added_arguments,
             related_tools=("provider.query",),
-            examples=("最近入库了什么", "查看 Jellyfin 最新添加内容"),
+            examples=("最近入库了什么", "查看 Jellyfin 最新添加内容", "只看电视剧库最近入库3个单集"),
         )
     )
     registry.register(
