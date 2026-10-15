@@ -621,6 +621,7 @@ def register_specs(
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 200,
+                        "description": "每项操作键为op，源对象用object_ref；move/copy/relocate目标用target_path目录路径，不用目录引用。create_directory仅支持op+path或op+parent_path+name，不能混用；已有正确name时保留并补parent_path。",
                         "items": {
                             "oneOf": [
                                 {
@@ -811,8 +812,8 @@ def register_specs(
                                         },
                                     },
                                     "oneOf": [
-                                        {"required": ["path"]},
-                                        {"required": ["parent_path", "name"]},
+                                        {"required": ["path"], "maxProperties": 2},
+                                        {"required": ["parent_path", "name"], "maxProperties": 3},
                                     ],
                                     "additionalProperties": False,
                                 },

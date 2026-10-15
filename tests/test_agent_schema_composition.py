@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import UserDict
+from itertools import product
 from types import MappingProxyType
 
 import pytest
@@ -29,6 +30,40 @@ from tests.test_agent_tool_argument_ingress import encode, wire
 
 def catalog_schema(name):
     return next(spec.parameters for spec in build_tool_specs() if spec.name == name)
+
+
+@pytest.mark.parametrize("fields", list(product([False, True], repeat=3)))
+def test_create_directory_schema_matches_exact_domain_shapes(fields):
+    from app.agent.kernel.pipeline import _validate_json_schema
+
+    values = {"path": "/parent/child", "parent_path": "/parent", "name": "child"}
+    operation = {"op": "create_directory", **{
+        key: value for (key, value), present in zip(values.items(), fields, strict=True) if present}}
+    arguments = {"operations": [operation]}
+    accepted = set(operation) in ({"op", "path"}, {"op", "parent_path", "name"})
+    schema = catalog_schema("guangya.fs.change.execute")
+    if accepted:
+        _validate_json_schema(arguments, schema)
+        assert guangya_fs_change_arguments(arguments)["operations"] == [
+            {"op": "create_directory", "parent_path": "/parent", "name": "child"}]
+    else:
+        with pytest.raises(AgentToolError):
+            guangya_fs_change_arguments(arguments)
+        with pytest.raises(ToolPipelineError):
+            _validate_json_schema(arguments, schema)
+
+
+@pytest.mark.parametrize("protocol", ["responses", "chat_completions", "anthropic_messages"])
+def test_cloud_operation_schema_survives_native_protocol_projection(protocol):
+    from app.agent.kernel.ports.existing_actions import adapt_tool_spec
+    from app.clients.openai_compatible import native_tool_definitions
+
+    spec = next(spec for spec in build_tool_specs() if spec.name == "guangya.fs.change.execute")
+    native, = native_tool_definitions(protocol, [adapt_tool_spec(spec).model_definition()])
+    native = json.loads(json.dumps(native))
+    if protocol == "chat_completions":
+        native = native["function"]
+    assert native["input_schema" if protocol == "anthropic_messages" else "parameters"] == spec.parameters
 
 
 async def execute(schema, arguments, trace, *, validator=None):
