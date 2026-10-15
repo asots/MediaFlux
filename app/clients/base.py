@@ -804,7 +804,8 @@ class MediaServerClient:
         return SeriesSearchResult(
             candidates=candidates,
             total=total if total is not None else len(items),
-            truncated=total > len(candidates) if total is not None else len(items) >= normalized_limit,
+            truncated=(total > len(candidates) if total is not None else
+                       len(items) >= normalized_limit or len(candidates) < len(items)),
         )
 
     def list_library_series(

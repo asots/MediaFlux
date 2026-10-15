@@ -191,6 +191,17 @@ class MediaInventoryCompletenessTests(unittest.TestCase):
             )
         self.assertEqual(result["items"][0]["status"], "present")
 
+    def test_unknown_short_search_page_keeps_filtered_candidate_incomplete(self):
+        for cls in (EmbyClient, JellyfinClient):
+            client = self.client(cls)
+            with self.subTest(server=cls.__name__), patch.object(
+                client, "_request", return_value={"Items": [self.item(1), {"Id": "2"}]},
+            ):
+                result = client.search_series_candidates("Show", limit=6)
+                self.assertEqual(len(result.candidates), 1)
+                self.assertEqual(result.total, 2)
+                self.assertTrue(result.truncated)
+
     def test_distinct_versions_of_the_same_episode_are_not_duplicate_items(self):
         client = self.client(JellyfinClient)
         first, second = self.item(1), self.item(2)
