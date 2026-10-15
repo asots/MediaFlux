@@ -1,6 +1,6 @@
 digraph MediaFluxFullChain {
   graph [
-    label="MediaFlux · 项目完整全链路流转拓扑\n源码基线：2026-09-12",
+    label="MediaFlux · 项目完整全链路流转拓扑\n原始基线：2026-09-12 · 本轮校核：2026-10-15（等待交付 / 元数据刷新）",
     labelloc=t,
     labeljust=c,
     fontname="Noto Sans CJK SC",
@@ -99,7 +99,7 @@ digraph MediaFluxFullChain {
       recognition [label="统一识别引擎\ndirectory_media → scraper → naming\n预处理、TMDB/AI 复核、季集、规格、版本", fillcolor="#F5F3FF", color="#8B5CF6"];
       organize [label="整理协调与确认\norganize + organize_tasks + confirmations\n扫描、规划、冲突、人工确认、审计", fillcolor="#FFF7ED", color="#EA580C"];
       local_media [label="本地媒体流水线\nlocal_media_service + scheduler\n路径映射、Writer 锁、移动事务、qB 收尾", fillcolor="#EFF6FF", color="#2563EB"];
-      strm [label="STRM 引擎\nstrm.py + scheduler.py\n全量/增量、索引、失败重试、退役清理", fillcolor="#ECFDF5", color="#059669"];
+      strm [label="STRM 引擎\nstrm.py + scheduler.py + strm_metadata_worker.py\n全量/增量、索引、元数据队列、退役清理", fillcolor="#ECFDF5", color="#059669"];
       refresh [label="媒体库刷新合并器\nmedia_refresh_coordinator\n去重、分批、绑定 Jellyfin / Emby", fillcolor="#F0FDF4", color="#16A34A"];
       notification [label="通知与投递中心\nNotificationEvent → Telegram outbox\n确认卡、进度、终态、失败告警", fillcolor="#FDF2F8", color="#DB2777"];
       playback [label="播放访问面\n/playgy 302 + media_proxy\n签名校验、直链获取、代理透传、播放审计", fillcolor="#ECFEFF", color="#0891B2"];
@@ -116,7 +116,7 @@ digraph MediaFluxFullChain {
       fillcolor="#FCFCFD";
 
       sqlite [label="SQLite + WAL\napp/database.py + repositories\n下载、整理、STRM、订阅、Agent、代理、通知 outbox", fillcolor="#ECFDF5", color="#10B981"];
-      filesystem [label="文件与配置\n/app/db：user.env / cache / logs\n/media/downloads · /media/library · /data/strm", fillcolor="#ECFDF5", color="#10B981"];
+      filesystem [label="文件与配置\nRuntimePaths：配置 / 数据 / 缓存 / 日志\n下载、媒体库与 STRM 配置目录", fillcolor="#ECFDF5", color="#10B981"];
       locks [label="一致性护栏\nruntime lifecycle / process lock / Writer lock\n任务 lease · owner · revision · 单 Worker", fillcolor="#F8FAFC", color="#64748B"];
       recovery [label="迁移、备份与恢复\nschema / migrations / backup\n启动恢复中断任务、确认、来源退役和失败账本", fillcolor="#F8FAFC", color="#64748B"];
     }
@@ -128,7 +128,7 @@ digraph MediaFluxFullChain {
   fastapi -> http_api [label="注册路由", color="#2563EB"];
   fastapi -> schedulers [label="lifespan 启停", color="#D97706"];
   web_user -> web_ui [label="HTTP", color="#0284C7"];
-  web_ui -> http_api [label="fetch / SSE", color="#0284C7"];
+  web_ui -> http_api [label="fetch · Agent NDJSON · 索引/日志 SSE", color="#0284C7"];
   tg_user -> telegram_api [label="命令 / 消息 / 回调", color="#DB2777"];
   telegram_api -> tg_adapter [label="Polling / callback updates", color="#DB2777"];
   tg_adapter -> download_dispatch [label="链接 / 种子提交", color="#EA580C"];
@@ -139,10 +139,15 @@ digraph MediaFluxFullChain {
   http_api -> strm [label="STRM 管理", color="#2563EB"];
   http_api -> discovery [label="探索 / 订阅 / 索引", color="#2563EB"];
   http_api -> playback [label="代理配置 / 播放入口", color="#2563EB"];
+  http_api -> agent_kernel [label="对话 / 确认 / 快照恢复", color="#D97706"];
   agent_kernel -> discovery [label="READ / 引用", color="#D97706"];
   agent_kernel -> download_dispatch [label="WRITE 预检 / 确认", color="#D97706"];
   agent_kernel -> organize [label="领域工具", color="#D97706"];
   agent_kernel -> strm [label="状态 / 重试 / 运行", color="#D97706"];
+  agent_kernel -> media_servers [label="库内查询 / 分页库存核验", color="#16A34A"];
+  agent_kernel -> sqlite [label="会话 / 等待 / 续行终态", color="#64748B", style=dotted];
+  schedulers -> agent_kernel [label="READ / Effect 续行", color="#D97706", style=dashed];
+  agent_kernel -> notification [label="可信会话路由 / 持久结果投递", color="#DB2777", style=dashed];
 
   // ===== 发现与下载 =====
   rss_source -> discovery [label="定时拉取 RSS", color="#F59E0B", style=dashed];
@@ -180,7 +185,7 @@ digraph MediaFluxFullChain {
   strm -> guangya [label="目录扫描 / 元数据 / 直链信息", color="#0F766E"];
   strm -> filesystem [label="生成 .strm / NFO / 图片", color="#059669"];
   strm -> sqlite [label="strm_index / failures / retirements", color="#64748B", style=dotted];
-  strm -> refresh [label="变化 scope", color="#16A34A", style=dashed];
+  strm -> refresh [label="变化 scope / 冻结策略 / 持久 outbox", color="#16A34A", style=dashed];
   local_media -> refresh [label="本地库变化", color="#16A34A", style=dashed];
   refresh -> media_servers [label="刷新媒体库 / 绑定路径", color="#16A34A"];
   media_servers -> playback [label="读取 STRM / 播放请求", color="#0891B2"];
@@ -194,7 +199,7 @@ digraph MediaFluxFullChain {
   schedulers -> notification [label="统一消费者 / 唤醒", color="#D97706", style=dashed];
   notification -> sqlite [label="outbox / lease / revision", color="#64748B", style=dotted];
   notification -> telegram_api [label="可靠投递 / 重试", color="#DB2777", style=dashed];
-  notification -> web_ui [label="API / SSE / 页面状态", color="#DB2777", style=dashed];
+  notification -> web_ui [label="API / 会话快照 / 页面状态", color="#DB2777", style=dashed];
   sqlite -> recovery [label="迁移 / 备份 / 状态恢复", color="#64748B", style=dotted];
   filesystem -> recovery [label="配置 / 日志 / 媒体指针", color="#64748B", style=dotted];
   recovery -> fastapi [label="启动前恢复并初始化", color="#334155", style=dashed];
