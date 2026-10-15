@@ -906,11 +906,12 @@ def _build_video_index_maps(existing_rows: list) -> tuple[dict[str, object], dic
     return by_id, by_path
 
 
-def _current_fingerprint_backfills(
+def _flush_fingerprint_backfills(
+    source_key: str,
     items: list[dict[str, object]],
     existing_by_id: dict[str, object],
-) -> list[dict[str, object]]:
-    """只保留仍与最终内存索引一致的指纹补写，避免旧路径覆盖新快照。"""
+) -> None:
+    """按最终索引过滤并一次补写，避免复活淘汰对象或覆盖迁移后的快照。"""
     current_items = []
     for item in items:
         current = existing_by_id.get(str(item["file_id"]))
@@ -926,7 +927,8 @@ def _current_fingerprint_backfills(
         ):
             continue
         current_items.append(item)
-    return current_items
+    if current_items:
+        db.upsert_strm_index_batch(source_key, current_items)
 
 
 def _update_video_index_snapshot(
@@ -1803,8 +1805,7 @@ def _sync_strm_incremental_impl(
         progress.emit("generate", completed, total_work, "精准更新 STRM")
 
     _flush_failure_resolutions(stats, source_dir_id, pending_resolutions)
-    if fingerprint_backfills:
-        db.upsert_strm_index_batch(video_key, fingerprint_backfills)
+    _flush_fingerprint_backfills(video_key, fingerprint_backfills, video_by_id)
 
     if not stats["fallback_required"] and not stats["stopped"]:
         for change in (item for item in normalized.values() if item["action"] == "remove"):
@@ -2496,14 +2497,7 @@ def _sync_strm_impl(
                     "生成 STRM",
                 )
 
-    if fingerprint_backfills:
-        # 同一远端 file_id 若在本轮后续候选中发生路径迁移，较早缓存的
-        # 指纹补写不得覆盖新索引；仅提交仍与最终内存快照一致的项目。
-        current_backfills = _current_fingerprint_backfills(
-            fingerprint_backfills, existing_by_id
-        )
-        if current_backfills:
-            db.upsert_strm_index_batch(source_key, current_backfills)
+    _flush_fingerprint_backfills(source_key, fingerprint_backfills, existing_by_id)
     _flush_failure_resolutions(stats, source_dir_id, pending_resolutions, "generate")
     stats["generate_elapsed_seconds"] = round(
         time.monotonic() - generate_started, 3

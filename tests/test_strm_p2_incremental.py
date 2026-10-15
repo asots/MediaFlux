@@ -974,3 +974,81 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         self.assertEqual(second["skipped"], 1)
         batch.assert_called_once()
         self.assertTrue(str(persisted["content_fingerprint"]).startswith("sha256:"))
+
+    def test_incremental_backfill_does_not_revive_displaced_index(self):
+        source_id = "incremental-displaced-backfill"
+        source_key = f"guangya:{source_id}"
+        first = GuangYaFile("a", "Film.mkv", False, 1024, "ea", "parent")
+        second = GuangYaFile("b", "Film.mp4", False, 2048, "eb", "parent")
+        client = _IncrementalClient({file.file_id: file for file in (first, second)})
+        changes = [{
+            "source_id": source_id, "kind": "video", "action": "upsert",
+            "file_id": file.file_id, "rel_dir": "Film", "name": file.name,
+            "etag": file.etag, "size": file.size, "parent_id": file.parent_id,
+        } for file in (first, second)]
+        with tempfile.TemporaryDirectory() as root:
+            target = generate_strm(first, "Film", "http://media.invalid", root)
+            db.upsert_strm_index(
+                source_key, first.file_id, first.etag, first.size,
+                first.name, str(target), "",
+            )
+            stats = sync_strm_incremental(
+                source_id, changes, "http://media.invalid", root, client=client,
+            )
+            rows = db.list_strm_index(source_key)
+            fingerprint = self._fingerprint(target)
+
+        self.assertEqual(stats["failed"], 0)
+        self.assertFalse(stats["fallback_required"])
+        self.assertEqual(stats["generated"], 1)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual([row["file_id"] for row in rows], [second.file_id])
+        self.assertEqual(rows[0]["content_fingerprint"], fingerprint)
+        self.assertEqual(client.list_calls, 0)
+        self.assertEqual(client.file_info_calls, 2)
+
+    def test_incremental_backfills_missing_fingerprints_once_without_rehash(self):
+        source_id = "incremental-batch-backfill"
+        source_key = f"guangya:{source_id}"
+        files = [
+            GuangYaFile(f"video-{i}", f"Episode-{i}.mkv", False, 1024, f"e-{i}", source_id)
+            for i in range(8)
+        ]
+        client = _IncrementalClient({file.file_id: file for file in files}, allow_list=True)
+        changes = [{
+            "source_id": source_id, "kind": "video", "action": "upsert",
+            "file_id": file.file_id, "rel_dir": "", "name": file.name,
+            "etag": file.etag, "size": file.size, "parent_id": file.parent_id,
+        } for file in files]
+        with tempfile.TemporaryDirectory() as root:
+            expected = {}
+            for file in files:
+                target = generate_strm(file, "", "http://media.invalid", root)
+                expected[file.file_id] = self._fingerprint(target)
+                db.upsert_strm_index(
+                    source_key, file.file_id, file.etag, file.size,
+                    file.name, str(target), "",
+                )
+            with patch.object(
+                db, "upsert_strm_index_batch", wraps=db.upsert_strm_index_batch,
+            ) as batch, patch.object(
+                db, "upsert_strm_index", side_effect=AssertionError("稳定文件不应逐条补写"),
+            ), patch(
+                "app.modules.strm._content_fingerprint",
+                side_effect=AssertionError("稳定文件不应重复计算指纹"),
+            ):
+                stats = sync_strm_incremental(
+                    source_id, changes, "http://media.invalid", root, client=client,
+                )
+
+        self.assertEqual(stats["failed"], 0)
+        self.assertFalse(stats["fallback_required"])
+        self.assertEqual(stats["generated"], 0)
+        self.assertEqual(stats["skipped"], len(files))
+        self.assertEqual(
+            {row["file_id"]: row["content_fingerprint"] for row in db.list_strm_index(source_key)},
+            expected,
+        )
+        batch.assert_called_once()
+        self.assertEqual(client.list_calls, 1)
+        self.assertEqual(client.file_info_calls, 0)

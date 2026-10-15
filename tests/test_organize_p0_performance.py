@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import threading
 import time
@@ -12,7 +13,7 @@ from app import database as db
 from app.clients.guangya import GuangYaFile
 from app.modules.organize import OrganizeRules, Organizer, _OrganizeAuditWriteError
 from app.modules.scraper import TMDBScraper
-from app.modules.strm import _current_fingerprint_backfills, sync_strm
+from app.modules.strm import _flush_fingerprint_backfills, sync_strm
 from tests.support import IsolatedDatabaseTestCase, PagedDirectoryTestMixin
 
 
@@ -525,22 +526,22 @@ class StrmBatchPerformanceTests(IsolatedDatabaseTestCase):
                 "size": first.size,
                 "filename": first.name,
                 "strm_path": str(first_path),
-                "content_fingerprint": "sha256:stale",
+                "content_fingerprint": f"sha256:{hashlib.sha256(first_path.read_bytes()).hexdigest()}",
             }
-            current_snapshot = {
-                "file_id": second.file_id,
-                "etag": second.etag,
-                "size": second.size,
-                "filename": second.name,
-                "strm_path": str(Path(root) / "second.strm"),
-                "content_fingerprint": "sha256:new",
-            }
-            existing_by_id = {second.file_id: current_snapshot}
-            current_backfills = _current_fingerprint_backfills(
-                [stale_backfill], existing_by_id
+            second_path = Path(root) / "second.strm"
+            second_path.write_text("moved", encoding="utf-8")
+            db.upsert_strm_index(
+                source_key, second.file_id, second.etag, second.size, second.name,
+                str(second_path), f"sha256:{hashlib.sha256(second_path.read_bytes()).hexdigest()}",
             )
+            before = dict(db.list_strm_index(source_key)[0])
+            with patch.object(
+                db, "upsert_strm_index_batch", wraps=db.upsert_strm_index_batch,
+            ) as batch:
+                _flush_fingerprint_backfills(source_key, [stale_backfill], {second.file_id: before})
 
-        self.assertEqual(current_backfills, [])
+        self.assertEqual(dict(db.list_strm_index(source_key)[0]), before)
+        batch.assert_not_called()
 
     def test_strm_stage_timings_are_exposed(self):
         source_id = "stage-timing-source"
