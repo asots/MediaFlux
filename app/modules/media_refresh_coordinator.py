@@ -386,7 +386,7 @@ class MediaRefreshCoordinator:
             if outcome.get("succeeded_target_ids"):
                 from app.services import clear_dashboard_cache
 
-                clear_dashboard_cache()
+                clear_dashboard_cache(keep_stale=True)
         except Exception as exc:
             safe_error = redact_sensitive_text(str(exc))[:300]
             try:

@@ -3,7 +3,18 @@
 {% block title %}看板 - MediaFlux{% endblock %}
 {% block body_class %}dashboard-page{% endblock %}
 {% block page_title %}看板{% endblock %}
-{% block page_styles %}<link rel="stylesheet" href="{{ static_url('css/dashboard-workbench.css') }}">{% endblock %}
+{% block page_styles %}
+<link rel="stylesheet" href="{{ static_url('css/dashboard-workbench.css') }}">
+<style>
+.dashboard-page .dashboard-status-foot { display: flex; align-items: baseline; gap: 6px; }
+.dashboard-page .dashboard-status-foot [data-dashboard-snapshot-message] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dashboard-page .dashboard-status-foot time { flex: none; color: var(--dashboard-faint); font-variant-numeric: tabular-nums; }
+.dashboard-page .dashboard-connection-picker.is-stale { color: var(--dashboard-orange); }
+.dashboard-page .dashboard-connection-picker.is-stale .dashboard-connection-dot { background: var(--dashboard-orange); animation: none; }
+.dashboard-page .dashboard-library-foot .is-orange { color: var(--dashboard-orange); }
+.dashboard-page .dashboard-connection-picker.is-hydrating .dashboard-connection-dot { animation: none; }
+</style>
+{% endblock %}
 
 {% block workspace_bar %}
 <header class="dashboard-topbar">
@@ -43,10 +54,10 @@
         </div>
         {{ theme_toggle('dashboard') }}
         {% if dashboards %}
-        <label class="dashboard-connection-picker{% if not is_cached %} is-hydrating{% elif not dashboards[0].online %} is-offline{% endif %}" data-server-connection>
-            <span class="dashboard-connection-dot{% if is_cached and not dashboards[0].online %} is-offline{% endif %}" aria-hidden="true"></span>
+        <label class="dashboard-connection-picker{% if not is_cached %} is-hydrating{% elif dashboards[0].stale %} is-stale{% elif not dashboards[0].online %} is-offline{% endif %}" data-server-connection>
+            <span class="dashboard-connection-dot{% if is_cached and not dashboards[0].online and not dashboards[0].stale %} is-offline{% endif %}" aria-hidden="true"></span>
             <select data-server-select aria-label="切换媒体服务器">
-                {% for server in dashboards %}<option value="{{ server.server_type }}" data-online="{{ 'true' if server.online else 'false' }}" data-name="{{ server.server_name }}" data-product="{{ server.server_product or server.server_type|upper }}">{{ server.server_name }} · {{ server.server_product or server.server_type|upper }}</option>{% endfor %}
+                {% for server in dashboards %}<option value="{{ server.server_type }}" data-online="{{ 'true' if server.online else 'false' }}" data-stale="{{ 'true' if server.stale else 'false' }}" data-name="{{ server.server_name }}" data-product="{{ server.server_product or server.server_type|upper }}">{{ server.server_name }} · {{ server.server_product or server.server_type|upper }}</option>{% endfor %}
             </select>
             <i data-lucide="chevron-down"></i>
         </label>
@@ -59,7 +70,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="dashboard-shell" data-is-cached="{{ 'true' if is_cached else 'false' }}">
+<div class="dashboard-shell" data-is-cached="{{ 'true' if is_cached else 'false' }}" data-needs-refresh="{{ 'true' if needs_refresh else 'false' }}">
 {% if not dashboards %}
     <section class="dashboard-panel dashboard-empty-state">
         <span class="dashboard-empty-icon"><i data-lucide="server-off"></i></span>
@@ -70,26 +81,23 @@
 {% endif %}
 
 {% for b in dashboards %}
-{% if loop.first %}
-<section class="dashboard-server-panel active{% if not is_cached %} is-hydrating{% endif %}" data-server-panel="{{ b.server_type }}">
-{% else %}
-<section class="dashboard-server-panel{% if not is_cached %} is-hydrating{% endif %}" data-server-panel="{{ b.server_type }}" hidden>
-{% endif %}
+{% set has_snapshot = is_cached and b.updated_at %}
+<section class="dashboard-server-panel{% if loop.first %} active{% endif %}{% if not has_snapshot %} is-hydrating{% endif %}" data-server-panel="{{ b.server_type }}" data-has-snapshot="{{ 'true' if has_snapshot else 'false' }}" data-stale="{{ 'true' if b.stale else 'false' }}" data-updated-at="{{ b.updated_at }}" data-refresh-error="{{ b.refresh_error or b.error }}" data-online="{{ 'true' if b.online else 'false' }}" data-product="{{ b.server_product or b.server_type|upper }}" data-partial-errors="{{ b.partial_errors|length }}"{% if not loop.first %} hidden{% endif %}>
     <section class="dashboard-summary-strip" aria-label="媒体概览">
         <article class="dashboard-metric">
             <div class="dashboard-metric-head">
                 <span class="dashboard-metric-label">媒体总数</span>
                 <span class="dashboard-metric-icon"><i data-lucide="layers-3"></i></span>
             </div>
-            <div class="dashboard-metric-value"><span data-metric="total_items" data-count-target="{{ b.total_items }}">{{ "{:,}".format(b.total_items) }}</span><small>项</small></div>
-            <div class="dashboard-metric-foot" data-media-composition>{% if b.movie_count or b.series_count or b.episode_count %}{{ b.movie_count }} 部电影 · {{ b.series_count }} 部剧集 · {{ b.episode_count }} 集{% else %}已建立索引的可播放媒体{% endif %}</div>
+            <div class="dashboard-metric-value"><span data-metric="total_items" data-count-target="{{ b.total_items if has_snapshot else '' }}">{{ "{:,}".format(b.total_items) if has_snapshot else '—' }}</span><small>项</small></div>
+            <div class="dashboard-metric-foot" data-media-composition>{% if not has_snapshot %}正在读取媒体概览{% elif b.movie_count or b.series_count or b.episode_count %}{{ b.movie_count }} 部电影 · {{ b.series_count }} 部剧集 · {{ b.episode_count }} 集{% else %}已建立索引的可播放媒体{% endif %}</div>
         </article>
         <article class="dashboard-metric">
             <div class="dashboard-metric-head">
                 <span class="dashboard-metric-label">媒体库</span>
                 <span class="dashboard-metric-icon is-blue"><i data-lucide="library-big"></i></span>
             </div>
-            <div class="dashboard-metric-value"><span data-metric="libraries" data-count-target="{{ b.libraries|length }}">{{ b.libraries|length }}</span><small>个分区</small></div>
+            <div class="dashboard-metric-value"><span data-metric="libraries" data-count-target="{{ b.libraries|length if has_snapshot else '' }}">{{ b.libraries|length if has_snapshot else '—' }}</span><small>个分区</small></div>
             <div class="dashboard-metric-foot">当前可访问的内容分区</div>
         </article>
         <article class="dashboard-metric">
@@ -97,7 +105,7 @@
                 <span class="dashboard-metric-label">最近入库</span>
                 <span class="dashboard-metric-icon is-orange"><i data-lucide="package-open"></i></span>
             </div>
-            <div class="dashboard-metric-value"><span data-metric="recent_added" data-count-target="{{ b.recent_added|length }}">{{ b.recent_added|length }}</span><small>项</small></div>
+            <div class="dashboard-metric-value"><span data-metric="recent_added" data-count-target="{{ b.recent_added|length if has_snapshot else '' }}">{{ b.recent_added|length if has_snapshot else '—' }}</span><small>项</small></div>
             <div class="dashboard-metric-foot">已去重的新内容</div>
         </article>
         <article class="dashboard-metric">
@@ -111,19 +119,18 @@
         <article class="dashboard-metric">
             <div class="dashboard-metric-head">
                 <span class="dashboard-metric-label">服务状态</span>
-                <button type="button" class="dashboard-metric-icon is-status dashboard-refresh-button" data-dashboard-refresh aria-label="刷新看板数据" title="刷新看板数据" aria-busy="false"><i data-lucide="refresh-cw"></i></button>
+                <button type="button" class="dashboard-metric-icon is-status dashboard-refresh-button" data-dashboard-refresh aria-label="{{ '重试看板更新' if b.refresh_error or b.error else '刷新看板数据' }}" title="{{ '重试看板更新' if b.refresh_error or b.error else '刷新看板数据' }}" aria-busy="false"><i data-lucide="refresh-cw"></i></button>
             </div>
-            <div class="dashboard-metric-value dashboard-status-value">{% if not is_cached %}加载中{% elif not b.online %}异常{% elif b.partial_errors %}部分异常{% else %}正常{% endif %}</div>
-            <div class="dashboard-metric-foot {% if not is_cached %}is-muted{% elif b.online and not b.partial_errors %}is-status{% else %}is-orange{% endif %}">{% if not is_cached %}正在读取 {{ b.server_product or b.server_type|upper }} 数据{% elif b.partial_errors %}{{ b.partial_errors|length }} 项数据未同步{% else %}{{ b.server_name }} · {{ b.server_product or b.server_type|upper }}{% endif %}</div>
+            <div class="dashboard-metric-value dashboard-status-value">{% if b.refresh_error or b.error %}更新失败{% elif not has_snapshot %}加载中{% elif b.stale %}缓存待更新{% elif not b.online %}异常{% elif b.partial_errors %}部分异常{% else %}正常{% endif %}</div>
+            <div class="dashboard-metric-foot dashboard-status-foot {% if b.stale or b.refresh_error or b.error or b.partial_errors %}is-orange{% elif not has_snapshot %}is-muted{% elif b.online %}is-status{% else %}is-orange{% endif %}" role="status" aria-live="polite">
+                <span data-dashboard-snapshot-message title="{{ b.refresh_error or b.error }}">{% if b.refresh_error or b.error %}可点击重试{% elif not has_snapshot %}正在读取媒体数据{% elif b.stale %}显示上次数据{% elif b.partial_errors %}{{ b.partial_errors|length }} 项数据未同步{% else %}{{ b.server_product or b.server_type|upper }}{% endif %}</span>
+                <span aria-hidden="true">·</span>
+                <time data-dashboard-updated-at datetime="{{ b.updated_at }}" title="{% if b.updated_at %}更新时间 {{ b.updated_at[:19]|replace('T', ' ') }} UTC{% else %}尚无成功读取{% endif %}">{% if b.updated_at %}{{ b.updated_at[11:19] }}{% else %}—{% endif %}</time>
+            </div>
         </article>
     </section>
 
-    <section class="dashboard-panel dashboard-error-card"{% if not b.error %} hidden{% endif %}>
-        <span class="dashboard-error-icon"><i data-lucide="circle-alert"></i></span>
-        <div><strong>节点连接失败</strong><p>{{ b.error }}</p><small>检查服务地址、凭证与网络可达性后重新保存。</small></div>
-        <button type="button" class="secondary-btn" data-open-media-config="{{ b.server_type }}"><i data-lucide="wrench"></i>修复配置</button>
-    </section>
-    <section class="dashboard-primary-grid"{% if b.error %} hidden{% endif %}>
+    <section class="dashboard-primary-grid">
         <article class="dashboard-panel">
             <header class="dashboard-panel-head">
                 <div class="dashboard-panel-title"><i data-lucide="history"></i><strong>最近播放</strong></div>
@@ -134,7 +141,7 @@
                     <thead><tr><th>名称</th><th>播放进度</th><th>类型</th><th>操作</th></tr></thead>
                     <tbody>
                     {% for item in b.recent_played[:4] %}
-                    <tr class="dashboard-playback-row">
+                    <tr class="dashboard-playback-row" data-render-key="{{ [item.display_name, item.web_url or '#', item.primary_image or '', item.episode_label or item.year or item.type or '', item.progress, item.last_played[:10] if item.last_played else '暂无播放时间', '剧集' if item.episode_label else '电影']|tojson|forceescape }}">
                         <td><a class="dashboard-media-name" href="{{ item.web_url }}" target="_blank" rel="noopener">{% if item.primary_image %}<img src="{{ item.primary_image }}" alt="" loading="lazy">{% else %}<span class="dashboard-media-thumb"><i data-lucide="film"></i></span>{% endif %}<span><strong>{{ item.display_name }}</strong><small>{% if item.episode_label %}{{ item.episode_label }}{% elif item.year %}{{ item.year }}{% else %}{{ item.type }}{% endif %}</small></span></a></td>
                         <td><div class="dashboard-progress"><span><i data-progress-width="{{ [item.progress, 100]|min }}"></i></span><b>{{ item.progress|round|int }}%</b></div><small class="dashboard-progress-note">{% if item.last_played %}{{ item.last_played[:10] }}{% else %}暂无播放时间{% endif %}</small></td>
                         <td><span class="dashboard-state-tag">{{ '剧集' if item.episode_label else '电影' }}</span></td>
@@ -145,48 +152,48 @@
                 </table>
             </div>
             {% if not b.recent_played %}
-            <div class="dashboard-panel-empty"><i data-lucide="history"></i><span>暂无最近播放记录</span></div>
+            <div class="dashboard-panel-empty"><i data-lucide="history"></i><span>{{ '暂无最近播放记录' if has_snapshot else '最近播放加载中' }}</span></div>
             {% endif %}
         </article>
 
         <aside class="dashboard-panel dashboard-library-status">
             <header class="dashboard-panel-head">
-                <div class="dashboard-panel-title"><i data-lucide="server"></i><strong>媒体库</strong><span data-library-count-label>{{ b.libraries|length }} 个分区</span></div>
+                <div class="dashboard-panel-title"><i data-lucide="server"></i><strong>媒体库</strong><span data-library-count-label>{{ b.libraries|length if has_snapshot else '—' }} 个分区</span></div>
                 {% if b.web_url %}<a class="dashboard-text-link" href="{{ b.web_url }}" target="_blank" rel="noopener">打开媒体库<i data-lucide="external-link"></i></a>{% endif %}
             </header>
             <div class="dashboard-library-body"{% if not b.libraries %} hidden{% endif %}>
                 {% set library_total = b.libraries|sum(attribute='count') %}
                 {% for lib in b.libraries %}
                 {% set share = ((lib.count / library_total * 100) if library_total else 0) %}
-                <a class="dashboard-library-row" href="{{ lib.web_url or '#' }}" target="_blank" rel="noopener">
+                <a class="dashboard-library-row" href="{{ lib.web_url or '#' }}" target="_blank" rel="noopener" data-render-key="{{ [lib.name, lib.count, lib.web_url or '#']|tojson|forceescape }}">
                     <div class="dashboard-library-row-head"><span><i data-lucide="folder"></i>{{ lib.name }}</span><strong>{{ "{:,}".format(lib.count) }} 项</strong></div>
                     <div class="dashboard-library-track"><i data-progress-width="{{ [share, 100]|min|round }}"></i></div>
                 </a>
                 {% endfor %}
             </div>
             {% if not b.libraries %}
-            <div class="dashboard-panel-empty"><i data-lucide="library"></i><span>暂无媒体库信息</span></div>
+            <div class="dashboard-panel-empty"><i data-lucide="library"></i><span>{{ '暂无媒体库信息' if has_snapshot else '媒体库加载中' }}</span></div>
             {% endif %}
-            <footer class="dashboard-library-foot"><span data-library-footer-count>{{ b.libraries|length }} 个媒体库</span><span data-library-footer-total>{{ "{:,}".format(b.total_items) }} 个可播放项</span><span class="is-status" data-library-footer-health><i data-lucide="check"></i>{{ b.server_product or b.server_type|upper }} 正常</span></footer>
+            <footer class="dashboard-library-foot"><span data-library-footer-count>{{ b.libraries|length if has_snapshot else '—' }} 个媒体库</span><span data-library-footer-total>{{ "{:,}".format(b.total_items) if has_snapshot else '—' }} 个可播放项</span><span class="{{ 'is-orange' if b.stale or b.refresh_error or b.error else 'is-status' if has_snapshot and b.online else '' }}" data-library-footer-health><i data-lucide="{{ 'circle-alert' if b.stale or b.refresh_error or b.error else 'check' if has_snapshot else 'clock' }}"></i>{{ b.server_product or b.server_type|upper }} {{ '缓存' if b.stale else '异常' if b.refresh_error or b.error else '正常' if has_snapshot and b.online else '加载中' }}</span></footer>
         </aside>
     </section>
 
-    <section class="dashboard-lower-grid"{% if b.error %} hidden{% endif %}>
+    <section class="dashboard-lower-grid">
         <article class="dashboard-panel">
             <header class="dashboard-panel-head">
-                <div class="dashboard-panel-title"><i data-lucide="film"></i><strong>最近入库</strong><span data-recent-added-count-label>{{ b.recent_added|length }} 项新内容</span></div>
+                <div class="dashboard-panel-title"><i data-lucide="film"></i><strong>最近入库</strong><span data-recent-added-count-label>{{ b.recent_added|length if has_snapshot else '—' }} 项新内容</span></div>
                 <a class="dashboard-text-link" href="{{ url_for('pages.media_recent') }}?server={{ b.server_type }}">查看全部<i data-lucide="chevron-right"></i></a>
             </header>
             <div class="dashboard-poster-list"{% if not b.recent_added %} hidden{% endif %}>
                 {% for item in b.recent_added[:5] %}
-                <a class="dashboard-poster-card" href="{{ item.web_url }}" target="_blank" rel="noopener" title="{{ item.display_name }}">
+                <a class="dashboard-poster-card" href="{{ item.web_url }}" target="_blank" rel="noopener" title="{{ item.display_name }}" data-render-key="{{ [item.display_name, item.web_url or '#', item.primary_image or '', item.type|upper, item.year or item.type, item.episode_label or ((item.runtime|string ~ ' 分钟') if item.runtime else '新入库')]|tojson|forceescape }}">
                     <div class="dashboard-poster-art">{% if item.primary_image %}<img src="{{ item.primary_image }}" alt="{{ item.display_name }}" loading="lazy">{% else %}<span><i data-lucide="film"></i></span>{% endif %}<small>{{ "%02d"|format(loop.index) }} / {{ item.type|upper }}</small></div>
                     <div class="dashboard-poster-copy"><strong>{{ item.display_name }}</strong><span><b>{{ item.year or item.type }}</b><b>{% if item.episode_label %}{{ item.episode_label }}{% elif item.runtime %}{{ item.runtime }} 分钟{% else %}新入库{% endif %}</b></span></div>
                 </a>
                 {% endfor %}
             </div>
             {% if not b.recent_added %}
-            <div class="dashboard-panel-empty is-poster"><i data-lucide="inbox"></i><span>暂无最近入库内容</span></div>
+            <div class="dashboard-panel-empty is-poster"><i data-lucide="inbox"></i><span>{{ '暂无最近入库内容' if has_snapshot else '最近入库加载中' }}</span></div>
             {% endif %}
         </article>
 
@@ -241,7 +248,7 @@
 <script>
 (function(){
     const shell=document.querySelector('.dashboard-shell');
-    const isCached=shell?.dataset.isCached==='true';
+    const needsRefresh=shell?.dataset.needsRefresh==='true';
     const serverSelect=document.querySelector('[data-server-select]');
     const serverPanels=[...document.querySelectorAll('[data-server-panel]')];
     const serverConnection=document.querySelector('[data-server-connection]');
@@ -263,10 +270,11 @@
     function animateDashboardMetrics(root=document){
         if(!window.MFAnim) return;
         root.querySelectorAll('[data-count-target]').forEach(el=>{
+            if(el.hasAttribute('data-metric') || !el.dataset.countTarget) return;
             const target=Number(el.dataset.countTarget);
             if(!isNaN(target)){
                 window.MFAnim.countUp(el, target, {
-                    startValue: 0,
+                    startValue: Number(el.textContent.replace(/,/g,'')) || 0,
                     duration: 0.6,
                     formatter: (v)=>Math.round(v).toLocaleString('zh-CN')
                 });
@@ -293,17 +301,20 @@
         if(!board || !serverSelect) return;
         const option=[...serverSelect.options].find(item=>item.value===board.server_type);
         if(option){
-            const name=board.server_name||board.server_type||'媒体服务';
+            const name=board.server_name||option.dataset.name||board.server_type||'媒体服务';
             const product=board.server_product||String(board.server_type||'').toUpperCase();
             option.dataset.online=board.online?'true':'false';
+            option.dataset.stale=board.stale?'true':'false';
             option.dataset.name=name;
             option.dataset.product=product;
             option.textContent=`${name} · ${product}`;
         }
         if(serverSelect.value===board.server_type){
-            serverConnection?.classList.remove('is-hydrating');
-            serverConnection?.classList.toggle('is-offline',!board.online);
-            serverConnection?.querySelector('.dashboard-connection-dot')?.classList.toggle('is-offline',!board.online);
+            const panel=serverPanels.find(item=>item.dataset.serverPanel===board.server_type);
+            serverConnection?.classList.toggle('is-hydrating',panel?.dataset.hasSnapshot!=='true'&&!panel?.dataset.refreshError);
+            serverConnection?.classList.toggle('is-stale',!!board.stale);
+            serverConnection?.classList.toggle('is-offline',!board.online&&!board.stale);
+            serverConnection?.querySelector('.dashboard-connection-dot')?.classList.toggle('is-offline',!board.online&&!board.stale);
         }
     }
 
@@ -315,64 +326,93 @@
             empty.className=`dashboard-panel-empty${extraClass?` ${extraClass}`:''}`;
             container.appendChild(empty);
         }
-        empty.innerHTML=`<i data-lucide="${esc(icon)}"></i><span>${esc(message)}</span>`;
+        if(empty.querySelector('span')?.textContent!==message) empty.innerHTML=`<i data-lucide="${esc(icon)}"></i><span>${esc(message)}</span>`;
         return empty;
     }
 
-    function setDashboardRequestError(message){
-        const panel=serverPanels.find(item=>!item.hidden) || serverPanels[0];
-        if(!panel) return;
-        panel.classList.remove('is-hydrating');
+    function updateDashboardStatus(panel){
+        const hasSnapshot=panel.dataset.hasSnapshot==='true';
+        const stale=panel.dataset.stale==='true';
+        const online=panel.dataset.online==='true';
+        const error=panel.dataset.refreshError;
+        const partialErrors=Number(panel.dataset.partialErrors)||0;
+        const busy=panel.dataset.refreshing==='true';
         const statusVal=panel.querySelector('.dashboard-status-value');
         const statusFoot=panel.querySelector('.dashboard-summary-strip .dashboard-metric:last-child .dashboard-metric-foot');
-        if(statusVal) statusVal.textContent='刷新失败';
+        if(statusVal) statusVal.textContent=busy?(hasSnapshot?'更新中':'加载中'):error?'更新失败':!hasSnapshot?'加载中':stale?'缓存待更新':!online?'异常':partialErrors?'部分异常':'正常';
         if(statusFoot){
-            statusFoot.className='dashboard-metric-foot is-orange';
-            statusFoot.textContent=`保留现有数据 · ${message||'稍后重试'}`;
+            statusFoot.className='dashboard-metric-foot dashboard-status-foot '+(stale||error||partialErrors||(!online&&hasSnapshot)?'is-orange':hasSnapshot&&!busy?'is-status':'is-muted');
         }
-        serverConnection?.classList.remove('is-hydrating');
+        const message=panel.querySelector('[data-dashboard-snapshot-message]');
+        if(message){
+            message.textContent=busy?(hasSnapshot?'保留已显示数据':'正在读取媒体数据'):error?'可点击重试':stale?'显示上次数据':partialErrors?`${partialErrors} 项数据未同步`:panel.dataset.product;
+            message.title=error?`更新失败 · ${error}`:message.textContent;
+        }
+        const time=panel.querySelector('[data-dashboard-updated-at]');
+        if(time){
+            time.dateTime=panel.dataset.updatedAt||'';
+            time.textContent=time.dateTime?time.dateTime.slice(11,19):'—';
+            time.title=time.dateTime?`更新时间 ${time.dateTime.slice(0,19).replace('T',' ')} UTC`:'尚无成功读取';
+        }
+        const refresh=panel.querySelector('[data-dashboard-refresh]');
+        if(refresh){
+            refresh.title=error?'重试看板更新':'刷新看板数据';
+            refresh.setAttribute('aria-label',refresh.title);
+        }
+        const health=panel.querySelector('[data-library-footer-health]');
+        if(health){
+            health.className=stale||error?'is-orange':hasSnapshot&&online?'is-status':'';
+            const label=stale?'缓存':error?'异常':hasSnapshot?(online?'正常':'异常'):'加载中';
+            const icon=stale||error||(!online&&hasSnapshot)?'circle-alert':hasSnapshot?'check':'clock';
+            const key=`${icon}:${panel.dataset.product}:${label}`;
+            if(health.dataset.statusKey!==key){
+                health.dataset.statusKey=key;
+                health.innerHTML=`<i data-lucide="${icon}"></i>${esc(panel.dataset.product)} ${label}`;
+                window.renderLucideIcons?.(health);
+            }
+        }
+    }
+
+    function setDashboardRequestError(message){
+        serverPanels.forEach(panel=>{
+            panel.dataset.refreshError=message;
+            panel.dataset.stale=panel.dataset.hasSnapshot==='true'?'true':'false';
+            updateDashboardStatus(panel);
+            updateServerConnection({server_type:panel.dataset.serverPanel,online:panel.dataset.online==='true',stale:panel.dataset.stale==='true',server_product:panel.dataset.product});
+        });
+    }
+
+    function updateDashboardList(container,html){
+        if(!container) return;
+        const template=document.createElement('template');
+        template.innerHTML=html;
+        const keys=nodes=>Array.from(nodes,node=>JSON.parse(node.dataset.renderKey));
+        if(JSON.stringify(keys(container.children))===JSON.stringify(keys(template.content.children))) return;
+        container.replaceChildren(template.content);
+        window.renderLucideIcons?.(container);
     }
 
     function hydrateServerPanel(panel, board){
         if(!panel || !board) return;
-        panel.classList.remove('is-hydrating');
-        updateServerConnection(board);
-
-        let errorCard=panel.querySelector('.dashboard-error-card');
-        const primaryGrid=panel.querySelector('.dashboard-primary-grid');
-        const lowerGrid=panel.querySelector('.dashboard-lower-grid');
         const partialErrors=Array.isArray(board.partial_errors)?board.partial_errors:[];
-        const statusVal=panel.querySelector('.dashboard-status-value');
-        const statusFoot=panel.querySelector('.dashboard-summary-strip .dashboard-metric:last-child .dashboard-metric-foot');
-        if(statusVal) statusVal.textContent=!board.online?'异常':(partialErrors.length?'部分异常':'正常');
-        if(statusFoot){
-            statusFoot.className='dashboard-metric-foot '+(board.online&&!partialErrors.length?'is-status':'is-orange');
-            statusFoot.textContent=partialErrors.length?`${partialErrors.length} 项数据未同步`:`${board.server_name||board.server_type} · ${board.server_product||String(board.server_type||'').toUpperCase()}`;
-        }
-
-        if(board.error){
-            if(primaryGrid) primaryGrid.hidden=true;
-            if(lowerGrid) lowerGrid.hidden=true;
-            if(!errorCard){
-                errorCard=document.createElement('section');
-                errorCard.className='dashboard-panel dashboard-error-card';
-                panel.appendChild(errorCard);
-            }
-            errorCard.hidden=false;
-            errorCard.innerHTML=`
-                <span class="dashboard-error-icon"><i data-lucide="circle-alert"></i></span>
-                <div><strong>节点连接失败</strong><p>${esc(board.error)}</p><small>检查服务地址、凭证与网络可达性后重新保存。</small></div>
-                <button type="button" class="secondary-btn" data-open-media-config="${esc(board.server_type)}"><i data-lucide="wrench"></i>修复配置</button>
-            `;
-            errorCard.querySelector('[data-open-media-config]')?.addEventListener('click',()=>openConfig(board.server_type||''));
-            applyDashboardProgress(panel);
-            window.renderLucideIcons?.(panel);
+        panel.dataset.online=board.online?'true':'false';
+        panel.dataset.stale=board.stale?'true':'false';
+        panel.dataset.refreshError=board.refresh_error||board.error||'';
+        panel.dataset.partialErrors=String(partialErrors.length);
+        panel.dataset.product=board.server_product||String(board.server_type||'').toUpperCase();
+        // 没有成功快照的节点失败仅更新状态，不能把占位或旧内容改成零。
+        if(!board.updated_at || (board.error&&!board.stale)){
+            panel.dataset.refreshError=board.refresh_error||board.error||'读取失败，请重试';
+            panel.dataset.stale=panel.dataset.hasSnapshot==='true'?'true':'false';
+            updateDashboardStatus(panel);
+            updateServerConnection({...board,stale:panel.dataset.stale==='true'});
             return;
         }
-
-        if(errorCard) errorCard.hidden=true;
-        if(primaryGrid) primaryGrid.hidden=false;
-        if(lowerGrid) lowerGrid.hidden=false;
+        panel.dataset.hasSnapshot='true';
+        panel.dataset.updatedAt=board.updated_at;
+        panel.classList.remove('is-hydrating');
+        updateDashboardStatus(panel);
+        updateServerConnection(board);
 
         const totalItems=Number(board.total_items)||0;
         const movieCount=Number(board.movie_count)||0;
@@ -389,11 +429,8 @@
         metricValues.forEach(([element,value])=>{
             if(!element) return;
             element.dataset.countTarget=String(value);
-            if(window.MFAnim){
-                window.MFAnim.countUp(element,value,{duration:0.6});
-            }else{
-                element.textContent=Number(value).toLocaleString('zh-CN');
-            }
+            const text=Number(value).toLocaleString('zh-CN');
+            if(element.textContent!==text) element.textContent=text;
         });
         const mediaComposition=panel.querySelector('[data-media-composition]');
         if(mediaComposition){
@@ -407,24 +444,25 @@
         const primaryFirstPanel=panel.querySelector('.dashboard-primary-grid .dashboard-panel:first-child');
         if(recentPlayed.length && playbackBody){
             primaryFirstPanel?.querySelector(':scope > .dashboard-panel-empty')?.remove();
-            playbackBody.innerHTML=recentPlayed.slice(0,4).map(item=>{
+            updateDashboardList(playbackBody,recentPlayed.slice(0,4).map(item=>{
                 const thumb=item.primary_image?`<img src="${esc(item.primary_image)}" alt="" loading="lazy">`:`<span class="dashboard-media-thumb"><i data-lucide="film"></i></span>`;
                 const subLabel=item.episode_label||item.year||item.type||'';
                 const progress=Math.min(100,Math.max(0,Number(item.progress)||0));
                 const lastPlayed=item.last_played?item.last_played.slice(0,10):'暂无播放时间';
                 const stateTag=item.episode_label?'剧集':'电影';
+                const key=[item.display_name,item.web_url||'#',item.primary_image||'',subLabel,Number(item.progress)||0,lastPlayed,stateTag];
                 return `
-                    <tr class="dashboard-playback-row">
+                    <tr class="dashboard-playback-row" data-render-key="${esc(JSON.stringify(key))}">
                         <td><a class="dashboard-media-name" href="${esc(item.web_url||'#')}" target="_blank" rel="noopener">${thumb}<span><strong>${esc(item.display_name)}</strong><small>${esc(subLabel)}</small></span></a></td>
                         <td><div class="dashboard-progress"><span><i data-progress-width="${progress}"></i></span><b>${Math.round(progress)}%</b></div><small class="dashboard-progress-note">${esc(lastPlayed)}</small></td>
                         <td><span class="dashboard-state-tag">${stateTag}</span></td>
                         <td><a class="dashboard-row-action" href="${esc(item.web_url||'#')}" target="_blank" rel="noopener" aria-label="打开 ${esc(item.display_name)}"><i data-lucide="external-link"></i></a></td>
                     </tr>
                 `;
-            }).join('');
+            }).join(''));
             if(playbackScroll) playbackScroll.hidden=false;
         }else{
-            if(playbackBody) playbackBody.innerHTML='';
+            updateDashboardList(playbackBody,'');
             if(playbackScroll) playbackScroll.hidden=true;
             ensurePanelEmpty(primaryFirstPanel,'history','暂无最近播放记录');
         }
@@ -435,25 +473,24 @@
         const libraryCountLabel=panel.querySelector('[data-library-count-label]');
         const libraryFooterCount=panel.querySelector('[data-library-footer-count]');
         const libraryFooterTotal=panel.querySelector('[data-library-footer-total]');
-        const libraryFooterHealth=panel.querySelector('[data-library-footer-health]');
         if(libraryCountLabel) libraryCountLabel.textContent=`${libraries.length} 个分区`;
         if(libraryFooterCount) libraryFooterCount.textContent=`${libraries.length} 个媒体库`;
         if(libraryFooterTotal) libraryFooterTotal.textContent=`${totalItems.toLocaleString('zh-CN')} 个可播放项`;
-        if(libraryFooterHealth) libraryFooterHealth.innerHTML=`<i data-lucide="${board.online?'check':'circle-alert'}"></i>${esc(board.server_product||String(board.server_type||'').toUpperCase())} ${board.online?'正常':'异常'}`;
         if(libraries.length && libBody){
             libContainer?.querySelector(':scope > .dashboard-panel-empty')?.remove();
             libBody.hidden=false;
-            libBody.innerHTML=libraries.map(library=>{
+            updateDashboardList(libBody,libraries.map(library=>{
                 const share=libraryTotal?Math.min(100,Math.round((Number(library.count)||0)/libraryTotal*100)):0;
                 return `
-                    <a class="dashboard-library-row" href="${esc(library.web_url||'#')}" target="_blank" rel="noopener">
+                    <a class="dashboard-library-row" href="${esc(library.web_url||'#')}" target="_blank" rel="noopener" data-render-key="${esc(JSON.stringify([library.name,Number(library.count)||0,library.web_url||'#']))}">
                         <div class="dashboard-library-row-head"><span><i data-lucide="folder"></i>${esc(library.name)}</span><strong>${Number(library.count||0).toLocaleString('zh-CN')} 项</strong></div>
                         <div class="dashboard-library-track"><i data-progress-width="${share}"></i></div>
                     </a>
                 `;
-            }).join('');
+            }).join(''));
         }else{
-            if(libBody){libBody.innerHTML='';libBody.hidden=true;}
+            updateDashboardList(libBody,'');
+            if(libBody) libBody.hidden=true;
             ensurePanelEmpty(libContainer,'library-big','暂无媒体库数据');
         }
 
@@ -464,19 +501,21 @@
         if(recentAdded.length && posterList){
             lowerFirstPanel?.querySelector(':scope > .dashboard-panel-empty')?.remove();
             posterList.hidden=false;
-            posterList.innerHTML=recentAdded.slice(0,5).map((item,index)=>{
+            updateDashboardList(posterList,recentAdded.slice(0,5).map((item,index)=>{
                 const image=item.primary_image?`<img src="${esc(item.primary_image)}" alt="${esc(item.display_name)}" loading="lazy">`:`<span><i data-lucide="film"></i></span>`;
                 const indexLabel=String(index+1).padStart(2,'0');
                 const tagRight=item.episode_label||(item.runtime?`${item.runtime} 分钟`:'新入库');
+                const key=[item.display_name,item.web_url||'#',item.primary_image||'',String(item.type||'').toUpperCase(),item.year||item.type,tagRight];
                 return `
-                    <a class="dashboard-poster-card" href="${esc(item.web_url||'#')}" target="_blank" rel="noopener" title="${esc(item.display_name)}">
+                    <a class="dashboard-poster-card" href="${esc(item.web_url||'#')}" target="_blank" rel="noopener" title="${esc(item.display_name)}" data-render-key="${esc(JSON.stringify(key))}">
                         <div class="dashboard-poster-art">${image}<small>${indexLabel} / ${esc(item.type||'').toUpperCase()}</small></div>
                         <div class="dashboard-poster-copy"><strong>${esc(item.display_name)}</strong><span><b>${esc(item.year||item.type||'')}</b><b>${esc(tagRight)}</b></span></div>
                     </a>
                 `;
-            }).join('');
+            }).join(''));
         }else{
-            if(posterList){posterList.innerHTML='';posterList.hidden=true;}
+            updateDashboardList(posterList,'');
+            if(posterList) posterList.hidden=true;
             ensurePanelEmpty(lowerFirstPanel,'package-open','暂无最近入库内容','is-poster');
         }
 
@@ -485,24 +524,49 @@
     }
 
     let dashboardRequestSerial=0;
+    let dashboardRequestController=null;
+    function setDashboardBusy(busy){
+        serverPanels.forEach(panel=>{
+            panel.dataset.refreshing=busy?'true':'false';
+            updateDashboardStatus(panel);
+        });
+        document.querySelectorAll('[data-dashboard-refresh]').forEach(button=>{
+            button.disabled=busy;
+            button.setAttribute('aria-busy',busy?'true':'false');
+            button.classList.toggle('is-refreshing',busy);
+        });
+    }
     async function fetchDashboardAsync(force=false){
         const requestSerial=++dashboardRequestSerial;
+        dashboardRequestController?.abort();
+        const controller=new AbortController();
+        dashboardRequestController=controller;
+        let timedOut=false;
+        const timeout=setTimeout(()=>{timedOut=true;controller.abort();},35000);
+        setDashboardBusy(true);
         try{
             const url=force?'/api/dashboard?refresh=1':'/api/dashboard';
-            const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'});
+            const response=await fetch(url,{headers:{Accept:'application/json'},signal:controller.signal});
             if(!response.ok) throw new Error(`看板请求失败（HTTP ${response.status}）`);
             const boards=await response.json();
             if(!Array.isArray(boards)) throw new Error('看板返回数据格式无效');
-            if(requestSerial!==dashboardRequestSerial) return false;
+            if(requestSerial!==dashboardRequestSerial||controller.signal.aborted) return false;
+            if(serverPanels.some(panel=>!boards.some(board=>board.server_type===panel.dataset.serverPanel))) throw new Error('看板返回数据不完整');
             boards.forEach(board=>{
                 const panel=serverPanels.find(item=>item.dataset.serverPanel===board.server_type);
                 if(panel) hydrateServerPanel(panel,board);
             });
             return true;
         }catch(error){
-            if(requestSerial!==dashboardRequestSerial || error?.name==='AbortError') return false;
-            setDashboardRequestError(error?.message||'看板读取失败');
+            if(requestSerial!==dashboardRequestSerial) return false;
+            setDashboardRequestError(timedOut?'读取超时，请重试':'读取失败，请重试');
             return false;
+        }finally{
+            clearTimeout(timeout);
+            if(requestSerial===dashboardRequestSerial){
+                dashboardRequestController=null;
+                setDashboardBusy(false);
+            }
         }
     }
     applyDashboardProgress();
@@ -510,7 +574,7 @@
     const initialPanel=document.querySelector('.dashboard-server-panel.active');
     if(initialPanel) animateDashboardEntry(initialPanel);
 
-    if(!isCached){
+    if(needsRefresh&&serverPanels.length){
         fetchDashboardAsync();
     }
 
@@ -546,7 +610,10 @@
         if(serverSelect){
             serverSelect.value=type;
             const selected=serverSelect.selectedOptions[0];
-            const offline=selected?.dataset.online!=='true';
+            const stale=selected?.dataset.stale==='true';
+            const offline=selected?.dataset.online!=='true'&&!stale;
+            serverConnection?.classList.toggle('is-hydrating',nextPanel?.dataset.hasSnapshot!=='true'&&!nextPanel?.dataset.refreshError);
+            serverConnection?.classList.toggle('is-stale',stale);
             serverConnection?.classList.toggle('is-offline',offline);
             serverConnection?.querySelector('.dashboard-connection-dot')?.classList.toggle('is-offline',offline);
         }
@@ -567,16 +634,7 @@
 
     async function refreshDashboardPanel(button){
         if(button.getAttribute('aria-busy')==='true') return;
-        button.disabled=true;
-        button.setAttribute('aria-busy','true');
-        button.classList.add('is-refreshing');
-        try{
-            await fetchDashboardAsync(true);
-        }finally{
-            button.disabled=false;
-            button.setAttribute('aria-busy','false');
-            button.classList.remove('is-refreshing');
-        }
+        await fetchDashboardAsync(true);
     }
     document.addEventListener('click',event=>{
         const button=event.target.closest('[data-dashboard-refresh]');

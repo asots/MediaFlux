@@ -7,7 +7,8 @@ import time
 import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any
 
 from app import database as db
@@ -77,15 +78,81 @@ def build_automation_summary() -> dict:
 
 
 @dataclass
-class _DashboardCacheEntry:
+class _MediaSnapshot:
     key: tuple[str, ...]
     expires_at: float
-    boards: list[DashboardData]
+    retain_until: float
+    data: list
+    forced: bool = False
 
 
-_dashboard_cache: _DashboardCacheEntry | None = None
-_dashboard_cache_lock = threading.Lock()
-_dashboard_refresh_lock = threading.Lock()
+class _MediaSnapshotCache:
+    """一个有界快照槽；页面只读，XHR 刷新合并，失效后不接收旧请求回填。"""
+
+    def __init__(self):
+        self._entry: _MediaSnapshot | None = None
+        self._lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
+        self._generation = 0
+
+    def peek(self, key: tuple[str, ...], *, stale: bool = False) -> _MediaSnapshot | None:
+        with self._lock:
+            entry = self._entry
+            now = time.monotonic()
+            if entry and entry.key == key and now < entry.retain_until and (stale or now < entry.expires_at):
+                return entry
+        return None
+
+    def invalidate(self, *, keep_stale: bool = False) -> None:
+        with self._lock:
+            self._generation += 1
+            self._entry = (
+                replace(self._entry, expires_at=0)
+                if keep_stale and self._entry else None
+            )
+
+    def load(
+        self, key: tuple[str, ...], loader: Callable[[], list],
+        merge: Callable[[list | None, list], tuple[list, bool, bool]],
+        *, force: bool = False,
+    ) -> list:
+        with self._lock:
+            observed = self._entry
+            generation = self._generation
+        with self._refresh_lock:
+            cached = self.peek(key)
+            # 排队中的强刷也复用同一轮刚完成的读取，不串行重复访问上游。
+            if cached and (not force or (cached is not observed and cached.forced)):
+                return cached.data
+            previous = self.peek(key, stale=True)
+            try:
+                data = loader()
+            except Exception as exc:
+                if previous is None:
+                    raise
+                logger.warning("媒体概览刷新失败，保留限龄快照 type=%s", type(exc).__name__)
+                data = None
+            # 读取期间旧快照可能过期，失败不能无限续期旧内容。
+            previous = self.peek(key, stale=True)
+            data, retained, failed = merge(data, previous.data if previous else [])
+            now = time.monotonic()
+            ttl = max(1, min(get_int("DASHBOARD_CACHE_TTL_SECONDS", 30), 300))
+            entry = _MediaSnapshot(
+                key=key,
+                expires_at=now + (min(ttl, 5) if failed else ttl),
+                retain_until=previous.retain_until if retained and previous else now + 300,
+                data=data,
+                forced=force,
+            )
+            with self._lock:
+                if generation != self._generation:
+                    raise RuntimeError("媒体配置或内容已更新，请重试")
+                self._entry = entry
+            return entry.data
+
+
+_dashboard_cache = _MediaSnapshotCache()
+_recent_media_cache = _MediaSnapshotCache()
 
 
 def _dashboard_config_key() -> tuple[str, ...]:
@@ -97,14 +164,16 @@ def _dashboard_config_key() -> tuple[str, ...]:
         get("JELLYFIN_ENABLED"),
         get("JELLYFIN_URL"),
         get("JELLYFIN_API_KEY"),
+        get("EMBY_USER_ID"),
+        get("JELLYFIN_USER_ID"),
     )
 
 
-def clear_dashboard_cache() -> None:
-    """配置保存或媒体库刷新后主动失效看板缓存。"""
-    global _dashboard_cache
-    with _dashboard_cache_lock:
-        _dashboard_cache = None
+def clear_dashboard_cache(*, keep_stale: bool = False) -> None:
+    """同时失效两页快照；入库可保留旧内容，配置变更必须清空。"""
+    # 先失效被复用的内容，再失效依赖它的看板，避免并发刷新重新注入旧内容。
+    _recent_media_cache.invalidate(keep_stale=keep_stale)
+    _dashboard_cache.invalidate(keep_stale=keep_stale)
 
 
 def _decorate_dashboard(
@@ -124,11 +193,21 @@ def _load_dashboard(
     *,
     server_type: str,
     web_url: str,
+    reuse_recent: bool = True,
 ) -> DashboardData:
     """读取一次看板并确定性释放该请求独占的连接池。"""
     try:
+        recent = _recent_media_cache.peek((*_dashboard_config_key(), "72")) if reuse_recent else None
+        source = next(
+            (item for item in recent.data if item["server_type"] == server_type), None,
+        ) if recent else None
+        # 只复用完整、新鲜且同配置的作品列表；冷看板仍只读取原有的 8 项。
+        options = (
+            {"recent_added": source["items"][:8]}
+            if source and not source.get("error") and not source.get("stale") else {}
+        )
         return _decorate_dashboard(
-            client.get_dashboard(),
+            client.get_dashboard(**options),
             server_type=server_type,
             web_url=web_url,
         )
@@ -136,7 +215,7 @@ def _load_dashboard(
         close_media_server_client(client)
 
 
-def _dashboard_jobs() -> list[Callable[[], DashboardData]]:
+def _dashboard_jobs(*, reuse_recent: bool = True) -> list[Callable[[], DashboardData]]:
     jobs: list[Callable[[], DashboardData]] = []
     if get_bool("EMBY_ENABLED"):
         url, token = get("EMBY_URL"), get("EMBY_TOKEN")
@@ -146,6 +225,7 @@ def _dashboard_jobs() -> list[Callable[[], DashboardData]]:
                     EmbyClient(url, token),
                     server_type="emby",
                     web_url=url,
+                    reuse_recent=reuse_recent,
                 )
             )
         else:
@@ -166,6 +246,7 @@ def _dashboard_jobs() -> list[Callable[[], DashboardData]]:
                     JellyfinClient(url, key),
                     server_type="jellyfin",
                     web_url=url,
+                    reuse_recent=reuse_recent,
                 )
             )
         else:
@@ -180,8 +261,8 @@ def _dashboard_jobs() -> list[Callable[[], DashboardData]]:
     return jobs
 
 
-def _fetch_dashboards() -> list[DashboardData]:
-    jobs = _dashboard_jobs()
+def _fetch_dashboards(*, reuse_recent: bool = True) -> list[DashboardData]:
+    jobs = _dashboard_jobs(reuse_recent=reuse_recent)
     if len(jobs) <= 1:
         return [job() for job in jobs]
     with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="media-dashboard") as pool:
@@ -189,49 +270,54 @@ def _fetch_dashboards() -> list[DashboardData]:
         return [future.result() for future in futures]
 
 
-def build_dashboards(*, force: bool = False) -> list[DashboardData]:
-    """构造媒体服务器看板；短时缓存降低外部 API 聚合延迟。"""
-    global _dashboard_cache
-    key = _dashboard_config_key()
-    now = time.monotonic()
-    if not force:
-        with _dashboard_cache_lock:
-            cached = _dashboard_cache
-            if cached and cached.key == key and cached.expires_at > now:
-                return cached.boards
+def _merge_dashboards(
+    boards: list[DashboardData] | None, previous: list[DashboardData],
+) -> tuple[list[DashboardData], bool, bool]:
+    """返回结果、是否保留旧值、是否读取失败；成功空值不会被旧数据覆盖。"""
+    if boards is None:
+        if not previous:
+            raise RuntimeError("媒体服务器暂时不可用")
+        return [replace(board, online=False, stale=True, refresh_error="读取失败，显示上次数据") for board in previous], True, True
+    old_by_type = {board.server_type: board for board in previous if board.updated_at}
+    retained = failed = False
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for index, board in enumerate(boards):
+        old = old_by_type.get(board.server_type)
+        unavailable = bool(board.error or not board.online)
+        failed = failed or unavailable or bool(board.partial_errors)
+        if unavailable and old:
+            boards[index] = replace(old, online=False, stale=True, refresh_error="读取失败，显示上次数据")
+            retained = True
+            continue
+        board.updated_at = stamp if board.online else ""
+        if board.partial_errors and old:
+            for part in board.partial_errors:
+                fields = ("movie_count", "series_count", "episode_count") if part == "media_counts" else (part,)
+                for field in fields:
+                    if field in {"libraries", "recent_added", "recent_played", "total_items", "total_plays", "movie_count", "series_count", "episode_count"}:
+                        setattr(board, field, getattr(old, field))
+            board.stale = True
+            board.updated_at = old.updated_at
+            board.refresh_error = "部分数据读取失败，保留上次结果"
+            retained = True
+    return boards, retained, failed
 
-    # 同一时刻只允许一个请求刷新，其他请求等待后复用结果，避免缓存击穿。
-    with _dashboard_refresh_lock:
-        now = time.monotonic()
-        if not force:
-            with _dashboard_cache_lock:
-                cached = _dashboard_cache
-                if cached and cached.key == key and cached.expires_at > now:
-                    return cached.boards
-        boards = _fetch_dashboards()
-        ttl = max(1, min(get_int("DASHBOARD_CACHE_TTL_SECONDS", 30), 300))
-        if any(board.error or board.partial_errors or not board.online for board in boards):
-            ttl = min(ttl, 5)
-        with _dashboard_cache_lock:
-            _dashboard_cache = _DashboardCacheEntry(
-                key=key,
-                expires_at=time.monotonic() + ttl,
-                boards=boards,
-            )
-        return boards
+
+def build_dashboards(*, force: bool = False) -> list[DashboardData]:
+    """XHR 读取最新看板，同轮请求共享结果；失败不清空仍可用的快照。"""
+    return _dashboard_cache.load(
+        _dashboard_config_key(),
+        (lambda: _fetch_dashboards(reuse_recent=False)) if force else _fetch_dashboards,
+        _merge_dashboards, force=force,
+    )
 
 
 def get_cached_dashboards_or_stubs() -> tuple[list[DashboardData], bool]:
-    """返回 (dashboards, is_cached)。
-    若已有热缓存，直接返回 (cached.boards, True)；
-    若无缓存，快速返回已配置服务的骨架列表 (stubs, False)，让页面 0ms 秒开。
-    """
-    key = _dashboard_config_key()
-    now = time.monotonic()
-    with _dashboard_cache_lock:
-        cached = _dashboard_cache
-        if cached and cached.key == key and cached.expires_at > now:
-            return cached.boards, True
+    """页面只读取快照，不访问上游；第二值表示有快照而非仍然新鲜。"""
+    cached = _dashboard_cache.peek(_dashboard_config_key(), stale=True)
+    if cached:
+        expired = cached.expires_at <= time.monotonic()
+        return [replace(board, stale=board.stale or expired) for board in cached.data], True
 
     stubs: list[DashboardData] = []
     if get_bool("JELLYFIN_ENABLED"):
@@ -331,7 +417,7 @@ def _run_owned_media_source_job(
         close_media_server_client(client)
 
 
-def build_recent_media(*, limit: int = 72) -> list[dict]:
+def _fetch_recent_media(*, limit: int = 72) -> list[dict]:
     """并发聚合所有已配置媒体服务器的最近入库内容。"""
     normalized_limit = max(1, min(int(limit or 72), 200))
     jobs: list[Callable[[], dict]] = []
@@ -355,6 +441,53 @@ def build_recent_media(*, limit: int = 72) -> list[dict]:
             reverse=True,
         )
     return results
+
+
+def _merge_recent_media(sources: list[dict] | None, previous: list[dict]) -> tuple[list[dict], bool, bool]:
+    if sources is None:
+        if not previous:
+            raise RuntimeError("媒体服务器暂时不可用")
+        return [{**source, "stale": True, "error": "读取失败，显示上次数据"} for source in previous], True, True
+    old_by_type = {source["server_type"]: source for source in previous if source.get("updated_at")}
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    retained = failed = False
+    results = []
+    for source in sources:
+        old = old_by_type.get(source["server_type"])
+        error = source.get("error", "")
+        failed = failed or bool(error)
+        if error and old:
+            results.append({**old, "error": error, "stale": True})
+            retained = True
+        else:
+            results.append({**source, "updated_at": "" if error else stamp, "stale": False})
+    return results, retained, failed
+
+
+def build_recent_media(*, limit: int = 72) -> list[dict]:
+    normalized_limit = max(1, min(int(limit or 72), 200))
+    return _recent_media_cache.load(
+        (*_dashboard_config_key(), str(normalized_limit)),
+        lambda: _fetch_recent_media(limit=normalized_limit), _merge_recent_media,
+    )
+
+
+def get_cached_recent_media_or_stubs(*, limit: int = 72) -> tuple[list[dict], bool]:
+    """与看板使用相同的限龄快照，未加载时只返回服务器标识。"""
+    normalized_limit = max(1, min(int(limit or 72), 200))
+    cached = _recent_media_cache.peek((*_dashboard_config_key(), str(normalized_limit)), stale=True)
+    if cached:
+        expired = cached.expires_at <= time.monotonic()
+        return [{**source, "stale": source.get("stale", False) or expired} for source in cached.data], True
+    return [
+        {"server_type": server_type, "server_name": name, "web_url": get(url_key),
+         "items": [], "error": "", "updated_at": "", "stale": False}
+        for server_type, name, url_key, token_key in (
+            ("emby", "Emby", "EMBY_URL", "EMBY_TOKEN"),
+            ("jellyfin", "Jellyfin", "JELLYFIN_URL", "JELLYFIN_API_KEY"),
+        )
+        if get_bool(f"{server_type.upper()}_ENABLED") and get(url_key) and get(token_key)
+    ], False
 
 
 def _media_search_source_payload(

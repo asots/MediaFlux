@@ -81,7 +81,7 @@ class JellyfinClient(MediaServerClient):
         finally:
             close_media_server_client(client)
 
-    def get_dashboard(self) -> DashboardData:
+    def get_dashboard(self, *, recent_added: list[MediaItem] | None = None) -> DashboardData:
         """并行读取互不依赖的 Jellyfin 看板分区。"""
         data = DashboardData(server_name=self.display_name)
         try:
@@ -100,6 +100,9 @@ class JellyfinClient(MediaServerClient):
             "media_counts": ("_media_counts", {}),
             "total_plays": ("_total_plays", 0),
         }
+        if recent_added is not None:
+            data.recent_added = recent_added
+            del parts["recent_added"]
         with ThreadPoolExecutor(max_workers=len(parts), thread_name_prefix="jellyfin-dashboard") as pool:
             futures = {
                 name: pool.submit(self._isolated_part, method_name, user_id)

@@ -960,6 +960,9 @@ def dashboard_data(request: Request, refresh: bool = False):
                 "server_product": b.server_product,
                 "server_version": b.server_version,
                 "partial_errors": b.partial_errors,
+                "stale": b.stale,
+                "updated_at": b.updated_at,
+                "refresh_error": b.refresh_error,
                 "total_items": b.total_items,
                 "movie_count": b.movie_count,
                 "series_count": b.series_count,
@@ -1002,6 +1005,7 @@ def dashboard_data(request: Request, refresh: bool = False):
                         "type": item.type,
                         "year": item.year,
                         "date_added": item.date_added,
+                        "runtime": item.runtime,
                         "overview": item.overview,
                         "primary_image": item.primary_image,
                         "web_url": item.web_url,
@@ -1759,7 +1763,8 @@ def save_config(request: Request, data: Any = Body(default=None)):
             )
     from app.services import clear_dashboard_cache
 
-    clear_dashboard_cache()
+    if _MEDIA_SERVER_PROFILE_KEYS & changed_keys:
+        clear_dashboard_cache()
     media_proxy_keys = {
         "JELLYFIN_ENABLED", "JELLYFIN_URL", "JELLYFIN_API_KEY", "JELLYFIN_USER_ID",
         "EMBY_ENABLED", "EMBY_URL", "EMBY_TOKEN", "EMBY_USER_ID",

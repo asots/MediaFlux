@@ -53,6 +53,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
             server_type="jellyfin",
             web_url="http://media.example:8096",
             online=True,
+            updated_at="2026-10-15T00:00:00+00:00",
             total_items=16,
             movie_count=3,
             series_count=8,
@@ -169,6 +170,66 @@ class MediaHubPageContractTests(InitializedWebTestCase):
             self.assertEqual(response.status_code, 302, path)
             self.assertEqual(response.headers.get("location"), "http://testserver/login")
 
+    def test_anonymous_recent_xhr_cannot_bypass_login(self):
+        with patch("app.routes.pages.build_recent_media") as load:
+            response = self.client.get(
+                "/media/recent", headers={"X-Requested-With": "MediaFlux"}, follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 302)
+        load.assert_not_called()
+
+    def test_recent_cold_page_returns_loading_shell_without_upstream_call(self):
+        self._login()
+        stub = {"server_type": "jellyfin", "server_name": "Test", "items": [], "error": ""}
+        with (
+            patch("app.routes.pages.get_cached_recent_media_or_stubs", return_value=([stub], False)),
+            patch("app.routes.pages.build_recent_media") as load,
+        ):
+            response = self.client.get("/media/recent")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-recent-loading="true"', response.text)
+        self.assertIn('data-recent-needs-refresh="true"', response.text)
+        self.assertIn("最近入库加载中", response.text)
+        self.assertNotIn("没有符合条件的入库内容", response.text)
+        load.assert_not_called()
+
+    def test_recent_stale_page_keeps_items_without_waiting_for_upstream(self):
+        self._login()
+        source = {
+            "server_type": "jellyfin", "server_name": "Test", "items": self._dashboard().recent_added,
+            "web_url": "http://media.test",
+            "error": "", "stale": True, "updated_at": "2026-10-15T00:00:00+00:00",
+        }
+        with (
+            patch("app.routes.pages.get_cached_recent_media_or_stubs", return_value=([source], True)),
+            patch("app.routes.pages.build_recent_media") as load,
+        ):
+            response = self.client.get("/media/recent?type=movie&q=沙丘")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("沙丘 2", response.text)
+        self.assertIn('data-recent-loading="false"', response.text)
+        self.assertIn('data-recent-needs-refresh="true"', response.text)
+        self.assertIn('data-recent-stale="true"', response.text)
+        self.assertNotIn("media-recent-snapshot-status", response.text)
+        load.assert_not_called()
+
+    def test_dashboard_api_preserves_snapshot_metadata_and_runtime(self):
+        self._login()
+        board = self._dashboard()
+        board.stale, board.online = True, False
+        board.refresh_error = "读取失败，显示上次数据"
+        board.recent_added[0].runtime = 120
+        with patch("app.routes.api.build_dashboards", return_value=[board]):
+            response = self.client.get("/api/dashboard")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()[0]
+        self.assertTrue(payload["stale"])
+        self.assertFalse(payload["online"])
+        self.assertEqual(payload["updated_at"], board.updated_at)
+        self.assertEqual(payload["refresh_error"], board.refresh_error)
+        self.assertEqual(payload["total_items"], 16)
+        self.assertEqual(payload["recent_added"][0]["runtime"], 120)
+
     def test_dashboard_uses_real_media_and_search_destinations(self):
         self._login()
         with patch("app.routes.pages.get_cached_dashboards_or_stubs", return_value=([self._dashboard()], True)):
@@ -272,7 +333,10 @@ class MediaHubPageContractTests(InitializedWebTestCase):
             "items": [self._dashboard().recent_added[0]],
         }]
         with patch("app.routes.pages.build_recent_media", return_value=sources, create=True) as build:
-            response = self.client.get("/media/recent?server=jellyfin&type=movie&q=沙丘")
+            response = self.client.get(
+                "/media/recent?server=jellyfin&type=movie&q=沙丘",
+                headers={"X-Requested-With": "MediaFlux"},
+            )
 
         self.assertEqual(response.status_code, 200)
         build.assert_called_once()

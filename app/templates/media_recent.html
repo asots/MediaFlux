@@ -5,14 +5,20 @@
 {% block page_styles %}
 <link rel="stylesheet" href="{{ static_url('css/dashboard-workbench.css') }}">
 <link rel="stylesheet" href="{{ static_url('css/media-hub.css') }}">
+<style>
+.media-recent-page button.media-recent-overview { appearance: none; background: none; border: 0; padding: 0; text-align: left; font: inherit; cursor: pointer; min-height: 44px; }
+.media-recent-page .media-recent-overview.is-warning .media-recent-overview-copy strong { color: var(--dashboard-orange); }
+.media-recent-page .media-recent-shell, .media-recent-page .media-recent-loading { min-height: max(300px, min(65vh, 520px)); }
+.media-recent-page .media-hub-shell.is-stale .media-recent-foot b i { background: var(--dashboard-orange); box-shadow: none; }
+</style>
 {% endblock %}
 {% block workspace_bar %}
 <header class="dashboard-topbar media-hub-topbar">
     <button class="icon-btn workspace-menu-btn dashboard-mobile-menu" id="toggleSidebar" type="button" aria-label="打开导航" title="打开导航" aria-expanded="false"><i data-lucide="menu"></i></button>
-    <div class="media-recent-overview" aria-label="最近入库，共 {{ items|length }} 项内容">
+    <button type="button" class="media-recent-overview" data-recent-retry title="刷新最近入库" aria-label="{{ '最近入库，加载中' if recent_loading else '最近入库，共 ' ~ items|length ~ ' 项内容' }}">
         <span class="media-recent-overview-icon"><i data-lucide="library-big" data-recent-idle-icon></i><i data-lucide="loader-circle" data-recent-loading-icon></i></span>
-        <span class="media-recent-overview-copy"><strong>最近入库</strong><small><b>{{ items|length }}</b> 项内容</small></span>
-    </div>
+        <span class="media-recent-overview-copy"><strong>最近入库</strong><small><b>{{ '—' if recent_loading or (all_sources_failed and not recent_updated_at) else items|length }}</b> 项内容</small></span>
+    </button>
     <form class="media-recent-toolbar" method="get" action="{{ url_for('pages.media_recent') }}" role="search" data-media-recent-filter aria-busy="false">
         <label class="media-hub-filter-search"><i data-lucide="search"></i><input name="q" type="search" maxlength="120" value="{{ query }}" autocomplete="off" placeholder="按标题、剧名或年份筛选"></label>
         <label class="media-recent-select"><span>服务器</span><select name="server" data-auto-submit aria-label="筛选媒体服务器">
@@ -34,13 +40,19 @@
 </header>
 {% endblock %}
 {% block content %}
-<div class="media-hub-shell">
-    <div data-media-recent-results>
+{% set recent_content = namespace(value=[]) %}
+{% for entry in items %}{% set item = entry.media %}{% set source = entry.source %}{% set recent_content.value = recent_content.value + [[source.server_type, source.server_name, source.web_url, item.web_url, item.display_name, item.primary_image, item.type, item.series_name, item.name, item.year, item.season_number, item.episode_number, item.date_added]] %}{% endfor %}
+<div class="media-hub-shell{% if recent_stale %} is-stale{% endif %}" data-media-recent-state data-recent-loading="{{ 'true' if recent_loading else 'false' }}" data-recent-needs-refresh="{{ 'true' if recent_needs_refresh else 'false' }}" data-recent-updated-at="{{ recent_updated_at|default('') }}" data-recent-stale="{{ 'true' if recent_stale else 'false' }}" data-recent-failed="{{ 'true' if errors else 'false' }}">
+    <div data-media-recent-results data-content-key="{{ [recent_content.value, [] if items else [recent_loading|default(false), all_sources_failed, has_sources, search_error]]|tojson|forceescape }}">
+    <div data-recent-notices>
     {% if search_error %}<section class="media-hub-notice is-error"><i data-lucide="circle-alert"></i><div><strong>筛选条件无效</strong><span>{{ search_error }}</span></div></section>{% endif %}
-    {% for source in errors %}<section class="media-hub-notice is-warning"><i data-lucide="server-off"></i><div><strong>{{ source.server_name }} 暂时不可用</strong><span>{{ source.error }}</span></div></section>{% endfor %}
+    {% for source in errors if not recent_updated_at %}<section class="media-hub-notice is-warning"><i data-lucide="server-off"></i><div><strong>{{ source.server_name }} 暂时不可用</strong><span>{{ source.error }}</span></div></section>{% endfor %}
+    </div>
 
     <section class="media-recent-shell">
-        {% if items %}
+        {% if recent_loading %}
+        <section class="media-hub-empty media-recent-loading"><span><i data-lucide="library-big"></i></span><strong>最近入库加载中</strong><p>正在读取媒体服务器，内容将在这里显示。</p></section>
+        {% elif items %}
         <section class="media-recent-grid" aria-label="最近入库内容">
             {% for entry in items %}
             {% set item = entry.media %}{% set source = entry.source %}
@@ -58,7 +70,7 @@
             {% endfor %}
         </section>
         {% elif all_sources_failed %}
-        <section class="media-hub-empty"><span><i data-lucide="server-off"></i></span><strong>媒体服务器暂时不可用</strong><p>连接恢复后刷新页面即可重新获取最近入库内容。</p></section>
+        <section class="media-hub-empty"><span><i data-lucide="server-off"></i></span><strong>媒体服务器暂时不可用</strong><p>连接恢复后点击重试，重新读取最近入库内容。</p></section>
         {% elif not has_sources %}
         <section class="media-hub-empty"><span><i data-lucide="server-cog"></i></span><strong>尚未配置媒体服务器</strong><p>先在看板连接 Jellyfin 或 Emby，最近入库会自动汇总到这里。</p><a class="media-hub-empty-action" href="/"><i data-lucide="sliders-horizontal"></i>前往看板配置</a></section>
         {% else %}
@@ -74,18 +86,51 @@
 (function(){
     const form=document.querySelector('[data-media-recent-filter]');
     const topbar=form?.closest('.media-hub-topbar');
+    const state=document.querySelector('[data-media-recent-state]');
+    const retry=document.querySelector('[data-recent-retry]');
     let requestController=null;
     let requestGeneration=0;
+    let retryUrl=location.href;
+    const renderState=()=>{
+        if(!state) return;
+        const loading=state.dataset.recentLoading==='true';
+        const stale=state.dataset.recentStale==='true';
+        const failed=state.dataset.recentFailed==='true';
+        const busy=state.dataset.recentBusy==='true';
+        const updated=state.dataset.recentUpdatedAt;
+        state.classList.toggle('is-stale',stale);
+        if(retry){
+            const label=failed?(state.dataset.recentTimeout==='true'?'读取超时':'读取失败'):'最近入库';
+            retry.querySelector('strong').textContent=failed&&!busy?`${label} · 重试`:'最近入库';
+            retry.title=failed?`${label}${updated?'，保留上次内容':''}，点击重试`:'刷新最近入库';
+            retry.setAttribute('aria-label',retry.title);
+            retry.classList.toggle('is-warning',failed&&!busy);
+            retry.disabled=busy;
+            retry.setAttribute('aria-busy',busy?'true':'false');
+        }
+        if(loading){
+            const placeholder=document.querySelector('.media-recent-loading');
+            if(placeholder){
+                placeholder.querySelector('strong').textContent=failed&&!busy?(state.dataset.recentTimeout==='true'?'读取超时':'读取失败'):'最近入库加载中';
+                placeholder.querySelector('p').textContent=failed&&!busy?'点击左上角重试，重新读取最近入库内容。':'正在读取媒体服务器，内容将在这里显示。';
+            }
+            if(failed&&!busy) document.querySelector('.media-recent-overview')?.setAttribute('aria-label','最近入库读取失败，可重试');
+        }
+    };
     const setBusy=busy=>{
         form?.classList.toggle('is-submitting',busy);
         topbar?.classList.toggle('is-submitting',busy);
         form?.setAttribute('aria-busy',busy?'true':'false');
+        if(state){ state.dataset.recentBusy=busy?'true':'false'; renderState(); }
     };
     async function updateResults(url){
         const generation=++requestGeneration;
         requestController?.abort();
         const controller=new AbortController();
         requestController=controller;
+        retryUrl=String(url);
+        let timedOut=false;
+        const timeout=setTimeout(()=>{timedOut=true;controller.abort();},35000);
         setBusy(true);
         try{
             const response=await fetch(url,{headers:{'X-Requested-With':'MediaFlux'},signal:controller.signal});
@@ -96,16 +141,30 @@
             const nextResults=nextDocument.querySelector('[data-media-recent-results]');
             const currentResults=document.querySelector('[data-media-recent-results]');
             if(!nextResults||!currentResults) throw new Error('筛选结果结构无效');
+            const nextState=nextDocument.querySelector('[data-media-recent-state]');
+            if(nextState&&(nextState.dataset.recentLoading==='true'||(nextState.dataset.recentFailed==='true'&&!nextState.dataset.recentUpdatedAt))) throw new Error('最近入库读取失败');
+            const sameResults=currentResults.dataset?.contentKey&&currentResults.dataset.contentKey===nextResults.dataset?.contentKey;
             const stableHeight=Math.ceil(currentResults.getBoundingClientRect().height);
-            currentResults.style.minHeight=`${stableHeight}px`;
-            currentResults.classList.add('is-updating');
-            nextResults.style.minHeight=`${stableHeight}px`;
             const applyResult=()=>{
                 if(generation!==requestGeneration||controller.signal.aborted) return;
-                currentResults.replaceWith(nextResults);
+                if(!sameResults){
+                    nextResults.style.minHeight=`${stableHeight}px`;
+                    currentResults.replaceWith(nextResults);
+                    renderLucideIcons(nextResults);
+                }else{
+                    const currentNotices=currentResults.querySelector('[data-recent-notices]');
+                    const nextNotices=nextResults.querySelector('[data-recent-notices]');
+                    if(currentNotices&&nextNotices&&currentNotices.textContent!==nextNotices.textContent){
+                        currentNotices.replaceChildren(...nextNotices.childNodes);
+                        renderLucideIcons(currentNotices);
+                    }
+                }
                 const nextOverview=nextDocument.querySelector('.media-recent-overview-copy small');
                 const currentOverview=document.querySelector('.media-recent-overview-copy small');
                 if(nextOverview&&currentOverview) currentOverview.innerHTML=nextOverview.innerHTML;
+                const overview=document.querySelector('.media-recent-overview');
+                const nextOverviewLabel=nextDocument.querySelector('.media-recent-overview')?.getAttribute('aria-label');
+                if(overview&&nextOverviewLabel) overview.setAttribute('aria-label',nextOverviewLabel);
                 const nextReset=nextDocument.querySelector('.media-hub-filter-reset');
                 const currentReset=form?.querySelector('.media-hub-filter-reset');
                 if(nextReset&&currentReset){
@@ -114,18 +173,29 @@
                     currentReset.tabIndex=nextReset.hasAttribute('tabindex')?Number(nextReset.getAttribute('tabindex')):0;
                 }
                 history.replaceState({},'',url);
-                renderLucideIcons(nextResults);
+                if(state&&nextState){
+                    for(const key of ['recentLoading','recentNeedsRefresh','recentUpdatedAt','recentStale','recentFailed']) state.dataset[key]=nextState.dataset[key];
+                    state.dataset.recentTimeout='false';
+                    renderState();
+                }
                 requestAnimationFrame(()=>requestAnimationFrame(()=>{
                     nextResults.style.minHeight='';
                     nextResults.classList.remove('is-updating');
                 }));
             };
             const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
-            if(document.startViewTransition&&!reduceMotion) document.startViewTransition(applyResult);
+            if(!sameResults&&document.startViewTransition&&!reduceMotion) await document.startViewTransition(applyResult).updateCallbackDone;
             else applyResult();
         }catch(error){
-            if(error.name!=='AbortError'&&generation===requestGeneration) location.assign(url);
+            if(generation!==requestGeneration) return;
+            if(state){
+                state.dataset.recentFailed='true';
+                state.dataset.recentTimeout=timedOut?'true':'false';
+                if(state.dataset.recentUpdatedAt) state.dataset.recentStale='true';
+                renderState();
+            }
         }finally{
+            clearTimeout(timeout);
             if(generation===requestGeneration){ requestController=null; setBusy(false); }
         }
     }
@@ -137,6 +207,16 @@
         updateResults(url);
     });
     form?.querySelectorAll('select[data-auto-submit]').forEach(select=>select.addEventListener('change',()=>form.requestSubmit()));
+    form?.querySelector('.media-hub-filter-reset')?.addEventListener('click',event=>{
+        if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey) return;
+        event.preventDefault();
+        form.querySelector('[name="q"]').value='';
+        form.querySelectorAll('select').forEach(select=>{select.value='all';});
+        updateResults(event.currentTarget.href);
+    });
+    retry?.addEventListener('click',()=>updateResults(retryUrl));
+    renderState();
+    if(state?.dataset.recentNeedsRefresh==='true') updateResults(location.href);
 })();
 </script>
 {% endblock %}

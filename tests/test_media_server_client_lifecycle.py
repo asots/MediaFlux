@@ -9,6 +9,12 @@ from app.clients.base import DashboardData, MediaSearchResult, MediaServerClient
 
 
 class MediaServerClientLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        from app.services import clear_dashboard_cache
+
+        clear_dashboard_cache()
+        self.addCleanup(clear_dashboard_cache)
+
     @staticmethod
     def _source(client: MagicMock) -> list[tuple[str, str, str, MagicMock]]:
         return [("jellyfin", "Jellyfin", "http://private.local", client)]

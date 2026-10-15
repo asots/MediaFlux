@@ -14,6 +14,7 @@ from app.services import (
     build_automation_summary,
     build_recent_media,
     get_cached_dashboards_or_stubs,
+    get_cached_recent_media_or_stubs,
     get_media_server_urls,
 )
 from app.web import render_template, require_page_login
@@ -40,6 +41,7 @@ def dashboard(request: Request):
         "dashboard.html",
         dashboards=dashboards,
         is_cached=is_cached,
+        needs_refresh=not is_cached or any(board.stale for board in dashboards),
         automation=build_automation_summary(),
         server_urls=get_media_server_urls(),
         active="dashboard",
@@ -113,7 +115,10 @@ def media_recent(request: Request):
                 discovery_enabled=config.get_bool("DISCOVERY_ENABLED"),
             )
 
-    sources = build_recent_media()
+    if request.headers.get("X-Requested-With") == "MediaFlux":
+        sources, is_cached = build_recent_media(), True
+    else:
+        sources, is_cached = get_cached_recent_media_or_stubs()
     filtered_sources = [
         source for source in sources
         if selected_server == "all" or source.get("server_type") == selected_server
@@ -145,6 +150,10 @@ def media_recent(request: Request):
         active="media_recent",
         sources=sources,
         items=items,
+        recent_loading=bool(sources) and not is_cached,
+        recent_needs_refresh=bool(sources) and (not is_cached or any(source.get("stale") for source in sources)),
+        recent_updated_at=min((source["updated_at"] for source in filtered_sources if source.get("updated_at")), default=""),
+        recent_stale=any(source.get("stale") for source in filtered_sources),
         selected_server=selected_server,
         selected_type=selected_type,
         query=query,

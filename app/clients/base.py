@@ -243,6 +243,9 @@ class DashboardData:
     server_product: str = ""
     server_version: str = ""
     partial_errors: list[str] = field(default_factory=list)
+    stale: bool = False
+    updated_at: str = ""
+    refresh_error: str = ""
 
 
 def _dedupe_texts(values: object) -> list[str]:
@@ -414,7 +417,7 @@ class MediaServerClient:
             "episode_count": count("Episode"),
         }
 
-    def get_dashboard(self) -> DashboardData:
+    def get_dashboard(self, *, recent_added: list[MediaItem] | None = None) -> DashboardData:
         """聚合看板数据。任一步失败不影响其余。"""
         data = DashboardData(server_name=self.display_name)
         try:
@@ -426,7 +429,7 @@ class MediaServerClient:
 
         parts = (
             ("libraries", self._libraries, []),
-            ("recent_added", self._recent_added, []),
+            ("recent_added", self._recent_added if recent_added is None else lambda: recent_added, []),
             ("recent_played", self._recent_played, []),
             ("total_items", self._total_items, 0),
             ("total_plays", self._total_plays, 0),

@@ -1954,9 +1954,6 @@ html[data-media-proxy-initial-tab="advanced"] #proxyTab_advanced { display: bloc
 .dashboard-server-panel[hidden], .media-config-panel[hidden] { display: none !important; }
 .dashboard-server-panel.active { animation: none; }
 .dashboard-empty-state { margin-top: 8px; }
-.dashboard-error-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
-.dashboard-error-card strong { display: block; margin-bottom: 6px; }
-.dashboard-error-card .jump-btn { flex: 0 0 auto; }
 .dashboard-config-link { width: auto; margin-top: 16px; }
 .dashboard-error-hint { margin-top: 6px; font-size: 12px; }
 .server-head { justify-content: space-between; align-items: flex-end; }
@@ -4693,8 +4690,6 @@ body:has(.discovery-dialog[open]) { overflow: hidden; }
     .server-switcher { width: 100%; }
     .dashboard-head-config { margin-left: auto; }
     .server-switch-btn { min-width: 124px; }
-    .dashboard-error-card { align-items: stretch; flex-direction: column; }
-    .dashboard-error-card .jump-btn { width: 100%; }
     .app-modal, .media-config-modal { padding: max(8px,env(safe-area-inset-top,0px)) max(8px,env(safe-area-inset-right,0px)) max(8px,env(safe-area-inset-bottom,0px)) max(8px,env(safe-area-inset-left,0px)); overflow: hidden; }
     .download-cache-dialog { width: 100%; max-height: calc(100dvh - 16px - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px)); border-radius: 12px; }
     .download-cache-head { padding: 16px; }

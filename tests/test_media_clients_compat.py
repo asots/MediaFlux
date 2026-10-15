@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 from datetime import datetime
 from unittest.mock import Mock, patch
 
@@ -13,6 +14,30 @@ from app.clients.jellyfin import JellyfinClient
 
 
 class MediaRuntimeTests(unittest.TestCase):
+    def test_dashboard_reuses_complete_recent_snapshot_including_empty_results(self):
+        for client_type in (JellyfinClient, EmbyClient):
+            for recent in ([], [MediaItem(id="movie", name="测试电影", type="Movie")]):
+                with self.subTest(client=client_type.__name__, empty=not recent), ExitStack() as stack:
+                    client = stack.enter_context(client_type("http://media.test", "fixture"))
+                    for method, value in {
+                        "_server_identity": ("Test", "Test", "12"),
+                        "_user_id": "user-id",
+                        "_libraries": [], "_recent_played": [],
+                        "_total_items": 7, "_total_plays": 0,
+                    }.items():
+                        stack.enter_context(patch.object(client_type, method, return_value=value))
+                    if client_type is JellyfinClient:
+                        stack.enter_context(patch.object(client_type, "_media_counts", return_value={}))
+                    fetch_recent = stack.enter_context(patch.object(
+                        client_type, "_recent_added", side_effect=AssertionError("不得重复查询最近入库"),
+                    ))
+                    board = client.get_dashboard(recent_added=recent)
+                    self.assertTrue(board.online)
+                    self.assertEqual(board.total_items, 7)
+                    self.assertEqual(board.recent_added, recent)
+                    self.assertEqual(board.partial_errors, [])
+                    fetch_recent.assert_not_called()
+
     def test_client_context_manager_closes_underlying_session(self):
         client = JellyfinClient("http://jellyfin.local", "key")
         client._session = Mock()
