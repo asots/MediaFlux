@@ -288,9 +288,11 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertNotIn("function formatEffectResult", source)
         self.assertNotIn("answerWithTrustedEffectReceipts", source)
         self.assertIn("case 'effect.completed':", source)
-        self.assertIn("return event.type === 'turn.completed' && TERMINAL_TURN_STATUSES.includes(", source)
         self.assertIn("status === 'effect_completed'", source)
-        self.assertIn("TERMINAL_TURN_STATUSES", source)
+        # 终结语义由 kernel 事件决定；waiting/确认/恢复行为在真实浏览器用例核验，
+        # 不能用源码断言要求前端重新维护一套业务状态白名单。
+        self.assertNotIn("TERMINAL_TURN_STATUSES", source)
+        self.assertNotIn("TERMINAL_LAST_TURN_STATUSES", source)
         self.assertIn("连接中断，后续结果尚未确认", source)
         self.assertNotIn("keepBusy", source)
         self.assertNotIn("waitingForTerminal", source)
