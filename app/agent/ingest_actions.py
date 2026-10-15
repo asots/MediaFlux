@@ -1122,22 +1122,15 @@ class IngestActions:
                 data["request"] = download_request_public_summary(row)
             ok = bool(public.get("ok"))
             status = str(public.get("status") or "failed")
-            summary = (
-                f"下载请求 #{request_number} 已提交"
-                if ok
-                else f"下载请求 #{request_number} 未完成提交"
-            )
-            result_status = (
-                "accepted"
-                if status in {"submitted", "partial"}
-                else "conflict"
-                if status == "duplicate"
-                else "unavailable"
-            )
+            result_status, summary = {
+                "submitted": ("accepted", "已提交"),
+                "partial": ("partial", "仅部分目标已提交"),
+                "duplicate": ("conflict", "未完成提交"),
+            }.get(status, ("unavailable", "未完成提交"))
             return ToolResult(
                 ok,
                 result_status,
-                summary,
+                f"下载请求 #{request_number} {summary}",
                 data=data,
                 evidence=[
                     Evidence(

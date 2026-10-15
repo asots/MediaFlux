@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from contextlib import ExitStack
 from unittest.mock import patch
 
+import pytest
+
+from app import database as db
 from app.agent.errors import AgentToolError
 from app.agent.ingest_actions import (
     AgentIngestSessionStore,
@@ -14,7 +18,10 @@ from app.agent.ingest_actions import (
     ingest_status_arguments,
     ingest_submit_arguments,
 )
+from app.agent.kernel.adapters import TurnView
+from app.agent.kernel.projection import DefaultProjector
 from app.agent.models import ToolContext, ToolResult
+from app.agent.public_view import format_public_result, public_result_state
 from app.agent.recent_resource_candidates import (
     RecentResourceCandidateStore,
     new_resource_search_id,
@@ -25,6 +32,10 @@ from app.agent.state_commit import (
     defer_agent_state_commits,
     stage_agent_resource_candidates,
 )
+from app.bot.agent_adapter import _render_turn
+from app.bot.telegram_markdown import render_telegram_markdown
+from app.modules import download_dispatcher as dispatcher
+from tests.support import isolated_test_database
 
 _MAGNET = "magnet:?xt=urn:btih:" + "a" * 40 + "&dn=Demo"
 _SHARE = "https://www.guangyapan.com/s/1938060615538466851_aecd7hu726g3whGl#/share"
@@ -955,3 +966,85 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual(result.data["request"]["request_number"], 7)
         self.assertNotIn("source_value", result.data["request"])
         self.assertNotIn("magnet:?", repr(result.to_dict()))
+
+
+@pytest.mark.parametrize(
+    "qb_ok,gy_ok,repeat,tool_status,dispatch_status,public_state,summary",
+    [
+        pytest.param(True, False, False, "partial", "partial", "warning", "仅部分目标已提交", id="qb-only"),
+        pytest.param(False, True, False, "partial", "partial", "warning", "仅部分目标已提交", id="guangya-only"),
+        pytest.param(True, True, False, "accepted", "submitted", "submitted", "已提交", id="both-success"),
+        pytest.param(False, False, False, "unavailable", "failed", "failed", "未完成提交", id="both-failed"),
+        pytest.param(True, True, True, "conflict", "duplicate", "failed", "未完成提交", id="duplicate-both"),
+        pytest.param(True, False, True, "conflict", "duplicate", "failed", "未完成提交", id="duplicate-qb-only"),
+        pytest.param(False, True, True, "conflict", "duplicate", "failed", "未完成提交", id="duplicate-guangya-only"),
+    ],
+)
+def test_direct_submission_receipt_matches_real_dispatch(
+    qb_ok, gy_ok, repeat, tool_status, dispatch_status, public_state, summary,
+):
+    """真实落盘与分发；只替换后端边界，确认结果由 Web/TG 共用生产投影。"""
+    with (
+        isolated_test_database(),
+        patch.dict(os.environ, {"QB_URL": "http://qb.invalid"}),
+        patch("socket.socket.connect", side_effect=AssertionError("禁止外联")),
+        patch("app.agent.indexer_actions.GuangYaClient") as cloud_client,
+        patch.object(dispatcher, "_submit_qb", return_value={"ok": qb_ok}) as qb,
+        patch.object(dispatcher, "_submit_guangya", return_value={"ok": gy_ok}) as gy,
+    ):
+        cloud_client.return_value.logged_in = True
+        actions = IngestActions(
+            store=AgentIngestSessionStore(),
+            recent_resource_store=RecentResourceCandidateStore(),
+        )
+        context = ToolContext(owner="owner-a", session_id="direct-receipt")
+        inspected = actions.inspect(
+            ingest_inspect_arguments({"source_type": "direct_url", "input": _MAGNET}),
+            context,
+        )
+        arguments = ingest_submit_arguments({"source_type": "direct_url", "target": "both"})
+        arguments["ingest_snapshot"] = inspected.references[0].value
+        preview, fingerprint = actions.prepare_submit(arguments, context)
+        assert preview.ok and preview.data["backends"] == {"qb": True, "guangya": True}
+        with db.get_conn() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0] == 0
+        qb.assert_not_called()
+        gy.assert_not_called()
+
+        first = actions.execute_submit(arguments, fingerprint, context)
+        result = actions.execute_submit(arguments, fingerprint, context) if repeat else first
+        request_number = result.data["request_number"]
+        assert request_number == first.data["request_number"]
+        assert result.data["created"] is (not repeat)
+        assert result.data["duplicate"] is repeat
+        qb.assert_called_once()
+        gy.assert_called_once()
+        row = db.get_download_request(request_number)
+        assert row["qb_status"] == ("submitted" if qb_ok else "failed")
+        assert row["gy_status"] == ("submitted" if gy_ok else "failed")
+        with db.get_conn() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM download_log").fetchone()[0] == 2
+        assert result.data["status"] == dispatch_status
+        assert result.ok is (not repeat and (qb_ok or gy_ok))
+        assert result.data["succeeded"] == ([] if repeat else [
+            name for name, ok in (("qb", qb_ok), ("guangya", gy_ok)) if ok
+        ])
+        assert result.data["failed"] == ([] if repeat else [
+            name for name, ok in (("qb", qb_ok), ("guangya", gy_ok)) if not ok
+        ])
+        assert (result.status, result.summary) == (tool_status, f"下载请求 #{request_number} {summary}")
+
+        public = dict(DefaultProjector().project(result).public_content)
+        receipt = format_public_result(public)
+        assert public_result_state(public) == public_state
+        assert result.summary in receipt
+        view = TurnView(
+            session_id=context.session_id, turn_id="direct-receipt", request_id="direct-receipt",
+            status="effect_completed" if result.ok else "failed", effect_result=public,
+        )
+        web = view.to_dict()["effect_result"]
+        assert web == public
+        assert public_result_state(web) == public_state
+        assert _render_turn(view) == render_telegram_markdown(receipt)
+        assert ("⚠️" in receipt) is (public_state == "warning")
