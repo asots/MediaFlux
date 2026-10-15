@@ -372,6 +372,9 @@ def build_organize_lifecycle_event(
     ]
     if confirmation_label:
         fields.append(("人工确认", confirmation_label))
+    if stats.get('resumed_download_ids'):
+        fields.append(("后台续接", f"{len(stats['resumed_download_ids'])} 个下载整理任务，等待重新核验文件落稳"))
+        footer = (footer + "\n已移动的下载目录将由后台继续整理，无需重复下达指令；当前不代表已经入库。").strip()
     fields.extend((("STRM", strm_status), ("媒体库", media_refresh)))
     if stopped:
         lifecycle_state = "stopped"

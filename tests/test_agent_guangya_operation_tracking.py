@@ -930,6 +930,29 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
+    def test_relocated_download_continuation_is_visible_without_claiming_completion(self):
+        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        for location in ("stats", "result"):
+            with self.subTest(location=location):
+                snapshot = _project_guangya_status(
+                    {"status": "partial", location: {"resumed_download_ids": [31, 32, 31, True, -1, "private"],
+                     "failed": 1}}, overview={},
+                )
+                self.assertFalse(snapshot.ok)
+                self.assertEqual(snapshot.data["task"]["status"], "partial")
+                self.assertEqual(snapshot.data["task"]["resumed_download_count"], 2)
+                self.assertIn("尚不代表入库完成", snapshot.summary)
+                self.assertIn("无需再次提交", str(snapshot.suggestions))
+                self.assertIn("其他未恢复或失败项", str(snapshot.suggestions))
+                self.assertNotIn("resumed_download_ids", str(snapshot.to_dict()))
+        for invalid in (None, "private", [], [True, 0, -1]):
+            with self.subTest(invalid=invalid):
+                snapshot = _project_guangya_status(
+                    {"status": "partial", "result": {"resumed_download_ids": invalid}}, overview={},
+                )
+                self.assertNotIn("resumed_download_count", snapshot.data["task"])
+                self.assertIn("核对失败项", str(snapshot.suggestions))
+
     async def test_cleanup_verification_failure_reaches_terminal_receipt_without_private_error(self):
         from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
         from app.agent.public_view import format_public_result

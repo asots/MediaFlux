@@ -19,6 +19,12 @@ _COLUMNS = (
     'gy_task_id,gy_task_ids,attention_cleared_at'
 )
 
+# 仅由原子来源交接写入；取消/过期本身不意味着可以忽略未完成的文件。
+_RELOCATED_CONFIRMATION_SQL = (
+    "(c.status='expired' AND CASE WHEN json_valid(c.result_json) THEN "
+    "COALESCE(json_extract(c.result_json,'$.resolution'),'')='source_relocated' ELSE 0 END)"
+)
+
 
 def list_staging_cleanup_requests(*, source_id: str = '', limit: int = 1000,
                                   active_only: bool = False, conn=None) -> list[dict]:
@@ -73,6 +79,7 @@ def unresolved_staging_confirmations(source_id: str) -> int:
     with db.get_conn() as conn:
         rows = conn.execute(
             "SELECT c.status,c.result_json FROM organize_confirmations c WHERE "
+            f"NOT {_RELOCATED_CONFIRMATION_SQL} AND "
             "NOT EXISTS (SELECT 1 FROM organize_confirmations newer "
             "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id) AND "
             "CASE WHEN json_valid(c.payload_json) THEN "
@@ -213,7 +220,8 @@ def staging_confirmation_summary(source_id: str, *, conn=None) -> dict[str, int]
     with (nullcontext(conn) if conn is not None else db.get_conn()) as connection:
         rows = connection.execute(
             "SELECT c.status,c.result_json FROM organize_confirmations c "
-            "WHERE json_valid(c.payload_json) AND CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT)=? "
+            f"WHERE NOT {_RELOCATED_CONFIRMATION_SQL} AND json_valid(c.payload_json) "
+            "AND CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT)=? "
             "AND NOT EXISTS (SELECT 1 FROM organize_confirmations newer "
             "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)", (str(source_id),),
         ).fetchall()
@@ -227,6 +235,78 @@ def staging_confirmation_summary(source_id: str, *, conn=None) -> dict[str, int]
             # 取消、过期或失败不等于文件已成功入库，不冒报完成。
             result['failed'] += 1
     return result
+
+
+def requeue_relocated_staging(expected: dict, *, parent_id: str, nsfw: bool) -> bool:
+    """持有整理写锁时交接已移动来源；旧确认失效与重新落稳入队必须同事务。"""
+    from app.repositories.download_requests import _update_download_request_conn
+
+    source_id = str(expected.get('gy_target_dir') or '')
+    if not parent_id or parent_id in ('0', source_id, expected.get('gy_staging_parent_dir')):
+        return False
+    with db.get_conn() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        owners = list_staging_cleanup_requests(source_id=source_id, conn=conn)
+        if len(owners) != 1 or not same_staging_identity(owners[0], expected):
+            return False
+        row = owners[0]
+        if (row['gy_status'] != 'completed' or row['status'] not in ('completed', 'submitted', 'downloading', 'manual_review')
+                or row['targets'] not in ('guangya', 'both') or row['organize_status'] != 'requires_manual'
+                or int(row['organize_started'] or 0) < 0 or row['attention_cleared_at']
+                or (row['gy_staging_cleanup_status'] or '') not in ('', 'pending', 'retained')):
+            return False
+        if conn.execute(
+            "SELECT 1 FROM organize_delete_audit WHERE status IN ('pending','failed') "
+            "AND (file_id=? OR parent_id=?) LIMIT 1", (source_id, source_id),
+        ).fetchone() or conn.execute(
+            "SELECT 1 FROM download_staging_reconcile WHERE request_id=? AND status='blocked' LIMIT 1",
+            (row['id'],),
+        ).fetchone():
+            return False
+        cards = conn.execute(
+            "SELECT c.* FROM organize_confirmations c WHERE CASE WHEN json_valid(c.payload_json) THEN "
+            "CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT)=? "
+            "ELSE c.organize_task_id=? END", (source_id, row['organize_task_id']),
+        ).fetchall()
+        for card in cards:
+            if card['status'] == 'pending':
+                try:
+                    if not requests_for_download_confirmation(json.loads(card['payload_json']), strict=True, conn=conn):
+                        return False
+                except (ValueError, TypeError, AttributeError):
+                    return False
+                continue
+            if card['status'] == 'completed' and not _unsafe_confirmation_stats(card['result_json']):
+                continue
+            try:
+                superseded = card['status'] == 'expired' and json.loads(card['result_json'] or '{}').get('resolution') in ('superseded', 'source_relocated')
+            except (ValueError, AttributeError):
+                superseded = False
+            if not superseded:
+                return False  # 不抢占已入队/执行中/失败未知或用户已取消的确认。
+        timestamp = db.now()
+        for card in cards:
+            if card['status'] == 'pending':
+                conn.execute(
+                    "UPDATE organize_confirmations SET status='expired',selected_index=NULL,queued_at=NULL,task_id='',result_json=?,error=?,"
+                    "review_status='cancelled',review_completed_at=?,completed_at=?,rollup_applied=0,updated_at=? WHERE id=?",
+                    (json.dumps({'resolution': 'source_relocated'}), '目录已移动，原确认已由重新整理接管',
+                     timestamp, timestamp, timestamp, card['id']),
+                )
+        _update_download_request_conn(
+            conn, int(row['id']), dict(
+                gy_staging_parent_dir=parent_id, gy_requested_target_dir=parent_id, gy_requested_nsfw=int(nsfw),
+                # 已完成下载的重新整理只处理剩余文件，原整包数量不再是剩余目录门槛。
+                gy_expected_file_count=0, gy_settle_snapshot='', gy_settle_stable_count=0,
+                gy_settle_observed_file_count=0, gy_settle_attempts=0,
+                gy_staging_cleanup_status='pending', gy_staging_cleanup_error='',
+                organize_started=0, organize_status='settling', organize_task_id='', organize_run_id=None,
+                organize_attempts=0, organize_next_retry_at=None, organize_finished_at=None,
+                organize_error='目录来源已更新，等待重新核验云端文件落稳', error='',
+                strm_run_id=None, strm_status='', strm_error='', strm_finished_at=None,
+            ), timestamp,
+        )
+    return True
 
 
 def requests_for_download_confirmation(payload: dict, *, strict: bool = False, conn=None) -> list[dict]:

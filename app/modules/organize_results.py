@@ -83,6 +83,7 @@ def build_organize_result(
         "scan_errors": _text_list(stats.get("scan_errors")),
         "scan_complete": stats.get("scan_complete") is not False,
         "protected_staging_dirs": _dict_list(stats.get("protected_staging_dirs")),
+        "resumed_download_ids": list(stats.get("resumed_download_ids") or []),
         "skip_reasons": _text_list(stats.get("skip_reasons")),
         "sources": _dict_list(source_results),
     }

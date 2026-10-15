@@ -2000,6 +2000,20 @@ class OrganizeTaskManager:
                 )
                 raise failure
             stopped = self._cancel_event.is_set()
+            if not stopped and not download_request_ids and trigger_type in {'manual', 'telegram', 'agent'}:
+                from app.modules.download_tracker import resume_relocated_staging
+
+                resumed = resume_relocated_staging(
+                    organizer.client, aggregate,
+                    source_ids={str(source['id']) for source in sources},
+                    nsfw_source_ids=rules.selected_nsfw_source_ids() if rules.nsfw_enabled else set(),
+                )
+                if resumed:
+                    _publish_download_lifecycles(resumed)
+                    updated_blocks = {item['file_id']: item for item in aggregate['protected_staging_dirs']}
+                    for source in source_results:
+                        for blocked in (source.get('stats') or {}).get('protected_staging_dirs', []):
+                            blocked.update(updated_blocks[blocked['file_id']])
             aggregate["stopped"] = 1 if stopped else int(aggregate.get("stopped", 0) or 0)
             partial = bool(
                 int(aggregate.get("failed", 0) or 0)
@@ -2076,6 +2090,8 @@ class OrganizeTaskManager:
                 blocked = aggregate["protected_staging_dirs"]
                 blocked_reason = "；".join(item["reason"] for item in blocked[:3])
                 message = f"整理任务部分完成，{len(blocked)} 个受保护下载目录未扫描：{blocked[0]['path']}"
+                if aggregate.get('resumed_download_ids'):
+                    message += f"；已恢复 {len(aggregate['resumed_download_ids'])} 个下载整理任务，等待后台落稳核验"
             finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if status == "completed":
                 cleanup = self._cleanup_download_staging(organizer, download_request_ids or [], sources, rules=rules)

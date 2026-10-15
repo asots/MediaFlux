@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from app import database as db
 from app.repositories.download_staging import (
+    _RELOCATED_CONFIRMATION_SQL,
     _unsafe_confirmation_stats,
     list_staging_cleanup_requests,
     requests_for_download_confirmation,
@@ -204,6 +205,7 @@ def reconcile_reorganized_confirmations(source_ids: list[str], *, conn=None,
         confirmations = connection.execute(
             "SELECT c.* FROM organize_confirmations c "
             "WHERE c.status IN ('pending','failed','expired','cancelled') "
+            f"AND NOT {_RELOCATED_CONFIRMATION_SQL} "
             "AND CASE WHEN json_valid(c.payload_json) THEN "
             f"CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT) END IN ({placeholders}) "
             "AND NOT EXISTS (SELECT 1 FROM organize_confirmations newer "

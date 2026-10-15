@@ -53,6 +53,10 @@ def _project_guangya_status(
     running = task_status in {"running", "stopping"}
     safe_result = _safe_result(raw)
     stats = safe_result.get("stats", {})
+    # 整源扫描与下载后续整理是同一业务的两个阶段；保留入队事实，而非伪报入库完成。
+    result = raw.get("result") or raw.get("stats") or {}
+    resumed_ids = result.get("resumed_download_ids", []) if isinstance(result, dict) else []
+    resumed_count = len({value for value in resumed_ids if type(value) is int and value > 0}) if isinstance(resumed_ids, list) else 0
     schedule_raw = (
         overview.get("schedule") if isinstance(overview.get("schedule"), dict) else {}
     )
@@ -87,7 +91,10 @@ def _project_guangya_status(
         suggestions = []
     elif task_status == "partial":
         ok, status, summary = False, "attention", "最近一次光鸭整理任务部分完成"
-        suggestions = ["请到网盘整理页核对失败项后再决定是否重试。"]
+        suggestions = (
+            ["已恢复的下载整理会由下载跟踪器重新核验落稳后继续，无需再次提交整理；可查询下载任务进度。其他未恢复或失败项仍需单独核对。"]
+            if resumed_count else ["请到网盘整理页核对失败项后再决定是否重试。"]
+        )
     elif task_status in {"stopped", "cancelled"}:
         ok, status, summary = True, "stopped", "最近一次光鸭整理任务已停止"
         suggestions = []
@@ -136,6 +143,9 @@ def _project_guangya_status(
         "finished_at": _safe_timestamp(raw.get("finished_at")),
         "stats": stats,
     }
+    if resumed_count:
+        task_data["resumed_download_count"] = resumed_count
+        summary += f"；本轮已恢复 {resumed_count} 个下载整理任务，尚不代表入库完成"
     if "operation_items" in safe_result:
         task_data["operation_items"] = safe_result["operation_items"]
     if operation_ref:

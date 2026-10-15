@@ -45,6 +45,47 @@ _TORRENT_DATA_CLEANUP_BATCH_SIZE = 500
 _STALE_SUBMISSION_MINUTES = 15
 
 
+def resume_relocated_staging(client, stats: dict, *, source_ids: set[str], nsfw_source_ids: set[str]) -> list[int]:
+    """手动整源扫描的续接点；只入既有下载跟踪队列，不绕过落稳或执行整理。"""
+    from app.repositories.download_staging import list_staging_cleanup_requests, requeue_relocated_staging
+
+    resumed = []
+    parent_entries: dict[str, list] = {}
+    for blocked in stats.get('protected_staging_dirs') or []:
+        source_id, staging_id = str(blocked['source_dir_id']), str(blocked['file_id'])
+        if source_id not in source_ids:
+            continue
+        try:
+            owners = list_staging_cleanup_requests(source_id=staging_id)
+            if len(owners) != 1:
+                continue
+            row = owners[0]
+            if (row['gy_status'] != 'completed' or row['organize_status'] != 'requires_manual'
+                    or row['gy_staging_parent_dir'] == source_id):
+                continue
+            info = client.file_info(staging_id)
+            if (info is None or not info.is_dir or str(info.file_id) != staging_id
+                    or str(info.parent_id) != source_id or str(info.name) != row['gy_staging_name']):
+                continue
+            if source_id not in parent_entries:
+                parent_entries[source_id] = client.list_dir(source_id)
+            members = [entry for entry in parent_entries[source_id] if str(entry.file_id) == staging_id]
+            if (len(members) != 1 or not members[0].is_dir or str(members[0].name) != row['gy_staging_name']
+                    or str(members[0].parent_id) != source_id):
+                continue
+            if not requeue_relocated_staging(row, parent_id=source_id, nsfw=source_id in nsfw_source_ids):
+                continue
+            resumed.append(int(row['id']))
+            old_reason = blocked['reason']
+            blocked['reason'] = f"目录「{blocked['path']}」已恢复下载请求 #{row['id']} 的整理，后台重新核验落稳后继续；尚未入库"
+            blocked['request_id'] = int(row['id'])
+            stats['skip_reasons'] = [blocked['reason'] if reason == old_reason else reason for reason in stats.get('skip_reasons', [])]
+        except Exception as exc:
+            logger.warning('移动下载目录续接未完成 source=%s staging=%s type=%s', source_id, staging_id, type(exc).__name__)
+    stats['resumed_download_ids'] = resumed
+    return resumed
+
+
 class _QBTaskIndex:
     """一轮快照只建一次内容身份索引，名称不作为任务归属证据。"""
 
