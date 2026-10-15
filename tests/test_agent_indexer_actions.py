@@ -893,3 +893,110 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             replace(normalized, display_title=item.title), "", "", origin="agent:nyaa", user_id=""
         )
         self.assertTrue(result["ok"])
+
+
+class IndexerReceivingSourceTests(unittest.TestCase):
+    """合成资源，仅验证来源路由，不访问索引站或下载后端。"""
+
+    def test_classified_cloud_resource_uses_configured_source_on_shared_dispatch(self):
+        for site, target, routed in (("sukebei", "guangya", True), ("sukebei", "both", True),
+                                     ("sukebei", "qb", False), ("nyaa", "guangya", False)):
+            with (self.subTest(site=site, target=target),
+                patch("app.modules.organize_sources.list_nsfw_download_sources", return_value=[{"id": "source-123", "name": "FixtureSpecial"}]),
+                patch("app.indexers.downloads.submit_download_input", return_value={
+                    "request_id": 7, "created": True, "summary": {"duplicate": False,
+                    "succeeded": [target], "failed": [], "status": "submitted", "error": ""},
+                }) as submit,
+            ):
+                result = asyncio.run(download_indexer_result(
+                    FakeDownloadService(_resource_item(site_id=site)), _RESULT_ID, target,
+                    origin_namespace="agent", scope="agent",
+                ))
+                self.assertTrue(result["ok"])
+                self.assertEqual(submit.call_args.kwargs.get("gy_target_dir", ""), "source-123" if routed else "")
+                self.assertEqual(submit.call_args.kwargs.get("gy_target_name", ""), "FixtureSpecial" if routed else "")
+
+    def test_missing_or_ambiguous_source_never_falls_back_to_normal_inbox(self):
+        from app.indexers.downloads import download_indexer_result_public
+        for sources in ([], [{"id": "1", "name": "A"}, {"id": "2", "name": "B"}]):
+            with (self.subTest(sources=sources),
+                patch("app.modules.organize_sources.list_nsfw_download_sources", return_value=sources),
+                patch("app.indexers.downloads.submit_download_input") as submit,
+            ):
+                result = asyncio.run(download_indexer_result_public(
+                    FakeDownloadService(_resource_item(site_id="sukebei")), _RESULT_ID, "guangya", scope="agent",
+                ))
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["pre_submission_failure"])
+                self.assertIn("NSFW", result["error"])
+                submit.assert_not_called()
+
+    def test_single_and_batch_confirmation_bind_actual_receiving_source(self):
+        from app.agent.indexer_actions import prepare_submit_resource_batch, submit_resource_confirmed, submit_resource_batch_confirmed
+        for batch in (False, True):
+            with (self.subTest(batch=batch),
+                patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+                patch("app.agent.indexer_actions.get_indexer_service", return_value=FakeIndexerService(item=_resource_item(site_id="sukebei"))),
+                patch("app.agent.indexer_actions.download_target_readiness", return_value={"guangya": True}),
+                patch("app.modules.organize_sources.list_nsfw_download_sources", return_value=[{"id": "source-123", "name": "FixtureSpecial"}]) as sources,
+                patch("app.agent.indexer_actions._submit_resource") as single,
+                patch("app.agent.indexer_actions._submit_resource_batch") as multiple,
+            ):
+                arguments = {"result_ids": [_RESULT_ID], "target": "guangya"} if batch else {"result_id": _RESULT_ID, "target": "guangya"}
+                prepare = prepare_submit_resource_batch if batch else prepare_submit_resource
+                confirm = submit_resource_batch_confirmed if batch else submit_resource_confirmed
+                preview, token = prepare(arguments)
+                self.assertTrue(preview.ok)
+                resources = preview.data["resources"] if batch else [preview.data["resource"]]
+                self.assertEqual(resources[0]["receiving_folder"], "FixtureSpecial")
+                self.assertNotIn("source-123", str(preview.to_dict()))
+                sources.return_value = [{"id": "different-source", "name": "FixtureSpecial"}]
+                with self.assertRaises(AgentToolError) as caught:
+                    confirm(arguments, token)
+                self.assertEqual(caught.exception.code, "confirmation_stale")
+                single.assert_not_called()
+                multiple.assert_not_called()
+
+    def test_receiving_summary_combines_selected_routes_without_false_default(self):
+        from app.agent.ingest_actions import _receiving_folders
+        from app.modules.offline import OfflineRules
+        with patch("app.modules.offline.OfflineRules.from_config", return_value=replace(OfflineRules.from_config(), target_dir_id="normal", target_dir_name="Inbox", secondary_enabled=False)):
+            self.assertEqual(_receiving_folders("guangya", []), _receiving_folders("guangya", [{}]))
+            folders, _ = _receiving_folders("guangya", [{"receiving_folder": "FixtureSpecial"}])
+            self.assertEqual(folders, ["光鸭：FixtureSpecial / 每任务隔离目录"])
+            folders, _ = _receiving_folders("guangya", [{"receiving_folder": "FixtureSpecial"}, {}])
+            self.assertEqual(set(folders), {"光鸭：FixtureSpecial / 每任务隔离目录", "光鸭：Inbox / 每任务隔离目录"})
+
+    def test_classification_survives_persisted_staging_and_retry_without_remote_writes(self):
+        from types import SimpleNamespace
+        from app import database as db
+        from app.modules import download_dispatcher as dispatcher
+        from app.modules.organize_rules import OrganizeRules
+        from tests.support import isolated_test_database
+
+        def offline(_url, **kwargs):
+            self.assertEqual(kwargs["target_dir_id"], "special-source")
+            kwargs["on_staging_created"]({"id": "stage-7", "parent_id": "special-source", "name": "MF-7-Fixture"})
+            return {"ok": True, "task_ids": ["fixture-task"], "decision": {"target_dir_id": "stage-7", "target_dir_name": "Fixture"},
+                    "staging": {"isolated": True, "parent_id": "special-source", "name": "MF-7-Fixture"}}
+
+        with (
+            isolated_test_database(),
+            patch("app.modules.organize_sources.list_nsfw_download_sources", return_value=[{"id": "special-source", "name": "FixtureSpecial"}]),
+            patch.object(dispatcher, "_recover_guangya_magnet_torrent", return_value=None),
+            patch.object(dispatcher, "analyze_offline_url", return_value=SimpleNamespace(allowed=True, reason="")),
+            patch.object(dispatcher, "submit_offline", side_effect=offline) as backend,
+        ):
+            service = FakeDownloadService(_resource_item(site_id="sukebei"))
+            submitted = asyncio.run(download_indexer_result(service, _RESULT_ID, "guangya", origin_namespace="agent", scope="agent"))
+            self.assertTrue(submitted["ok"], submitted)
+            row = db.get_download_request(submitted["request_id"])
+            self.assertEqual((row["gy_requested_target_dir"], row["gy_requested_nsfw"]), ("special-source", 1))
+            self.assertEqual((row["gy_staging_parent_dir"], row["gy_target_dir"]), ("special-source", "stage-7"))
+            rules = OrganizeRules(nsfw_enabled=True, nsfw_source_ids='["special-source"]').for_source(row["gy_target_dir"])
+            self.assertTrue(rules.nsfw_enabled)
+            self.assertTrue(rules.nsfw_exclusive)
+            repeated = asyncio.run(download_indexer_result(service, _RESULT_ID, "guangya", origin_namespace="agent", scope="agent"))
+            self.assertTrue(repeated["duplicate"])
+            self.assertEqual(repeated["request_id"], row["id"])
+            backend.assert_called_once()

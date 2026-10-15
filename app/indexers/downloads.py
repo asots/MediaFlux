@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from app import database as db
+from app.indexers.config import SENSITIVE_INDEXER_SITE_IDS
 from app.indexers.errors import (
     IndexerError,
     IndexerInvalidResponse,
@@ -85,6 +86,25 @@ async def _resolve(
     if not isinstance(resolved, ResolvedDownload):
         raise IndexerInvalidResponse("provider returned invalid download")
     return item, resolved
+
+
+def indexer_download_destination(item: Any, target: str) -> dict[str, str]:
+    """按服务端保存的来源分类路由；预检与提交共享，不从资源标题猜测。"""
+    if target not in {"guangya", "both"} or item.site_id not in SENSITIVE_INDEXER_SITE_IDS:
+        return {}
+    from app.modules.organize_sources import list_nsfw_download_sources
+
+    sources = list_nsfw_download_sources()
+    if len(sources) != 1:
+        raise IndexerValidationError(
+            "sensitive cloud download requires an unambiguous organizing source",
+            public_message=(
+                "尚未配置启用的 NSFW 整理来源，不能将此资源提交到普通离线目录"
+                if not sources else
+                "存在多个 NSFW 整理来源，请先明确唯一接收来源，未提交下载"
+            ),
+        )
+    return {"gy_target_dir": sources[0]["id"], "gy_target_name": sources[0]["name"]}
 
 
 def _torrent_filename(resolved: ResolvedDownload) -> str:
@@ -474,6 +494,7 @@ async def download_indexer_result(
     async with _download_limiter():
         try:
             stored, resolved = await _resolve(service, result_id, scope=scope)
+            destination = indexer_download_destination(stored, normalized_target)
             item = await _resolved_download_input(service, stored, resolved)
         except (IndexerError, InvalidDownloadData) as exc:
             if not _public_errors:
@@ -493,6 +514,7 @@ async def download_indexer_result(
             chat_id=str(chat_id),
             user_id=str(user_id),
             message_id=str(message_id),
+            **destination,
             **({"admission_id": admission_id} if admission_id is not None else {}),
         )
 

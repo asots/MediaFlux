@@ -30,6 +30,7 @@ from app.indexers.downloads import (
     InvalidDownloadData,
     download_indexer_result,
     download_indexer_result_public,
+    indexer_download_destination,
 )
 from app.indexers.errors import IndexerError, IndexerResultExpired, IndexerValidationError
 from app.indexers.models import IndexerMediaSearchRequest
@@ -446,7 +447,7 @@ def _stored_resource(arguments: dict[str, str], *, service: Any | None = None):
 
 
 def _resource_confirmation_payload(
-    arguments: dict[str, str], item: Any, readiness: dict[str, bool]
+    arguments: dict[str, str], item: Any, readiness: dict[str, bool], destination: dict[str, str]
 ) -> dict[str, Any]:
     return {
         "result_id": arguments["result_id"],
@@ -457,6 +458,7 @@ def _resource_confirmation_payload(
         "download_kinds": sorted(str(kind) for kind in item.download_kinds),
         "backends": readiness,
         "enabled": True,
+        "destination": destination,
     }
 
 
@@ -465,6 +467,7 @@ def _capture_submit_resource(arguments: dict[str, str]) -> dict[str, Any]:
         return {"enabled": False, "fingerprint": "disabled"}
     try:
         service, item = _stored_resource(arguments)
+        destination = indexer_download_destination(item, arguments["target"])
     except IndexerError as exc:
         return {
             "enabled": True,
@@ -472,12 +475,13 @@ def _capture_submit_resource(arguments: dict[str, str]) -> dict[str, Any]:
             "fingerprint": f"resource-error:{exc.code}",
         }
     readiness = download_target_readiness(arguments["target"])
-    payload = _resource_confirmation_payload(arguments, item, readiness)
+    payload = _resource_confirmation_payload(arguments, item, readiness, destination)
     return {
         "enabled": True,
         "service": service,
         "item": item,
         "readiness": readiness,
+        "destination": destination,
         "fingerprint": hashlib.sha256(
             json.dumps(
                 payload,
@@ -533,6 +537,7 @@ def _preview_submit_resource(
                 "site_name": _safe_text(item.site_name, 80),
                 "title": _safe_text(item.title, 300),
                 "download_state": item.download_state,
+                "receiving_folder": _safe_text(state["destination"].get("gy_target_name", ""), 100),
                 "download_kinds": [
                     kind
                     for kind in item.download_kinds
@@ -679,6 +684,7 @@ def _capture_submit_resource_batch(arguments: dict[str, Any]) -> dict[str, Any]:
                     "title": str(item.title),
                     "download_state": str(item.download_state),
                     "download_kinds": sorted(str(kind) for kind in item.download_kinds),
+                    "destination": indexer_download_destination(item, arguments["target"]),
                 }
             )
     except IndexerError as exc:
@@ -747,8 +753,9 @@ def _preview_submit_resource_batch(
             "site_name": _safe_text(item.site_name, 80),
             "title": _safe_text(item.title, 300),
             "download_state": item.download_state,
+            "receiving_folder": _safe_text(resource.get("destination", {}).get("gy_target_name", ""), 100),
         }
-        for position, item in enumerate(items, start=1)
+        for position, (item, resource) in enumerate(zip(items, state["resources"], strict=True), start=1)
     ]
     return ToolResult(
         True,
