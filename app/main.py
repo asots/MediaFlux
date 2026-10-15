@@ -288,28 +288,29 @@ def _initialize_runtime_storage() -> None:
         fresh = first_run.needs_initialization()
         if not path.is_file():
             raise RuntimeFenceError("runtime_database_unavailable")
-        else:
-            if fresh:
-                raise RuntimeFenceError("existing_runtime_requires_controlled_config_recovery")
-            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
-                if not fresh:
-                    # Recognize the long-lived organize history, not just a
-                    # SQLite header or a generic settings table. Missing newer
-                    # tables/columns remain the schema migrator's responsibility.
-                    history = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='organize_log'").fetchone()
-                    columns = {row[1] for row in conn.execute('PRAGMA table_info(organize_log)')} if history else set()
-                    if not {'id', 'source', 'original_path', 'new_path', 'status', 'created_at'} <= columns:
-                        raise RuntimeFenceError("runtime_database_schema_unrecognized")
-                tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings_kv'").fetchone()
-                if tables and conn.execute("SELECT 1 FROM settings_kv WHERE key=?", (RUNTIME_FENCE_KEY,)).fetchone():
-                    fence = read_runtime_fence(conn)
-                    if fence.phase != "stable":
-                        raise RuntimeFenceError("runtime_fence_changing")
-                    config.capture_runtime_config_snapshot()
-                    if fresh:
-                        raise RuntimeFenceError("existing_runtime_requires_controlled_config_recovery")
+        if fresh:
+            raise RuntimeFenceError("existing_runtime_requires_controlled_config_recovery")
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+            # Recognize application history before upgrading, not an arbitrary SQLite file.
+            history = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='organize_log'").fetchone()
+            columns = {row[1] for row in conn.execute('PRAGMA table_info(organize_log)')} if history else set()
+            if not {'id', 'source', 'original_path', 'new_path', 'status', 'created_at'} <= columns:
+                raise RuntimeFenceError("runtime_database_schema_unrecognized")
+            tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings_kv'").fetchone()
+            established = bool(tables and conn.execute("SELECT 1 FROM settings_kv WHERE key=?", (RUNTIME_FENCE_KEY,)).fetchone())
+            if established:
+                fence = read_runtime_fence(conn)
+                if fence.phase != "stable":
+                    raise RuntimeFenceError("runtime_fence_changing")
+                config.capture_runtime_config_snapshot()
         database.init_db()
-        initialize_runtime_fence(defer_initial_setup=fresh)
+        if not established:
+            # 旧版允许只用部署环境变量。首次建立 fence 前补齐空文件，
+            # 不复制环境凭据；已有 fence 丢失配置仍由上面的校验拒绝。
+            payload, _ = config.read_env_snapshot(config.ENV_FILE)
+            if payload is None:
+                config.write_env_file(config.ENV_FILE, {}, replace=False)
+        initialize_runtime_fence()
 
 
 def _resolve_bind_host(host: str | None) -> str:
