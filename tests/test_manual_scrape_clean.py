@@ -145,6 +145,9 @@ class LocalManualScrapeCleanBrowserTests(IsolatedDatabaseTestCase):
         path = urlsplit(route.request.url).path
         if path == '/local-media':
             return route.fulfill(status=200, content_type='text/html', body=self.html)
+        if path.startswith('/static/css/') and path.endswith('.css'):
+            response = self.client.get(path)
+            return route.fulfill(status=response.status_code, content_type='text/css', body=response.content)
         if not path.startswith('/api/'):
             return route.fulfill(status=404, body='')
         body = route.request.post_data_json if route.request.post_data else None
@@ -185,6 +188,10 @@ class LocalManualScrapeCleanBrowserTests(IsolatedDatabaseTestCase):
 
     def _open(self):
         self.page.locator('[data-open-item-menu]').first.click()
+        # 菜单必须按真实样式固定在视口内，不能靠无样式页面的滚动时序点击。
+        self.assertEqual(self.page.locator('#lmItemContextMenu').evaluate(
+            'element => getComputedStyle(element).position',
+        ), 'fixed')
         self.page.locator('[data-item-action="search"]').click()
         self.page.wait_for_function("document.getElementById('lmScrapeStatus').textContent === '请选择候选'")
         self.requests.clear()
