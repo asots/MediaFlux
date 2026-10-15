@@ -13,7 +13,7 @@ from typing import Iterable
 
 from app import config
 from app.logger import get_logger
-from app.modules.local_path_mapping import normalize_qb_path
+from app.modules.local_path_mapping import normalize_qb_path, normalized_path_parts, path_uses_casefold
 
 logger = get_logger(__name__)
 
@@ -38,24 +38,8 @@ def _is_absolute(value: str) -> bool:
     return value.startswith("/") or value.startswith("//") or bool(_DRIVE_RE.match(value))
 
 
-def _windows_style(value: str) -> bool:
-    return value.startswith("//") or bool(_DRIVE_RE.match(value))
-
-
-def _anchor_and_parts(value: str) -> tuple[str, tuple[str, ...]]:
-    if value.startswith("//"):
-        anchor, remainder = "//", value[2:]
-    elif _DRIVE_RE.match(value):
-        anchor, remainder = value[:3], value[3:]
-    elif value.startswith("/"):
-        anchor, remainder = "/", value[1:]
-    else:
-        anchor, remainder = "", value
-    return anchor, tuple(part for part in remainder.split("/") if part)
-
-
 def _comparison_key(value: str) -> str:
-    return value.casefold() if _windows_style(value) else value
+    return value.casefold() if path_uses_casefold(value) else value
 
 
 def normalize_media_server_path(raw_path: object) -> str:
@@ -133,9 +117,9 @@ class MediaServerPathMapping:
 
     def relative_parts(self, raw_path: str) -> tuple[str, ...]:
         path = normalize_media_server_path(raw_path)
-        prefix_anchor, prefix_parts = _anchor_and_parts(self.local_prefix)
-        path_anchor, path_parts = _anchor_and_parts(path)
-        normalize = str.casefold if _windows_style(self.local_prefix) else (lambda value: value)
+        prefix_anchor, prefix_parts = normalized_path_parts(self.local_prefix)
+        path_anchor, path_parts = normalized_path_parts(path)
+        normalize = str.casefold if path_uses_casefold(self.local_prefix) else (lambda value: value)
         if normalize(path_anchor) != normalize(prefix_anchor):
             raise MediaServerPathMappingError("路径未命中当前映射")
         if len(path_parts) < len(prefix_parts):

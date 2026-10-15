@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from app.modules.local_path_mapping import (
@@ -18,6 +19,19 @@ from app.modules.local_path_mapping import (
 
 
 class LocalPathMappingTests(unittest.TestCase):
+    def test_immutable_mapping_reuses_normalized_rule_across_batch(self):
+        from dataclasses import asdict
+        from app.modules import local_path_mapping as module
+
+        raw = r"D:\Downloads\Straße"
+        mapping = PathMapping(raw, Path("/mnt/library"))
+        with patch.object(module, "normalize_qb_path", wraps=normalize_qb_path) as normalize:
+            for _ in range(100):
+                self.assertTrue(mapping.matches(r"d:\downloads\STRASSE\Title\Film.mkv"))
+                self.assertEqual(mapping.normalized_prefix, "D:/Downloads/Straße")
+            self.assertLessEqual(normalize.call_count, 102)
+        self.assertEqual(asdict(mapping), {"qb_prefix": raw, "local_root": Path("/mnt/library")})
+
     def test_longest_prefix_mapping(self):
         mappings = PathMappingSet([
             PathMapping("/downloads", Path("/mnt/all")),

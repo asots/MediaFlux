@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path, PurePath
 from typing import Iterable
 
@@ -78,11 +79,11 @@ def normalize_qb_path(raw_path: str) -> str:
     return result
 
 
-def _windows_style(value: str) -> bool:
+def path_uses_casefold(value: str) -> bool:
     return value.startswith("//") or bool(_DRIVE_RE.match(value))
 
 
-def _normalized_anchor_and_parts(value: str) -> tuple[str, tuple[str, ...]]:
+def normalized_path_parts(value: str) -> tuple[str, tuple[str, ...]]:
     """拆分规范化路径，避免 Unicode casefold 长度变化破坏后缀切片。"""
     if value.startswith("//"):
         anchor, remainder = "//", value[2:]
@@ -106,18 +107,18 @@ class PathMapping:
             raise PathMappingError("qB 路径前缀不能是文件系统根目录")
         object.__setattr__(self, "local_root", Path(self.local_root).expanduser())
 
-    @property
+    @cached_property
     def normalized_prefix(self) -> str:
         return normalize_qb_path(self.qb_prefix)
 
-    @property
+    @cached_property
     def comparison_prefix(self) -> str:
         value = self.normalized_prefix
-        return value.casefold() if _windows_style(value) else value
+        return value.casefold() if path_uses_casefold(value) else value
 
     def matches(self, value: str) -> bool:
         normalized = normalize_qb_path(value)
-        candidate = normalized.casefold() if _windows_style(self.normalized_prefix) else normalized
+        candidate = normalized.casefold() if path_uses_casefold(self.normalized_prefix) else normalized
         prefix = self.comparison_prefix.rstrip("/")
         return candidate == prefix or candidate.startswith(prefix + "/")
 
@@ -125,9 +126,9 @@ class PathMapping:
         normalized = normalize_qb_path(value)
         if not self.matches(normalized):
             raise PathMappingError("路径不匹配 qB 前缀")
-        prefix_anchor, prefix_parts = _normalized_anchor_and_parts(self.normalized_prefix)
-        value_anchor, value_parts = _normalized_anchor_and_parts(normalized)
-        windows_style = _windows_style(self.normalized_prefix)
+        prefix_anchor, prefix_parts = normalized_path_parts(self.normalized_prefix)
+        value_anchor, value_parts = normalized_path_parts(normalized)
+        windows_style = path_uses_casefold(self.normalized_prefix)
         normalize = str.casefold if windows_style else str
         if (
             normalize(value_anchor) != normalize(prefix_anchor)
