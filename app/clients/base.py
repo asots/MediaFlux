@@ -655,35 +655,51 @@ class MediaServerClient:
         return normalized if normalized != "0" else ""
 
     @staticmethod
-    def _items_payload(data: Any) -> tuple[list[dict[str, Any]], int]:
+    def _items_payload(data: Any) -> tuple[list[dict[str, Any]], int | None]:
         if isinstance(data, list):
             items = [item for item in data if isinstance(item, dict)]
-            return items, len(items)
+            return items, None
         if not isinstance(data, dict):
             raise ValueError("媒体服务器响应结构无效")
         raw_items = data.get("Items", [])
         if not isinstance(raw_items, list):
             raise ValueError("媒体服务器响应结构无效")
         items = [item for item in raw_items if isinstance(item, dict)]
-        try:
-            total = int(data.get("TotalRecordCount", len(items)) or 0)
-        except (TypeError, ValueError):
-            total = len(items)
-        return items, max(total, len(items))
+        return items, MediaServerClient._search_record_count(data, minimum=len(items))
 
-    def _inventory_page(
-        self, data: Any, seen_ids: set[str]
-    ) -> tuple[list[dict[str, Any]], int]:
-        """分页枚举不得把同一上游条目重复计为不同结果。"""
-        items, total = self._items_payload(data)
-        for item in items:
-            item_id = str(item.get("Id") or "").strip()
-            if not item_id:
-                continue
-            if item_id in seen_ids:
-                raise ValueError("媒体服务器分页包含重复条目，无法确认清单完整")
-            seen_ids.add(item_id)
-        return items, total
+    def _inventory_items(
+        self, user_id: str, *, params: dict[str, Any], cap: int, page_size: int,
+        deadline_at: float | None,
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """统一有界枚举；未知总数靠末页证明完整，触及上限仍是截断。"""
+        rows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        reported_total = 0
+        while len(rows) < cap:
+            limit = min(page_size, cap - len(rows))
+            data = self._request(
+                f"/Users/{user_id}/Items",
+                params={
+                    "Recursive": "true", "SortBy": "SortName", "SortOrder": "Ascending",
+                    **params, "StartIndex": len(rows), "Limit": limit,
+                },
+                timeout=self._remaining_timeout(deadline_at),
+            )
+            items, total = self._items_payload(data)
+            reported_total = max(reported_total, total or 0)
+            for item in items:
+                item_id = str(item.get("Id") or "").strip()
+                if item_id:
+                    if item_id in seen_ids:
+                        raise ValueError("媒体服务器分页包含重复条目，无法确认清单完整")
+                    seen_ids.add(item_id)
+            rows.extend(items[:limit])
+            raw_items = data if isinstance(data, list) else data.get("Items", [])
+            if len(items) != len(raw_items) or len(items) > limit:
+                break  # 丢弃了无效条目或超额页，不能据此证明库存缺失。
+            if len(items) < limit or (total is not None and len(rows) >= reported_total):
+                return rows, max(reported_total, len(rows)), reported_total > len(rows)
+        return rows, max(reported_total, len(rows)), True
 
     def has_tmdb_media(
         self, tmdb_id: str, media_type: str, *, parent_id: str = ""
@@ -751,7 +767,7 @@ class MediaServerClient:
         return SeriesSearchResult(
             candidates=candidates,
             total=max(len(candidates), int(total or 0)),
-            truncated=int(total or 0) > len(items),
+            truncated=total > len(items) if total is not None else len(items) >= normalized_limit,
         )
 
     def search_series_candidates(
@@ -787,8 +803,8 @@ class MediaServerClient:
         ]
         return SeriesSearchResult(
             candidates=candidates,
-            total=total,
-            truncated=total > len(candidates),
+            total=total if total is not None else len(items),
+            truncated=total > len(candidates) if total is not None else len(items) >= normalized_limit,
         )
 
     def list_library_series(
@@ -803,53 +819,32 @@ class MediaServerClient:
         # 每部剧的集号。常规调用仍由上层传入的小上限约束。
         cap = max(1, min(int(max_series or 50), 5000))
         page = max(1, min(int(page_size or 100), 100))
-        offset = 0
-        seen_ids: set[str] = set()
         candidates: list[SeriesCandidate] = []
-        reported_total = 0
-        exhausted = False
         user_id = self._user_id(deadline_at=deadline_at)
 
-        while offset < cap:
-            limit = min(page, cap - offset)
-            data = self._request(
-                f"/Users/{user_id}/Items",
-                params={
-                    "Recursive": "true",
-                    "StartIndex": offset,
-                    "Limit": limit,
-                    "IncludeItemTypes": "Series",
-                    "Fields": "ProviderIds,ProductionYear",
-                    "SortBy": "SortName",
-                    "SortOrder": "Ascending",
-                },
-                timeout=self._remaining_timeout(deadline_at),
-            )
-            items, total = self._inventory_page(data, seen_ids)
-            reported_total = max(reported_total, total)
-            for item in items:
-                item_id = str(item.get("Id") or "").strip()
-                name = str(item.get("Name") or "").strip()
-                if not item_id or not name:
-                    continue
-                candidates.append(SeriesCandidate(
-                    id=item_id,
-                    name=name,
-                    year=str(item.get("ProductionYear") or "").strip(),
-                    tmdb_id=self._provider_tmdb_id(item.get("ProviderIds")),
-                ))
-                if len(candidates) >= cap:
-                    break
-            offset += len(items)
-            if not items or len(items) < limit or offset >= total:
-                exhausted = True
-                break
+        items, total, truncated = self._inventory_items(
+            user_id, cap=cap, page_size=page, deadline_at=deadline_at,
+            params={
+                "IncludeItemTypes": "Series",
+                "Fields": "ProviderIds,ProductionYear",
+            },
+        )
+        for item in items:
+            item_id = str(item.get("Id") or "").strip()
+            name = str(item.get("Name") or "").strip()
+            if not item_id or not name:
+                continue
+            candidates.append(SeriesCandidate(
+                id=item_id,
+                name=name,
+                year=str(item.get("ProductionYear") or "").strip(),
+                tmdb_id=self._provider_tmdb_id(item.get("ProviderIds")),
+            ))
 
         return SeriesSearchResult(
-            candidates=candidates[:cap],
-            total=reported_total or offset,
-            # 提前结束分页不代表完整：上游报告的未读条目必须保留为截断态。
-            truncated=reported_total > offset or (not exhausted and len(candidates) >= cap),
+            candidates=candidates,
+            total=total,
+            truncated=truncated,
         )
 
     def list_media_identity_inventory(
@@ -867,55 +862,37 @@ class MediaServerClient:
         include_item_type = "Movie" if normalized_type == "movie" else "Series"
         cap = max(1, min(int(max_items or 5_000), 10_000))
         page = max(1, min(int(page_size or 200), 500))
-        offset = 0
-        seen_ids: set[str] = set()
         candidates: list[MediaIdentityCandidate] = []
-        reported_total = 0
-        exhausted = False
         unmapped = 0
         user_id = self._user_id(deadline_at=deadline_at)
 
-        while offset < cap:
-            limit = min(page, cap - offset)
-            data = self._request(
-                f"/Users/{user_id}/Items",
-                params={
-                    "Recursive": "true",
-                    "StartIndex": offset,
-                    "Limit": limit,
-                    "IncludeItemTypes": include_item_type,
-                    "Fields": "ProviderIds,ProductionYear",
-                    "SortBy": "SortName",
-                    "SortOrder": "Ascending",
-                },
-                timeout=self._remaining_timeout(deadline_at),
-            )
-            items, total = self._inventory_page(data, seen_ids)
-            reported_total = max(reported_total, total)
-            for item in items:
-                name = str(item.get("Name") or "").strip()
-                if not name:
-                    continue
-                tmdb_id = self._provider_tmdb_id(item.get("ProviderIds"))
-                if not tmdb_id:
-                    unmapped += 1
-                candidates.append(
-                    MediaIdentityCandidate(
-                        name=name,
-                        year=str(item.get("ProductionYear") or "").strip(),
-                        tmdb_id=tmdb_id,
-                        media_type=normalized_type,
-                    )
+        items, total, truncated = self._inventory_items(
+            user_id, cap=cap, page_size=page, deadline_at=deadline_at,
+            params={
+                "IncludeItemTypes": include_item_type,
+                "Fields": "ProviderIds,ProductionYear",
+            },
+        )
+        for item in items:
+            name = str(item.get("Name") or "").strip()
+            if not name:
+                continue
+            tmdb_id = self._provider_tmdb_id(item.get("ProviderIds"))
+            if not tmdb_id:
+                unmapped += 1
+            candidates.append(
+                MediaIdentityCandidate(
+                    name=name,
+                    year=str(item.get("ProductionYear") or "").strip(),
+                    tmdb_id=tmdb_id,
+                    media_type=normalized_type,
                 )
-            offset += len(items)
-            if not items or len(items) < limit or offset >= total:
-                exhausted = True
-                break
+            )
 
         return MediaIdentityInventory(
-            candidates=candidates[:cap],
-            total=reported_total or offset,
-            truncated=reported_total > offset or (not exhausted and offset >= cap),
+            candidates=candidates,
+            total=total,
+            truncated=truncated,
             unmapped=unmapped,
         )
 
@@ -940,11 +917,7 @@ class MediaServerClient:
         }[normalized_type]
         cap = max(1, min(int(max_items or 5_000), 10_000))
         page = max(1, min(int(page_size or 200), 500))
-        offset = 0
-        seen_ids: set[str] = set()
         candidates: list[MediaRecommendationCandidate] = []
-        reported_total = 0
-        exhausted = False
 
         def score(value: object, *, maximum: float) -> float:
             if isinstance(value, bool):
@@ -968,87 +941,73 @@ class MediaServerClient:
                     names.append(name)
             return tuple(dict.fromkeys(names))[:12]
 
-        while offset < cap:
-            limit = min(page, cap - offset)
-            data = self._request(
-                f"/Users/{selected_user}/Items",
-                params={
-                    "Recursive": "true",
-                    "StartIndex": offset,
-                    "Limit": limit,
-                    "IncludeItemTypes": include_types,
-                    "Fields": (
-                        "Overview,ProductionYear,OriginalTitle,Genres,Tags,Studios,"
-                        "ProductionLocations,CommunityRating,CriticRating,ProviderIds,"
-                        "UserData"
-                    ),
-                    "EnableImages": "false",
-                    "EnableUserData": "true",
-                    "SortBy": "SortName",
-                    "SortOrder": "Ascending",
-                },
-                timeout=self._remaining_timeout(deadline_at),
+        items, total, truncated = self._inventory_items(
+            selected_user, cap=cap, page_size=page, deadline_at=deadline_at,
+            params={
+                "IncludeItemTypes": include_types,
+                "Fields": (
+                    "Overview,ProductionYear,OriginalTitle,Genres,Tags,Studios,"
+                    "ProductionLocations,CommunityRating,CriticRating,ProviderIds,"
+                    "UserData"
+                ),
+                "EnableImages": "false",
+                "EnableUserData": "true",
+            },
+        )
+        for item in items:
+            item_id = str(item.get("Id") or "").strip()
+            name = str(item.get("Name") or "").strip()
+            raw_type = str(item.get("Type") or "").strip().casefold()
+            candidate_type = "movie" if raw_type == "movie" else (
+                "tv" if raw_type == "series" else ""
             )
-            items, total = self._inventory_page(data, seen_ids)
-            reported_total = max(reported_total, total)
-            for item in items:
-                item_id = str(item.get("Id") or "").strip()
-                name = str(item.get("Name") or "").strip()
-                raw_type = str(item.get("Type") or "").strip().casefold()
-                candidate_type = "movie" if raw_type == "movie" else (
-                    "tv" if raw_type == "series" else ""
+            if not item_id or not name or not candidate_type:
+                continue
+            raw_user_data = item.get("UserData")
+            user_data = raw_user_data if isinstance(raw_user_data, dict) else {}
+            try:
+                play_count = max(0, int(user_data.get("PlayCount", 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                play_count = 0
+            try:
+                playback_position = max(
+                    0, int(user_data.get("PlaybackPositionTicks", 0) or 0)
                 )
-                if not item_id or not name or not candidate_type:
-                    continue
-                raw_user_data = item.get("UserData")
-                user_data = raw_user_data if isinstance(raw_user_data, dict) else {}
-                try:
-                    play_count = max(0, int(user_data.get("PlayCount", 0) or 0))
-                except (TypeError, ValueError, OverflowError):
-                    play_count = 0
-                try:
-                    playback_position = max(
-                        0, int(user_data.get("PlaybackPositionTicks", 0) or 0)
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    playback_position = 0
-                watched = bool(
-                    user_data.get("Played")
-                    or play_count
-                    or playback_position
-                    or str(user_data.get("LastPlayedDate") or "").strip()
+            except (TypeError, ValueError, OverflowError):
+                playback_position = 0
+            watched = bool(
+                user_data.get("Played")
+                or play_count
+                or playback_position
+                or str(user_data.get("LastPlayedDate") or "").strip()
+            )
+            candidates.append(
+                MediaRecommendationCandidate(
+                    id=item_id,
+                    name=name,
+                    media_type=candidate_type,
+                    year=str(item.get("ProductionYear") or "").strip(),
+                    original_title=str(item.get("OriginalTitle") or "").strip(),
+                    overview=str(item.get("Overview") or "").strip()[:1_000],
+                    genres=tuple(_dedupe_texts(item.get("Genres")))[:12],
+                    tags=tuple(_dedupe_texts(item.get("Tags")))[:24],
+                    studios=studio_names(item.get("Studios")),
+                    production_locations=tuple(
+                        _dedupe_texts(item.get("ProductionLocations"))
+                    )[:12],
+                    community_rating=score(
+                        item.get("CommunityRating"), maximum=10.0
+                    ),
+                    critic_rating=score(item.get("CriticRating"), maximum=100.0),
+                    watched=watched,
+                    tmdb_id=self._provider_tmdb_id(item.get("ProviderIds")),
                 )
-                candidates.append(
-                    MediaRecommendationCandidate(
-                        id=item_id,
-                        name=name,
-                        media_type=candidate_type,
-                        year=str(item.get("ProductionYear") or "").strip(),
-                        original_title=str(item.get("OriginalTitle") or "").strip(),
-                        overview=str(item.get("Overview") or "").strip()[:1_000],
-                        genres=tuple(_dedupe_texts(item.get("Genres")))[:12],
-                        tags=tuple(_dedupe_texts(item.get("Tags")))[:24],
-                        studios=studio_names(item.get("Studios")),
-                        production_locations=tuple(
-                            _dedupe_texts(item.get("ProductionLocations"))
-                        )[:12],
-                        community_rating=score(
-                            item.get("CommunityRating"), maximum=10.0
-                        ),
-                        critic_rating=score(item.get("CriticRating"), maximum=100.0),
-                        watched=watched,
-                        tmdb_id=self._provider_tmdb_id(item.get("ProviderIds")),
-                    )
-                )
-            offset += len(items)
-            if not items or len(items) < limit or offset >= total:
-                exhausted = True
-                break
+            )
 
         return MediaRecommendationInventory(
-            candidates=candidates[:cap],
-            total=reported_total or offset,
-            truncated=reported_total > offset or (not exhausted and offset >= cap),
+            candidates=candidates,
+            total=total,
+            truncated=truncated,
         )
 
     def list_series_episode_inventory(
@@ -1063,61 +1022,44 @@ class MediaServerClient:
         """分页枚举剧集集号；默认忽略 Season 0，显式开启时纳入特典。"""
         cap = max(1, min(int(max_episodes or 2000), 2000))
         page = max(1, min(int(page_size or 200), 200))
-        offset = 0
-        seen_ids: set[str] = set()
         seen: set[tuple[int, int]] = set()
         ignored_specials = 0
         ignored_unknown = 0
-        reported_total = 0
-        exhausted = False
         user_id = self._user_id(deadline_at=deadline_at)
 
-        while offset < cap:
-            limit = min(page, cap - offset)
-            data = self._request(
-                f"/Users/{user_id}/Items",
-                params={
-                    "ParentId": str(series_id or "").strip(),
-                    "Recursive": "true",
-                    "StartIndex": offset,
-                    "Limit": limit,
-                    "IncludeItemTypes": "Episode",
-                    "Fields": (
-                        "SeriesId,SeriesName,SeasonId,ParentIndexNumber,"
-                        "IndexNumber,ProviderIds"
-                    ),
-                    "SortBy": "ParentIndexNumber,IndexNumber",
-                    "SortOrder": "Ascending",
-                },
-                timeout=self._remaining_timeout(deadline_at),
-            )
-            items, total = self._inventory_page(data, seen_ids)
-            reported_total = max(reported_total, total)
-            for item in items:
-                try:
-                    season = int(item.get("ParentIndexNumber"))
-                    episode = int(item.get("IndexNumber"))
-                except (TypeError, ValueError):
-                    ignored_unknown += 1
-                    continue
-                if season == 0 and episode > 0:
-                    if include_specials:
-                        seen.add((season, episode))
-                    else:
-                        ignored_specials += 1
-                elif season > 0 and episode > 0:
+        items, total, truncated = self._inventory_items(
+            user_id, cap=cap, page_size=page, deadline_at=deadline_at,
+            params={
+                "ParentId": str(series_id or "").strip(),
+                "IncludeItemTypes": "Episode",
+                "Fields": (
+                    "SeriesId,SeriesName,SeasonId,ParentIndexNumber,"
+                    "IndexNumber,ProviderIds"
+                ),
+                "SortBy": "ParentIndexNumber,IndexNumber",
+            },
+        )
+        for item in items:
+            try:
+                season = int(item.get("ParentIndexNumber"))
+                episode = int(item.get("IndexNumber"))
+            except (TypeError, ValueError):
+                ignored_unknown += 1
+                continue
+            if season == 0 and episode > 0:
+                if include_specials:
                     seen.add((season, episode))
                 else:
-                    ignored_unknown += 1
-            offset += len(items)
-            if not items or len(items) < limit or offset >= total:
-                exhausted = True
-                break
+                    ignored_specials += 1
+            elif season > 0 and episode > 0:
+                seen.add((season, episode))
+            else:
+                ignored_unknown += 1
 
         return SeriesEpisodeInventory(
             episodes=sorted(seen),
-            total=reported_total or offset,
-            truncated=reported_total > offset or (not exhausted and offset >= cap),
+            total=total,
+            truncated=truncated,
             ignored_specials=ignored_specials,
             ignored_unknown=ignored_unknown,
         )

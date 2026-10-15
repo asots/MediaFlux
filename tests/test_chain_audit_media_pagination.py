@@ -144,6 +144,53 @@ class MediaInventoryCompletenessTests(unittest.TestCase):
                         reader()
                     self.assertEqual(request.call_count, 2)
 
+    def test_missing_or_invalid_total_continues_until_the_actual_last_page(self):
+        for cls in (EmbyClient, JellyfinClient):
+            client = self.client(cls)
+            for total in (None, True, -1, "invalid", 1):
+                for name, reader in self.readers(client).items():
+                    pages = [
+                        {"Items": [self.item(1), self.item(2)], "TotalRecordCount": total},
+                        {"Items": [self.item(3)]},
+                    ]
+                    with self.subTest(server=cls.__name__, operation=name, total=total), \
+                            patch.object(client, "_request", side_effect=pages) as request:
+                        result = reader()
+                        self.assertEqual(result.total, 3)
+                        self.assertFalse(result.truncated)
+                        self.assertEqual(
+                            [call.kwargs["params"]["StartIndex"] for call in request.call_args_list],
+                            [0, 2],
+                        )
+
+    def test_unknown_total_at_cap_or_malformed_page_cannot_prove_completeness(self):
+        client = self.client(JellyfinClient)
+        for name, reader in self.readers(client, cap=2).items():
+            for payload in (
+                [self.item(1), self.item(2)],
+                {"Items": [self.item(1), self.item(2)]},
+                {"Items": [self.item(1), None]},
+            ):
+                with self.subTest(operation=name, payload=payload), \
+                        patch.object(client, "_request", return_value=payload) as request:
+                    self.assertTrue(reader().truncated)
+                    self.assertEqual(request.call_count, 1)
+
+    def test_batch_identity_check_finds_existing_media_beyond_unknown_first_page(self):
+        from app.services import _media_identity_batch_source_payload
+
+        client = self.client(JellyfinClient)
+        pages = [
+            {"Items": [self.item(n) for n in range(1, 201)]},
+            {"Items": [self.item(201)]},
+        ]
+        with patch.object(client, "_request", side_effect=pages):
+            result = _media_identity_batch_source_payload(
+                "jellyfin", "Synthetic", client,
+                [{"tmdb_id": "201", "media_type": "tv", "title": "Show 201"}],
+            )
+        self.assertEqual(result["items"][0]["status"], "present")
+
     def test_distinct_versions_of_the_same_episode_are_not_duplicate_items(self):
         client = self.client(JellyfinClient)
         first, second = self.item(1), self.item(2)
