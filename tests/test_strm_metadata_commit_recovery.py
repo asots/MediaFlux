@@ -341,7 +341,7 @@ raise AssertionError("crash checkpoint not reached")
         self.assertEqual(self.queue_row()["status"], "running")
         self.assertEqual(db.list_strm_refresh_entries(), [])
 
-    def recover_without_download(self):
+    def recover_without_download(self, expected_refresh_count=1):
         self.assertEqual(db.recover_stale_strm_metadata_jobs(force=True), 1)
         with patch(
             "app.modules.strm.requests.get",
@@ -350,7 +350,28 @@ raise AssertionError("crash checkpoint not reached")
             self.assertTrue(self.worker._process_one())
         self.assertEqual(self.queue_row()["status"], "completed")
         self.assertEqual(db.list_strm_failures(status="open"), [])
-        self.assertEqual(len(db.list_strm_refresh_entries()), 1)
+        self.assertEqual(len(db.list_strm_refresh_entries()), expected_refresh_count)
+
+    def assert_refresh_policy_survives_crash(self, *, enabled, allow_emby):
+        db.enqueue_strm_metadata_jobs([{
+            **self.job,
+            "refresh_policy": {
+                "media_root": str(self.root / STRM_SUBDIR),
+                "enabled": enabled, "allow_emby": allow_emby,
+            },
+        }], max_attempts=1)
+        self.crash_after_install()
+        self.recover_without_download(expected_refresh_count=int(enabled))
+        self.assertEqual(
+            [entry["allow_emby"] for entry in db.list_strm_refresh_entries()],
+            [allow_emby] if enabled else [],
+        )
+
+    def test_real_exit_keeps_refresh_disabled_after_restart(self):
+        self.assert_refresh_policy_survives_crash(enabled=False, allow_emby=False)
+
+    def test_real_exit_keeps_emby_disabled_after_restart(self):
+        self.assert_refresh_policy_survives_crash(enabled=True, allow_emby=False)
 
     def test_real_exit_after_install_before_ack_recovers_without_repeating_download(
         self,

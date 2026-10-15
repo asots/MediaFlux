@@ -6,7 +6,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from collections.abc import Iterable
 from typing import Any
 
@@ -15,7 +15,7 @@ from typing import Any
 class StrmRefreshPolicy:
     """本轮固定的刷新策略；索引提交与既有 outbox 共用一个事务。"""
 
-    media_root: str
+    media_root: str = ""
     allow_emby: bool = True
     request_owners: object = None
     enabled: bool = True
@@ -36,7 +36,9 @@ class StrmRefreshPolicy:
             return
         from app.modules.media_refresh import plan_refresh_targets
 
-        targets = plan_refresh_targets(paths, media_roots=[self.media_root]).targets
+        # 历史任务未保存媒体根，保留其明确目标；新任务按冻结的根规划目录。
+        planning = {"changed_paths": paths} if self.media_root else {"changed_dirs": paths}
+        targets = plan_refresh_targets(**planning, media_roots=[self.media_root]).targets
         if targets:
             _enqueue_strm_refresh_paths(
                 conn, targets, stamp=db.now(), allow_emby=self.allow_emby,
@@ -312,6 +314,9 @@ _METADATA_ACTIVE_STATUSES = ("queued", "running", "retry_wait")
 
 
 def _metadata_snapshot(item: dict[str, Any]) -> tuple[str, ...]:
+    policy = StrmRefreshPolicy(**(
+        item.get("refresh_policy") or json.loads(item.get("refresh_policy_json") or "{}")
+    ))
     return (
         str(item.get("source_name") or ""),
         str(item.get("parent_id") or ""),
@@ -320,18 +325,7 @@ def _metadata_snapshot(item: dict[str, Any]) -> tuple[str, ...]:
         str(max(0, int(item.get("size") or 0))),
         _normalize_rel_dir(item.get("rel_dir")),
         str(item.get("target_rel_path") or ""),
-    )
-
-
-def _metadata_row_snapshot(row) -> tuple[str, ...]:
-    return (
-        str(row["source_name"] or ""),
-        str(row["parent_id"] or ""),
-        str(row["filename"] or ""),
-        str(row["etag"] or ""),
-        str(max(0, int(row["size"] or 0))),
-        _normalize_rel_dir(row["rel_dir"]),
-        str(row["target_rel_path"] or ""),
+        json.dumps(asdict(policy), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
     )
 
 
@@ -367,33 +361,30 @@ def enqueue_strm_metadata_jobs(
                 "SELECT * FROM strm_metadata_queue WHERE provider=? AND source_id=? AND file_id=?",
                 (str(provider or "guangya"), source_id, file_id),
             ).fetchone()
-            values = (
-                snapshot[0], snapshot[1], snapshot[2], snapshot[3], int(snapshot[4]),
-                snapshot[5], snapshot[6], safe_max_attempts, stamp,
-            )
+            values = (*snapshot[:4], int(snapshot[4]), *snapshot[5:], safe_max_attempts)
             if row is None:
                 conn.execute(
                     "INSERT INTO strm_metadata_queue("
                     "provider,source_id,source_name,file_id,parent_id,filename,etag,size,"
-                    "rel_dir,target_rel_path,status,max_attempts,next_attempt_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)",
+                    "rel_dir,target_rel_path,refresh_policy_json,status,max_attempts,next_attempt_at,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)",
                     (
                         str(provider or "guangya"), source_id, snapshot[0], file_id,
                         snapshot[1], snapshot[2], snapshot[3], int(snapshot[4]),
-                        snapshot[5], snapshot[6], safe_max_attempts, stamp, stamp, stamp,
+                        snapshot[5], snapshot[6], snapshot[7], safe_max_attempts, stamp, stamp, stamp,
                     ),
                 )
                 result["created"] += 1
                 continue
 
-            changed = _metadata_row_snapshot(row) != snapshot
+            changed = _metadata_snapshot(dict(row)) != snapshot
             status = str(row["status"] or "queued")
             if status == "running":
                 conn.execute(
                     "UPDATE strm_metadata_queue SET source_name=?,parent_id=?,filename=?,etag=?,"
-                    "size=?,rel_dir=?,target_rel_path=?,max_attempts=?,dirty=?,"
+                    "size=?,rel_dir=?,target_rel_path=?,refresh_policy_json=?,max_attempts=?,dirty=?,"
                     "revision=revision+?,updated_at=? WHERE id=?",
-                    (*values[:8], 1 if changed else int(row["dirty"] or 0), 1 if changed else 0,
+                    (*values, 1 if changed else int(row["dirty"] or 0), 1 if changed else 0,
                      stamp, int(row["id"])),
                 )
                 result["dirty" if changed else "deduped"] += 1
@@ -408,17 +399,17 @@ def enqueue_strm_metadata_jobs(
             ):
                 conn.execute(
                     "UPDATE strm_metadata_queue SET source_name=?,parent_id=?,filename=?,etag=?,"
-                    "size=?,rel_dir=?,target_rel_path=?,max_attempts=?,updated_at=? WHERE id=?",
-                    (*values[:8], stamp, int(row["id"])),
+                    "size=?,rel_dir=?,target_rel_path=?,refresh_policy_json=?,max_attempts=?,updated_at=? WHERE id=?",
+                    (*values, stamp, int(row["id"])),
                 )
                 result["deduped"] += 1
                 continue
             conn.execute(
                 "UPDATE strm_metadata_queue SET source_name=?,parent_id=?,filename=?,etag=?,"
-                "size=?,rel_dir=?,target_rel_path=?,status='queued',dirty=0,revision=revision+1,"
+                "size=?,rel_dir=?,target_rel_path=?,refresh_policy_json=?,status='queued',dirty=0,revision=revision+1,"
                 "attempts=0,max_attempts=?,next_attempt_at=?,last_attempt_at=NULL,completed_at=NULL,"
                 "lease_owner='',lease_until=0,last_error_type='',last_error='',updated_at=? WHERE id=?",
-                (*values[:8], stamp, stamp, int(row["id"])),
+                (*values, stamp, stamp, int(row["id"])),
             )
             result["updated"] += 1
     return result
@@ -512,7 +503,7 @@ def settle_strm_metadata_job(
         # 之间写入 dirty/revision 后又被迟到的 completed 覆盖。
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT status,dirty,revision,lease_owner,lease_generation,source_id,file_id "
+            "SELECT status,dirty,revision,lease_owner,lease_generation,source_id,file_id,refresh_policy_json "
             "FROM strm_metadata_queue WHERE id=?",
             (int(job_id),),
         ).fetchone()
@@ -539,7 +530,7 @@ def settle_strm_metadata_job(
         if cur.rowcount != 1:
             return "stale"
         if status == "completed":
-            _enqueue_strm_refresh_paths(conn, refresh_paths, stamp=stamp, allow_emby=True)
+            StrmRefreshPolicy(**json.loads(row["refresh_policy_json"])).record(conn, refresh_paths)
             database._resolve_strm_failure_for_item_conn(
                 conn, str(row["source_id"]), str(row["file_id"]), "metadata", timestamp=stamp,
             )

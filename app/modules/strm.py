@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -499,6 +499,7 @@ def _metadata_queue_payload(
     source_id: str,
     source_name: str,
     force: bool = False,
+    refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict[str, object]:
     """生成不含签名直链的持久化元数据任务快照。"""
     target = _metadata_target(file, rel_dir, strm_root)
@@ -517,6 +518,9 @@ def _metadata_queue_payload(
         "rel_dir": str(rel_dir or ""),
         "target_rel_path": target_rel_path,
         "force": bool(force),
+        "refresh_policy": asdict(refresh_policy or StrmRefreshPolicy(
+            media_root=str((Path(strm_root).expanduser() / STRM_SUBDIR).resolve()),
+        )),
     }
 
 
@@ -1779,6 +1783,7 @@ def _sync_strm_incremental_impl(
                             source_id=source_dir_id,
                             source_name=display_source_name,
                             force=True,
+                            refresh_policy=refresh_policy,
                         )
                     ])
                     if int(queued.get("failed", 0) or 0):
@@ -2644,6 +2649,7 @@ def _sync_strm_impl(
                     source_id=source_dir_id,
                     source_name=display_source_name,
                     force=True,
+                    refresh_policy=refresh_policy,
                 ))
                 queue_files.append((file, rel_dir, expected))
                 pending_metadata_targets.add(str(expected))

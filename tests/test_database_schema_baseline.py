@@ -18,6 +18,78 @@ from tests.support import seed_rss_entry_state
 
 
 class DatabaseSchemaBaselineTests(IsolatedDatabaseTestCase):
+    def test_legacy_metadata_queue_gains_policy_column_on_cold_restart(self) -> None:
+        import subprocess
+        import sys
+
+        with db.get_conn() as fresh:
+            column = next(row for row in fresh.execute("PRAGMA table_info(strm_metadata_queue)")
+                          if row["name"] == "refresh_policy_json")
+            self.assertEqual(tuple(column)[2:5], ("TEXT", 1, "'{}'"))
+
+        with tempfile.TemporaryDirectory(prefix="mediaflux-legacy-metadata-policy-") as root:
+            path = Path(root) / "legacy.db"
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(db._SCHEMA.replace(
+                    "    refresh_policy_json TEXT NOT NULL DEFAULT '{}',\n", "",
+                ))
+                self.assertNotIn("refresh_policy_json", {
+                    row[1] for row in conn.execute("PRAGMA table_info(strm_metadata_queue)")
+                })
+                conn.execute(
+                    "INSERT INTO strm_metadata_queue(source_id,source_name,file_id,parent_id,"
+                    "filename,etag,size,rel_dir,target_rel_path,next_attempt_at,created_at,updated_at) "
+                    "VALUES('source','整理','meta','source','Movie.nfo','m1',8,'Movie',"
+                    "'光鸭云盘/Movie/Movie.nfo',?,?,?)", (db.now(),) * 3,
+                )
+                conn.execute(f"PRAGMA user_version={db.SCHEMA_VERSION}")
+                conn.commit()
+            finally:
+                conn.close()
+
+            script = r"""
+import tests
+import socket, sys
+from pathlib import Path
+from unittest.mock import patch
+from app import database as db
+from app.clients.guangya import GuangYaFile
+from app.modules.strm_metadata_worker import STRMMetadataWorker
+from tests.test_strm_metadata_queue import _Response, _TreeClient
+socket.socket.connect=lambda *_a,**_k: (_ for _ in ()).throw(AssertionError("network forbidden"))
+db.configure_database(Path(sys.argv[1]), test_mode=True)
+db.init_db()
+worker = STRMMetadataWorker()
+worker._client = _TreeClient({"source": [GuangYaFile("meta", "Movie.nfo", False, 8, "m1", "source")]})
+with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
+     patch("app.modules.strm_metadata_worker.get", side_effect=lambda k,d="": {"STRM_ROOT":sys.argv[2], "STRM_METADATA_EXTS":"nfo"}.get(k,d)), \
+     patch("app.modules.strm.requests.get", return_value=_Response()), \
+     patch.object(worker, "_flush_media_refresh"):
+    assert worker._process_one()
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(path), root],
+                timeout=20, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            conn = sqlite3.connect(path)
+            try:
+                columns = {row[1]: row for row in conn.execute("PRAGMA table_info(strm_metadata_queue)")}
+                self.assertIn("refresh_policy_json", columns)
+                # 复用既有补列机制：历史表添加类型和默认值，不重建旧表约束。
+                self.assertEqual(columns["refresh_policy_json"][2], "TEXT")
+                self.assertEqual(columns["refresh_policy_json"][4], "'{}'")
+                self.assertEqual(conn.execute(
+                    "SELECT source_id,file_id,status,refresh_policy_json FROM strm_metadata_queue"
+                ).fetchall(), [("source", "meta", "completed", "{}")])
+                self.assertEqual(conn.execute(
+                    "SELECT path,allow_emby FROM strm_refresh_outbox"
+                ).fetchall(), [(str(Path(root) / "光鸭云盘/Movie/Movie.nfo"), 1)])
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
+            finally:
+                conn.close()
+
     def test_v32_database_migrates_agent_kernel_due_expression_index(self) -> None:
         previous_path = db.DB_PATH
         previous_test_mode = bool(getattr(db, "_configured_test_mode", False))

@@ -74,6 +74,62 @@ class StrmMetadataQueueTests(IsolatedDatabaseTestCase):
         self.assertEqual(row["etag"], "etag-2")
         self.assertEqual(row["attempts"], 0)
 
+    def test_policy_only_change_reopens_completed_job(self):
+        original = _job(refresh_policy={"media_root": "/strm", "enabled": False})
+        db.enqueue_strm_metadata_jobs([original])
+        claimed = db.claim_due_strm_metadata_jobs(owner="worker")[0]
+        db.settle_strm_metadata_job(
+            claimed["id"],
+            expected_lease_generation=claimed["lease_generation"],
+            expected_revision=claimed["revision"],
+        )
+
+        updated = {**original, "refresh_policy": {"media_root": "/strm", "allow_emby": False}}
+        result = db.enqueue_strm_metadata_jobs([updated])
+
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(self._rows()[0]["status"], "queued")
+        self.assertEqual(self._rows()[0]["revision"], claimed["revision"] + 1)
+        self.assertEqual(db.enqueue_strm_metadata_jobs([updated])["deduped"], 1)
+
+    def test_legacy_empty_policy_matches_explicit_defaults_without_revision_change(self):
+        from dataclasses import asdict
+
+        from app.repositories.strm import StrmRefreshPolicy
+
+        db.enqueue_strm_metadata_jobs([_job()])
+        with db.get_conn() as conn:
+            conn.execute("UPDATE strm_metadata_queue SET refresh_policy_json='{}'")
+        before = self._rows()[0]
+        result = db.enqueue_strm_metadata_jobs([_job(refresh_policy=asdict(StrmRefreshPolicy()))])
+
+        self.assertEqual(result["deduped"], 1)
+        self.assertEqual(self._rows()[0]["revision"], before["revision"])
+
+    def test_policy_only_change_fences_running_revision_and_uses_latest_scope(self):
+        original = _job(refresh_policy={"media_root": "/strm"})
+        db.enqueue_strm_metadata_jobs([original])
+        first = db.claim_due_strm_metadata_jobs(owner="worker")[0]
+        result = db.enqueue_strm_metadata_jobs([{
+            **original, "refresh_policy": {"media_root": "/strm", "allow_emby": False},
+        }])
+
+        self.assertEqual(result["dirty"], 1)
+        self.assertEqual(self._rows()[0]["revision"], first["revision"] + 1)
+        self.assertEqual(db.settle_strm_metadata_job(
+            first["id"], expected_lease_generation=first["lease_generation"],
+            expected_revision=first["revision"], refresh_paths=["/strm/Film/Movie.nfo"],
+        ), "queued")
+        self.assertEqual(db.list_strm_refresh_entries(), [])
+        latest = db.claim_due_strm_metadata_jobs(owner="successor")[0]
+        self.assertEqual(db.settle_strm_metadata_job(
+            latest["id"], expected_lease_generation=latest["lease_generation"],
+            expected_revision=latest["revision"], refresh_paths=["/strm/Film/Movie.nfo"],
+        ), "completed")
+        self.assertEqual(
+            [entry["allow_emby"] for entry in db.list_strm_refresh_entries()], [False],
+        )
+
     def test_change_while_running_marks_dirty_and_fences_old_revision(self):
         db.enqueue_strm_metadata_jobs([_job()])
         claimed = db.claim_due_strm_metadata_jobs(owner="worker")
@@ -387,6 +443,58 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
             rows = [dict(row) for row in db.list_strm_metadata_queue()]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["status"], "queued")
+
+    def test_full_and_incremental_metadata_keep_frozen_refresh_policy(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from app.clients.guangya import GuangYaFile
+        from app.modules import strm
+        from app.modules.strm_metadata_worker import STRMMetadataWorker
+        from app.repositories.strm import StrmRefreshPolicy
+        from tests.support import isolated_test_database
+
+        for mode in ("full", "incremental"):
+            for enabled, allow_emby in ((False, False), (True, False), (True, True)):
+                with self.subTest(mode=mode, enabled=enabled, allow_emby=allow_emby), \
+                     isolated_test_database(), tempfile.TemporaryDirectory() as root:
+                    metadata = GuangYaFile("meta", "Movie.nfo", False, 8, "m1", "film")
+                    client = _TreeClient({
+                        "source": [GuangYaFile("film", "Film", True, parent_id="source")],
+                        "film": [metadata],
+                    })
+                    policy = StrmRefreshPolicy(
+                        media_root=str(Path(root) / strm.STRM_SUBDIR),
+                        enabled=enabled, allow_emby=allow_emby,
+                    )
+                    options = {
+                        "source_dir_id": "source", "base_url": "http://media.invalid",
+                        "strm_root": root, "client": client,
+                        "metadata_exts": {"nfo"}, "refresh_policy": policy,
+                    }
+                    if mode == "incremental":
+                        options["changes"] = [{
+                            "source_id": "source", "kind": "metadata", "action": "upsert",
+                            "file_id": "meta", "parent_id": "film", "name": "Movie.nfo",
+                            "etag": "m1", "size": 8, "rel_dir": "Film",
+                        }]
+                    result = (strm.sync_strm if mode == "full" else strm.sync_strm_incremental)(**options)
+                    self.assertEqual(result["metadata_queued"], 1)
+                    worker = STRMMetadataWorker()
+                    worker._client = client
+                    with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
+                         patch("app.modules.strm_metadata_worker.get", side_effect=lambda k, d="": {
+                             "STRM_ROOT": root, "STRM_METADATA_EXTS": "nfo",
+                         }.get(k, d)), \
+                         patch("app.modules.strm.requests.get", return_value=_Response()), \
+                         patch.object(worker, "_flush_media_refresh"):
+                        self.assertTrue(worker._process_one())
+                    self.assertEqual(dict(db.list_strm_metadata_queue()[0])["status"], "completed")
+                    self.assertEqual(
+                        [entry["allow_emby"] for entry in db.list_strm_refresh_entries()],
+                        [allow_emby] if enabled else [],
+                    )
 
     def test_background_worker_downloads_and_commits_queued_metadata(self):
         import tempfile

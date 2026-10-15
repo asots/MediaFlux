@@ -972,6 +972,7 @@ CREATE TABLE IF NOT EXISTS strm_metadata_queue (
     size INTEGER NOT NULL DEFAULT 0 CHECK(size >= 0),
     rel_dir TEXT NOT NULL DEFAULT '',
     target_rel_path TEXT NOT NULL DEFAULT '',
+    refresh_policy_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'queued'
         CHECK(status IN ('queued','running','retry_wait','completed','failed','cancelled')),
     dirty INTEGER NOT NULL DEFAULT 0 CHECK(dirty IN (0,1)),
