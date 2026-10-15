@@ -107,7 +107,10 @@ class StrmMoveRecoveryTests(unittest.TestCase):
                 cold_steps, operation_steps, statements = [], [], []
 
                 @contextmanager
-                def measured():
+                def measured(
+                    real_get_conn=real_get_conn, cold_steps=cold_steps,
+                    operation_steps=operation_steps, statements=statements,
+                ):
                     steps = [0]
 
                     def count():

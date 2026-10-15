@@ -141,7 +141,7 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(failure=type(failure).__name__):
                 http, _search, _detail = self.partial_detail_http(200)
                 original_get = http.get
-                async def get(url, **kwargs):
+                async def get(url, *, original_get=original_get, failure=failure, **kwargs):
                     response = await original_get(url, **kwargs)
                     if '/detail/bad.html' in url:
                         raise failure

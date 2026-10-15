@@ -66,7 +66,7 @@ class StrmMetadataCommitRecoveryTests(unittest.TestCase):
                     conn.execute("DELETE FROM strm_metadata_queue")
                 db.enqueue_strm_metadata_jobs([{**self.job, "filename": "Movie.jpg", "target_rel_path": "整理/Movie/Movie.jpg"}])
                 successor = []
-                def settings(key, default=""):
+                def settings(key, default="", *, change=change, successor=successor):
                     if key == "STRM_METADATA_EXTS":
                         if change == "revision":
                             db.enqueue_strm_metadata_jobs([self.job])
@@ -247,7 +247,7 @@ class StrmMetadataCommitRecoveryTests(unittest.TestCase):
                 self.record_old_failure()
                 db.enqueue_strm_metadata_jobs([self.job], max_attempts=1)
 
-                def interrupt(*_args, **_kwargs):
+                def interrupt(*_args, interruption=interruption, **_kwargs):
                     if interruption == "revision":
                         db.enqueue_strm_metadata_jobs(
                             [{**self.job, "etag": "new-version"}]
@@ -516,7 +516,7 @@ raise AssertionError("crash checkpoint not reached")
             with self.subTest(change=change):
                 old = self.queue_move()
 
-                def change_then_settle(*args, **kwargs):
+                def change_then_settle(*args, change=change, **kwargs):
                     if change == "revision":
                         db.enqueue_strm_metadata_jobs([{**self.job, "etag": "new"}])
                     elif change == "cancel":
@@ -549,7 +549,7 @@ raise AssertionError("crash checkpoint not reached")
             with self.subTest(change=change):
                 old = self.queue_move()
 
-                def prepare_then_change(*args, **kwargs):
+                def prepare_then_change(*args, change=change, **kwargs):
                     result = strm.prepare_strm_metadata_job(*args, **kwargs)
                     if change == "revision":
                         db.enqueue_strm_metadata_jobs([{**self.job, "etag": "new"}])
