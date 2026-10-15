@@ -125,7 +125,7 @@
             <div class="dashboard-metric-foot dashboard-status-foot {% if b.stale or b.refresh_error or b.error or b.partial_errors %}is-orange{% elif not has_snapshot %}is-muted{% elif b.online %}is-status{% else %}is-orange{% endif %}" role="status" aria-live="polite">
                 <span data-dashboard-snapshot-message title="{{ b.refresh_error or b.error }}">{% if b.refresh_error or b.error %}可点击重试{% elif not has_snapshot %}正在读取媒体数据{% elif b.stale %}显示上次数据{% elif b.partial_errors %}{{ b.partial_errors|length }} 项数据未同步{% else %}{{ b.server_product or b.server_type|upper }}{% endif %}</span>
                 <span aria-hidden="true">·</span>
-                <time data-dashboard-updated-at datetime="{{ b.updated_at }}" title="{% if b.updated_at %}更新时间 {{ b.updated_at[:19]|replace('T', ' ') }} UTC{% else %}尚无成功读取{% endif %}">{% if b.updated_at %}{{ b.updated_at[11:19] }}{% else %}—{% endif %}</time>
+                <time data-dashboard-updated-at datetime="{{ b.updated_at }}" title="{% if b.updated_at %}更新时间 {{ b.updated_at|replace('T', ' ') }}{% else %}尚无成功读取{% endif %}">{% if b.updated_at %}{{ b.updated_at[11:19] }}{% else %}—{% endif %}</time>
             </div>
         </article>
     </section>
@@ -352,7 +352,7 @@
         if(time){
             time.dateTime=panel.dataset.updatedAt||'';
             time.textContent=time.dateTime?time.dateTime.slice(11,19):'—';
-            time.title=time.dateTime?`更新时间 ${time.dateTime.slice(0,19).replace('T',' ')} UTC`:'尚无成功读取';
+            time.title=time.dateTime?`更新时间 ${time.dateTime.replace('T',' ')}`:'尚无成功读取';
         }
         const refresh=panel.querySelector('[data-dashboard-refresh]');
         if(refresh){

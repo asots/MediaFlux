@@ -80,7 +80,7 @@ class MediaSnapshotBrowserTests(unittest.TestCase):
         self.addCleanup(self.fixture.tearDown)
         self.fixture._login()
         self.context = self.browser.new_context(
-            viewport={"width": 1440, "height": 1000}, reduced_motion="reduce",
+            viewport={"width": 1440, "height": 1000}, reduced_motion="reduce", timezone_id="UTC",
         )
         self.addCleanup(self.context.close)
         self.errors = []
@@ -206,7 +206,7 @@ class MediaSnapshotBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator('[data-metric="total_items"]').inner_text(), "1,135")
         self.assertEqual(page.locator(".dashboard-status-value").inner_text(), "更新失败")
         self.assertEqual(page.locator("[data-dashboard-updated-at]").inner_text(), "02:00:00")
-        self.assertIn("2026-10-15 02:00:00 UTC", page.locator("[data-dashboard-updated-at]").get_attribute("title"))
+        self.assertIn("2026-10-15 02:00:00+00:00", page.locator("[data-dashboard-updated-at]").get_attribute("title"))
         self.assertTrue(page.locator(".dashboard-primary-grid").is_visible())
         self.assertTrue(page.locator("[data-dashboard-refresh]").is_visible())
         page.locator("[data-dashboard-refresh]").click()
@@ -245,6 +245,28 @@ class MediaSnapshotBrowserTests(unittest.TestCase):
         self.finish(page, index=1, payload=self.dashboard_payload(self.board()))
         self.wait_dashboard(page)
         self.assertEqual(page.locator('[data-metric="recent_added"]').inner_text(), "5")
+
+    def test_dashboard_keeps_server_timezone_on_initial_render_and_refresh(self):
+        # 浏览器在另一个时区，也必须显示MF容器生成的本地时间。
+        for stamp, refreshed in (
+            ("2026-10-15T13:29:48+08:00", "2026-10-15T13:31:02+08:00"),
+            ("2026-10-15T10:59:48+05:30", "2026-10-15T11:01:02+05:30"),
+            ("2026-10-15T01:29:48-04:00", "2026-10-15T01:31:02-04:00"),
+        ):
+            with self.subTest(stamp=stamp):
+                page = self.open_page(self.dashboard_html(self.board(updated_at=stamp)))
+                time = page.locator("[data-dashboard-updated-at]")
+                self.assertEqual(time.inner_text(), stamp[11:19])
+                self.assertEqual(time.get_attribute("datetime"), stamp)
+                self.assertEqual(time.get_attribute("title"), "更新时间 " + stamp.replace("T", " "))
+                page.locator("[data-dashboard-refresh]").click()
+                self.assertEqual(time.inner_text(), stamp[11:19])
+                self.finish(page, payload=self.dashboard_payload(self.board(updated_at=refreshed)))
+                self.wait_dashboard(page)
+                self.assertEqual(time.inner_text(), refreshed[11:19])
+                self.assertEqual(time.get_attribute("datetime"), refreshed)
+                self.assertEqual(time.get_attribute("title"), "更新时间 " + refreshed.replace("T", " "))
+                page.close()
 
     def test_dashboard_keeps_original_playback_and_library_heights(self):
         for width in (1440, 2048, 390):

@@ -8,7 +8,7 @@ import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from app import database as db
@@ -280,7 +280,7 @@ def _merge_dashboards(
         return [replace(board, online=False, stale=True, refresh_error="读取失败，显示上次数据") for board in previous], True, True
     old_by_type = {board.server_type: board for board in previous if board.updated_at}
     retained = failed = False
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
     for index, board in enumerate(boards):
         old = old_by_type.get(board.server_type)
         unavailable = bool(board.error or not board.online)
@@ -449,7 +449,7 @@ def _merge_recent_media(sources: list[dict] | None, previous: list[dict]) -> tup
             raise RuntimeError("媒体服务器暂时不可用")
         return [{**source, "stale": True, "error": "读取失败，显示上次数据"} for source in previous], True, True
     old_by_type = {source["server_type"]: source for source in previous if source.get("updated_at")}
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
     retained = failed = False
     results = []
     for source in sources:

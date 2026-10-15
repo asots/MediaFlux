@@ -1,9 +1,16 @@
 """媒体概览快照的缓存、失效与非阻塞页面契约；不访问网络。"""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 import threading
 import unittest
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 from app import services
 from app.clients.base import DashboardData, MediaItem
@@ -72,6 +79,31 @@ class MediaSnapshotCacheTests(unittest.TestCase):
         self.assertEqual(sources[0]["items"], [])
         self.dashboard.assert_not_called()
         self.recent.assert_not_called()
+
+    def test_snapshot_timestamps_follow_process_timezone(self):
+        # 在独立进程设置TZ，避免tzset污染并行测试或服务线程。
+        script = """
+import json
+from app.clients.base import DashboardData
+from app.services import _merge_dashboards, _merge_recent_media
+boards, _, _ = _merge_dashboards([DashboardData(server_name='Test', server_type='jellyfin', online=True)], [])
+sources, _, _ = _merge_recent_media([{'server_type': 'jellyfin', 'error': ''}], [])
+print(json.dumps([boards[0].updated_at, sources[0]['updated_at']]))
+"""
+        for zone in ("Asia/Shanghai", "Asia/Kolkata", "America/New_York", "UTC"):
+            with self.subTest(timezone=zone):
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env={**os.environ, "TZ": zone},
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for stamp in json.loads(result.stdout):
+                    value = datetime.fromisoformat(stamp)
+                    local = value.astimezone(ZoneInfo(zone))
+                    self.assertEqual(value.utcoffset(), local.utcoffset())
+                    self.assertEqual(stamp, local.isoformat(timespec="seconds"))
 
     def test_hot_and_expired_snapshots_are_reused_without_remote_reads(self):
         services.build_dashboards()
