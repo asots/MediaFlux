@@ -179,6 +179,30 @@ def test_one_card_two_writes_and_single_use_ticket(rig):
     asyncio.run(run())
 
 
+def test_batch_unknown_step_key_repair_reaches_one_confirmation(rig):
+    from tests.error30_model_inputs import ExplicitRepairModel
+
+    async def run():
+        fixed = batch(*NAMES[:2])
+        invalid = {'steps': [{'tool': s['tool'], 'parameters': s['arguments']}
+                             for s in fixed['steps']]}
+        session = rig.session([call('agent.batch', invalid), call('agent.batch', fixed)])
+        session.model = ExplicitRepairModel(session.model, {'regression-call'})
+        view, events = await capture(session.run(AgentInput(
+            owner=OWNER, session_id=SESSION, message='agent.batch 合并收藏和偏好，一次确认')))
+        assert view.status == 'approval_required'
+        assert len([e for e in events if e.type == Event.TOOL_FAILED]) == 1
+        assert not rig.writes
+        plan = await session.pipeline.get_pending_plan(owner=OWNER, session_id=SESSION)
+        assert plan and plan.tool_name == 'agent.batch'
+        assert [s['tool'] for s in plan.arguments['steps']] == list(NAMES[:2])
+        session.model = ScriptedModel([FINAL])
+        result, _ = await confirm(session, plan.plan_id)
+        assert result.status == 'success'
+        assert [name for name, _ in rig.writes] == list(NAMES[:2])
+    asyncio.run(run())
+
+
 def test_cancelled_batch_never_writes(rig):
     async def run():
         session, preview, _ = await rig.start()

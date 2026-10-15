@@ -10,6 +10,52 @@ from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelin
 from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
 
 
+@pytest.mark.parametrize('composition', ['oneOf', 'anyOf'])
+@pytest.mark.parametrize('closed_branches', [True, False])
+def test_union_repair_can_remove_only_proven_unknown_fields(composition, closed_branches):
+    async def run():
+        branches = [
+            {'type': 'object', 'required': ['operation', 'arguments'],
+             'additionalProperties': False if operation == 'first' else not closed_branches,
+             'properties': {'operation': {'enum': [operation]},
+                            'arguments': {'type': 'object'}}}
+            for operation in ('first', 'second')
+        ]
+        schema = {'type': 'object', 'required': ['steps'], 'properties': {
+            'steps': {'type': 'array', 'items': {composition: branches}}}}
+        seen = []
+        tool = KernelToolSpec(name='lookup', domain='library', description='union repair',
+            input_schema=schema, effect=ToolEffect.READ,
+            read=lambda args, _: seen.append(args) or {'ok': True})
+        store = InMemorySessionStateStore()
+        lease, _ = await store.begin_turn(owner='owner', session_id='union', request_id='r')
+        async def progress(payload): pass
+        context = ToolCallContext(owner=lease.owner, session_id=lease.session_id,
+            request_id=lease.request_id, turn_id=lease.turn_id, lease=lease,
+            cancellation=CancellationToken(), report_progress=progress)
+        pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=store)
+        with pytest.raises(ToolPipelineError) as error:
+            await pipeline.execute('lookup', {'steps': [
+                {'operation': 'first', 'parameters': {'limit': 2}}]}, context=context)
+        ticket = error.value.repair_ticket
+        assert ticket and not seen
+        # Removing an invalid key must not unlock the valid operation selector.
+        with pytest.raises(ToolPipelineError, match='不能更改原有效参数'):
+            await pipeline.execute('agent.repair', {'ticket': ticket, 'arguments': {
+                'steps': [{'operation': 'second', 'arguments': {'limit': 2}}]}}, context=context)
+        fixed = {'steps': [{'operation': 'first', 'arguments': {'limit': 2}}]}
+        if closed_branches:
+            result = await pipeline.execute('agent.repair', {'ticket': ticket, 'arguments': fixed}, context=context)
+            assert ticket in result.recovered_failures
+            assert seen == [fixed]
+        else:
+            # An open alternative prevents inferring that this key is unknown.
+            with pytest.raises(ToolPipelineError, match='不能更改原有效参数'):
+                await pipeline.execute('agent.repair', {'ticket': ticket, 'arguments': fixed}, context=context)
+            assert not seen
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("composition", [
     {"not": {"required": ["left", "right"]}},
     {"oneOf": [{"required": ["left"]}, {"required": ["right"]}]},

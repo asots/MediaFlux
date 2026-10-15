@@ -111,8 +111,13 @@ def issue(tool, arguments, context, validate=None, error_type=Exception, *, coll
                 # replacement must still satisfy the full original composition.
                 repairable |= any(set(part.get("required", ())) - value.keys()
                                   for part in [schema, *branches])
+                # Closed alternatives also reject undeclared keys. Do not lock
+                # an invalid key just because the union wrapper is untyped/open.
+                closed = schema.get("additionalProperties") is False or any(
+                    choices and all(part.get("additionalProperties") is False for part in choices)
+                    for choices in (schema.get("oneOf", ()), schema.get("anyOf", ())))
                 for key, item in value.items():
-                    if key not in properties and schema.get("additionalProperties") is False:
+                    if key not in properties and closed:
                         repairable = True
                         parent = equivalent
                         for part in path:
