@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from app import database as db
+from app.clients.emby import EmbyClient
 from app.clients.guangya import GuangYaFile
 from app.clients.jellyfin import JellyfinClient
 from app.modules import media_probe, strm, strm_metadata_worker as metadata
@@ -23,7 +24,9 @@ from app.modules import media_refresh_coordinator as refresh
 from app.modules.organize import OrganizeRules
 from app.modules.scraper import MatchResult, extract_recognition_context
 from app.repositories import media_refresh_queue as queue
+from app.repositories.strm import StrmRefreshPolicy
 from tests.support import isolated_test_database, release_parse_result
+from tests.test_strm_refresh_closure import _providers
 
 
 @pytest.fixture(autouse=True)
@@ -116,9 +119,11 @@ class Response:
 class MediaEndpoint:
     """替换 HTTP transport 而非媒体刷新规划，保留真实客户端作用域/ID解析。"""
 
-    def __init__(self, root):
+    def __init__(self, root, *, series=None):
         self.root = str(root)
+        self.series = series or {}
         self.posts = []
+        self.provider_posts = []
         self.fail = False
 
     def get(self, url, **kwargs):
@@ -135,23 +140,36 @@ class MediaEndpoint:
                 ]
             )
         if path == "/Items":
-            return Response({"Items": [], "TotalRecordCount": 0})
+            items = [
+                {"Id": item_id, "Type": "Series", "Path": str(directory)}
+                for item_id, directory in self.series.items()
+            ]
+            if items:
+                items.append({
+                    "Id": "unrelated-series", "Type": "Series",
+                    "Path": str(Path(self.root) / "Unrelated Series"),
+                })
+            return Response({"Items": items, "TotalRecordCount": len(items)})
         raise AssertionError(f"unexpected media GET {path}")
 
     def post(self, url, **kwargs):
         path = urlsplit(url).path
-        assert path == "/Items/audit-library/Refresh", "不得触发全库 fallback"
+        assert path in {
+            f"/Items/{item_id}/Refresh" for item_id in (self.series or {"audit-library"})
+        }, "不得扩大到无关作品或全库 fallback"
         if self.fail:
             raise OSError("media endpoint offline")
         self.posts.append(path)
+        self.provider_posts.append((urlsplit(url).hostname.split(".")[0], path))
         return Response()
 
     def close(self):
         pass
 
     def client(self, provider):
-        assert provider == "jellyfin"
-        client = JellyfinClient("http://media.invalid", "offline-test-key")
+        client = {"jellyfin": JellyfinClient, "emby": EmbyClient}[provider](
+            f"http://{provider}.invalid", "offline-test-key",
+        )
         client._session.close()
         client._session = self
         return client
@@ -167,6 +185,28 @@ def drain_refresh(endpoint, *, owner="audit-consumer", now_epoch=None):
         for group in claimed:
             worker._process_group(group)
     return worker, claimed
+
+
+def assert_strm_refresh_delivery(worker, root, targets, series, *, allow_emby):
+    """验证持久交接与真实客户端的最终作品范围，仅替换外部 HTTP。"""
+    targets = {str(path) for path in targets}
+    assert {(entry["path"], entry["allow_emby"]) for entry in db.list_strm_refresh_entries()} == {
+        (path, allow_emby) for path in targets
+    }
+    worker._flush_media_refresh(force=True)
+    assert db.count_strm_refresh_paths() == 0
+    providers = (("jellyfin", "emby") if allow_emby else ("jellyfin",)) if targets else ()
+    assert queue.media_refresh_queue_status()["paths"] == len(targets) * len(providers)
+    endpoint = MediaEndpoint(root, series=series)
+    coordinator, claimed = drain_refresh(endpoint)
+    assert {group["provider"] for group in claimed} == set(providers)
+    assert all(set(group["paths"]) == targets for group in claimed)
+    assert coordinator._completed_session == len(providers)
+    assert sorted(endpoint.provider_posts) == sorted(
+        (provider, f"/Items/{item_id}/Refresh")
+        for provider in providers for item_id in series
+    )
+    assert queue.media_refresh_queue_status()["paths"] == 0
 
 
 class CloudFiles:
@@ -238,7 +278,7 @@ class CloudFiles:
 
 
 @contextmanager
-def cloud_runtime(cloud, root):
+def cloud_runtime(cloud, root, *, providers=("jellyfin",)):
     with (
         patch.object(metadata, "get_bool", return_value=True),
         patch.object(
@@ -247,12 +287,12 @@ def cloud_runtime(cloud, root):
             side_effect=lambda k, d="": str(root) if k == "STRM_ROOT" else d,
         ),
         patch.object(strm.requests, "get", side_effect=cloud.download),
-        patch.object(refresh, "_configured_provider_names", return_value=("jellyfin",)),
+        _providers(*providers),
     ):
         yield
 
 
-def generate_batch(cloud, root, should_stop=None):
+def generate_batch(cloud, root, should_stop=None, *, refresh_policy=None):
     return strm.sync_strm_incremental(
         "audit",
         cloud.changes(),
@@ -261,6 +301,7 @@ def generate_batch(cloud, root, should_stop=None):
         client=cloud,
         metadata_exts={"nfo"},
         should_stop=should_stop,
+        refresh_policy=refresh_policy,
     )
 
 
@@ -345,7 +386,8 @@ def test_normal_local_recognition_move_probe_and_refresh(tmp_path):
             service.close()
 
 
-def test_batch_cloud_strm_metadata_outbox_and_media_service(tmp_path):
+@pytest.mark.parametrize("enabled,allow_emby", [(True, True), (True, False), (False, True)])
+def test_batch_cloud_strm_metadata_outbox_and_media_service(tmp_path, enabled, allow_emby):
     with isolated_test_database():
         cloud = CloudFiles(tmp_path / "cloud")
         root = tmp_path / "strm"
@@ -354,13 +396,23 @@ def test_batch_cloud_strm_metadata_outbox_and_media_service(tmp_path):
         worker._client = cloud
         # 保留真实批量 flush 门槛，以便观察完成事务产生的真实 outbox。
         worker._last_refresh_at = metadata.time.monotonic()
-        with cloud_runtime(cloud, root):
-            result = generate_batch(cloud, root)
+        media_root = root / strm.STRM_SUBDIR
+        series_dir = media_root / "Audit Series"
+        targets = [series_dir / "Season 01"] if enabled else []
+        policy = StrmRefreshPolicy(str(media_root), enabled=enabled, allow_emby=allow_emby)
+        with cloud_runtime(cloud, root, providers=("jellyfin", "emby")):
+            result = generate_batch(cloud, root, refresh_policy=policy)
             assert result["generated"] == 4 and result["metadata_queued"] == 4, result
             assert cloud.list_calls == 1 and cloud.info_calls == 0
+            # 先交接视频意图，避免同目录已有记录掩盖元数据完成后的漏交接。
+            assert {(entry["path"], entry["allow_emby"]) for entry in db.list_strm_refresh_entries()} == {
+                (str(path), allow_emby) for path in targets
+            }
+            worker._flush_media_refresh(force=True)
+            assert db.count_strm_refresh_paths() == 0
+            assert queue.media_refresh_queue_status()["paths"] == len(targets) * (2 if allow_emby else 1)
             for _ in range(4):
                 assert worker._process_one()
-            assert db.count_strm_refresh_paths() == 4
             assert len(list(root.rglob("*.strm"))) == 4
             assert len(list(root.rglob("*.nfo"))) == 4
             for path in root.rglob("*.nfo"):
@@ -373,25 +425,21 @@ def test_batch_cloud_strm_metadata_outbox_and_media_service(tmp_path):
             )
             assert len(db.list_strm_index("guangya:audit")) == 4
             assert len(db.list_strm_index("guangya-meta:audit")) == 4
-            # 正常视频同步的收尾将已变化路径也交给同一持久 outbox。
-            db.enqueue_strm_refresh_paths(result["changed_strm_paths"])
-            assert db.count_strm_refresh_paths() == 8
-            worker._flush_media_refresh(force=True)
-            assert db.count_strm_refresh_paths() == 0
-            assert queue.media_refresh_queue_status()["paths"] == 8
-            endpoint = MediaEndpoint(root)
-            coordinator, claimed = drain_refresh(endpoint)
-            assert len(claimed) == 1 and coordinator._completed_session == 1
-            assert endpoint.posts == ["/Items/audit-library/Refresh"]
-            assert queue.media_refresh_queue_status()["paths"] == 0
-            repeated = generate_batch(cloud, root)
+            # 视频安装与元数据交接均走冻结策略；同目录只交接一次。
+            assert_strm_refresh_delivery(
+                worker, root, targets,
+                {"audit-series": series_dir}, allow_emby=allow_emby,
+            )
+            repeated = generate_batch(cloud, root, refresh_policy=policy)
             assert repeated["generated"] == repeated["metadata_queued"] == 0
             assert repeated["skipped"] == repeated["metadata_skipped"] == 4
             assert worker._process_one() is False
+            assert db.count_strm_refresh_paths() == queue.media_refresh_queue_status()["paths"] == 0
             assert not list(root.rglob("*.part"))
 
 
-def test_batch_metadata_path_migration_keeps_both_refresh_intents(tmp_path):
+@pytest.mark.parametrize("allow_emby", [True, False])
+def test_batch_metadata_path_migration_keeps_both_refresh_intents(tmp_path, allow_emby):
     """后台元数据迁移已删除旧副本时，新旧目录都必须进入持久刷新交接。"""
     with isolated_test_database():
         cloud = CloudFiles(tmp_path / "cloud", count=1)
@@ -401,7 +449,8 @@ def test_batch_metadata_path_migration_keeps_both_refresh_intents(tmp_path):
         worker._client = cloud
         worker._last_refresh_at = metadata.time.monotonic()
         file = cloud.files["nfo-1"]
-        with cloud_runtime(cloud, root):
+        policy = StrmRefreshPolicy(str(root / strm.STRM_SUBDIR), allow_emby=allow_emby)
+        with cloud_runtime(cloud, root, providers=("jellyfin", "emby")):
             for directory in ("Old Series/Season 01", "New Series/Season 01"):
                 db.enqueue_strm_metadata_jobs(
                     [
@@ -412,6 +461,7 @@ def test_batch_metadata_path_migration_keeps_both_refresh_intents(tmp_path):
                             source_id="audit",
                             source_name="审查",
                             force=True,
+                            refresh_policy=policy,
                         )
                     ]
                 )
@@ -423,10 +473,11 @@ def test_batch_metadata_path_migration_keeps_both_refresh_intents(tmp_path):
             new = Path(db.list_strm_index("guangya-meta:audit")[0]["strm_path"])
             assert not old.exists()
             assert new.read_bytes() == cloud.paths["nfo-1"].read_bytes()
-            assert {entry["path"] for entry in db.list_strm_refresh_entries()} == {
-                str(old),
-                str(new),
-            }
+            assert_strm_refresh_delivery(
+                worker, root, [old.parent, new.parent],
+                {"old-series": old.parent.parent, "new-series": new.parent.parent},
+                allow_emby=allow_emby,
+            )
 
 
 def test_interrupt_metadata_ack_crash_reuses_verified_installation(tmp_path):
@@ -682,7 +733,8 @@ class WritableCloud(CloudFiles):
         return True
 
 
-def test_normal_cloud_organize_write_to_strm_and_refresh(tmp_path):
+@pytest.mark.parametrize("allow_emby", [True, False])
+def test_normal_cloud_organize_write_to_strm_and_refresh(tmp_path, allow_emby):
     from app.modules.organize import Organizer
 
     with isolated_test_database():
@@ -718,7 +770,7 @@ def test_normal_cloud_organize_write_to_strm_and_refresh(tmp_path):
             "",
         )
         with (
-            cloud_runtime(cloud, root),
+            cloud_runtime(cloud, root, providers=("jellyfin", "emby")),
             patch.object(media_probe, "_run_ffprobe", return_value=ffprobe_result),
         ):
             plans, stats = organizer.organize(
@@ -744,16 +796,18 @@ def test_normal_cloud_organize_write_to_strm_and_refresh(tmp_path):
                 str(root),
                 client=cloud,
                 metadata_exts={"nfo"},
+                refresh_policy=StrmRefreshPolicy(
+                    str(root / strm.STRM_SUBDIR), allow_emby=allow_emby,
+                ),
             )
             assert result["generated"] == 2 and result["metadata_queued"] == 2, result
             worker = metadata.STRMMetadataWorker()
             worker._client = cloud
             worker._last_refresh_at = metadata.time.monotonic()
             assert worker._process_one() and worker._process_one()
-            db.enqueue_strm_refresh_paths(result["changed_strm_paths"])
-            assert db.count_strm_refresh_paths() == 4
-            worker._flush_media_refresh(force=True)
-            endpoint = MediaEndpoint(root)
-            completed, _ = drain_refresh(endpoint)
-            assert completed._completed_session == 1 and len(endpoint.posts) == 1
-            assert queue.media_refresh_queue_status()["paths"] == 0
+            targets = {Path(path).parent for path in result["changed_strm_paths"]}
+            assert len(targets) == 1
+            assert_strm_refresh_delivery(
+                worker, root, targets, {"audit-series": next(iter(targets)).parent},
+                allow_emby=allow_emby,
+            )
