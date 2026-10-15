@@ -617,15 +617,31 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.reader.close_count, 1)
 
     async def test_close_itself_is_bounded(self):
-        release, closed = threading.Event(), threading.Event()
+        entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+        clock = [0.0]
+        validate = self.reader.validate
+        def validate_near_deadline(*args, **kwargs):
+            proposal = validate(*args, **kwargs)
+            # 单独耗尽研究阶段预算，避免把整套六轮调用的机器耗时当作关闭测试。
+            clock[0] = 9.95
+            return proposal
         def slow_close():
-            release.wait(2)
+            entered.set()
+            release.wait(5)
             self.reader.close_count += 1
             closed.set()
+        self.reader.validate = validate_near_deadline
         self.reader.close = slow_close
         try:
-            with patch.object(runner, "_TIMEOUT_SECONDS", 0.12):
-                result = await self.run_case(success_model())
+            with patch.object(runner, "_TIMEOUT_SECONDS", 10), patch.object(
+                runner, "time", SimpleNamespace(monotonic=lambda: clock[0]),
+            ):
+                # asyncio 保持真实计时：关闭只剩50ms，忽略期限会触发此独立外层保护。
+                result = await asyncio.wait_for(self.run_case(success_model()), timeout=2)
+            self.assertTrue(entered.is_set())
+            self.assertFalse(closed.is_set())
+            self.assertEqual(self.reader.close_count, 0)
+            self.assertEqual(result["status"], "failed")
             self.assertEqual(result["reason_code"], "reader_close_failed")
             self.assertIsNone(result["proposal"])
         finally:
