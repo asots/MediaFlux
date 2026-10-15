@@ -930,14 +930,16 @@ class RSSEngine:
         stage = "submit"
         try:
             runtime = qb_runtime_config if isinstance(qb_runtime_config, dict) else None
-            qb_save_path = str(self._entry_value(entry, "qb_save_path", "") or "")
-            if not qb_save_path and runtime is not None:
-                qb_save_path = str(runtime.get("default_save_path") or "")
-            qb_category = (
-                str(runtime.get("category") or "")
-                if runtime is not None
-                else str(get("RSS_QB_CATEGORY", "") or "")
-            )
+            qb_options = {
+                "qb_save_path": str(
+                    self._entry_value(entry, "qb_save_path", "")
+                    or (runtime or {}).get("default_save_path") or ""
+                ),
+                "qb_category": str(
+                    (runtime.get("category") if runtime is not None else get("RSS_QB_CATEGORY", "")) or ""
+                ),
+                "qb_runtime_config": runtime,
+            }
             from app.indexers.downloads import submit_download_input
             from app.modules.download_dispatcher import (
                 public_dispatch_summary,
@@ -965,6 +967,7 @@ class RSSEngine:
                 dispatch = resubmit_download_request(
                     int(retry_source["id"]), method,
                     origin=f"rss:{int(entry['rss_item_id'])}",
+                    **qb_options,
                     rss_item_id=int(entry["rss_item_id"]),
                     log_path=_safe_download_source_marker(str(retry_source["source_value"] or "")),
                 )
@@ -985,9 +988,7 @@ class RSSEngine:
                     gy_target_name=str(
                         self._entry_value(entry, "gy_target_dir_name", "") or ""
                     ),
-                    qb_save_path=qb_save_path,
-                    qb_category=qb_category,
-                    qb_runtime_config=runtime,
+                    **qb_options,
                     qb_task_id_hint=infohash if method == "qb" else "",
                     rss_item_id=int(entry["rss_item_id"]),
                     rss_entry_id=entry_id,

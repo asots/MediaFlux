@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import database as db
+from app.clients.qbittorrent import TorrentAddResult
 from app.modules import download_dispatcher as dispatcher
 from app.modules.rss import RSSEngine, rss_entry_delivery
 from app.repositories.download_requests import apply_download_tracker_update
@@ -123,6 +124,124 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
             self.assertEqual(db.get_rss_entry(eid)["download_request_key"], key)
             with patch.object(dispatcher, "_submit_qb", side_effect=self.success), patch.object(dispatcher, "_submit_guangya", side_effect=self.success):
                 self.assertTrue(RSSEngine().download(eid)["ok"])
+
+    def test_qb_retry_keeps_subscription_directory_and_rss_category(self):
+        sid, eid, _ = self.pending()
+        db.update_rss_subscription(sid, {"qb_save_path": "/synthetic/subscription"})
+        values = {
+            "QB_URL": "http://synthetic.invalid",
+            "RSS_QB_CATEGORY": "rss-category",
+            "TG_QB_CATEGORY": "tg-category",
+            "TG_QB_SAVE_PATH": "/synthetic/tg-default",
+        }
+        get = lambda key, default="": values.get(key, default)
+        with (
+            patch("app.modules.rss.get", side_effect=get),
+            patch.object(dispatcher, "get", side_effect=get),
+            patch.object(dispatcher, "QBittorrentClient") as factory,
+        ):
+            qb = factory.return_value
+            qb.add_torrent_detailed.return_value = TorrentAddResult(True)
+            engine = RSSEngine()
+            self.addCleanup(engine.close)
+            first = engine.download(eid)
+            self.assertTrue(first["ok"], first)
+            self.fail(first["request_id"])
+            retry = engine.download(eid)
+            self.assertTrue(retry["ok"], retry)
+            self.assertNotEqual(first["request_id"], retry["request_id"])
+            self.assertTrue(engine.download(eid)["existing"])
+        routes = [(call.kwargs["save_path"], call.kwargs["category"])
+                  for call in qb.add_torrent_detailed.call_args_list]
+        assert routes == [("/synthetic/subscription", "rss-category")] * 2, routes
+
+    def test_qb_retry_keeps_frozen_config_when_live_config_changes(self):
+        _sid, eid, _ = self.pending()
+        runtime = {
+            "url": "http://frozen.invalid", "username": "frozen-user",
+            "password": "synthetic-password", "api_key": "synthetic-key", "timeout": 7,
+            "category": "frozen-rss", "default_save_path": "/synthetic/frozen",
+            "default_method": "qb",
+        }
+        original = dict(runtime)
+        with (
+            patch("app.modules.rss.get", side_effect=AssertionError("use frozen RSS config")),
+            patch.object(dispatcher, "get", return_value=""),
+            patch.object(dispatcher, "QBittorrentClient") as factory,
+        ):
+            qb = factory.return_value
+            qb.add_torrent_detailed.return_value = TorrentAddResult(True)
+            engine = RSSEngine()
+            self.addCleanup(engine.close)
+            first = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
+            assert first["ok"], first
+            self.fail(first["request_id"])
+            retry = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
+            assert retry["ok"], retry
+        assert factory.call_count == 2
+        for call in factory.call_args_list:
+            assert call.kwargs == {
+                "url": runtime["url"], "username": runtime["username"],
+                "password": runtime["password"], "api_key": runtime["api_key"], "timeout": 7,
+            }
+        routes = [(call.kwargs["save_path"], call.kwargs["category"])
+                  for call in qb.add_torrent_detailed.call_args_list]
+        assert routes == [("/synthetic/frozen", "frozen-rss")] * 2, routes
+        assert runtime == original
+
+    def test_rss_retry_exports_shared_torrent_with_frozen_config_after_retention(self):
+        from app.indexers.downloads import submit_download_input
+        from tests.test_torrent_manifest import _torrent
+
+        runtime = {
+            "url": "http://frozen.invalid", "username": "frozen-user",
+            "password": "synthetic-password", "api_key": "synthetic-key", "timeout": 7,
+            "category": "frozen-rss", "default_save_path": "/synthetic/frozen",
+            "default_method": "qb",
+        }
+        for live_url in ("http://other.invalid", ""):
+            with self.subTest(live_url=live_url):
+                payload = _torrent({
+                    b"name": ("fixture-" + str(self.sequence) + ".mkv").encode(),
+                    b"length": 4096, b"piece length": 16384, b"pieces": b"x" * 20,
+                })
+                item = dispatcher.torrent_download_input("fixture.torrent", payload)
+                _sid, eid, _ = self.pending()
+                with db.get_conn() as conn:
+                    conn.execute("UPDATE rss_entries SET payload=? WHERE id=?",
+                                 (json.dumps({"torrent_url": item.source_value}), eid))
+                with (
+                    patch("app.modules.rss.get", side_effect=AssertionError("use frozen RSS config")),
+                    patch.object(dispatcher, "get", return_value=live_url),
+                    patch.object(dispatcher, "QBittorrentClient") as factory,
+                ):
+                    qb = factory.return_value
+                    qb.add_torrent_detailed.return_value = TorrentAddResult(True)
+                    qb.export_torrent.return_value = payload
+                    manual = submit_download_input(item, "qb", origin="manual-test", qb_runtime_config=runtime)
+                    assert manual["dispatch"]["ok"], manual
+                    engine = RSSEngine()
+                    self.addCleanup(engine.close)
+                    bound = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
+                    assert bound["ok"] and bound["request_id"] == manual["request_id"], bound
+                    assert db.get_download_request(bound["request_id"])["kind"] == "torrent"
+                    assert qb.add_torrent_detailed.call_count == 1
+                    self.fail(bound["request_id"])
+                    with db.get_conn() as conn:
+                        conn.execute("UPDATE download_requests SET completed_at=datetime('now','localtime','-31 days') WHERE id=?",
+                                     (bound["request_id"],))
+                    assert db.purge_expired_download_request_torrent_data(30) == 1
+                    assert db.get_download_request(bound["request_id"])["torrent_data"] is None
+                    retry = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
+                    assert retry["ok"], retry
+                qb.export_torrent.assert_called_once_with(dispatcher.parse_torrent_metadata(payload)[1])
+                assert factory.call_count == 3
+                for call in factory.call_args_list:
+                    assert call.kwargs == {key: runtime[key] for key in
+                                           ("url", "username", "password", "api_key", "timeout")}
+                assert qb.add_torrent_detailed.call_args.kwargs["torrents"] == payload
+                assert qb.add_torrent_detailed.call_args.kwargs["category"] == "frozen-rss"
+                assert qb.add_torrent_detailed.call_args.kwargs["save_path"] == "/synthetic/frozen"
 
     def test_active_unknown_and_manual_skips_never_resubmit(self):
         for backend in ("qb", "guangya"):

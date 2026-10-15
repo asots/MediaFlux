@@ -4,9 +4,11 @@ from __future__ import annotations
 import ast
 import inspect
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import database as db
+from app.clients.qbittorrent import TorrentAddResult
 from app.modules import download_dispatcher as dispatcher
 from tests.support import isolated_test_database
 
@@ -114,6 +116,107 @@ class DownloadDispatchSingleTrackTests(unittest.TestCase):
         self.assertEqual(set(result['results']), {'guangya'})
         row = db.get_download_request(request_id)
         self.assertEqual((row['targets'], row['qb_status'], row['gy_status']), ('both','submitted','submitted'))
+
+    def test_all_submission_paths_share_qb_route_and_frozen_config(self):
+        runtime = {
+            'url': 'http://frozen.invalid', 'username': 'frozen-user',
+            'password': 'synthetic-password', 'api_key': 'synthetic-key', 'timeout': 7,
+            'category': 'frozen-default', 'default_save_path': '/synthetic/frozen-default',
+        }
+        operations = {
+            'first': dispatcher.dispatch_request,
+            'missing': dispatcher.dispatch_missing_targets,
+            'retry_in_place': dispatcher.resubmit_download_request,
+            'successor': dispatcher.resubmit_download_request,
+        }
+        for path, operation in operations.items():
+            for save_path, category in (('/synthetic/subscription', 'rss'), ('', '')):
+                with self.subTest(path=path, save_path=save_path, category=category):
+                    self.serial += 1
+                    item = dispatcher.normalize_download_url(f'magnet:?xt=urn:btih:{self.serial:040x}')
+                    request_id = dispatcher.create_request(item, '', 'route-test')['id']
+                    if path in {'missing', 'retry_in_place'}:
+                        db.update_download_request(
+                            request_id, status='downloading', targets='both',
+                            qb_status='failed' if path == 'retry_in_place' else '',
+                            gy_status='downloading', gy_task_id='kept-cloud',
+                        )
+                    elif path == 'successor':
+                        db.update_download_request(request_id, status='failed', targets='qb', qb_status='failed')
+                    with (
+                        patch.object(dispatcher, 'get', return_value=''),
+                        patch.object(dispatcher, 'analyze_offline_url', return_value=SimpleNamespace(allowed=True)),
+                        patch.object(dispatcher, 'QBittorrentClient') as factory,
+                        patch.object(dispatcher, '_submit_guangya') as cloud,
+                    ):
+                        qb = factory.return_value
+                        qb.add_torrent_detailed.return_value = TorrentAddResult(True)
+                        result = operation(request_id, 'qb', qb_save_path=save_path,
+                                           qb_category=category, qb_runtime_config=runtime)
+                    self.assertTrue(result['ok'], result)
+                    qb.add_torrent_detailed.assert_called_once()
+                    self.assertEqual(qb.add_torrent_detailed.call_args.kwargs['save_path'], save_path)
+                    self.assertEqual(qb.add_torrent_detailed.call_args.kwargs['category'], category)
+                    self.assertEqual(factory.call_args.kwargs, {
+                        'url': runtime['url'], 'username': runtime['username'],
+                        'password': runtime['password'], 'api_key': runtime['api_key'], 'timeout': 7,
+                    })
+                    cloud.assert_not_called()
+                    if path in {'missing', 'retry_in_place'}:
+                        row = db.get_download_request(request_id)
+                        self.assertEqual((row['gy_status'], row['gy_task_id']), ('downloading', 'kept-cloud'))
+                        self.assertEqual(result['request_id'], request_id)
+                    elif path == 'successor':
+                        self.assertNotEqual(result['request_id'], request_id)
+
+    def test_both_cloud_recovery_paths_use_frozen_or_default_qb_connection(self):
+        from tests.test_torrent_manifest import _torrent
+
+        frozen = {'url': 'http://frozen.invalid', 'username': 'frozen-user',
+                  'password': 'synthetic-password', 'api_key': 'synthetic-key', 'timeout': 7}
+        live = {'url': 'http://live.invalid', 'username': 'live-user',
+                'password': 'live-password', 'api_key': 'live-key', 'timeout': 10}
+        for active_peer in (True, False):
+            for runtime in (frozen, {}, None):
+                with self.subTest(active_peer=active_peer, runtime=runtime):
+                    self.serial += 1
+                    payload = _torrent({b'name': f'fixture-{self.serial}.mkv'.encode(),
+                                        b'length': 4096, b'piece length': 16384, b'pieces': b'x' * 20})
+                    torrent = dispatcher.torrent_download_input('fixture.torrent', payload)
+                    request_id = dispatcher.create_request(
+                        dispatcher.normalize_download_url(torrent.source_value), '', 'cloud-recovery-test')['id']
+                    torrent_id = dispatcher.parse_torrent_metadata(payload)[1]
+                    db.update_download_request(
+                        request_id, targets='both', status='submitted' if active_peer else 'completed',
+                        qb_status='downloading' if active_peer else 'completed',
+                        qb_task_id=torrent_id, gy_status='failed',
+                    )
+                    values = {'QB_' + key.upper(): value for key, value in live.items()}
+                    with (
+                        patch.object(dispatcher, 'get', side_effect=lambda key, default='': values.get(key, default)),
+                        patch.object(dispatcher, 'analyze_offline_url', return_value=SimpleNamespace(allowed=True)),
+                        patch('app.modules.organize_sources.list_nsfw_download_sources', return_value=[]),
+                        patch.object(dispatcher, 'QBittorrentClient') as factory,
+                        patch.object(dispatcher, '_submit_qb') as submit_qb,
+                        patch.object(dispatcher, 'submit_offline', return_value={'ok': True, 'task_ids': ['cloud-task']}) as cloud,
+                    ):
+                        factory.return_value.export_torrent.return_value = payload
+                        kwargs = {'qb_runtime_config': runtime} if runtime is not None else {}
+                        result = dispatcher.resubmit_download_request(request_id, 'guangya', **kwargs)
+                    self.assertTrue(result['ok'], result)
+                    submit_qb.assert_not_called()
+                    if runtime == {}:
+                        factory.assert_not_called()
+                        self.assertIsNone(cloud.call_args.kwargs['torrent_data'])
+                    else:
+                        factory.assert_called_once()
+                        connection = dict(factory.call_args.kwargs)
+                        connection.setdefault('timeout', 10)
+                        self.assertEqual(connection, frozen if runtime is not None else live)
+                        factory.return_value.export_torrent.assert_called_once_with(torrent_id)
+                        factory.return_value.close.assert_called_once()
+                        self.assertEqual(cloud.call_args.kwargs['torrent_data'], payload)
+                    self.assertEqual(result['request_id'] == request_id, active_peer)
 
     def test_completed_request_requires_successor_instead_of_reopening_in_place(self):
         request_id = self.request()

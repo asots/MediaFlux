@@ -552,10 +552,30 @@ def public_dispatch_summary(result: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def _export_qb_torrent_for_resubmit(row, torrent_id: str) -> bytes | None:
+def _qb_client_options(runtime_config: dict[str, Any] | None) -> dict[str, Any]:
+    """读写 qB 共用连接参数；冻结配置缺项不能回读实时配置。"""
+    options = {
+        key: str((runtime_config.get(key) if runtime_config is not None else get(name, "")) or "")
+        for key, name in (
+            ("url", "QB_URL"), ("username", "QB_USERNAME"),
+            ("password", "QB_PASSWORD"), ("api_key", "QB_API_KEY"),
+        )
+    }
+    timeout = runtime_config.get("timeout") if runtime_config is not None else 10
+    try:
+        options["timeout"] = max(1, int(timeout or 10))
+    except (TypeError, ValueError):
+        options["timeout"] = 10
+    return options
+
+
+def _export_qb_torrent_for_resubmit(
+    row, torrent_id: str, *, qb_runtime_config: dict[str, Any] | None = None,
+) -> bytes | None:
     """尽力从 qB 5.x 恢复种子；失败时由调用者继续走本地或 Magnet 回退。"""
-    qb_url = get("QB_URL", "").strip()
-    if not qb_url or not _QB_TORRENT_ID_RE.fullmatch(str(torrent_id or "")):
+    options = _qb_client_options(qb_runtime_config)
+    options["url"] = options["url"].strip()
+    if not options["url"] or not _QB_TORRENT_ID_RE.fullmatch(str(torrent_id or "")):
         return None
     request_id = 0
     try:
@@ -564,12 +584,7 @@ def _export_qb_torrent_for_resubmit(row, torrent_id: str) -> bytes | None:
         request_id = 0
     client = None
     try:
-        client = QBittorrentClient(
-            url=qb_url,
-            username=get("QB_USERNAME"),
-            password=get("QB_PASSWORD"),
-            api_key=get("QB_API_KEY"),
-        )
+        client = QBittorrentClient(**options)
         payload = client.export_torrent(str(torrent_id).lower())
         _title, exported_id = parse_torrent_metadata(payload)
         if exported_id.lower() != str(torrent_id).lower():
@@ -595,7 +610,9 @@ def _export_qb_torrent_for_resubmit(row, torrent_id: str) -> bytes | None:
     return None
 
 
-def _recover_guangya_magnet_torrent(row) -> bytes | None:
+def _recover_guangya_magnet_torrent(
+    row, *, qb_runtime_config: dict[str, Any] | None = None,
+) -> bytes | None:
     """只读复用本请求已绑定 qB 任务的元数据，不能借机创建或重投 qB。"""
     if str(row["kind"] or "") != "magnet":
         return None
@@ -605,7 +622,7 @@ def _recover_guangya_magnet_torrent(row) -> bytes | None:
     torrent_id = str(row["qb_task_id"] or "").strip().lower()
     if not torrent_id or torrent_id != magnet_infohash(source_value):
         return None
-    payload = _export_qb_torrent_for_resubmit(row, torrent_id)
+    payload = _export_qb_torrent_for_resubmit(row, torrent_id, qb_runtime_config=qb_runtime_config)
     if payload is None:
         return None
 
@@ -644,6 +661,7 @@ def download_resubmit_capabilities(
     row,
     *,
     allow_completed: bool = False,
+    qb_runtime_config: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """返回旧下载请求可重新提交的目标，不暴露原始链接或种子内容。
 
@@ -658,7 +676,8 @@ def download_resubmit_capabilities(
     gy_status = str(row["gy_status"] or "").strip().lower()
     retryable = kind in {"magnet", "torrent", "ed2k", "http"}
 
-    qb_configured = bool(get("QB_URL", "").strip())
+    qb_url = qb_runtime_config.get("url") if qb_runtime_config is not None else get("QB_URL", "")
+    qb_configured = bool(str(qb_url or "").strip())
     qb_export_available = bool(
         qb_configured and _QB_TORRENT_ID_RE.fullmatch(qb_task_id)
     )
@@ -762,6 +781,9 @@ def resubmit_download_request(
     *,
     allow_completed: bool = False,
     origin: str = "web",
+    qb_save_path: str | None = None,
+    qb_category: str | None = None,
+    qb_runtime_config: dict[str, Any] | None = None,
     rss_item_id: int | None = None,
     log_path: str | None = None,
 ) -> dict[str, Any]:
@@ -775,6 +797,7 @@ def resubmit_download_request(
     capabilities = download_resubmit_capabilities(
         source_row,
         allow_completed=allow_completed,
+        qb_runtime_config=qb_runtime_config,
     )
     target_capability = capabilities.get(targets) or {}
     if not target_capability.get("enabled"):
@@ -783,11 +806,13 @@ def resubmit_download_request(
             "error": str(target_capability.get("reason") or "当前目标不可重新提交"),
         }
 
-    dispatch_kwargs: dict[str, Any] = {}
-    if rss_item_id is not None:
-        dispatch_kwargs["rss_item_id"] = rss_item_id
-    if log_path is not None:
-        dispatch_kwargs["log_path"] = log_path
+    dispatch_kwargs = {
+        key: value for key, value in (
+            ("qb_save_path", qb_save_path), ("qb_category", qb_category),
+            ("qb_runtime_config", qb_runtime_config),
+            ("rss_item_id", rss_item_id), ("log_path", log_path),
+        ) if value is not None
+    }
 
     # 部分成功请求仍需跟踪另一个后端，不能创建同源 successor，也不能
     # 因两个方向的分支不同而绕过取消检查。统一复用已有目标级 CAS；
@@ -838,7 +863,7 @@ def resubmit_download_request(
     item_kind = source_kind
     item_torrent_data = source_torrent_data
     if source_kind == "magnet" and targets in {"guangya", "both"}:
-        recovered = _recover_guangya_magnet_torrent(source_row)
+        recovered = _recover_guangya_magnet_torrent(source_row, qb_runtime_config=qb_runtime_config)
         if recovered is not None:
             item_kind = "torrent"
             item_torrent_data = recovered
@@ -862,6 +887,7 @@ def resubmit_download_request(
             exported_torrent = _export_qb_torrent_for_resubmit(
                 source_row,
                 qb_task_id,
+                qb_runtime_config=qb_runtime_config,
             )
 
         if exported_torrent is not None:
@@ -986,26 +1012,6 @@ def resubmit_download_request(
 
 
 
-def _qb_submit_overrides(
-    *,
-    save_path: str | None,
-    category: str | None,
-    runtime_config: dict[str, Any] | None,
-    task_id_hint: str,
-) -> dict[str, Any]:
-    """只传递真实 qB 覆盖值，保持默认提交器及测试替身的旧调用契约。"""
-    overrides: dict[str, Any] = {}
-    if save_path is not None:
-        overrides["save_path"] = save_path
-    if category is not None:
-        overrides["category"] = category
-    if runtime_config is not None:
-        overrides["runtime_config"] = runtime_config
-    if task_id_hint:
-        overrides["task_id_hint"] = task_id_hint
-    return overrides
-
-
 def dispatch_missing_targets(
     request_id: int,
     targets: str,
@@ -1110,12 +1116,17 @@ def _dispatch_claimed_targets(
     source_value = str(row["source_value"] or "")
     results: dict[str, dict[str, Any]] = {}
     submissions = {
-        "qb": (_submit_qb, _qb_submit_overrides(
-            save_path=qb_save_path, category=qb_category,
-            runtime_config=qb_runtime_config, task_id_hint=qb_task_id_hint,
-        )),
+        "qb": (_submit_qb, {
+            key: value for key, value in (
+                ("save_path", qb_save_path), ("category", qb_category),
+                ("runtime_config", qb_runtime_config), ("task_id_hint", qb_task_id_hint or None),
+            ) if value is not None
+        }),
         "guangya": (_submit_guangya, {
-            "target_dir_id": gy_target_dir, "target_dir_name": gy_target_name,
+            key: value for key, value in (
+                ("target_dir_id", gy_target_dir), ("target_dir_name", gy_target_name),
+                ("qb_runtime_config", qb_runtime_config),
+            ) if value is not None
         }),
     }
     for source in claimed_targets:
@@ -1482,35 +1493,10 @@ def _submit_qb(
     task_id_hint: str = "",
 ) -> dict[str, Any]:
     runtime = runtime_config if isinstance(runtime_config, dict) else None
-    runtime_keys = {
-        "QB_URL": "url",
-        "QB_USERNAME": "username",
-        "QB_PASSWORD": "password",
-        "QB_API_KEY": "api_key",
-    }
-
-    def configured(name: str, fallback: str = "") -> str:
-        if runtime is None:
-            return str(get(name, fallback) or "")
-        return str(runtime.get(runtime_keys[name], fallback) or "")
-
-    qb_url = configured("QB_URL")
-    if not qb_url.strip():
+    options = _qb_client_options(runtime)
+    if not options["url"].strip():
         return {"ok": False, "error": "未配置 qBittorrent"}
-    try:
-        timeout = max(
-            1,
-            int(runtime.get("timeout") or 10) if runtime is not None else 10,
-        )
-    except (TypeError, ValueError):
-        timeout = 10
-    client = QBittorrentClient(
-        url=qb_url,
-        username=configured("QB_USERNAME"),
-        password=configured("QB_PASSWORD"),
-        api_key=configured("QB_API_KEY"),
-        timeout=timeout,
-    )
+    client = QBittorrentClient(**options)
     default_category = (
         runtime.get("category")
         if runtime is not None
@@ -1566,7 +1552,10 @@ def _submit_qb(
         close_qbittorrent_client(client)
 
 
-def _submit_guangya(row, *, target_dir_id: str = "", target_dir_name: str = "") -> dict[str, Any]:
+def _submit_guangya(
+    row, *, target_dir_id: str = "", target_dir_name: str = "",
+    qb_runtime_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from app.modules.organize_sources import list_nsfw_download_sources
 
     saved = dict(row)
@@ -1583,7 +1572,7 @@ def _submit_guangya(row, *, target_dir_id: str = "", target_dir_name: str = "") 
         target_dir_name = target_dir_name or nsfw_sources.get(target_dir_id, "")
     torrent_data = (
         row["torrent_data"] if row["kind"] in {"torrent", "http"}
-        else _recover_guangya_magnet_torrent(row)
+        else _recover_guangya_magnet_torrent(row, qb_runtime_config=qb_runtime_config)
     )
     if row["kind"] == "http":
         # Telegram历史待提交请求可能先于选后端建立；在任何云盘副作用前补齐身份。
