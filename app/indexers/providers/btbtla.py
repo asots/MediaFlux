@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 import html
 import re
+import threading
 import time
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from collections.abc import Awaitable, Callable
 from urllib.parse import quote, unquote, urlsplit
+from weakref import WeakValueDictionary
 
 from bs4 import BeautifulSoup
 
@@ -24,7 +25,7 @@ from ..errors import (
 )
 from ..models import IndexerCapabilities, IndexerItem, IndexerMediaSearchRequest, IndexerPage, IndexerProviderError, IndexerSearchRequest, ResolvedDownload
 from ..ranking import candidate_sort_key, rank_item
-from .base import IndexerAdapter, fixed_host_join, is_likely_challenge_page, magnet_infohash, parse_size_bytes, require_html_response
+from .base import IndexerAdapter, SearchRequestPacer, fixed_host_join, is_likely_challenge_page, magnet_infohash, parse_size_bytes, require_html_response
 
 _MAGNET_CANDIDATE = re.compile(r"magnet:\?[^\"'\s<>]+", re.IGNORECASE)
 _RESOURCE_SIZE = re.compile(r"\[\s*([0-9]+(?:\.[0-9]+)?\s*[KMGTPE]?i?B)\s*\]", re.IGNORECASE)
@@ -75,13 +76,13 @@ class BTBtlaAdapter(IndexerAdapter):
         self.http = http
         self.page_size = max(1, min(int(page_size), 100))
         self.cache_ttl_seconds = max(1.0, float(cache_ttl_seconds))
-        self._catalog_lock = CrossLoopAsyncLock()
+        self._cache_lock = threading.Lock()
+        self._catalog_locks: WeakValueDictionary[IndexerSearchRequest, CrossLoopAsyncLock] = WeakValueDictionary()
         self._catalogs: OrderedDict[IndexerSearchRequest, _ResourcePages] = OrderedDict()
         self.min_interval_seconds = max(0.0, float(min_interval_seconds))
         self._monotonic = monotonic or time.monotonic
-        self._sleep = sleeper or asyncio.sleep
         self._request_lock = CrossLoopAsyncLock()
-        self._last_request_started: float | None = None
+        self._request_pacer = SearchRequestPacer(self.min_interval_seconds, monotonic=self._monotonic, sleeper=sleeper)
         self.max_detail_candidates = max(1, min(int(max_detail_candidates), 3))
         self.mirror_base_urls = tuple(
             dict.fromkeys(self.mirror_base_urls if mirror_base_urls is None else mirror_base_urls)
@@ -98,12 +99,17 @@ class BTBtlaAdapter(IndexerAdapter):
         # 截断整部作品；原生影片搜索页只在当前页的所有资源窗口用完后读取。
         # 排序范围为已取回的影片搜索页；不会为“全站全局排序”后台遍历所有影片。
         key = replace(request, page=1)
-        async with self._catalog_lock:
-            now = self._monotonic()
-            for old_key in list(self._catalogs):
-                if self._catalogs[old_key].expires_at <= now:
-                    del self._catalogs[old_key]
-            catalog = self._catalogs.get(key) or _ResourcePages(now + self.cache_ttl_seconds, [])
+        # 同键分页共享读取；不同作品不能拿着全站缓存锁等待网络。
+        # 调用者持有强引用，进行中的锁不会随缓存淘汰；结束后弱引用自动释放。
+        with self._cache_lock:
+            lock = self._catalog_locks.setdefault(key, CrossLoopAsyncLock())
+        async with lock:
+            with self._cache_lock:
+                now = self._monotonic()
+                for old_key in list(self._catalogs):
+                    if self._catalogs[old_key].expires_at <= now:
+                        del self._catalogs[old_key]
+                catalog = self._catalogs.get(key) or _ResourcePages(now + self.cache_ttl_seconds, [])
             fetches = 0
             while len(catalog.pages) < request.page and catalog.next_native_page is not None:
                 if fetches == 2:
@@ -133,10 +139,11 @@ class BTBtlaAdapter(IndexerAdapter):
                     catalog.next_native_page + 1
                     if native.has_more and len(catalog.pages) < _MAX_CATALOG_PAGES else None
                 )
-                self._catalogs[key] = catalog
-                self._catalogs.move_to_end(key)
-                while len(self._catalogs) > 16:
-                    self._catalogs.popitem(last=False)
+                with self._cache_lock:
+                    self._catalogs[key] = catalog
+                    self._catalogs.move_to_end(key)
+                    while len(self._catalogs) > 16:
+                        self._catalogs.popitem(last=False)
             if request.page > len(catalog.pages):
                 return IndexerPage([], request.page, False, True)
             resource_page = catalog.pages[request.page - 1]
@@ -479,13 +486,9 @@ class BTBtlaAdapter(IndexerAdapter):
         return (0, -len(normalized_title))
 
     async def _get(self, url: str):
+        # 下游浏览器传输也会排队；串行覆盖发送，防止已放行请求积压后突发。
         async with self._request_lock:
-            now = self._monotonic()
-            if self._last_request_started is not None:
-                remaining = self.min_interval_seconds - (now - self._last_request_started)
-                if remaining > 0:
-                    await self._sleep(remaining)
-            self._last_request_started = self._monotonic()
+            await self._request_pacer.wait()
             return await self.http.get(url)
 
     def _select_download_url(self, soup: BeautifulSoup, *, base_url: str) -> str:

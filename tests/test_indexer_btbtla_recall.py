@@ -3,10 +3,11 @@ from pathlib import Path
 from dataclasses import replace
 import unittest
 import asyncio
+import threading
 from bs4 import BeautifulSoup
 from app.indexers.errors import IndexerResultExpired, IndexerSecurityError, IndexerUnavailable
 from datetime import datetime, timedelta, timezone
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from app.indexers.models import IndexerMediaSearchRequest, IndexerSearchRequest
 from app.indexers.providers.btbtla import BTBtlaAdapter
@@ -317,6 +318,167 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
         clock[0]+=9
         self.assertTrue((await empty_adapter.search(IndexerSearchRequest.create('Demo'))).items)
         self.assertEqual(len(empty_http.calls),3)
+
+    async def test_slow_catalog_does_not_block_cached_titles_or_cancel_shared_fetch(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        owner = self
+
+        class ControlledHttp(FakeHttpClient):
+            async def get(self, url, **kwargs):
+                path = unquote(urlsplit(url).path)
+                calls.append(path)
+                title = path.rsplit('/', 1)[-1].removesuffix('.html')
+                search, detail = owner.catalog_html(3, prefix=title)
+                if path == '/detail/Slow.html':
+                    entered.set()
+                    await release.wait()
+                body = search.replace(b'/detail/demo.html', f'/detail/{title}.html'.encode()) if '/search/' in path else detail
+                return await FakeHttpClient(body).get(url, **kwargs)
+
+        adapter = BTBtlaAdapter(http=ControlledHttp(_EMPTY), page_size=2)
+        await adapter.search(IndexerSearchRequest.create('Fast'))
+        first = asyncio.create_task(adapter.search(IndexerSearchRequest.create('Slow')))
+        waiter = None
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            waiter = asyncio.create_task(adapter.search(IndexerSearchRequest.create('Slow', page=2)))
+            fast = await asyncio.wait_for(adapter.search(IndexerSearchRequest.create('Fast')), 0.5)
+            self.assertTrue(all('Fast' in item.title for item in fast.items))
+            self.assertEqual(calls.count('/search/Fast'), 1)
+            self.assertFalse(first.done())
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+        finally:
+            release.set()
+            await asyncio.gather(first, *([waiter] if waiter else []), return_exceptions=True)
+        second = await adapter.search(IndexerSearchRequest.create('Slow', page=2))
+        self.assertEqual(len(second.items), 1)
+        self.assertEqual(calls.count('/search/Slow'), 1)
+        self.assertEqual(calls.count('/detail/Slow.html'), 1)
+
+    async def test_same_catalog_shares_fetch_across_event_loops(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        other_started = threading.Event()
+        search, detail = self.catalog_html(3)
+
+        class ControlledHttp(FakeHttpClient):
+            async def get(self, url, **kwargs):
+                if '/detail/' in url:
+                    entered.set()
+                    await release.wait()
+                return await super().get(url, **kwargs)
+
+        http = ControlledHttp(_EMPTY)
+        http.responses = [search, detail]
+        adapter = BTBtlaAdapter(http=http, page_size=2)
+        first = asyncio.create_task(adapter.search(IndexerSearchRequest.create('Demo')))
+        other = None
+
+        async def read_second_page():
+            other_started.set()
+            return await adapter.search(IndexerSearchRequest.create('Demo', page=2))
+
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            other = asyncio.create_task(asyncio.to_thread(lambda: asyncio.run(read_second_page())))
+            self.assertTrue(await asyncio.to_thread(other_started.wait, 1))
+            self.assertFalse(first.done())
+        finally:
+            release.set()
+            pages = await asyncio.wait_for(asyncio.gather(first, *([other] if other else [])), 2)
+        self.assertEqual([len(page.items) for page in pages], [2, 1])
+        self.assertEqual(len(http.calls), 2)
+        self.assertFalse(adapter._catalog_locks)
+
+    async def test_cancelled_owner_allows_waiting_page_to_retry(self):
+        entered = asyncio.Event()
+        search, detail = self.catalog_html(3)
+
+        class ControlledHttp(FakeHttpClient):
+            async def get(self, url, **kwargs):
+                if '/detail/' in url and not entered.is_set():
+                    entered.set()
+                    await asyncio.Event().wait()
+                return await super().get(url, **kwargs)
+
+        http = ControlledHttp(_EMPTY)
+        http.responses = [search, search, detail]
+        adapter = BTBtlaAdapter(http=http, page_size=2)
+        first = asyncio.create_task(adapter.search(IndexerSearchRequest.create('Demo')))
+        waiter = None
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            waiter = asyncio.create_task(adapter.search(IndexerSearchRequest.create('Demo', page=2)))
+            await asyncio.sleep(0)
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            page = await asyncio.wait_for(waiter, 1)
+            self.assertEqual(len(page.items), 1)
+            self.assertEqual(len(http.calls), 3)
+            self.assertFalse(adapter._catalog_locks)
+        finally:
+            first.cancel()
+            if waiter is not None:
+                waiter.cancel()
+            await asyncio.gather(first, *([waiter] if waiter else []), return_exceptions=True)
+
+    async def test_inflight_catalog_lock_survives_cache_eviction(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        evicting, finish_eviction = asyncio.Event(), asyncio.Event()
+        calls = []
+        owner = self
+
+        class ControlledHttp(FakeHttpClient):
+            async def get(self, url, **kwargs):
+                path = unquote(urlsplit(url).path)
+                calls.append(path)
+                if path.startswith('/search/'):
+                    parts = path.split('/')
+                    title, native = parts[2], int(parts[3]) if len(parts) > 3 else 1
+                    search, _ = owner.catalog_html(1, prefix=title, next_native=title == 'Slow' and native == 1)
+                    body = search.replace(b'/detail/demo.html', f'/detail/{title}-{native}.html'.encode())
+                else:
+                    title, native_text = path.rsplit('/', 1)[-1].removesuffix('.html').rsplit('-', 1)
+                    if title == 'Evictor':
+                        evicting.set()
+                        await finish_eviction.wait()
+                    if title == 'Slow' and native_text == '2':
+                        entered.set()
+                        await release.wait()
+                    _, body = owner.catalog_html(int(native_text), prefix=title)
+                return await FakeHttpClient(body).get(url, **kwargs)
+
+        adapter = BTBtlaAdapter(http=ControlledHttp(_EMPTY), page_size=1)
+        request = IndexerSearchRequest.create('Slow')
+        await adapter.search(request)
+        for index in range(15):
+            await adapter.search(IndexerSearchRequest.create(f'Fast{index}'))
+        evictor = asyncio.create_task(adapter.search(IndexerSearchRequest.create('Evictor')))
+        extending = waiter = None
+        try:
+            await asyncio.wait_for(evicting.wait(), 1)
+            extending = asyncio.create_task(adapter.search(replace(request, page=2)))
+            await asyncio.sleep(0)
+            finish_eviction.set()
+            await asyncio.wait_for(evictor, 1)
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(len(adapter._catalogs), 16)
+            self.assertNotIn(request, adapter._catalogs)
+            waiter = asyncio.create_task(adapter.search(replace(request, page=2)))
+            await asyncio.sleep(0)
+        finally:
+            finish_eviction.set()
+            release.set()
+            await evictor
+            pages = await asyncio.wait_for(asyncio.gather(*(task for task in (extending, waiter) if task is not None)), 2)
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(pages[0].items[0].title, pages[1].items[0].title)
+        self.assertEqual(calls.count('/search/Slow/2'), 1)
+        self.assertEqual(calls.count('/search/Slow'), 1)
+        self.assertFalse(adapter._catalog_locks)
 
     async def test_empty_native_page_is_skipped_within_read_budget(self):
         search, empty = self.catalog_html(0, next_native=True)

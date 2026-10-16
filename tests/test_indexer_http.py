@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import gzip
+import threading
 import unittest
 from unittest.mock import PropertyMock, patch
 import zlib
@@ -13,6 +14,7 @@ import httpx
 
 from app.indexers.errors import IndexerInvalidResponse, IndexerResponseTooLarge, IndexerSecurityError
 from app.indexers.http import BrowserImpersonatingHttpClient, FixedHostHttpClient
+from app.indexers.providers.btbtla import BTBtlaAdapter
 
 
 PUBLIC_DNS = lambda host, port: [(2, 1, 6, "", ("93.184.216.34", port))]
@@ -260,6 +262,81 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(CurlOpt.RESOLVE, session.curl_options)
         self.assertEqual(response.body, b"ok")
+
+    async def test_btbtla_browser_session_keeps_start_intervals_after_slow_request_backlog(self):
+        for name in ("getaddrinfo", "create_connection", "socket.connect", "socket.connect_ex"):
+            self.enterContext(patch("socket." + name, side_effect=AssertionError("禁止真实网络/DNS")))
+
+        interval = 1 / 64  # 可精确表示的虚拟间隔，不依赖墙钟精度。
+        clock = [0.0]
+        starts = []
+        first_started = asyncio.Event()
+        release_first = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        class SlowFirstSession(FakeCurlSession):
+            def get(self, url, **kwargs):
+                # 记录真实线程中的 session 入口，而不是 Pacer 的放行时刻。
+                starts.append((url, clock[0]))
+                if len(starts) == 1:
+                    loop.call_soon_threadsafe(first_started.set)
+                    if not release_first.wait(timeout=2):
+                        raise TimeoutError("慢请求未被释放")
+                return super().get(url, **kwargs)
+
+        urls = [f"https://www.btbtlb.com/search/{name}" for name in ("slow", "one", "two", "three")]
+        session = SlowFirstSession([FakeCurlResponse() for _ in urls])
+        self.client = BrowserImpersonatingHttpClient(
+            allowed_hosts={"www.btbtlb.com", "btbtlb.com"},
+            resolver=PUBLIC_DNS,
+            session_factory=lambda: session,
+            sni_host="btbtlb.com",
+        )
+
+        async def sleep(delay):
+            clock[0] += delay
+
+        adapter = BTBtlaAdapter(
+            http=self.client, min_interval_seconds=interval,
+            monotonic=lambda: clock[0], sleeper=sleep,
+        )
+        queued = asyncio.Event()
+        queued_count = 0
+
+        async def queued_request(url):
+            nonlocal queued_count
+            queued_count += 1
+            if queued_count == len(urls) - 1:
+                queued.set()
+            return await adapter._get(url)
+
+        tasks = [asyncio.create_task(adapter._get(urls[0]))]
+        try:
+            await asyncio.wait_for(first_started.wait(), 2)
+            tasks.extend(asyncio.create_task(queued_request(url)) for url in urls[1:])
+            await asyncio.wait_for(queued.wait(), 2)
+            self.assertEqual(len(starts), 1)
+            self.assertTrue(all(not task.done() for task in tasks))
+
+            # 首项耗时超过所有积压项的间隔总和；提前放行会导致后续项同时启动。
+            clock[0] = interval * 8
+            release_first.set()
+            responses = await asyncio.wait_for(asyncio.gather(*tasks), 2)
+        finally:
+            release_first.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self.assertEqual([response.body for response in responses], [b"ok"] * len(urls))
+        self.assertEqual(len(starts), len(urls))
+        self.assertCountEqual(
+            [url for url, _options in session.calls],
+            [str(httpx.URL(url).copy_with(host="btbtlb.com")) for url in urls],
+        )
+        for (previous_url, previous_start), (url, start) in zip(starts, starts[1:]):
+            self.assertGreaterEqual(start - previous_start, interval, f"{previous_url} -> {url}")
 
     async def test_browser_client_stops_oversized_body_during_receive(self):
         session = FakeCurlSession([FakeCurlResponse(content=b"12345")])
