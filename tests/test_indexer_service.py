@@ -609,7 +609,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         adapter = QueryAwareAdapter(
             "btbtla",
             {
-                "九门 S02E30": [
+                "九门": [
                     item(
                         "btbtla",
                         "九门[第30集].Mystic.Nine.S02.2026.1080p",
@@ -622,7 +622,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
 
         result = await service.search_media(media, ("btbtla",))
 
-        self.assertEqual(adapter.queries, ["九门 S02E30"])
+        self.assertEqual(adapter.queries, ["九门"])
         self.assertEqual(adapter.sort_modes, ["published_desc"])
         self.assertEqual(adapter.seasons, [2])
         self.assertEqual(adapter.episodes, [30])
@@ -631,6 +631,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_episode_range_does_not_suppress_later_exact_alias_result(self):
         media = IndexerMediaSearchRequest.create(
             title="九门",
+            english_title="Mystic Nine",
             year=2026,
             media_type="tv",
             sort_mode="published_desc",
@@ -650,15 +651,17 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         adapter = QueryAwareAdapter(
             "btbtla",
             {
-                "九门 S02E30": [range_item],
-                "九门 第2季 第30集": [exact_item],
+                "九门": [range_item],
+                "Mystic Nine": [exact_item],
             },
         )
         service = self.service([adapter])
 
         result = await service.search_media(media, ("btbtla",))
 
-        self.assertEqual(adapter.queries, ["九门 S02E30", "九门 第2季 第30集"])
+        self.assertEqual(adapter.queries, ["九门", "Mystic Nine"])
+        self.assertEqual(adapter.seasons, [2, 2])
+        self.assertEqual(adapter.episodes, [30, 30])
         self.assertIn("episode_exact", result.items[0].match_reasons)
         self.assertIn("episode_range", result.items[1].match_reasons)
 

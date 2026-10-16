@@ -1,5 +1,6 @@
 """官网真实同名候选与详情快照，覆盖关键词/媒体卡片共用召回链路。"""
 from pathlib import Path
+from dataclasses import replace
 import unittest
 import asyncio
 from bs4 import BeautifulSoup
@@ -434,14 +435,53 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
         http.responses = [_SEARCH, _DETAIL]
         service = IndexerService(registry=IndexerRegistry({'btbtla': BTBtlaAdapter(http=http)}), result_store=IndexerResultStore())
         try:
-            request = IndexerMediaSearchRequest.create(title='征途', year=2026, media_type='tv')
+            request = IndexerMediaSearchRequest.create(title='征途', year=2026, media_type='tv', season=1, episode=15)
             result = await service.search_media(request, ('btbtla',))
             self.assertTrue(result.items)
             self.assertTrue(all('2026' in item.title for item in result.items))
             self.assertTrue(all(item.result_id for item in result.items))
+            self.assertIn('episode_range', result.items[0].match_reasons)
+            self.assertEqual(unquote(http.calls[0]['url']).split('/search/')[1], '征途')
             self.assertFalse(result.errors)
             cached = await service.search_media(request, ('btbtla',))
             self.assertTrue(cached.cached)
             self.assertEqual(len(http.calls), 2)
+        finally:
+            await service.aclose()
+
+    async def test_directory_alias_fallback_preserves_episode_ranking_and_pagination(self):
+        search, detail = self.catalog_html(4)
+        http = FakeHttpClient(_EMPTY)
+        # 中文别名无结果，英文目录包含所有集数；目标集必须在窗口截取之前排到前面。
+        http.responses = [_EMPTY, search, detail]
+        service = IndexerService(
+            registry=IndexerRegistry({'btbtla': BTBtlaAdapter(http=http, page_size=2)}),
+            result_store=IndexerResultStore(), max_results_per_site=2,
+        )
+        try:
+            for episode in (1, 2):
+                if episode == 2:
+                    http.responses = [_EMPTY, search, detail]
+                request = IndexerMediaSearchRequest.create(
+                    title='演示', english_title='Demo', media_type='tv', season=1, episode=episode,
+                )
+                first = await service.search_media(request, ('btbtla',))
+                self.assertFalse(first.errors)
+                self.assertTrue(first.has_more)
+                self.assertIn(f'S01E{episode:02d}', first.items[0].title)
+                self.assertIn('episode_exact', first.items[0].match_reasons)
+                self.assertTrue(all('episode_exact' not in item.match_reasons for item in first.items[1:]))
+                calls = len(http.calls)
+                cached = await service.search_media(request, ('btbtla',))
+                self.assertTrue(cached.cached)
+                self.assertEqual(len(http.calls), calls)
+                if episode == 1:
+                    second = await service.search_media(replace(request, page=2), ('btbtla',))
+                    self.assertEqual(len(second.items), 2)
+                    self.assertFalse(second.has_more)
+                    self.assertFalse({item.detail_url for item in first.items} & {item.detail_url for item in second.items})
+                    self.assertEqual(len(http.calls), calls)
+            paths = [unquote(call['url']).split('/search/')[1] for call in http.calls if '/search/' in call['url']]
+            self.assertEqual(paths, ['演示', 'Demo', '演示', 'Demo'])
         finally:
             await service.aclose()

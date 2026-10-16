@@ -19,6 +19,7 @@ from app.indexers.service import IndexerService
 class IndexerQueryBudgetAuditTests(unittest.TestCase):
     def test_long_aliases_with_positions_fit_all_provider_query_limits(self):
         for season, episode in (
+            (0, 1),
             (1, 1),
             (None, 999),
             (99, None),
@@ -43,7 +44,9 @@ class IndexerQueryBudgetAuditTests(unittest.TestCase):
                         self.assertEqual(
                             IndexerSearchRequest.create(query).query, query
                         )
-                    if episode is not None:
+                    if provider == "btbtla":
+                        self.assertEqual(queries, (request.title, request.english_title, request.original_title))
+                    elif episode is not None:
                         self.assertIn(f"{episode:02d}" if provider == "mikan" else f"E{episode:02d}", queries[0])
                     else:
                         self.assertTrue(queries[0].endswith(f"S{season:02d}"))

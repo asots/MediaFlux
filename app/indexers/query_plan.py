@@ -94,21 +94,11 @@ def _with_position(title: str, request: IndexerMediaSearchRequest) -> str:
     return _append_position_suffix(normalized, suffix)
 
 
-def _with_chinese_episode(title: str, request: IndexerMediaSearchRequest) -> str:
-    normalized = " ".join(str(title or "").split())
-    if not normalized or request.episode is None or _POSITION_MARKER.search(normalized):
-        return normalized
-    if request.season is not None:
-        return _append_position_suffix(normalized, f"第{request.season}季 第{request.episode}集")
-    return _append_position_suffix(normalized, f"第{request.episode}集")
-
-
 def build_site_queries(site_id: str, request: IndexerMediaSearchRequest) -> tuple[str, ...]:
     """Return at most three stable, year-free query variants for one provider.
 
-    When a caller provides season/episode intent, exact-position aliases are attempted before
-    broad title aliases. This prevents an old but non-empty first page from suppressing the
-    query that can actually find the requested release.
+    Release indexes use position-aware queries; directory indexes search complete titles
+    and rank resources against the unchanged season/episode context before pagination.
     """
 
     site_id = str(site_id or "").strip().lower()
@@ -122,6 +112,11 @@ def build_site_queries(site_id: str, request: IndexerMediaSearchRequest) -> tupl
     if site_id == "kpkuang":
         # 目录索引按完整作品名称检索；年份/季集交由共享候选排序核对。
         return _unique((title, original, english, *aliases))
+
+    if site_id == "btbtla":
+        # 作品目录不索引集号；自动拼接季集会空查两轮，耗尽真正片名查询的预算。
+        # 保留原始标题/别名和请求季集，由详情资源排序而非搜索词决定匹配与分页。
+        return _unique((title, english, original, *aliases))
 
     if site_id in {"dygang", "ys5266"}:
         # 搜索的是作品目录，季集在详情资源中排序；不把SxxExx拼进片名。
@@ -157,8 +152,6 @@ def build_site_queries(site_id: str, request: IndexerMediaSearchRequest) -> tupl
         preferred_latin = latin_aliases[:1]
         remaining_latin = latin_aliases[1:]
         bases = [*preferred_latin, original, *remaining_latin, english, title, *other_aliases]
-    elif site_id == "btbtla":
-        bases = [title, english, original, *aliases]
     elif site_id == "tpb":
         bases = [english, *latin_aliases]
         if _is_latin(original):
@@ -178,16 +171,6 @@ def build_site_queries(site_id: str, request: IndexerMediaSearchRequest) -> tupl
             numbered = primary if _POSITION_MARKER.search(primary) else _append_position_suffix(primary, f"{request.episode:02d}")
             # 蜜柑发布名常用裸集号，不先耗费预算查两种不存在的季集写法。
             candidates = [numbered, primary, *positioned[1:], *bases[1:]]
-        elif site_id == "btbtla" and request.episode is not None:
-            primary = bases[0] if bases else title
-            localized = _with_chinese_episode(primary, request)
-            candidates = [
-                _with_position(primary, request),
-                localized,
-                primary,
-                *positioned[1:],
-                *bases[1:],
-            ]
         else:
             candidates = [*positioned, *bases]
         queries = _unique(candidates)

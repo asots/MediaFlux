@@ -30,7 +30,10 @@ class TenPassReverseContractTests(unittest.TestCase):
                             query,
                             (length, site, query),
                         )
-                    self.assertIn(f"{episode:02d}" if site == "mikan" else f"E{episode:02d}", queries[0])
+                    if site == "btbtla":
+                        self.assertEqual(queries, (title,))
+                    else:
+                        self.assertIn(f"{episode:02d}" if site == "mikan" else f"E{episode:02d}", queries[0])
                 self.assertEqual(request.title, title)
 
     def test_torrent_retry_uses_intact_payload_and_keeps_unknown_peer_identity(self):

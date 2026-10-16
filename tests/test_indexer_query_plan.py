@@ -76,13 +76,27 @@ class IndexerQueryPlanTests(unittest.TestCase):
 
         self.assertEqual(
             build_site_queries("btbtla", request),
-            ("九门 S02E30", "九门 第2季 第30集", "九门"),
+            ("九门", "Mystic Nine", "The Mystic Nine"),
         )
         self.assertEqual(
             build_site_queries("nyaa", request),
             ("The Mystic Nine S02E30", "九门", "Mystic Nine"),
         )
         self.assertTrue(needs_bilingual_search(build_site_queries("nyaa", request)))
+
+    def test_btbtla_directory_queries_preserve_titles_and_target_identity(self):
+        for title in ("1917", "银翼杀手2049", "某部剧 第2季", "Demo S02E30"):
+            for season, episode in ((None, None), (0, 1), (2, None), (2, 30), (None, 30)):
+                with self.subTest(title=title, season=season, episode=episode):
+                    request = IndexerMediaSearchRequest.create(
+                        title=title, english_title="English Title", original_title="Original Title",
+                        aliases=[title, "ENGLISH TITLE", "Another Title"],
+                        year=2026, media_type="tv", season=season, episode=episode,
+                    )
+                    identity = request.cache_identity()
+                    self.assertEqual(build_site_queries("btbtla", request),
+                                     (title, "English Title", "Original Title"))
+                    self.assertEqual(request.cache_identity(), identity)
 
     def test_bilingual_search_predicate_requires_two_queries_in_different_scripts(self):
         self.assertTrue(needs_bilingual_search(("The Great Ruler", "大主宰")))
