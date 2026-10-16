@@ -295,9 +295,29 @@ class EpisodeResearchCloseReliabilityTests(_OfflineCase):
         try:
             with ExitStack() as stack:
                 stack.enter_context(patch.object(core, "TMDBClient", return_value=client))
-                stack.enter_context(patch.object(runner, "_TIMEOUT_SECONDS", 0.8 if outer_deadline else 0.12))
+                stack.enter_context(patch.object(runner, "_TIMEOUT_SECONDS", 2 if outer_deadline else 0.12))
                 if outer_deadline:
-                    stack.enter_context(patch.object(service, "_TOTAL_TIMEOUT_SECONDS", 0.12))
+                    # 本用例验证在途读取的关闭所有权，不要求模型/线程在120ms内启动。
+                    # 等HTTP已进入后再触发真实wait_for超时，避免冷初始化抢先耗尽预算。
+                    real_wait_for = asyncio.wait_for
+                    armed = False
+
+                    async def expire_during_read(awaitable, timeout):
+                        nonlocal armed, started
+                        if armed:
+                            return await real_wait_for(awaitable, timeout)
+                        armed = True
+                        task = asyncio.create_task(awaitable)
+                        try:
+                            self.assertTrue(await asyncio.to_thread(session.entered.wait, 1))
+                            started = time.monotonic()
+                            return await real_wait_for(task, 0.03)
+                        finally:
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+
+                    stack.enter_context(patch.object(service.asyncio, "wait_for", expire_during_read))
+                    stack.enter_context(patch.object(service, "_TOTAL_TIMEOUT_SECONDS", 2))
                     stack.enter_context(patch.object(runner, "_CLEANUP_SECONDS", 0.03))
                 result = service.research_confirmation_episodes(self.payload, runner=offline_runner, reader_factory=RecordingReader)
             self.assertEqual(result["reason_code"], "research_timeout")
