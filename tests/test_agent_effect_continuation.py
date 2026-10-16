@@ -379,7 +379,7 @@ def test_foreground_completion_consumes_same_goal_without_background_double_run(
 
 def test_local_read_quota_parks_effect_followup_without_asking_user_again(tmp_path):
     async def run():
-        from app.agent.kernel.ports.mediaflux_policy import ToolRateLimitError
+        from app.agent.kernel.pipeline import ToolRateLimitError
         from app.agent.rate_limit import RateLimitDecision
         async with _ready_case(tmp_path) as (store, candidate, client, reads, _stack, source_users):
             now = [store._clock()]

@@ -1022,6 +1022,10 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(reader, return_exceptions=True)
 
     async def test_admission_failure_still_emits_a_terminal_event(self) -> None:
+        from unittest.mock import Mock
+
+        select_model = Mock(side_effect=AssertionError("denied input must not select a model"))
+
         class RejectingAdmission:
             async def begin(self, agent_input):
                 del agent_input
@@ -1041,6 +1045,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             pipeline=ToolPipeline(catalog=catalog, state_store=state),
             state_store=state,
             turn_admission=RejectingAdmission(),
+            model_selector=select_model,
         )
 
         events = await collect(
@@ -1057,6 +1062,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0].type, AgentEventType.TURN_FAILED)
         self.assertEqual(events[0].payload["code"], "authorization_denied")
         self.assertEqual(model.requests, [])
+        select_model.assert_not_called()
 
     def test_incomplete_provider_stream_has_explicit_error(self):
         for message in ("Provider 流在完成事件前中断", "Provider 回复被截断，未完整结束"):
@@ -1917,19 +1923,119 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay[-1].type, AgentEventType.TURN_FAILED)
 
     async def test_telegram_model_preference_is_scoped_and_web_metadata_cannot_override(self):
+        from unittest.mock import patch
+        from app.agent.kernel.ports.mediaflux_policy import select_channel_model
+
         model = ScriptedModel([
             [ModelEvent(ModelEventType.TEXT_DELTA, text="hello"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
             [ModelEvent(ModelEventType.TEXT_DELTA, text="hello"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
         ])
         catalog = ToolCatalog([read_tool("library.status")]); store = InMemorySessionStateStore()
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
-                               pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
-        with unittest.mock.patch("app.modules.telegram_model_preferences.get_telegram_model_preference", return_value="chosen-model") as preference:
+                               pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store,
+                               model_selector=select_channel_model)
+        with patch("app.modules.telegram_model_preferences.get_telegram_model_preference", return_value="chosen-model") as preference:
             await consume_events(session.run(AgentInput(message="你好", owner="o", session_id="web", channel="web", metadata={"model":"not-trusted"})))
             preference.assert_not_called()
             await consume_events(session.run(AgentInput(message="你好", owner="o", session_id="tg", channel="telegram")))
             preference.assert_called_once_with("o", "tg")
         self.assertEqual([request.model for request in model.requests], ["", "chosen-model"])
+
+    async def test_default_model_selection_does_not_read_channel_preferences(self):
+        from unittest.mock import patch
+
+        model = ScriptedModel([[
+            ModelEvent(ModelEventType.TEXT_DELTA, text="hello"),
+            ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+        ]])
+        catalog = ToolCatalog([])
+        store = InMemorySessionStateStore()
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+                               pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
+        with patch("app.modules.telegram_model_preferences.get_telegram_model_preference",
+                   side_effect=AssertionError("bare kernel must not read channel preferences")) as preference:
+            result = await consume_events(session.run(AgentInput(
+                message="你好", owner="o", session_id="bare", channel="telegram",
+                metadata={"model": "not-trusted"},
+            )))
+        preference.assert_not_called()
+        self.assertEqual(result.status, "success")
+        self.assertEqual(model.requests[0].model, "")
+        self.assertEqual(model.requests[0].max_output_tokens, 6000)
+
+    async def test_model_selection_failure_does_not_fallback_to_default_model(self):
+        from unittest.mock import Mock
+
+        select_model = Mock(side_effect=RuntimeError("model selection unavailable"))
+        model = ScriptedModel([])
+        catalog = ToolCatalog([])
+        store = InMemorySessionStateStore()
+        session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
+            pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store,
+            model_selector=select_model)
+        agent_input = AgentInput(message="你好", owner="o", session_id="selection-failed", channel="telegram")
+        events = await collect(session.run(agent_input))
+        self.assertEqual(events[-1].type, AgentEventType.TURN_FAILED)
+        self.assertEqual(events[-1].payload["code"], "internal_error")
+        self.assertEqual(model.requests, [])
+        select_model.assert_called_once_with(agent_input, model)
+
+    async def test_model_selection_and_budget_follow_current_adapter_across_confirmation(self):
+        trace = []
+
+        class BudgetedModel(ScriptedModel):
+            def budget_for_model(self, model, context, output):
+                trace.append(("budget", model))
+                self.received_limits = (context, output)
+                return 16_384, 512, True
+
+        def prepare(_arguments, _context):
+            trace.append(("prepare", ""))
+            return PreparedEffect(preview={"summary": "暂停任务"}, snapshot_fingerprint="fixed")
+
+        def execute(_arguments, _snapshot, _context):
+            trace.append(("execute", ""))
+            return {"ok": True, "summary": "已暂停任务"}
+
+        tool = KernelToolSpec(name="download.pause", domain="download", description="暂停任务",
+            input_schema={"type": "object", "properties": {}}, effect=ToolEffect.WRITE,
+            prepare=prepare, execute_confirmed=execute)
+        initial = BudgetedModel([[
+            ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall("pause", tool.name, {})),
+            ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls"),
+        ]])
+        replacement = BudgetedModel([[
+            ModelEvent(ModelEventType.TEXT_DELTA, text="已暂停任务"),
+            ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+        ]])
+
+        def select_model(agent_input, model):
+            self.assertEqual((agent_input.owner, agent_input.session_id, agent_input.channel),
+                             ("o", "selected", "telegram"))
+            selected = "preview-model" if model is initial else "confirmation-model"
+            trace.append(("select", selected))
+            return selected
+
+        catalog = ToolCatalog([tool])
+        store = InMemorySessionStateStore()
+        session = AgentSession(model=initial, catalog=catalog, retriever=CapabilityRetriever(),
+            pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store,
+            model_selector=select_model)
+        preview = await consume_events(session.run(AgentInput(
+            message="暂停任务", owner="o", session_id="selected", channel="telegram")))
+        self.assertIsNotNone(preview.approval)
+        session.model = replacement
+        result = await consume_events(session.confirm(owner="o", session_id="selected",
+            plan_id=preview.approval.plan_id, channel="telegram"))
+        self.assertEqual(result.status, "success")
+        self.assertEqual(trace, [
+            ("select", "preview-model"), ("budget", "preview-model"), ("prepare", ""),
+            ("select", "confirmation-model"), ("execute", ""), ("budget", "confirmation-model"),
+        ])
+        for model, expected in ((initial, "preview-model"), (replacement, "confirmation-model")):
+            self.assertEqual(model.received_limits, (128_000, 6000))
+            self.assertEqual([(request.model, request.max_output_tokens) for request in model.requests],
+                             [(expected, 512)])
 
     async def test_cancel_after_preview_does_not_publish_revoked_approval(self):
         """停止发生于真实预检发布与会话检查点之间；不能恢复已撤销按钮。"""

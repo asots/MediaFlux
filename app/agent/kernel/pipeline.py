@@ -10,7 +10,8 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from contextlib import nullcontext
-from typing import Any, Protocol
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Protocol
 
 from app.agent.model_context_budget import RESULT_PATH_MAX, compact_tool_content, decode_tool_content
 from app.agent.public_safety import sanitize_public_text
@@ -51,6 +52,10 @@ from .ux_selection import (
 )
 
 
+if TYPE_CHECKING:
+    from app.agent.rate_limit import RateLimitDecision
+
+
 class ToolPipelineError(RuntimeError):
     def __init__(self, message: str, *, code: str = "tool_failed", task_patch: TaskPatch | None = None, invalid_fields: tuple[str, ...] = (),
                  argument_schemas: Mapping[str, Mapping[str, Any]] | None = None) -> None:
@@ -62,16 +67,36 @@ class ToolPipelineError(RuntimeError):
         self.argument_schemas = argument_schemas
 
 
-class _ReadPermitRejected(ToolPipelineError):
+class ToolRateLimitError(ToolPipelineError):
+    """Trusted local denial with a fixed, identity-free recovery projection."""
+
+    def __init__(self, decision: RateLimitDecision) -> None:
+        super().__init__(
+            "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；"
+            "请稍后重试，不能据此判断后端故障或没有数据。",
+            code="rate_limited",
+        )
+        self._rate_limit: Mapping[str, int | float | str | None] = MappingProxyType({
+            "limit": decision.limit,
+            "cost": decision.cost,
+            "remaining": decision.remaining,
+            "retry_after_seconds": decision.retry_after_seconds,
+            "retry_at_epoch": decision.retry_at_epoch,
+            "reason": decision.reason,
+        })
+
+    @property
+    def rate_limit(self) -> Mapping[str, int | float | str | None]:
+        return self._rate_limit
+
+
+class _ReadPermitRejected(ToolRateLimitError):
     """Proven pre-handler denial, issued only at the acquire boundary."""
-    def __init__(self, error, tool_name):
+
+    def __init__(self, error: ToolRateLimitError, tool_name: str) -> None:
         ToolPipelineError.__init__(self, str(error), code=error.code)
         self._rate_limit = error.rate_limit
         self.tool_name = tool_name
-
-    @property
-    def rate_limit(self):
-        return self._rate_limit
 
 
 class ConfirmationClaimError(ToolPipelineError):
@@ -1130,7 +1155,6 @@ class ToolPipeline:
                 code="confirmation_stale" if confirmation else "reference_invalid",
             ) from exc
         await self.authorization.authorize(tool, resolved, context)
-        from .ports.mediaflux_policy import ToolRateLimitError
         try:
             await self.rate_limiter.acquire(
                 owner=context.owner, tool_name=f"confirm:{tool.name}" if confirmation else tool.name,
@@ -1138,9 +1162,7 @@ class ToolPipeline:
             )
         except ToolRateLimitError as exc:
             if not confirmation and tool.effect is ToolEffect.READ and not tool.name.startswith("agent."):
-                class RejectedReadPermit(_ReadPermitRejected, ToolRateLimitError):
-                    pass
-                raise RejectedReadPermit(exc, tool.name) from exc
+                raise _ReadPermitRejected(exc, tool.name) from exc
             raise
         context.cancellation.raise_if_cancelled()
         # A preview cannot reenter a held confirmation, even with an old lease.

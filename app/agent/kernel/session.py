@@ -36,6 +36,7 @@ from .discovery import DISCOVERY_TOOL, CapabilityDiscovery
 from .events import AgentEvent, AgentEventType, EventFactory, TERMINAL_EVENT_TYPES
 from .adapters import TurnViewBuilder
 from .model import (
+    BudgetedModelAdapter,
     ModelAdapter,
     ModelEventType,
     ModelMessage,
@@ -53,7 +54,6 @@ from .pipeline import (
 )
 from .projection import _arguments_safe
 from .provider_model import UncommittableModelTurn, ModelProviderError
-from .provider_model import OpenAICompatibleModelAdapter
 from .session_guard import session_scope_guard
 from .state import (
     AgentInput,
@@ -202,6 +202,7 @@ class AgentSession:
         limits: SessionLimits | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         turn_admission: TurnAdmissionPolicy | None = None,
+        model_selector: Callable[[AgentInput, ModelAdapter], str] | None = None,
         stream_display: Callable[[], bool] | None = None,
     ) -> None:
         if pipeline.catalog is not catalog:
@@ -219,6 +220,7 @@ class AgentSession:
         self.system_prompt = str(system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
         self.stream_display = stream_display
         self.turn_admission = turn_admission or AllowAllTurnAdmission()
+        self.model_selector = model_selector
         self.continuation_binding = None
         # 只串行化极短的“取得 generation + 注册 active turn + 保存安全输入”窗口；
         # 已确认写操作一旦开始就不会被后续聊天抢占。
@@ -856,14 +858,10 @@ class _AgentTurn:
         )
 
     def prepare_context(self) -> None:
-        self.selected_model = ""
-        if self.agent_input.channel == "telegram":
-            from app.modules.telegram_model_preferences import get_telegram_model_preference
-
-            preference_options = {}
-            if isinstance(self.session.model, OpenAICompatibleModelAdapter):
-                preference_options["settings"] = self.session.model.settings
-            self.selected_model = get_telegram_model_preference(self.lease.owner, self.lease.session_id, **preference_options)
+        self.selected_model = (
+            self.session.model_selector(self.agent_input, self.session.model)
+            if self.session.model_selector is not None else ""
+        )
         self.tool_context = ToolCallContext(
             owner=self.agent_input.owner,
             session_id=self.agent_input.session_id,
@@ -1132,7 +1130,7 @@ class _AgentTurn:
         self.context_window = self.session.limits.context_window_tokens
         self.output_tokens = self.session.limits.effective_output_tokens
         self.conservative_budget = False
-        if isinstance(self.session.model, OpenAICompatibleModelAdapter):
+        if isinstance(self.session.model, BudgetedModelAdapter):
             self.context_window, self.output_tokens, self.conservative_budget = self.session.model.budget_for_model(
                 self.selected_model, self.context_window, self.output_tokens,
             )

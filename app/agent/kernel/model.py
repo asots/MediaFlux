@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from .state import CancellationToken
 
@@ -173,3 +173,10 @@ class ModelAdapter(Protocol):
         *,
         cancellation: CancellationToken,
     ) -> AsyncIterator[ModelEvent]: ...
+
+
+@runtime_checkable
+class BudgetedModelAdapter(ModelAdapter, Protocol):
+    """可选预算能力；不依赖具体 Provider 或渠道。"""
+
+    def budget_for_model(self, model: str, context: int, output: int) -> tuple[int, int, bool]: ...

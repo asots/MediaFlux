@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping
-from types import MappingProxyType
 from typing import Any
 
 from app.agent.feature_gate import (
@@ -16,13 +15,27 @@ from app.agent.feature_gate import (
 from app.agent.owner_routes import telegram_owner_route_is_currently_authorized
 from app.agent.provider_actions import get_provider_gateway
 from app.agent.provider_models import ProviderGatewayError
-from app.agent.rate_limit import RateLimitDecision, consume_agent_tool
+from app.agent.rate_limit import consume_agent_tool
 
+from .. import pipeline
 from ..capabilities import KernelToolSpec
+from ..model import ModelAdapter
 from ..pipeline import ToolCallContext, ToolPipelineError
+from ..provider_model import OpenAICompatibleModelAdapter
 from ..state import AgentInput
 
 _WEB_OWNER_RE = re.compile(r"^webk:v1:[0-9a-f]{64}$")
+
+
+def select_channel_model(agent_input: AgentInput, model: ModelAdapter) -> str:
+    if agent_input.channel != "telegram":
+        return ""
+    from app.modules.telegram_model_preferences import get_telegram_model_preference
+
+    preference_options = {}
+    if isinstance(model, OpenAICompatibleModelAdapter):
+        preference_options["settings"] = model.settings
+    return get_telegram_model_preference(agent_input.owner, agent_input.session_id, **preference_options)
 
 
 class MediaFluxTurnAdmission:
@@ -79,29 +92,6 @@ class MediaFluxAuthorizationPolicy:
         raise ToolPipelineError("Agent 身份无效", code="authorization_denied")
 
 
-class ToolRateLimitError(ToolPipelineError):
-    """Trusted local denial with a fixed, identity-free recovery projection."""
-
-    def __init__(self, decision: RateLimitDecision) -> None:
-        super().__init__(
-            "MediaFlux 对该能力的本地调用频率已达上限，本次未访问后端；"
-            "请稍后重试，不能据此判断后端故障或没有数据。",
-            code="rate_limited",
-        )
-        self._rate_limit = MappingProxyType({
-            "limit": decision.limit,
-            "cost": decision.cost,
-            "remaining": decision.remaining,
-            "retry_after_seconds": decision.retry_after_seconds,
-            "retry_at_epoch": decision.retry_at_epoch,
-            "reason": decision.reason,
-        })
-
-    @property
-    def rate_limit(self) -> Mapping[str, int | float | str | None]:
-        return self._rate_limit
-
-
 class MediaFluxToolRateLimiter:
     """复用现有 SQLite 共享预算，不因多 Worker 重置工具限流。"""
 
@@ -124,4 +114,4 @@ class MediaFluxToolRateLimiter:
             consume_agent_tool, owner, canonical, scope_suffix=scope_suffix
         )
         if not decision.allowed:
-            raise ToolRateLimitError(decision)
+            raise pipeline.ToolRateLimitError(decision)

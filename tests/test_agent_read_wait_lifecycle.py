@@ -12,7 +12,7 @@ from app.agent.feature_gate import initialize_runtime_fence
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.state import AgentInput
-from app.agent.kernel.ports.mediaflux_policy import ToolRateLimitError
+from app.agent.kernel.pipeline import ToolRateLimitError
 from app.agent.rate_limit import RateLimitDecision
 from tests.test_agent_task_first_slice import NativeScript, declaration, GOAL, OWNER
 

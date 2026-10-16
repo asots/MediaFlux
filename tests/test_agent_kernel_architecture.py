@@ -101,6 +101,41 @@ class AgentKernelArchitectureTests(unittest.TestCase):
         # 总行数不再作为功能一票否决；交付报告完整记录 kernel/app 增长及理由。
         # 保留防空壳检查和真实架构约束，不排除文件、另建控制面或迁移业务路由。
 
+    def test_execution_kernel_does_not_import_business_ports(self) -> None:
+        violations: list[str] = []
+        for name in ("pipeline.py", "session.py"):
+            path = KERNEL / name
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules = [item.name for item in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    modules = [str(node.module or "")]
+                    modules.extend(f"{node.module or ''}.{item.name}" for item in node.names)
+                else:
+                    continue
+                if any("ports" in module.split(".") for module in modules):
+                    violations.append(f"{path}:{node.lineno}")
+        self.assertEqual(violations, [])
+
+    def test_session_does_not_resolve_channel_or_concrete_model_policy(self) -> None:
+        path = KERNEL / "session.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        forbidden = {"telegram_model_preferences", "OpenAICompatibleModelAdapter"}
+        violations: list[int] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                names = [str(node.module or ""), *(item.name for item in node.names)]
+            elif isinstance(node, ast.Import):
+                names = [item.name for item in node.names]
+            elif isinstance(node, ast.Attribute):
+                names = [node.attr]
+            else:
+                continue
+            if any(forbidden.intersection(name.split(".")) for name in names):
+                violations.append(node.lineno)
+        self.assertEqual(violations, [])
+
     def test_web_adapter_only_uses_kernel_event_endpoints(self) -> None:
         source = (ROOT / "app" / "static" / "js" / "agent.js").read_text(
             encoding="utf-8"

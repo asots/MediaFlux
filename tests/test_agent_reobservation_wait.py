@@ -23,7 +23,8 @@ from app.agent import effect_completion as effects
 from app.agent.kernel.bootstrap import _capture_creation_binding
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.ports import existing_actions
-from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter, ToolRateLimitError
+from app.agent.kernel.pipeline import ToolRateLimitError
+from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
 from app.agent.kernel.state import AgentInput
 from app.agent.models import ToolContext
 from app.agent.rate_limit import RateLimitDecision

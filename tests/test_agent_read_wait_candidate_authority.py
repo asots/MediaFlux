@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from app import database as db
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.ports.mediaflux_policy import ToolRateLimitError
+from app.agent.kernel.pipeline import ToolRateLimitError
 from app.agent.rate_limit import RateLimitDecision
 from tests.test_agent_read_wait_lifecycle import (
     parked_runtime, OWNER, GOAL, isolated_database as isolated_database,

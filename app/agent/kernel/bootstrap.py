@@ -41,6 +41,7 @@ from .ports.mediaflux_policy import (
     MediaFluxAuthorizationPolicy,
     MediaFluxToolRateLimiter,
     MediaFluxTurnAdmission,
+    select_channel_model,
 )
 from .provider_model import OpenAICompatibleModelAdapter, ProviderSettings
 from .session import AgentSession, SessionLimits
@@ -193,6 +194,7 @@ def _build_agent_kernel_runtime(
         journal=kernel_store,
         limits=limits,
         turn_admission=MediaFluxTurnAdmission(),
+        model_selector=select_channel_model,
         stream_display=lambda: config.get_bool("AGENT_STREAM_DISPLAY_ENABLED"),
     )
     metrics = KernelMetrics()

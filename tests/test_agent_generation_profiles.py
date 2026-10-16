@@ -523,6 +523,7 @@ def test_telegram_callback_real_kv_next_turn_title_and_web_isolation():
     from app.modules.telegram_topic_routing import _generate_private_topic_title
     from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
     from app.agent.kernel.pipeline import ToolPipeline
+    from app.agent.kernel.ports.mediaflux_policy import select_channel_model
     from app.agent.kernel.session import AgentSession
     from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
 
@@ -545,7 +546,7 @@ def test_telegram_callback_real_kv_next_turn_title_and_web_isolation():
         catalog = ToolCatalog([])
         session = AgentSession(model=OpenAICompatibleModelAdapter(ProviderSettings.from_config(), client_factory=wire.factory),
             catalog=catalog, pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state,
-            retriever=CapabilityRetriever())
+            retriever=CapabilityRetriever(), model_selector=select_channel_model)
         async def turn(channel='telegram', principal=owner, session_id='profile-topic'):
             events = [e async for e in session.run(AgentInput(message='hello', owner=principal,
                 session_id=session_id, channel=channel))]

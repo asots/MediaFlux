@@ -15,9 +15,8 @@ from app.agent.kernel.continuation import (
     register_effect, release_effect,
 )
 from app.agent.kernel.pipeline import (
-    _ReadPermitRejected, ToolCallContext, ToolPipeline, ToolPipelineError,
+    _ReadPermitRejected, ToolCallContext, ToolPipeline, ToolPipelineError, ToolRateLimitError,
 )
-from app.agent.kernel.ports.mediaflux_policy import ToolRateLimitError
 from app.agent.kernel.state import (
     CancellationToken, InMemorySessionStateStore, PublicationLease, SessionState,
 )
@@ -125,6 +124,22 @@ def test_initial_effect_followup_has_no_read_anchor(effect_case):
     assert case.record["state"] == "running"
     assert "anchor" not in case.record
     assert "read_wait" not in case.state.metadata
+
+
+def test_read_permit_has_stable_kernel_type_and_preserves_denial():
+    permit = native_denial()
+    another = native_denial()
+    assert type(permit) is type(another) is _ReadPermitRejected
+    assert isinstance(permit, ToolRateLimitError)
+    assert type(permit.__cause__) is ToolRateLimitError
+    assert permit.rate_limit is permit.__cause__.rate_limit
+    assert permit.code == permit.__cause__.code == "rate_limited"
+    assert str(permit) == str(permit.__cause__)
+    assert permit.tool_name == READ
+    with pytest.raises(TypeError):
+        permit.rate_limit["remaining"] = 1
+    with pytest.raises(AttributeError):
+        permit.rate_limit = {}
 
 
 def test_native_quota_park_restores_original_arguments(effect_case):

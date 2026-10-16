@@ -20,7 +20,7 @@ from app import database as db
 from app.agent import rate_limit as rates
 from app.agent.domain_catalog import build_tool_specs
 from app.agent.kernel.capabilities import ToolCatalog
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError, ToolRateLimitError
 from app.agent.kernel.ports import mediaflux_policy as policy
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
@@ -46,6 +46,12 @@ def rows():
 
 
 snapshot = rows
+
+
+def test_rate_limit_error_is_kernel_owned_without_port_alias():
+    assert ToolRateLimitError.__module__ == "app.agent.kernel.pipeline"
+    assert issubclass(ToolRateLimitError, ToolPipelineError)
+    assert not hasattr(policy, "ToolRateLimitError")
 
 
 def test_real_pipeline_shared_owner_and_retry_payload():
@@ -80,7 +86,6 @@ def test_real_pipeline_shared_owner_and_retry_payload():
         assert advice.get('remaining')==0
         assert dict(advice)=={'limit':8,'cost':1,'remaining':0,'retry_after_seconds':68.0,'retry_at_epoch':188.0,'reason':'quota'}
         with pytest.raises(TypeError):advice['remaining']=99
-        from app.agent.kernel.ports.mediaflux_policy import ToolRateLimitError
         assert isinstance(exc.value,ToolRateLimitError)
     limiter=AgentRateLimiter(shared=True)
     limiter.reset()
@@ -195,7 +200,7 @@ def test_authoritative_cost_and_bool_wrapper_same_bucket():
         port=policy.MediaFluxToolRateLimiter()
         await port.acquire(owner='cost-owner',tool_name='media.subscription_updates',cost=999,arguments={})
         assert rates.allow_agent_tool('cost-owner','media.subscription_updates') is True
-        with pytest.raises(policy.ToolRateLimitError) as raised:
+        with pytest.raises(ToolRateLimitError) as raised:
             await port.acquire(owner='cost-owner',tool_name='media.subscription_updates',cost=0,arguments={})
         assert dict(raised.value.rate_limit)=={'limit':4,'cost':2,'remaining':0,'retry_after_seconds':90.0,'retry_at_epoch':210.0,'reason':'quota'}
         with pytest.raises(AttributeError):raised.value.rate_limit={}
@@ -253,7 +258,7 @@ def test_real_port_public_values_are_immutable_json_scalars(denial):
         if denial=='clock_anomaly':wall[0]=60.0
         denied_owner='different-owner' if denial=='capacity' else owner
         before=snapshot()
-        with pytest.raises(policy.ToolRateLimitError) as caught:
+        with pytest.raises(ToolRateLimitError) as caught:
             await port.acquire(owner=denied_owner,tool_name='web.read',cost=0,arguments={})
         error=caught.value
         assert error.code=='rate_limited' and error.task_patch is None
