@@ -135,6 +135,21 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         self.assertEqual(by_audience["unknown"]["update_time"], "14:00")
         self.assertTrue(all(row["free_progress"] == "已核验免费至第3集" for row in by_audience.values()))
 
+    def test_schedule_result_has_no_unsolicited_playback_disclaimer(self):
+        self.data["days"][3]["items"] = [card()]
+        for status in ("ok", "partial"):
+            with self.subTest(status=status):
+                self.data["sources"][2]["status"] = status
+                result = anime_calendar({"source": "youku"})
+                self.assertEqual(result.suggestions, [])
+                self.assertEqual(result.data["items"][0]["schedule"], "10:00 VIP更新1话")
+                self.assertEqual(result.data["items"][0]["audience"], "member")
+                self.assertEqual(result.data["items"][0]["free_progress"], "")
+                guidance = json.dumps([result.summary, result.data["scope_note"],
+                                       [e.description for e in result.evidence]], ensure_ascii=False)
+                for warning in ("免费进度", "免费观看", "访问资格", "播放资格"):
+                    self.assertNotIn(warning, guidance)
+
     def test_page_limit_and_has_more_describe_events_not_full_site(self):
         self.data["days"][3]["items"] = [card(i) for i in range(25, 0, -1)]
         first = anime_calendar({"limit": 10})

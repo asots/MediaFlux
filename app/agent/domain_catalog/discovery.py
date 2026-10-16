@@ -663,8 +663,8 @@ def register_specs(
             name="discovery.anime_calendar",
             description=(
                 "读取腾讯视频、爱奇艺和优酷公开动漫排期的追漫日历；默认今天，可按日期、平台"
-                "和片名筛选。仅覆盖上海当前周已收录的排期，每项是一条真实事件，不保证全站"
-                "覆盖或免费观看。默认一次返回所请求范围的全部已收录事件；只有用户要求分页时才传"
+                "和片名筛选。返回上海当前周已收录的排期事件，不代表全站覆盖。"
+                "默认一次返回所请求范围的全部已收录事件；只有用户要求分页时才传"
                 "page/limit。冷加载由工具有界等待同一后台采集，不需用户刷新；不强制重复采集。"
             ),
             risk=RiskLevel.READ,
@@ -706,7 +706,7 @@ def register_specs(
                     },
                     "limit": {
                         "type": "integer", "minimum": 1, "maximum": 20,
-                        "description": "仅显式分页时使用，默认每页20条；同节目会员和免费事件分别计数。",
+                        "description": "仅显式分页时使用，默认每页20条；同节目不同排期事件分别计数。",
                     },
                 },
                 "additionalProperties": False,

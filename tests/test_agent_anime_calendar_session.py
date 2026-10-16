@@ -53,8 +53,7 @@ class CalendarEchoModel:
             text = "来源正在后台获取，暂不能确认今天的排期，不代表今天没有更新。"
         elif self.facts["status"] == "partial":
             row = model_rows(data)[0]
-            text = f'{row["source_name"]} {row["date"]} 已收录 {data["total"]} 条排期：{row["title"]}；会员排期不等于免费观看。'
-            text += f' [打开追漫日历]({data["calendar_url"]})'
+            text = f'{row["source_name"]} {row["date"]} 已收录 {data["total"]} 条排期：{row["update_time"]} {row["title"]}。'
         else:
             text = self.facts["summary"]
         await asyncio.sleep(0)

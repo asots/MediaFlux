@@ -149,7 +149,7 @@ def test_declared_schema_defaults_match_validator_and_bounded_event_contract(cat
         assert props[name]["type"] == "integer"
         assert (props[name]["minimum"], props[name]["maximum"]) == (1, maximum)
     assert (props["query"]["minLength"], props["query"]["maxLength"]) == (0, 80)
-    assert "真实事件" in tool.description
+    assert "排期事件" in tool.description
 
 
 @pytest.mark.parametrize("message", [
@@ -305,7 +305,8 @@ def test_public_label_and_kernel_guidance_keep_calendars_and_links_distinct(isol
     wire, = capture_policy_windows([[NEW_TOOL, OLD_TOOL]], tmp_path)
     system = wire["messages"][0]["content"]
     for contract in (
-        NEW_TOOL, OLD_TOOL, "Asia/Shanghai", "每项为一条排期事件", "不等于免费进度",
+        NEW_TOOL, OLD_TOOL, "Asia/Shanghai", "每项为一条排期事件", "默认直接给出星期、时间、节目",
+        "不附会员/免费免责声明", "不追加无关建议或追问", "明确询问播放权限",
         "不要求用户手动刷新", "不让用户确认只读翻页", "calendar_url", "Telegram", "不猜站点地址",
     ):
         assert contract in system

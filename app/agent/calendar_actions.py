@@ -21,7 +21,7 @@ _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
 _DAYS = {"today", "tomorrow", "week", *_WEEKDAYS}
 _ARGUMENTS = {"day", "source", "query", "page", "limit"}
 _SOURCE_STATUSES = {"ok", "partial", "stale", "loading", "unavailable"}
-_SCOPE = "平台公开动漫排期，非全站完整覆盖；排期不等于免费进度，访问资格以平台为准。来源不可用不代表当天没有更新。"
+_SCOPE = "平台公开动漫排期，非全站完整覆盖。来源不可用不代表当天没有更新。"
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
@@ -176,7 +176,7 @@ def _items(snapshot: dict, requested: list[date], sources: list[dict], query: st
 def _result(ok: bool, status: str, summary: str, data: dict, *, error: str = "", suggestions=()) -> ToolResult:
     result = ToolResult(ok=ok, status=status, summary=summary, data=data, error=error,
                         suggestions=list(suggestions), evidence=[Evidence(
-                            "anime_calendar", "读取追漫日历受控缓存/后台刷新快照；来源事实时间独立列出，不查询播放资格。",
+                            "anime_calendar", "读取追漫日历缓存/后台刷新快照；来源事实时间独立列出。",
                             datetime.now(ZoneInfo(_TIMEZONE)).isoformat(timespec="seconds"),
                         )])
     # 重复列名只传一次；保留所有事件和文案，不以删排期说明换预算。
@@ -236,13 +236,13 @@ def anime_calendar(arguments: dict[str, Any], context: ToolContext | None = None
     scope = "本周" if len(requested) == 7 else requested[0].isoformat()
     if page:
         partial = states != {"ok"} or any(item["stale"] for item in page)
-        suggestions = ["请结合来源状态和上次成功时间阅读排期；未注明时刻保持未知，会员排期不代表可免费观看。"]
+        suggestions = []
         if data["pagination_limited"]:
             suggestions.append("已到第100页上限，仍有匹配记录；请收窄日期、平台或片名，不要继续查询第101页。")
         elif data["has_more"]:
             suggestions.append("尚有下一页：请继续读取直至覆盖用户请求范围，不要让用户再次确认只读翻页。")
         return _result(True, "partial" if partial else "success",
-                       f"{scope}追漫日历返回{len(page)}条排期（已收录匹配{len(items)}条），非全站完整覆盖", data,
+                       f"{scope}追漫日历返回{len(page)}条排期（已收录匹配{len(items)}条）", data,
                        suggestions=suggestions)
     if items:
         return _result(True, "empty", f"所选范围共有{len(items)}条已收录排期，本页没有结果", data)
