@@ -7,6 +7,15 @@ from app.modules.episode_mapping import classify_episode_position
 
 
 class IndexerReleasePositionTests(unittest.TestCase):
+    def test_explicit_bracket_ranges_need_no_finished_marker(self):
+        for suffix in ("01-03", "01-03 Fin"):
+            title = f"[GM-Team][国漫][诛仙 第4季][Jade Dynasty IV][2026][{suffix}][HEVC][GB][4K]"
+            with self.subTest(title=title):
+                self.assertEqual(parse_indexer_release_position(title),
+                                 {"season": 4, "episode": 1, "episode_end": 3})
+        self.assertEqual(parse_indexer_release_position("示例剧 [2019-2026] 2160p"),
+                         {"season": None, "episode": None, "episode_end": None})
+
     def test_captioned_bare_episode_requires_an_exact_known_media_title(self):
         title = "【国产】理想禁区 07 黑历史 1080P"
         self.assertIsNone(parse_indexer_release_position(title)["episode"])

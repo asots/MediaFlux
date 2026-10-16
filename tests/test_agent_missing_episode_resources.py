@@ -804,6 +804,126 @@ class MultiWorkResourceTests(unittest.TestCase):
         self.assertEqual(result.data["items"], [])
         self.assertEqual(result.data["recommended_positions"], [])
 
+    def test_future_fin_pack_is_excluded_from_single_and_batch_missing_resources(self):
+        from types import SimpleNamespace
+
+        from app.agent.kernel.ux_selection import _recommend, candidate_item
+        from app.indexers.models import IndexerItem
+
+        # 固定合成排期和资源，仅用于回归，不代表真实平台上的播出或检索结果。
+        as_of = date(2026, 10, 16)
+        target = {"query": "诛仙", "tmdb_id": "999999", "season": 4}
+        mapping_context = {
+            "as_of": as_of.isoformat(),
+            "detail": {
+                "name": "诛仙",
+                "seasons": [{"season_number": 4, "episode_count": 26}],
+            },
+            "season_detail": {
+                "season_number": 4,
+                "episodes": [
+                    {
+                        "episode_number": number,
+                        "air_date": (as_of + timedelta(weeks=number - 11)).isoformat(),
+                    }
+                    for number in range(1, 27)
+                ],
+            },
+        }
+        future_title = "[GM-Team][国漫][诛仙 第4季][Jade Dynasty IV][2026][01-26 Fin][HEVC][GB][4K]"
+        for mode in ("episode", "season", "batch"):
+            for legal_title in (
+                None,
+                "诛仙 S04E11 2160p",
+                future_title.replace("01-26 Fin", "01-11 Fin"),
+            ):
+                with self.subTest(mode=mode, legal_title=legal_title):
+                    titles = [future_title] + ([legal_title] if legal_title else [])
+                    stored = {
+                        f"zhuxian-fixture-result-{index:02d}": IndexerItem(
+                            "nyaa", "Nyaa", title,
+                            result_id=f"zhuxian-fixture-result-{index:02d}",
+                            download_state="ready", download_kinds=("magnet",),
+                            magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                            seeders=999 if index == 0 else 1,
+                        )
+                        for index, title in enumerate(titles)
+                    }
+                    service = SimpleNamespace(
+                        result_store=SimpleNamespace(get=stored.__getitem__, restore=Mock())
+                    )
+                    audit_result = _audit_result(
+                        missing=[{"season": 4, "episode": 11}], target_missing=True
+                    )
+                    audit_result.data.update(title="诛仙", tmdb_id=target["tmdb_id"])
+                    audit_result.effect_metadata["episode_mapping_context"] = mapping_context
+                    with (
+                        patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit_result) as audit,
+                        patch("app.agent.episode_resource_actions.search_resources", return_value=_search_result(
+                            query="诛仙 S04E11", items=[item.to_public_dict() for item in stored.values()]
+                        )) as search,
+                        patch("app.agent.episode_resource_actions.get_indexer_service", return_value=service),
+                    ):
+                        if mode == "episode":
+                            arguments = missing_episode_resource_arguments({
+                                **target, "episode": 11, "as_of": as_of.isoformat(),
+                            })
+                            result = search_missing_episode_resources(arguments)
+                        else:
+                            item = {**target, "episodes": [11]}
+                            arguments = missing_season_resource_arguments({
+                                **({"items": [item]} if mode == "batch" else item),
+                                "as_of": as_of.isoformat(),
+                            })
+                            result = search_missing_season_resources(arguments)
+
+                    audit.assert_called_once()
+                    self.assertEqual(audit.call_args.args[0]["as_of"], "2026-10-16")
+                    self.assertTrue(audit.call_args.kwargs["refresh"])
+                    search.assert_called_once()
+                    self.assertEqual(search.call_args.args[0]["season"], 4)
+                    self.assertEqual(search.call_args.args[0]["episode"], 11)
+                    expected_titles = [legal_title] if legal_title else []
+                    expected_positions = [1] if legal_title else []
+                    candidates = result.references[0].value["candidates"] if result.references else []
+                    self.assertEqual([item["title"] for item in candidates], expected_titles)
+                    self.assertEqual([item["position"] for item in candidates], expected_positions)
+                    self.assertEqual(_recommend([
+                        candidate_item(item, item["position"]) for item in candidates
+                    ]), expected_positions)
+                    if legal_title:
+                        self.assertEqual(len(result.references), 1)
+                        self.assertEqual(
+                            [item["result_id"] for item in result.references[0].value["_private_items"]],
+                            ["zhuxian-fixture-result-01"],
+                        )
+                        self.assertEqual(candidates[0]["_verification_context"]["as_of"], "2026-10-16")
+                    else:
+                        self.assertEqual(result.references, [])
+
+                    if mode == "batch":
+                        self.assertEqual(result.data["recommended_positions"], expected_positions)
+                        self.assertEqual(result.data["review_positions"], [])
+                        self.assertEqual([item["title"] for item in result.data["items"]], expected_titles)
+                        group = result.data["groups"][0]
+                        self.assertEqual(group["positions"], expected_positions)
+                        self.assertEqual(group["review_positions"], [])
+                        self.assertEqual(group["status"], "success" if legal_title else "empty")
+                        self.assertEqual(group["uncovered_episodes"], [] if legal_title else [
+                            {"season": 4, "episode": 11, "reason": "no_match"}
+                        ])
+                    else:
+                        ranked = result.data["search"] if mode == "episode" else result.data["episodes"][0]["search"]
+                        rejected = next(item for item in ranked["items"] if item["title"] == future_title)
+                        self.assertEqual(rejected["quality"]["match"], "conflict")
+                        self.assertFalse(rejected["quality"]["eligible"])
+                        self.assertTrue(any("未播" in warning for warning in rejected["quality"]["warnings"]))
+                        recommendation = ranked["recommendation"]
+                        selected = recommendation["selected"]
+                        self.assertEqual(selected["title"] if selected else None, legal_title)
+                        self.assertEqual(recommendation["alternatives"], [])
+                        self.assertFalse(ranked["download_plan"]["auto_submit"])
+
     def test_batch_exposes_unproved_arc_candidate_without_preselecting_it(self):
         from types import SimpleNamespace
 
@@ -1019,7 +1139,7 @@ class MissingResourceInventoryFreshnessTests(unittest.TestCase):
                 if mode == "batch":
                     self.assertEqual(len(result.data["groups"]), 1)
                     group = result.data["groups"][0]
-                    self.assertEqual(group["status"], "not_missing" if after else "needs_review")
+                    self.assertEqual(group["status"], "not_missing" if after else "empty")
                     if not after:
                         self.assertEqual(group["missing_total"], 3)
                         self.assertEqual(group["remaining"], 0)

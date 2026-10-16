@@ -11,6 +11,7 @@ import re
 import unicodedata
 
 from app.modules.scraper import parse_release_position
+from app.modules.episode_mapping import extract_release_episode_range
 
 _SEASON = re.compile(
     r"(?ix)(?:"
@@ -113,6 +114,12 @@ def parse_indexer_release_position(value: str, *, media_title: str = "") -> dict
             complete_end = _first_int(complete_match)
             if _valid_episode(complete_end) is not None:
                 episode, episode_end = 1, complete_end
+
+    if episode is None:
+        range_season, start, end = extract_release_episode_range(text)
+        if _valid_episode(start) is not None and _valid_episode(end) is not None:
+            season = season if season is not None else _valid_season(range_season)
+            episode, episode_end = start, end
 
     # 站点可把集名放在裸集号后。只有已核对作品名恰好位于编号前，才采用此格式；
     # 不把作品名自身的数字、年份或清晰度猜成集号，也不补造季号。

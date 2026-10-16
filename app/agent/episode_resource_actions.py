@@ -376,9 +376,10 @@ def search_missing_episode_resources(
         "search": ranked_search,
     }
     if searched.ok:
-        summary = (
-            f"已确认 S{arguments['season']:02d}E{arguments['episode']:02d} 缺失；{searched.summary}"
-        )
+        recommendation = ranked_search["recommendation"]
+        summary = f"已确认 S{arguments['season']:02d}E{arguments['episode']:02d} 缺失；{recommendation['reason']}"
+        if search_data.get("partial"):
+            summary += "部分来源未完成。"
     else:
         summary = f"已确认指定集缺失，但{searched.summary}"
     return attach_resource_candidate_reference(
@@ -396,14 +397,10 @@ def search_missing_episode_resources(
                     _now(),
                 )
             ],
-            suggestions=list(searched.suggestions)
-            + (
-                [
-                    "已按季集匹配、可提交性、发布规格和站点活跃度生成只读推荐；确认后才会提交下载。"
-                ]
-                if ranked_search.get("recommendation", {}).get("selected")
-                else []
-            ),
+            suggestions=(list(searched.suggestions) if not searched.ok else [
+                "只报告匹配目标集的结果；没有匹配就直接说明本轮未找到，不列旧集或未知映射让用户猜。"
+                "标题匹配不代表已核验文件清单或下载完成。"
+            ]),
             error=searched.error,
         ),
         result_store=get_indexer_service().result_store,
@@ -521,7 +518,8 @@ def search_missing_season_resources(
             mapping_context=audit.effect_metadata.get("episode_mapping_context"),
         )
         items = search_data.get("items", [])
-        item_count = len(items) if isinstance(items, list) else 0
+        item_count = sum(1 for item in items if item["quality"]["eligible"]
+                         and item["quality"]["match"] in {"exact_episode", "episode_pack"})
         total_candidates += item_count
         completed += int(bool(searched.ok))
         failed += int(not searched.ok)
@@ -554,14 +552,16 @@ def search_missing_season_resources(
     ok = bool(completed)
     summary = f"已核验第 {arguments['season']} 季 {len(missing)} 个缺集，并搜索其中 {len(episodes)} 集"
     if total_candidates:
-        summary += f"，找到 {total_candidates} 项候选资源"
+        summary += f"，找到 {total_candidates} 项季集标题匹配候选"
     elif completed:
-        summary += "，暂未找到候选资源"
+        summary += "，本轮未找到匹配目标集的资源"
     if remaining:
         summary += f"；其余 {remaining} 集未在本批次检索"
+    if failed:
+        summary += f"；其中 {failed} 集查询未完成"
 
     if total_candidates:
-        suggestions.append("可逐项选择候选资源，并预检推送到 qBittorrent 或光鸭。")
+        suggestions.append("仅报告匹配目标集的候选；标题匹配不代表已核验文件清单，不推荐旧集或未知映射。")
     if remaining:
         suggestions.append(f"本次最多处理 3 集；剩余 {remaining} 集可再次按季度检索。")
     if failed:
@@ -601,7 +601,7 @@ def _search_missing_resource_batch(
     preferences: dict[str, Any] | None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """复用单季检索快照；明确候选默认选中，待映射候选只展示不预选。"""
+    """复用单季快照；匹配候选可推荐，未核验候选仅保留供明确选择。"""
 
     def search(item: dict[str, Any]) -> ToolResult:
         try:
@@ -636,6 +636,7 @@ def _search_missing_resource_batch(
         candidates = (
             reference.value.get("candidates", []) if reference is not None else []
         )
+        candidates_by_id = {candidate["result_id"]: candidate for candidate in candidates}
         verification = data.get("verification") or {}
         identity = str(
             verification.get("tmdb_id")
@@ -655,6 +656,7 @@ def _search_missing_resource_batch(
             "uncovered_episodes": [],
             "missing_total": data.get("missing_total"),
             "remaining": data.get("remaining", 0),
+            "failed": data.get("failed", 0),
             "sites_succeeded": [],
             "errors": [],
         }
@@ -671,41 +673,13 @@ def _search_missing_resource_batch(
                 if isinstance(item, dict)
                 and (item.get("quality") or {}).get("eligible")
             ]
-            proved_ids = [
-                item.get("result_id")
-                for item in ranked_items
-                if (item.get("quality") or {}).get("match")
-                in {"exact_episode", "episode_pack"}
-                and (item.get("quality") or {}).get("confidence") in {"high", "medium"}
-            ]
-            review_ids = [
-                item.get("result_id")
-                for item in ranked_items
-                if (item.get("quality") or {}).get("match")
-                in {"unknown", "season_pack"}
-            ]
-            proved = next(
-                (
-                    candidate
-                    for result_id in proved_ids
-                    for candidate in candidates
-                    if candidate["result_id"] == result_id
-                ),
-                None,
-            )
-            review = (
-                None
-                if proved is not None
-                else next(
-                    (
-                        candidate
-                        for result_id in review_ids
-                        for candidate in candidates
-                        if candidate["result_id"] == result_id
-                    ),
-                    None,
-                )
-            )
+            matched = [candidates_by_id[item["result_id"]] for item in ranked_items
+                       if item.get("result_id") in candidates_by_id]
+            proved = next((candidate for candidate in matched
+                           if candidate["match"] in {"exact_episode", "episode_pack"}
+                           and candidate["confidence"] in {"high", "medium"}), None)
+            review = None if proved else next((candidate for candidate in matched
+                                               if candidate["match"] in {"unknown", "season_pack"}), None)
             chosen = proved or review
             prior = by_id.get(chosen["result_id"]) if chosen else None
             reason = "no_match"
@@ -720,7 +694,7 @@ def _search_missing_resource_batch(
                 reason = "needs_review"
             elif not episode.get("ok"):
                 reason = "unavailable"
-            elif searched.get("items"):
+            elif ranked_items:
                 reason = "needs_review"
 
             if chosen is None:
@@ -768,7 +742,7 @@ def _search_missing_resource_batch(
                 "partial"
                 if group["positions"]
                 else "needs_review"
-                if group["review_positions"] or result.ok
+                if group["review_positions"]
                 else result.status
             )
         groups.append(group)
@@ -781,12 +755,15 @@ def _search_missing_resource_batch(
     proved_groups = sum(bool(group["positions"]) for group in groups)
     review_groups = sum(bool(group["review_positions"]) for group in groups)
     summary = (
-        f"已核对 {len(groups)} 部/季，{proved_groups} 部有可提交候选"
-        f"，{review_groups} 部找到待核对候选，共展示 {len(presented)} 项"
+        f"已核对 {len(groups)} 部/季，{proved_groups} 部有季集标题匹配候选"
+        f"，{review_groups} 部仅有未核验线索，不作为匹配结果推荐"
     )
     unsearched = sum(group["resource_search_attempted"] is False for group in groups)
     if unsearched:
         summary += f"；{unsearched} 部未执行资源站检索，不能据此判断没有资源"
+    unfinished = sum(group["failed"] + group["remaining"] for group in groups)
+    if unfinished:
+        summary += f"；{unfinished} 集查询未完成"
     result = ToolResult(
         any(item.ok for item in results),
         status,
@@ -798,8 +775,9 @@ def _search_missing_resource_batch(
             "review_positions": review_positions,
         },
         suggestions=[
-            "推荐位置已证明覆盖目标缺集；待核对位置不会默认选中，确认发布组编号后可手动选择。",
-            "没有可证明候选、季集映射不明确或来源失败都不等于全网没有资源；本工具不提交下载。",
+            "推荐位置仅表示季集标题匹配，未核验合集文件清单。只用简表列目标和检索结论；未执行或失败的集标为查询未完成。"
+            "不复述旧集/未知映射，不推断最新发布进度；仅当用户主动查看或明确选择未核验候选时使用待核对位置。",
+            "站点失败时简要说明未完成来源，不把检索不完整说成全网无资源；本工具不提交下载。",
         ],
     )
     if presented:

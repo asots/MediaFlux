@@ -7,6 +7,7 @@ from unittest.mock import Mock
 from app.modules.directory_media import DirectoryInspection, MediaSnapshot
 from app.modules.directory_scrape import DirectoryScrapeService, FixedMatchScraper
 from app.modules.episode_mapping import (
+    EpisodeMappingPlan,
     build_directory_episode_evidence,
     classify_episode_position,
     extract_release_episode_range,
@@ -1246,6 +1247,13 @@ class DirectoryScrapeEpisodeMappingTests(unittest.TestCase):
         self.assertLess(mapping.confidence, 0.9)
         self.assertEqual(match.relation, "unknown")
         self.assertEqual(standard_conflict.relation, "conflict")
+
+    def test_proven_merged_season_old_episode_is_conflict_not_unknown(self):
+        match = classify_episode_position(
+            source_season=3, source_episode=26, target_season=1, target_episode=99,
+            mapping=EpisodeMappingPlan(3, 26, 1, 95, confidence=1.0),
+        )
+        self.assertEqual(match.relation, "conflict")
 
 
 if __name__ == "__main__":

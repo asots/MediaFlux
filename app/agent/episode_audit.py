@@ -60,7 +60,7 @@ def _with_episode_mapping_context(
     result: ToolResult, context: dict[str, Any]
 ) -> ToolResult:
     if context:
-        result.effect_metadata["episode_mapping_context"] = context
+        result.effect_metadata["episode_mapping_context"] = {**context, "as_of": result.data["as_of"]}
     return result
 
 

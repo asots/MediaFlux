@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from datetime import date
 from typing import Any
 
 from app.agent.media_preference_policy import (
@@ -63,6 +64,28 @@ def _release_year(title: str) -> str:
     return years[-1] if years else ""
 
 
+def _range_airing_issue(context: dict, season: int, start: int, end: int) -> tuple[str, str] | None:
+    """只读复用缺集审计时间线；标题合集范围不能越过已知播出事实。"""
+    detail = context.get("season_detail")
+    if not context.get("as_of") or not isinstance(detail, dict) or detail.get("season_number") != season:
+        return None
+    as_of = date.fromisoformat(context["as_of"])
+    dates = {}
+    for row in detail.get("episodes", []):
+        number = row.get("episode_number")
+        if type(number) is not int or not start <= number <= end:
+            continue
+        try:
+            dates[number] = date.fromisoformat(str(row.get("air_date") or ""))
+        except ValueError:
+            continue
+    if any(day > as_of for day in dates.values()):
+        return "conflict", "标题合集范围包含截止核对日期仍未播出的集数，不作为缺集候选"
+    if len(dates) != end - start + 1:
+        return "unknown", "标题合集范围的播出记录不完整，尚不能核实覆盖目标；未核验文件清单"
+    return None
+
+
 def _episode_match(
     title: str,
     *,
@@ -112,6 +135,19 @@ def _episode_match(
         end_mapping=end_mapping,
     )
     label = f"S{season:02d}E{episode:02d}"
+    is_season_pack = match.relation == "season" and _looks_like_season_pack(title, season)
+    if isinstance(mapping_context, dict) and (match.relation == "range" or is_season_pack):
+        start = mapping.target_episode if mapping and mapping.confidence >= 0.9 else source_episode
+        end = end_mapping.target_episode if end_mapping and end_mapping.confidence >= 0.9 else source_end
+        if is_season_pack and isinstance(season_detail, dict):
+            start = 1
+            end = max((row.get("episode_number", 0) for row in season_detail.get("episodes", [])
+                       if type(row.get("episode_number")) is int), default=0)
+        if start and end:
+            issue = _range_airing_issue(mapping_context, season, start, end)
+            if issue:
+                relation, warning = issue
+                return relation, -320 if relation == "conflict" else 20, [], [warning]
     if match.relation == "exact":
         if mapping is not None and mapping.confidence >= 0.9 and mapping.changed:
             reason = (
@@ -128,15 +164,15 @@ def _episode_match(
         return (
             "episode_pack",
             110,
-            [f"资源范围包含 {label}（E{source_episode:02d}-E{source_end:02d}）"],
-            ["多集资源需人工核对文件清单"],
+            [f"标题范围包含 {label}（E{source_episode:02d}-E{source_end:02d}）"],
+            ["多集资源尚未核验实际文件清单，标题范围不代表文件已验证"],
         )
-    if match.relation == "season" and _looks_like_season_pack(title, season):
+    if is_season_pack:
         return (
             "season_pack",
             85,
             [f"识别为第 {season} 季整季资源"],
-            ["整季包需人工核对文件清单"],
+            ["整季包尚未核验实际文件清单"],
         )
     if match.relation == "conflict":
         parsed_label = ""
@@ -150,7 +186,7 @@ def _episode_match(
         if parsed_label:
             warning += f"：{parsed_label}"
         return "conflict", -320, [], [warning]
-    return "unknown", 20, [], [f"标题未能证明覆盖 {label}，需人工复核"]
+    return "unknown", 20, [], [f"标题未能证明覆盖 {label}，不作为匹配结果推荐"]
 
 
 def _tag_score(title: str) -> tuple[int, dict[str, str], list[str]]:
@@ -213,7 +249,7 @@ def _availability_score(item: dict[str, Any]) -> tuple[int, bool, list[str], lis
     warnings: list[str] = []
     if state == "ready":
         score = 45
-        reasons.append("可直接提交下载")
+        reasons.append("已取得下载入口")
     elif state == "resolvable":
         score = 30
         reasons.append("可在提交前解析下载地址")
@@ -387,23 +423,24 @@ def rank_episode_search(
     ranked_data["items"] = items
 
     eligible = [item for item in items if item["quality"]["eligible"]]
-    selected = eligible[0] if eligible else None
+    matching = [item for item in eligible if item["quality"]["match"] in {"exact_episode", "episode_pack"}]
+    selected = matching[0] if matching else None
     if selected is None:
-        status = "empty" if not items else "no_downloadable_candidate"
-        reason = "没有可安全提交的候选资源。" if items else "本次搜索没有返回候选资源。"
+        status = "review_required" if eligible else "no_downloadable_candidate" if items else "empty"
+        reason = "本轮未找到匹配目标季集的资源。"
     elif selected["quality"]["match"] == "exact_episode":
         status = "recommended"
-        reason = "首选项明确匹配目标季集，且具备可验证的提交句柄。"
+        reason = "首选项标题明确匹配目标季集，已取得下载入口；未核验实际文件。"
     else:
         status = "review_required"
-        reason = "候选项未能明确匹配目标单集，提交前需要人工核对。"
+        reason = "合集标题范围包含目标集；尚未核验文件清单，不等于目标文件已验证。"
 
     selected_summary = _candidate_summary(selected) if selected else None
     ranked_data["recommendation"] = {
         "status": status,
         "candidate_count": len(eligible),
         "selected": selected_summary,
-        "alternatives": [_candidate_summary(item) for item in eligible[1:4]],
+        "alternatives": [_candidate_summary(item) for item in matching[1:4]],
         "reason": reason,
     }
     ranked_data["download_plan"] = {

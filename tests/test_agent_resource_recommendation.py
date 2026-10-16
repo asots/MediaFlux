@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from datetime import date, timedelta
 
 from app.agent.resource_recommendation import rank_episode_search
 
@@ -29,6 +30,51 @@ def _item(
 
 
 class ResourceRecommendationTests(unittest.TestCase):
+    def test_claimed_finished_pack_cannot_cover_episodes_not_yet_aired(self):
+        as_of = date(2026, 10, 16)
+        context = {
+            "as_of": as_of.isoformat(),
+            "detail": {"name": "诛仙", "seasons": [{"season_number": 4, "episode_count": 26}]},
+            "season_detail": {"season_number": 4, "episodes": [
+                {"episode_number": number, "air_date": (as_of + timedelta(days=number - 11)).isoformat()}
+                for number in range(1, 27)
+            ]},
+        }
+        for title in (
+            "[GM-Team][国漫][诛仙 第4季][Jade Dynasty IV][2026][01-26 Fin][HEVC][GB][4K]",
+            "诛仙 S04 Complete 2160p WEB-DL",
+        ):
+            with self.subTest(title=title):
+                ranked = rank_episode_search({"items": [_item("future-pack-result-001", title)]},
+                                             season=4, episode=11, mapping_context=context)
+                self.assertFalse(ranked["items"][0]["quality"]["eligible"])
+                self.assertIsNone(ranked["recommendation"]["selected"])
+                self.assertTrue(any("未播" in warning for warning in ranked["items"][0]["quality"]["warnings"]))
+        valid = rank_episode_search({"items": [_item("aired-pack-result-0001", "诛仙 S04E01-E11 2160p")]},
+                                    season=4, episode=11, mapping_context=context)
+        self.assertEqual(valid["items"][0]["quality"]["match"], "episode_pack")
+        self.assertTrue(valid["items"][0]["quality"]["eligible"])
+        context["as_of"] = (as_of + timedelta(days=15)).isoformat()
+        finished = rank_episode_search(
+            {"items": [_item("finished-pack-result-001", "诛仙 第4季 [01-26 Fin] 2160p")]},
+            season=4, episode=11, mapping_context=context,
+        )
+        self.assertEqual(finished["items"][0]["quality"]["match"], "episode_pack")
+        self.assertTrue(finished["items"][0]["quality"]["eligible"])
+        self.assertIsNotNone(finished["recommendation"]["selected"])
+
+    def test_pack_with_unknown_dates_is_not_confirmed_coverage(self):
+        context = {"as_of": "2026-10-16", "detail": {"seasons": [{"season_number": 4, "episode_count": 26}]},
+                   "season_detail": {"season_number": 4, "episodes": [
+                       {"episode_number": number, "air_date": "2026-10-01" if number <= 11 else None}
+                       for number in range(1, 27)
+                   ]}}
+        ranked = rank_episode_search({"items": [_item("unknown-date-pack-001", "诛仙 S04E01-E26 2160p")]},
+                                     season=4, episode=11, mapping_context=context)
+        quality = ranked["items"][0]["quality"]
+        self.assertEqual(quality["match"], "unknown")
+        self.assertTrue(quality["eligible"], "日期未知不是资源不存在，保留用户主动查看和手动选择能力")
+
     def test_exact_episode_dominates_quality_and_conflicts_are_ineligible(self):
         data = {
             "query": "示例剧 S02E03",
@@ -109,7 +155,9 @@ class ResourceRecommendationTests(unittest.TestCase):
 
         self.assertEqual(source, original)
         self.assertEqual(ranked["recommendation"]["status"], "review_required")
-        self.assertEqual(ranked["recommendation"]["selected"]["result_id"], "season-pack-id-0001")
+        self.assertIsNone(ranked["recommendation"]["selected"])
+        self.assertEqual(ranked["recommendation"]["alternatives"], [])
+        self.assertTrue(ranked["items"][0]["quality"]["eligible"], "仍允许用户明确选择合集，但不冒充已匹配推荐")
         self.assertEqual(ranked["items"][0]["quality"]["match"], "season_pack")
         self.assertEqual(ranked["download_plan"]["mode"], "read_only")
         self.assertFalse(ranked["download_plan"]["auto_submit"])
@@ -250,6 +298,8 @@ class ResourceRecommendationTests(unittest.TestCase):
         self.assertEqual(quality["match"], "unknown")
         self.assertTrue(quality["eligible"])
         self.assertEqual(ranked["recommendation"]["status"], "review_required")
+        self.assertIsNone(ranked["recommendation"]["selected"])
+        self.assertEqual(ranked["recommendation"]["alternatives"], [])
 
     def test_unavailable_and_empty_results_have_no_selected_plan(self):
         unavailable = rank_episode_search({"items": [

@@ -1026,7 +1026,7 @@ def classify_episode_position(
 
     # 长篇动画常被发布组按篇章/年番切成 S02+，而 TMDB 仍合并在 S01。
     # 缺少时间线证据时只能降级待核对，不能在索引初排阶段误判冲突并挤出结果。
-    if target_s == 1 and season > 1:
+    if target_s == 1 and season > 1 and not (start_mapped or end_mapped):
         return EpisodePositionMatch(
             "unknown", "publisher_season_mapping_not_provable", mapping
         )
