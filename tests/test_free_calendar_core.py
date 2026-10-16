@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import unittest
@@ -366,6 +366,203 @@ class CalendarCoreTests(unittest.TestCase):
         self.assertEqual(data["items_count"], 1)
         self.assertEqual(data["sources"][0]["status"], "partial")
         self.assertEqual(data["days"][0]["items"][0]["mapping_status"], "unmatched")
+
+
+class GatedSource(Source):
+    def __init__(self, source="tencent"):
+        self.source = source
+        self.allowed_hosts = {"v.qq.com" if source == "tencent" else "www.iqiyi.com"}
+        self.entries = (entry(source=source, url=f"https://{next(iter(self.allowed_hosts))}/show_1.html"),)
+        self.calls = 0
+        self.entered, self.release = threading.Event(), threading.Event()
+
+    async def fetch(self, http):
+        self.calls += 1
+        self.entered.set()
+        # 故意占住真实采集线程，模拟不能被 asyncio 超时立即终止的同步工作。
+        if not self.release.wait(10):
+            raise AssertionError("测试必须释放采集线程")
+        if self.failure:
+            raise SourceUnavailable("受控来源失败")
+        return SourceResult(self.entries, "ok", "受控平台事实")
+
+
+class CalendarSourceWaitTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(isolated_test_database())
+        self.readers = self.enterContext(ThreadPoolExecutor(max_workers=3, thread_name_prefix="calendar-reader-test"))
+        for name in ("getaddrinfo", "create_connection", "socket.connect", "socket.connect_ex"):
+            self.enterContext(patch("socket." + name, side_effect=AssertionError("禁止真实网络/DNS")))
+        self.now = datetime(2026, 9, 9, 12)
+
+    def service(self, *sources, metadata=None, source_timeout=5):
+        service = CalendarService(
+            providers={source.source: source for source in sources},
+            cache=DiscoveryCache(clock=lambda: self.now), metadata=metadata or RawMetadata(),
+            http_factory=NoNetwork, clock=lambda: self.now, source_timeout=source_timeout,
+        )
+
+        def close():
+            for source in sources:
+                source.release.set()
+            service.shutdown()
+            if service._executor is not None:
+                service._executor.shutdown(wait=True, cancel_futures=True)
+
+        self.addCleanup(close)
+        return service
+
+    def start_refresh(self, service, *sources):
+        page = self.readers.submit(service.get_week).result(timeout=2)
+        for source in sources:
+            self.assertTrue(source.entered.wait(2), "真实采集线程未进入 provider")
+        return page
+
+    def observe_waiters(self, service, count=1):
+        entered, identities = threading.Event(), set()
+        original_wait = service._guard.wait
+
+        def wait(timeout=None):
+            # 只记录线程确实进入 Condition；保留真实的锁释放、通知和超时行为。
+            identities.add(threading.get_ident())
+            if len(identities) >= count:
+                entered.set()
+            return original_wait(timeout)
+
+        self.enterContext(patch.object(service._guard, "wait", side_effect=wait))
+        return entered
+
+    def test_wait_sources_returns_real_facts_published_by_inflight_refresh(self):
+        source = GatedSource()
+        service = self.service(source)
+        page = self.start_refresh(service, source)
+        self.assertEqual((page["items_count"], page["sources"][0]["status"]), (0, "loading"))
+        entered = self.observe_waiters(service)
+        waiting = self.readers.submit(service.get_week, wait_sources=("tencent",))
+        self.assertTrue(entered.wait(2))
+        self.assertFalse(waiting.done())
+        source.release.set()
+        data = waiting.result(timeout=2)
+        self.assertEqual((data["items_count"], data["sources"][0]["status"]), (1, "ok"))
+        self.assertEqual(data["days"][2]["items"][0]["free_progress"], source.entries[0].free_progress)
+        self.assertEqual(source.calls, 1)
+
+    def test_wait_deadline_preserves_ready_facts_while_selected_source_is_blocked(self):
+        ready, blocked = GatedSource(), GatedSource("iqiyi")
+        service = self.service(ready, blocked, source_timeout=1)
+        self.start_refresh(service, ready, blocked)
+        refresh = service._pending["tencent"]
+        ready.release.set()
+        refresh.result(timeout=2)
+        entered = self.observe_waiters(service)
+        started = time.monotonic()
+        waiting = self.readers.submit(service.get_week, wait_sources=("tencent", "iqiyi"))
+        self.assertTrue(entered.wait(2), "已有部分事实不能跳过选中冷源的等待")
+        data = waiting.result(timeout=3)
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, service.source_timeout + 1)
+        self.assertLess(elapsed, service.source_timeout + 3)
+        self.assertEqual(data["items_count"], 1)
+        self.assertEqual({row["id"]: row["status"] for row in data["sources"]}["iqiyi"], "loading")
+        self.assertEqual(data["days"][2]["items"][0]["source"], "tencent")
+        self.assertFalse(blocked.release.is_set())
+        self.assertFalse(service._pending["iqiyi"].done())
+        self.assertEqual((ready.calls, blocked.calls), (1, 1))
+
+    def test_cancellation_stops_reader_without_cancelling_shared_refresh(self):
+        source = GatedSource()
+        service = self.service(source)
+        self.start_refresh(service, source)
+        refresh = service._pending["tencent"]
+        entered = self.observe_waiters(service)
+        cancelled = threading.Event()
+        waiting = self.readers.submit(service.get_week, wait_sources=("tencent",), cancelled=cancelled.is_set)
+        self.assertTrue(entered.wait(2))
+        cancelled.set()  # 不发送来源通知，取消回调本身也必须有界生效。
+        with self.assertRaisesRegex(SourceUnavailable, "已停止"):
+            waiting.result(timeout=2)
+        self.assertFalse(service.closed)
+        self.assertFalse(refresh.done())
+        self.assertFalse(source.release.is_set())
+        source.release.set()
+        refresh.result(timeout=2)
+        self.assertEqual(service.get_week(wait_sources=("tencent",))["items_count"], 1)
+        self.assertEqual(source.calls, 1)
+
+    def test_selected_source_does_not_wait_for_another_inflight_source(self):
+        selected, other = GatedSource(), GatedSource("iqiyi")
+        service = self.service(selected, other)
+        self.start_refresh(service, selected, other)
+        entered = self.observe_waiters(service)
+        waiting = self.readers.submit(service.get_week, wait_sources=("tencent",))
+        self.assertTrue(entered.wait(2))
+        selected.release.set()
+        data = waiting.result(timeout=2)
+        self.assertEqual(data["items_count"], 1)
+        self.assertEqual({row["id"]: row["status"] for row in data["sources"]}["iqiyi"], "loading")
+        self.assertFalse(other.release.is_set())
+        self.assertFalse(service._pending["iqiyi"].done())
+        self.assertEqual((selected.calls, other.calls), (1, 1))
+
+    def test_platform_fact_publication_unblocks_reader_before_metadata_finishes(self):
+        metadata_entered, metadata_release = threading.Event(), threading.Event()
+
+        class Metadata(RawMetadata):
+            def enrich(self, entries):
+                metadata_entered.set()
+                if not metadata_release.wait(10):
+                    raise AssertionError("测试必须释放元数据线程")
+                return super().enrich(entries)
+
+        source = GatedSource()
+        service = self.service(source, metadata=Metadata())
+        self.addCleanup(metadata_release.set)
+        self.start_refresh(service, source)
+        entered = self.observe_waiters(service)
+        waiting = self.readers.submit(service.get_week, wait_sources=("tencent",))
+        self.assertTrue(entered.wait(2))
+        source.release.set()
+        self.assertTrue(metadata_entered.wait(2))
+        data = waiting.result(timeout=2)
+        self.assertEqual((data["items_count"], data["sources"][0]["status"]), (1, "ok"))
+        self.assertEqual(data["days"][2]["items"][0]["free_progress"], source.entries[0].free_progress)
+        self.assertFalse(metadata_release.is_set())
+        self.assertFalse(service._pending["tencent"].done())
+        self.assertEqual(source.calls, 1)
+
+    def test_concurrent_readers_and_web_refresh_share_one_real_source_fetch(self):
+        source = GatedSource()
+        service = self.service(source)
+        self.start_refresh(service, source)
+        entered = self.observe_waiters(service, count=3)
+        waiting = [self.readers.submit(service.get_week, wait_sources=("tencent",)) for _ in range(3)]
+        self.assertTrue(entered.wait(2), "三个独立读线程必须同时等待同一采集")
+        page = service.get_week(force=True)
+        self.assertEqual((page["items_count"], page["sources"][0]["status"]), (0, "loading"))
+        self.assertTrue(all(not future.done() for future in waiting))
+        self.assertEqual((source.calls, len(service._pending)), (1, 1))
+        source.release.set()
+        results = [future.result(timeout=2) for future in waiting]
+        self.assertEqual([result["items_count"] for result in results], [1, 1, 1])
+        self.assertTrue(all(result["days"][2]["items"][0]["free_progress"] == source.entries[0].free_progress
+                            for result in results))
+        self.assertEqual(source.calls, 1)
+
+    def test_failed_source_unblocks_waiters_without_an_automatic_retry(self):
+        source = GatedSource()
+        source.failure = True
+        service = self.service(source)
+        self.start_refresh(service, source)
+        entered = self.observe_waiters(service)
+        waiting = self.readers.submit(service.get_week, wait_sources=("tencent",))
+        self.assertTrue(entered.wait(2))
+        source.release.set()
+        data = waiting.result(timeout=2)
+        self.assertEqual((data["items_count"], data["sources"][0]["status"]), (0, "unavailable"))
+        self.assertFalse(data["refreshing"])
+        self.assertEqual(service.cache.get(service.key("tencent")).status, "error")
+        self.assertEqual(service.get_week(wait_sources=("tencent",))["items_count"], 0)
+        self.assertEqual(source.calls, 1)
 
 
 class CalendarDNSTimeoutTests(unittest.TestCase):

@@ -110,7 +110,8 @@ def test_catalog_registers_distinct_read_handler_and_model_alias(specs, catalog)
     assert len(by_name) == len(specs) == len(catalog)
     spec = by_name[NEW_TOOL]
     tool = catalog.get(NEW_TOOL)
-    assert spec.handler is anime_calendar
+    assert spec.context_handler is anime_calendar
+    assert spec.handler is None
     assert spec.validator is anime_calendar_arguments
     assert spec.risk is RiskLevel.READ
     assert not spec.requires_confirmation
@@ -132,9 +133,9 @@ def test_declared_schema_defaults_match_validator_and_bounded_event_contract(cat
     tool = catalog.get(NEW_TOOL)
     schema = tool.input_schema
     props = schema["properties"]
-    defaults = {name: prop["default"] for name, prop in props.items()}
+    defaults = {name: prop["default"] for name, prop in props.items() if "default" in prop}
     assert defaults == tool.validator({}) == {
-        "day": "today", "source": "all", "query": "", "page": 1, "limit": 20,
+        "day": "today", "source": "all", "query": "",
     }
     assert schema["additionalProperties"] is False
     assert set(props) == {"day", "source", "query", "page", "limit"}
@@ -215,10 +216,11 @@ def test_real_pipeline_reads_single_cached_snapshot_and_projects_flat_events(cat
         patch("app.agent.discovery_actions.get_discovery_service") as bangumi,
     ):
         result = asyncio.run(_execute(catalog, tool_name, {"source": "tencent"}))
-    service.get_week.assert_called_once_with()
+    service.get_week.assert_called_once()
+    assert callable(service.get_week.call_args.kwargs["cancelled"])
     bangumi.assert_not_called()
     assert result.tool.name == NEW_TOOL
-    assert result.arguments == {"day": "today", "source": "tencent", "query": "", "page": 1, "limit": 20}
+    assert result.arguments == {"day": "today", "source": "tencent", "query": ""}
     public = result.outcome.public_content
     assert public["ok"] and public["status"] == "success"
     assert result.outcome.effect_plan is None
@@ -247,7 +249,8 @@ def test_cold_calendar_pipeline_returns_loading_without_retry_or_bangumi(catalog
         patch("app.agent.discovery_actions.get_discovery_service") as bangumi,
     ):
         result = asyncio.run(_execute(catalog, NEW_TOOL, {}))
-    service.get_week.assert_called_once_with()
+    service.get_week.assert_called_once()
+    assert callable(service.get_week.call_args.kwargs["cancelled"])
     bangumi.assert_not_called()
     public = result.outcome.public_content
     assert not public["ok"] and public["status"] == "loading"
@@ -303,6 +306,6 @@ def test_public_label_and_kernel_guidance_keep_calendars_and_links_distinct(isol
     system = wire["messages"][0]["content"]
     for contract in (
         NEW_TOOL, OLD_TOOL, "Asia/Shanghai", "每项为一条排期事件", "不等于免费进度",
-        "本回合不要循环调用", "calendar_url", "Telegram", "不猜站点地址",
+        "不要求用户手动刷新", "不让用户确认只读翻页", "calendar_url", "Telegram", "不猜站点地址",
     ):
         assert contract in system

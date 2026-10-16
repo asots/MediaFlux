@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
 import unittest
-from unittest.mock import Mock, patch
+from datetime import datetime
+from unittest.mock import ANY, Mock, patch
 
 import tests  # noqa: F401 -- 导入应用前隔离运行目录和配置。
 from app.agent.domain_catalog import build_tool_specs
@@ -17,7 +19,11 @@ from app.agent.kernel.ports.existing_actions import adapt_tool_spec, catalog_fro
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxAuthorizationPolicy
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
-from tests.test_agent_anime_calendar import card, snapshot
+from app.discovery.cache import DiscoveryCache
+from app.discovery.calendar.models import CalendarEntry, CalendarEvent, SourceResult
+from app.discovery.calendar.service import CalendarService
+from tests.support import isolated_test_database
+from tests.test_agent_anime_calendar import card, model_rows, snapshot
 from tests.test_agent_kernel_capability_discovery import call, session_for
 from tests.test_agent_kernel_core import ScriptedModel, collect
 
@@ -46,7 +52,7 @@ class CalendarEchoModel:
         if self.facts["status"] == "loading":
             text = "来源正在后台获取，暂不能确认今天的排期，不代表今天没有更新。"
         elif self.facts["status"] == "partial":
-            row = data["items"][0]
+            row = model_rows(data)[0]
             text = f'{row["source_name"]} {row["date"]} 已收录 {data["total"]} 条排期：{row["title"]}；会员排期不等于免费观看。'
             text += f' [打开追漫日历]({data["calendar_url"]})'
         else:
@@ -60,7 +66,7 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.data = snapshot()
         self.data["days"][3]["items"] = [card(title="离线回放动漫")]
-        self.service = Mock(get_week=Mock(side_effect=lambda: copy.deepcopy(self.data)))
+        self.service = Mock(get_week=Mock(side_effect=lambda **kwargs: copy.deepcopy(self.data)))
         self.getter = self.enterContext(patch("app.agent.calendar_actions.get_calendar_service", return_value=self.service))
         self.enabled = self.enterContext(patch("app.agent.calendar_actions.config.get_bool", return_value=True))
         self.enterContext(patch("app.agent.kernel.ports.mediaflux_policy.is_agent_enabled", return_value=True))
@@ -85,7 +91,7 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         session = self.session(model)
         events = await collect(session.run(AgentInput(message="今天优酷有哪些动漫更新，打开追漫日历", owner="webk:v1:" + "a" * 64,
                                                        session_id="calendar-session")))
-        self.service.get_week.assert_called_once_with()
+        self.service.get_week.assert_called_once_with(wait_sources=("youku",), cancelled=ANY)
         self.assertEqual(len(model.requests), 2)
         facts = model.facts
         self.assertEqual((facts["status"], facts["data"]["total"], facts["data"]["returned"]), ("partial", 1, 1))
@@ -101,17 +107,74 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         for private in ("private-poster-key", "should-not-be-returned", "private-token", "trackInfo"):
             self.assertNotIn(private, content)
 
-    async def test_loading_returns_once_and_model_can_explain_without_bangumi_or_retry(self):
+    async def test_source_still_loading_after_bounded_wait_explains_gap_without_bangumi(self):
         self.data["sources"][2]["status"] = "loading"
         self.data["days"][3]["items"] = []
         self.data["refreshing"] = True
         model = CalendarEchoModel({"source": "youku"})
         events = await collect(self.session(model).run(AgentInput(message="今天优酷动漫排期", owner="webk:v1:" + "b" * 64,
                                                                 session_id="loading-session")))
-        self.service.get_week.assert_called_once_with()
+        self.service.get_week.assert_called_once_with(wait_sources=("youku",), cancelled=ANY)
         self.assertEqual(model.facts["status"], "loading")
         self.assertEqual(model.facts["data"]["retry_after"], 5)
         self.assertEqual(len(model.requests), 2)
+        self.assertEqual(sum(event.type == AgentEventType.TOOL_STARTED for event in events), 1)
+        self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
+
+    async def test_cold_week_finishes_in_one_turn_from_shared_collector_without_user_refresh(self):
+        self.enterContext(isolated_test_database())
+        started, release = threading.Event(), threading.Event()
+        calls = []
+        dates = [day["date"] for day in self.data["days"]]
+
+        class Provider:
+            source = "tencent"
+            allowed_hosts = frozenset({"v.qq.com"})
+
+            async def fetch(self, http):
+                calls.append(True)
+                started.set()
+                await asyncio.to_thread(release.wait, 2)
+                return SourceResult(tuple(CalendarEntry(
+                    "tencent", f"show_{i}", f"回放动漫{i}", "animation",
+                    f"https://v.qq.com/x/cover/show_{i}.html",
+                    evidence="线程测试平台排期回放",
+                    events=(CalendarEvent(dates[i % 7], "10:00", "会员更新一话", "member"),),
+                ) for i in range(53)), "partial", "公开排期有限覆盖")
+
+        class NoNetwork:
+            def __init__(self, hosts):
+                pass
+
+            async def aclose(self):
+                pass
+
+        class Metadata:
+            def enrich(self, entries):
+                return [entry.to_dict() for entry in entries]
+
+        now = datetime(2026, 9, 10, 12)
+        service = CalendarService(providers={"tencent": Provider()}, cache=DiscoveryCache(clock=lambda: now),
+                                  http_factory=NoNetwork, metadata=Metadata(), clock=lambda: now)
+        self.addCleanup(service.shutdown)
+        self.getter.return_value = service
+        model = CalendarEchoModel({"day": "week", "source": "tencent"})
+        session = self.session(model)
+        turn = asyncio.create_task(collect(session.run(AgentInput(
+            message="腾讯动漫周一到周日追更表", owner="webk:v1:" + "a" * 64, session_id="cold-week",
+        ))))
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 2))
+            self.assertFalse(turn.done(), "冷加载不能直接结束用户请求")
+            self.assertEqual(service.get_week()["sources"][0]["status"], "loading", "页面读取保持非阻塞")
+        finally:
+            release.set()
+        events = await asyncio.wait_for(turn, 5)
+        facts = model.facts["data"]
+        self.assertEqual((facts["total"], facts["returned"]), (53, 53))
+        self.assertFalse(facts["has_more"])
+        self.assertEqual({row["date"] for row in model_rows(facts)}, set(dates))
+        self.assertEqual((len(calls), len(model.requests)), (1, 2))
         self.assertEqual(sum(event.type == AgentEventType.TOOL_STARTED for event in events), 1)
         self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
 
@@ -123,7 +186,7 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
             [ModelEvent(ModelEventType.TEXT_DELTA, text="按工具返回的公开排期及来源状态回答。")],
         ])
         events = await collect(session.run(AgentInput(message="查询追漫日历优酷今天的排期", owner="fixture-owner", session_id="find-session")))
-        self.service.get_week.assert_called_once_with()
+        self.service.get_week.assert_called_once_with(wait_sources=("youku",), cancelled=ANY)
         self.assertNotIn("discovery__anime_calendar", {tool["name"] for tool in model.requests[0].tools})
         self.assertIn("discovery__anime_calendar", {tool["name"] for tool in model.requests[1].tools})
         self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)

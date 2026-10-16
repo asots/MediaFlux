@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app import config
 from app.agent.errors import AgentToolError
-from app.agent.models import Evidence, ToolResult
+from app.agent.models import Evidence, ToolContext, ToolResult
 from app.agent.public_safety import sanitize_public_text
 from app.discovery.calendar.models import CalendarEvent, SOURCE_NAMES
 from app.discovery.calendar.service import get_calendar_service
@@ -60,6 +60,8 @@ def anime_calendar_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         if not query:
             raise AgentToolError("query 只能提供片名关键词，不能包含路径、地址或凭据")
     normalized = {"day": day, "source": source, "query": query}
+    if not {"page", "limit"} & arguments.keys():
+        return normalized
     for name, default, maximum in (("page", 1, 100), ("limit", 20, 20)):
         value = arguments.get(name, default)
         if type(value) is not int or not 1 <= value <= maximum:
@@ -177,26 +179,17 @@ def _result(ok: bool, status: str, summary: str, data: dict, *, error: str = "",
                             "anime_calendar", "读取追漫日历受控缓存/后台刷新快照；来源事实时间独立列出，不查询播放资格。",
                             datetime.now(ZoneInfo(_TIMEZONE)).isoformat(timespec="seconds"),
                         )])
-    # 按真正的JSON转义体积预留projector余量，不让合法长文案把整页事件降成纯摘要。
-    def model_size():
-        return len(json.dumps(result.to_model_dict(), ensure_ascii=False, separators=(",", ":")))
-
-    if model_size() > 22_000:
-        compact = {**data,
-                   "items": [{key: value for key, value in item.items() if key != "source_id"} for item in data["items"]],
-                   "sources": [{key: value for key, value in source.items() if key != "message"} for source in data["sources"]],
-                   "model_omitted_fields": ["items.source_id", "sources.message"],
-                   "model_view_note": "仅省略重复身份和长说明，没有删减本页事件；完整文案可打开追漫日历查看。"}
-        result.model_data = compact
-        if model_size() > 22_000:
-            for item in compact["items"]:
-                item.pop("schedule", None)
-            compact["model_omitted_fields"].append("items.schedule")
-            compact["model_view_note"] = "长排期文案仅在模型视图省略，不得据此推断集数；日期、时刻、受众、免费进度和本页事件均保留。"
+    # 重复列名只传一次；保留所有事件和文案，不以删排期说明换预算。
+    # 极端长结果仍交由 Kernel 的完整结果分页处理，不另造截断链路。
+    if data["items"] and len(json.dumps(result.to_model_dict(), ensure_ascii=False)) > 22_000:
+        fields = list(data["items"][0])
+        result.model_data = {**data, "item_fields": fields,
+                             "items": [[row[key] for key in fields] for row in data["items"]],
+                             "model_view_note": "items 每行按 item_fields 的列顺序排列；全部事件、字段及排期说明均保留。"}
     return result
 
 
-def anime_calendar(arguments: dict[str, Any]) -> ToolResult:
+def anime_calendar(arguments: dict[str, Any], context: ToolContext | None = None) -> ToolResult:
     normalized = anime_calendar_arguments(arguments)
     data = {**normalized, "timezone": _TIMEZONE, "calendar_url": "/discovery/calendar", "scope_note": _SCOPE,
             "today": "", "week_start": "", "week_end": "", "requested_dates": [], "total": 0,
@@ -206,7 +199,10 @@ def anime_calendar(arguments: dict[str, Any]) -> ToolResult:
         return _result(False, "disabled", "影视探索功能当前已关闭", data,
                        error="请先由管理员启用影视探索。")
     try:
-        snapshot = get_calendar_service().get_week()  # 与页面完全相同的缓存和单飞策略，不传force。
+        selected = tuple(SOURCE_NAMES) if normalized["source"] == "all" else (normalized["source"],)
+        snapshot = get_calendar_service().get_week(
+            wait_sources=selected, cancelled=context.cancelled if context else None,
+        )
         if not isinstance(snapshot, dict) or snapshot.get("timezone") != _TIMEZONE:
             raise ValueError("日历时区无效")
         today, start = _date(snapshot.get("today")), _date(snapshot.get("week_start"))
@@ -231,11 +227,11 @@ def anime_calendar(arguments: dict[str, Any]) -> ToolResult:
         logger.warning("Agent追漫日历读取失败 type=%s", type(exc).__name__)
         return _result(False, "unavailable", "追漫日历暂时不可用，不能据此判断没有动漫更新", data,
                        error="未取得可核验的追漫日历快照。", suggestions=["请稍后重试，或打开追漫日历查看来源状态。"])
-    offset = (normalized["page"] - 1) * normalized["limit"]
-    page = items[offset:offset + normalized["limit"]]
+    offset = (normalized.get("page", 1) - 1) * normalized.get("limit", 20)
+    page = items[offset:offset + normalized["limit"]] if "limit" in normalized else items
     data.update(items=page, total=len(items), total_programmes=len({item["stable_id"] for item in items}),
-                returned=len(page), has_more=offset + len(page) < len(items) and normalized["page"] < 100,
-                pagination_limited=offset + len(page) < len(items) and normalized["page"] == 100)
+                returned=len(page), has_more=offset + len(page) < len(items) and normalized.get("page", 1) < 100,
+                pagination_limited=offset + len(page) < len(items) and normalized.get("page") == 100)
     states = {source["status"] for source in sources}
     scope = "本周" if len(requested) == 7 else requested[0].isoformat()
     if page:
@@ -243,6 +239,8 @@ def anime_calendar(arguments: dict[str, Any]) -> ToolResult:
         suggestions = ["请结合来源状态和上次成功时间阅读排期；未注明时刻保持未知，会员排期不代表可免费观看。"]
         if data["pagination_limited"]:
             suggestions.append("已到第100页上限，仍有匹配记录；请收窄日期、平台或片名，不要继续查询第101页。")
+        elif data["has_more"]:
+            suggestions.append("尚有下一页：请继续读取直至覆盖用户请求范围，不要让用户再次确认只读翻页。")
         return _result(True, "partial" if partial else "success",
                        f"{scope}追漫日历返回{len(page)}条排期（已收录匹配{len(items)}条），非全站完整覆盖", data,
                        suggestions=suggestions)
@@ -250,8 +248,8 @@ def anime_calendar(arguments: dict[str, Any]) -> ToolResult:
         return _result(True, "empty", f"所选范围共有{len(items)}条已收录排期，本页没有结果", data)
     if "loading" in states:
         data["retry_after"] = 5
-        return _result(False, "loading", "追漫日历正在后台获取，暂不能确认所选日期的更新", data,
-                       suggestions=["排期正在后台获取，可稍后查看或打开追漫日历了解同步进度。"])
+        return _result(False, "loading", "已等待平台排期加载至本次时限，来源仍未就绪，暂不能确认更新", data,
+                       suggestions=["说明实际未就绪的来源及日期，不把加载中当作无更新，不重复发起刷新。"])
     if states & {"unavailable", "stale"}:
         return _result(False, "unavailable", "所选来源不可用或仅有旧缓存，暂无可核验的匹配排期；不代表当天没有更新", data,
                        suggestions=["可查看其他平台或稍后重试，不能把未取得数据解释为没有更新。"])

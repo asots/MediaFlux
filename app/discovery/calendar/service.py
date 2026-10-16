@@ -51,7 +51,7 @@ class CalendarService:
         self._submit = submit
         self.source_timeout = max(1.0, min(float(source_timeout), 45))
         self.cooldown = max(30.0, float(cooldown))
-        self._guard = threading.RLock()
+        self._guard = threading.Condition(threading.RLock())
         self._pending: dict[str, Future | None] = {}
         self._last_attempt: dict[str, float] = {}
         self._last_metadata_attempt: dict[str, float] = {}
@@ -71,7 +71,7 @@ class CalendarService:
         now = self.clock()
         return now.replace(tzinfo=TIMEZONE) if now.tzinfo is None else now.astimezone(TIMEZONE)
 
-    def get_week(self, *, force=False):
+    def get_week(self, *, force=False, wait_sources=(), cancelled=None):
         if self.closed:
             raise SourceUnavailable("日历服务正在停止")
         for source in self.providers:
@@ -84,6 +84,21 @@ class CalendarService:
             elif (cached.status == "fresh" and not cached.last_error and cached.payload
                   and self._needs_metadata(cached.payload)):
                 self._schedule(source, metadata_only=True)
+        # 对话等待平台事实发布，页面仍立即返回。共享同一采集任务，不等待可选的海报/TMDB补全。
+        deadline = time.monotonic() + self.source_timeout + 1
+        with self._guard:
+            waiting = set(wait_sources) & self.providers.keys()
+            while waiting:
+                if self._closed or (cancelled is not None and cancelled()):
+                    raise SourceUnavailable("日历查询已停止")
+                waiting = {source for source in waiting if source in self._pending and not (
+                    (cached := self.cache.get(self.key(source))).status in {"fresh", "stale"}
+                    and cached.payload and not self._empty_partial(cached.payload)
+                )}
+                remaining = deadline - time.monotonic()
+                if not waiting or remaining <= 0:
+                    break
+                self._guard.wait(min(remaining, 0.25))
         today, week_start = calendar_dates(self._now())
         start = datetime.fromisoformat(week_start).date()
         labels = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -243,6 +258,7 @@ class CalendarService:
         with self._guard:
             if self._pending.get(source) is future:
                 self._pending.pop(source, None)
+            self._guard.notify_all()
             release = self._closed and not self._pending
         if release:
             _release(self)
@@ -349,6 +365,7 @@ class CalendarService:
                 # 先发布平台事实；可选的TMDB查询不能阻挡免费进度进入页面。
                 self.cache.set_success(self.key(source), "calendar:" + source, payload,
                                        ttl_seconds=3600, stale_seconds=2 * 86400)
+                self._guard.notify_all()
             try:
                 entries = self.metadata.enrich(self._metadata_order(result.entries))
             except Exception as exc:
@@ -371,11 +388,13 @@ class CalendarService:
                     self.cache.set_error(self.key(source), "calendar:" + source, message,
                                          ttl_seconds=int(self.cooldown), retry_after=int(self.cooldown),
                                          preserve_stale=self._has_entries(previous.payload))
+                    self._guard.notify_all()
 
     def shutdown(self):
         """回收业务任务；已取消请求的有界 OS DNS 可能仍待系统返回，但不能再发 HTTP/写缓存。"""
         with self._guard:
             self._closed = True
+            self._guard.notify_all()
             futures = tuple(f for f in self._pending.values() if f is not None)
             executor = self._executor
         for future in futures:
