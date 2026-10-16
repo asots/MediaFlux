@@ -408,7 +408,7 @@ def search_missing_episode_resources(
     )
 
 
-_MISSING_SEASON_SEARCH_DEADLINE_SECONDS = 30.0
+_MISSING_EPISODE_SEARCH_TIMEOUT_SECONDS = 30.0
 
 
 def search_missing_season_resources(
@@ -418,7 +418,7 @@ def search_missing_season_resources(
         return _search_missing_resource_batch(arguments["items"], preferences=preferences, context=context)
     if context is not None and context.cancelled():
         return ToolResult(False, "cancelled", "本项已停止，未执行资源核对")
-    deadline_at = time.monotonic() + _MISSING_SEASON_SEARCH_DEADLINE_SECONDS
+    started_at = time.monotonic()
     audit_arguments: dict[str, Any] = {
         "query": arguments["query"],
         "tmdb_id": arguments["tmdb_id"],
@@ -484,6 +484,8 @@ def search_missing_season_resources(
     verification["verified_missing"] = True
     verification["missing_count"] = len(missing)
     selected = missing[: arguments["max_episodes"]]
+    # 按实际目标分配总预算；单集仍有上限，不能把多集任务挤进一集的时间。
+    deadline_at = started_at + _MISSING_EPISODE_SEARCH_TIMEOUT_SECONDS * len(selected)
     episodes: list[dict[str, Any]] = []
     evidence = list(audit.evidence)
     total_candidates = 0
@@ -507,7 +509,7 @@ def search_missing_season_resources(
         search_args = _episode_search_arguments(
             per_episode_arguments, verification["title"]
         )
-        searched = search_resources(search_args, timeout_seconds=remaining_seconds)
+        searched = search_resources(search_args, timeout_seconds=min(remaining_seconds, _MISSING_EPISODE_SEARCH_TIMEOUT_SECONDS))
         verification["resource_search_attempted"] = True
         raw_search_data = searched.data if isinstance(searched.data, dict) else {}
         search_data = rank_episode_search(
@@ -534,13 +536,10 @@ def search_missing_season_resources(
             }
         )
         evidence.extend(searched.evidence)
-        if time.monotonic() >= deadline_at:
-            deadline_exhausted = True
-            break
-
-    remaining = max(0, len(missing) - len(episodes))
+    remaining_episodes = missing[len(episodes):]
+    remaining = len(remaining_episodes)
     if deadline_exhausted:
-        suggestions.append("批量搜索已达到本次耗时上限；可再次按季度检索其余缺集。")
+        suggestions.append("批量搜索已达到本次耗时上限；remaining_episodes 是未执行检索的准确季集，不代表没有资源。")
     if failed or remaining:
         status = "partial"
     elif total_candidates:
@@ -561,7 +560,7 @@ def search_missing_season_resources(
     if total_candidates:
         suggestions.append("仅报告匹配目标集的候选；标题匹配不代表已核验文件清单，不推荐旧集或未知映射。")
     if remaining:
-        suggestions.append(f"本次最多处理 3 集；剩余 {remaining} 集可再次按季度检索。")
+        suggestions.append(f"本批剩余 {remaining} 集未执行检索；具体范围见 remaining_episodes，不能当作已搜索无匹配。")
     if failed:
         suggestions.append("部分集的资源站搜索未完成；这不代表资源站中没有相关资源。")
     data = {
@@ -569,6 +568,7 @@ def search_missing_season_resources(
         "missing_total": len(missing),
         "processed": len(episodes),
         "remaining": remaining,
+        "remaining_episodes": remaining_episodes,
         "failed": failed,
         "truncated": bool(remaining),
         "episodes": episodes,
@@ -659,6 +659,7 @@ def _search_missing_resource_batch(
             "uncovered_episodes": [],
             "missing_total": data.get("missing_total"),
             "remaining": data.get("remaining", 0),
+            "remaining_episodes": data.get("remaining_episodes", []),
             "failed": data.get("failed", 0),
             "sites_succeeded": [],
             "errors": [],

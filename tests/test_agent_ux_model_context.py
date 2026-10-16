@@ -182,8 +182,10 @@ def test_missing_search_model_omits_unmatched_titles_without_losing_scope_or_han
     assert dto.to_dict() == original, "精简模型视图不能删除原始查询证据"
     if kind == "batch":
         assert actual["data"]["groups"][0]["remaining"] == 2
+        assert actual["data"]["groups"][0]["remaining_episodes"] == [{"season": 2, "episode": number} for number in (5, 6)]
     elif kind == "season":
         assert actual["data"]["remaining"] == 2
+        assert actual["data"]["remaining_episodes"] == [{"season": 2, "episode": number} for number in (5, 6)]
     else:
         assert actual["data"]["verification"]["verified_missing"] is True
     appendix = json.loads(suffix)
