@@ -378,6 +378,21 @@ def _candidate_summary(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def matched_episode_items(search_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """匹配计数、默认推荐和模型明细共用同一结果集，不改变完整研究快照。"""
+    return [item for item in search_data.get("items", []) if item["quality"]["eligible"]
+            and item["quality"]["match"] in {"exact_episode", "episode_pack"}]
+
+
+def episode_search_model_data(search_data: dict[str, Any]) -> dict[str, Any]:
+    """默认只回答目标集是否有匹配；完整研究数据和未核验候选由原快照保留。"""
+    items = matched_episode_items(search_data)
+    recommendation = {**search_data["recommendation"], "candidate_count": len(items)}
+    if not items:
+        recommendation["status"] = "empty"
+    return {**search_data, "items": items, "recommendation": recommendation}
+
+
 def rank_episode_search(
     search_data: dict[str, Any],
     *,
@@ -423,7 +438,7 @@ def rank_episode_search(
     ranked_data["items"] = items
 
     eligible = [item for item in items if item["quality"]["eligible"]]
-    matching = [item for item in eligible if item["quality"]["match"] in {"exact_episode", "episode_pack"}]
+    matching = matched_episode_items(ranked_data)
     selected = matching[0] if matching else None
     if selected is None:
         status = "review_required" if eligible else "no_downloadable_candidate" if items else "empty"

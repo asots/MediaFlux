@@ -943,7 +943,7 @@ def test_mixed_episode_candidates_keep_verified_global_positions(store):
         with patch(__name__ + "._resources", return_value=_episode_candidates_result(include_match=True)):
             view, _ = await _publish_candidates(pipeline, states)
         assert view["recommended_positions"] == [2]
-        assert [item["position"] for item in view["items"]] == [1, 2]
+        assert [item["position"] for item in view["items"]] == [2]
         state = await states.load(owner=OWNER, session_id=SESSION)
         assert (await current_candidate_view(state=state, store=store))["recommended_positions"] == [2]
         result = await validate_selection(_selection(view, [2]), state=state, store=store)
@@ -1012,11 +1012,15 @@ def test_explicit_presentation_cannot_override_missing_episode_coverage(store):
         _, context = await _publish_candidates(pipeline, states)
         with patch(__name__ + "._resources", return_value=_episode_candidates_result("unknown")):
             searched = await pipeline.execute("indexer.search_resources", {"title": "缺集"}, context=context)
+        assert json.loads(searched.outcome.model_content)["candidate_numbers"] == []
         presented = await pipeline.execute("indexer.present_candidates", {
             **searched.outcome.public_content["reference_arguments"], "positions": [1],
         }, context=context)
         assert presented.outcome.public_content["candidate_view"] is None
         assert '"recommended_ingest_arguments":' not in presented.outcome.model_content
+        detail = json.loads(presented.outcome.model_content)["candidate_numbers"][0]
+        assert detail["position"] == 1 and detail["match"] == "unknown"
+        assert detail["title"] and "coverage" in detail
     asyncio.run(exercise())
 
 

@@ -45,6 +45,7 @@ from .ux_selection import (
     RESOURCE_KIND,
     candidate_result,
     issue_candidate_view,
+    model_candidate_numbers,
     resource_candidate_items,
     resource_model_content,
 )
@@ -1251,10 +1252,7 @@ class ToolPipeline:
             payload["reference_arguments"] = reference_arguments
         numbered_items = candidate_view["items"] if candidate_view else candidate_items
         if numbered_items:
-            payload["candidate_numbers"] = [
-                {key: item[key] for key in ("position", "title", "coverage", "media_title", "requested_episode", "match")}
-                for item in numbered_items
-            ]
+            payload["candidate_numbers"] = model_candidate_numbers(numbered_items, selected_positions=selected_positions)
             if candidate_view and candidate_view["recommended_positions"]:
                 payload["recommended_ingest_arguments"] = {
                     "source_type": RESOURCE_KIND, "resource_candidates_ref": candidate_view["ref"],

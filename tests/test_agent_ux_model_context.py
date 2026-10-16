@@ -43,8 +43,9 @@ class FixtureIndexer:
 
     enabled_site_ids = frozenset({"nyaa"})
 
-    def __init__(self, *, empty=False):
+    def __init__(self, *, empty=False, titles=None):
         self.empty = empty
+        self.titles = titles
         self.items = {}
         self.result_store = Mock(get=lambda result_id: self.items[result_id])
 
@@ -61,10 +62,12 @@ class FixtureIndexer:
         items = [] if self.empty else [
             _resource_item(
                 result_id=f"fixture-{label}-candidate-{index}",
-                title=f"Example.{label}.{resolution}.WEB-DL",
+                title=title.format(label=label),
                 seeders=40 - index,
             )
-            for index, resolution in enumerate(("2160p", "1080p"), 1)
+            for index, title in enumerate(self.titles or (
+                "Example.{label}.2160p.WEB-DL", "Example.{label}.1080p.WEB-DL",
+            ), 1)
         ]
         self.items.update({item.result_id: item for item in items})
         return AggregatedIndexerResult(
@@ -80,8 +83,8 @@ class FixtureIndexer:
         )
 
 
-def real_dto(kind):
-    service = FixtureIndexer(empty=kind == "empty")
+def real_dto(kind, *, titles=None):
+    service = FixtureIndexer(empty=kind == "empty", titles=titles)
     with (
         patch("socket.socket.connect", side_effect=AssertionError("network forbidden")),
         patch("sqlite3.connect", side_effect=AssertionError("database forbidden")),
@@ -98,8 +101,10 @@ def real_dto(kind):
                 }))
         audit = _audit_result(missing=[{"season": 2, "episode": number} for number in (3, 4, 5, 6)])
         with patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit):
+            arguments = {"query": "示例剧", "season": 2}
             return search_missing_season_resources(missing_season_resource_arguments({
-                "query": "示例剧", "season": 2, "max_episodes": 2, "as_of": "2026-08-15",
+                **({"items": [arguments]} if kind == "batch" else arguments),
+                "max_episodes": 2, "as_of": "2026-08-15",
             }))
 
 
@@ -124,6 +129,7 @@ def next_model_round(dto, *, kind="search", maximum=24_000):
         name = {
             "episode": "library.search_missing_episode_resources",
             "season": "library.search_missing_season_resources",
+            "batch": "library.search_missing_season_resources",
             "not_missing": "library.search_missing_episode_resources",
         }.get(kind, "indexer.search_resources")
         # 只隔离工具参数/外部 I/O；模型循环、projector、refs、事件与提交均为正式 Kernel。
@@ -160,6 +166,37 @@ def next_model_round(dto, *, kind="search", maximum=24_000):
 def assert_private_absent(content):
     for private in (_SECRET_DETAIL_URL, _SECRET_MAGNET, _SECRET_TORRENT_URL, "/private/", "10.0.0.9", "SECRET", "rawresult", "raw_result"):
         assert private not in content
+
+
+@pytest.mark.parametrize("kind", ["episode", "season", "batch"])
+@pytest.mark.parametrize("has_match", [False, True])
+def test_missing_search_model_omits_unmatched_titles_without_losing_scope_or_handles(kind, has_match):
+    titles = (["Example.{label}.2160p.WEB-DL"] if has_match else []) + [
+        "UnverifiedArc.1080p.WEB-DL", "KnownOld.S02E01.2160p.WEB-DL",
+    ]
+    dto = real_dto(kind, titles=titles)
+    original = deepcopy(dto.to_dict())
+    actual, _, suffix, content, public, _ = next_model_round(dto, kind=kind)
+    assert "UnverifiedArc" not in content and "KnownOld" not in content
+    assert actual["data"] == dto.model_data
+    assert dto.to_dict() == original, "精简模型视图不能删除原始查询证据"
+    if kind == "batch":
+        assert actual["data"]["groups"][0]["remaining"] == 2
+    elif kind == "season":
+        assert actual["data"]["remaining"] == 2
+    else:
+        assert actual["data"]["verification"]["verified_missing"] is True
+    appendix = json.loads(suffix)
+    assert appendix["reference_arguments"]["resource_candidates_ref"]
+    numbers = appendix["candidate_numbers"]
+    assert bool(numbers) is has_match
+    assert bool(appendix.get("recommended_ingest_arguments")) is has_match
+    for item in numbers:
+        assert item["match"] in {"exact_episode", "episode_pack"}
+        assert "Example." in item["title"]
+    if not has_match:
+        assert public["candidate_view"] is None
+        assert any("UnverifiedArc" in item["title"] for item in dto.references[0].value["candidates"])
 
 
 @pytest.mark.parametrize("kind", ["search", "episode", "season"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
 from datetime import date, timedelta
 from unittest.mock import Mock, patch
 
@@ -324,6 +325,64 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             assert result.data["search"]["download_plan"]["auto_submit"] is False
             if not extra:
                 assert result.references == [], "仅命中旧集时，不得生成候选卡引用"
+
+    def test_model_data_filters_single_and_season_items_without_losing_search_state(self):
+        titles = ["示例剧 WEB-DL 1080p", "示例剧 S02E01 1080p",
+                  "示例剧 S02E03 1080p", "示例剧 S02E03-E04 1080p", "示例剧 S02E03 720p"]
+        rows = [{**_search_result().data["items"][0], "result_id": f"model-projection-{index:04d}", "title": title}
+                for index, title in enumerate(titles)]
+        matched_ids = {row["result_id"] for row in rows[2:4]}
+        options = {"query": "示例剧", "season": 2, "preference_overrides": {"minimum_resolution": "1080p"}}
+        for mode in ("single", "failed", "season"):
+            searches = [_search_result(items=deepcopy(rows)),
+                        _search_result(ok=False, status="unavailable", items=deepcopy(rows[:2]))]
+            for searched in searches:
+                searched.data.update(page=4, cached=True, has_more=True, partial=True,
+                                     sites_attempted=["nyaa", "broken"], errors=[{"site_id": "broken", "code": "timeout"}])
+            if mode != "season":
+                searches = [searches[1 if mode == "failed" else 0]]
+            with (
+                self.subTest(mode=mode),
+                patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(
+                    missing=[{"season": 2, "episode": number} for number in (3, 4, 5)], target_missing=True)),
+                patch("app.agent.episode_resource_actions.search_resources", side_effect=searches),
+                patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
+            ):
+                result = (search_missing_season_resources(missing_season_resource_arguments(
+                    {**options, "max_episodes": 2})) if mode == "season"
+                    else search_missing_episode_resources(missing_episode_resource_arguments(
+                        {**options, "episode": 3})))
+                expected = deepcopy(result.data)
+                public_searches = ([entry["search"] for entry in result.data["episodes"]]
+                                   if mode == "season" else [result.data["search"]])
+                model_searches = ([entry["search"] for entry in expected["episodes"]]
+                                  if mode == "season" else [expected["search"]])
+                for public_search, model_search, source in zip(public_searches, model_searches, searches):
+                    self.assertCountEqual([row["result_id"] for row in public_search["items"]],
+                                          [row["result_id"] for row in source.data["items"]])
+                    model_search["items"] = [row for row in model_search["items"] if row["result_id"] in matched_ids]
+                    model_search["recommendation"]["candidate_count"] = len(model_search["items"])
+                    if not model_search["items"]:
+                        model_search["recommendation"]["status"] = "empty"
+                if mode != "failed":
+                    ineligible = next(row for row in public_searches[0]["items"] if row["result_id"] == rows[4]["result_id"])
+                    self.assertEqual((ineligible["quality"]["match"], ineligible["quality"]["eligible"]), ("exact_episode", False))
+                self.assertEqual(result.model_data, expected)
+                self.assertEqual(len(model_searches[0]["items"]), 0 if mode == "failed" else 2)
+                self.assertTrue(result.model_data["verification"]["verified_missing"])
+                if mode == "season":
+                    self.assertEqual((result.status, expected["failed"], expected["remaining"]), ("partial", 1, 1))
+                    self.assertFalse(expected["episodes"][1]["ok"])
+                elif mode == "failed":
+                    self.assertFalse(result.ok)
+                    self.assertEqual((result.status, result.error), ("unavailable", "safe indexer error"))
+                candidates = result.references[0].value["candidates"]
+                self.assertCountEqual([row["result_id"] for row in candidates],
+                                      [rows[0]["result_id"]] + ([] if mode == "failed" else list(matched_ids)))
+                self.assertEqual([row["position"] for row in candidates], list(range(1, len(candidates) + 1)))
+                frozen = deepcopy((result.data, result.references))
+                self.assertEqual(result.to_model_dict()["data"], expected)
+                self.assertEqual((result.to_dict()["data"], result.references), frozen)
 
     def test_minimum_2160_filters_1080_and_unknown_without_candidate_reference(self):
         arguments = missing_episode_resource_arguments(
@@ -732,6 +791,59 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
 
 
 class MultiWorkResourceTests(unittest.TestCase):
+    def test_batch_model_data_keeps_recommended_global_positions_and_review_reference(self):
+        for include_match in (False, True):
+            names = ["未核验"] + (["合法"] if include_match else []) + ["失败"]
+
+            def audit(arguments, **_kwargs):
+                result = _audit_result(missing=[{"season": 2, "episode": 3}])
+                result.data.update(title=arguments["query"], tmdb_id=str(1000 + names.index(arguments["query"])))
+                return result
+
+            def search(arguments, **_kwargs):
+                name = arguments["title"]
+                result = _search_result(ok=name != "失败", status="unavailable" if name == "失败" else "success")
+                if result.data["items"]:
+                    result.data["items"][0].update(result_id=f"model-batch-{names.index(name):04d}",
+                                                  title=f"{name} {'WEB-DL' if name == '未核验' else 'S02E03'} 1080p")
+                if not result.ok:
+                    result.data.update(partial=True, errors=[{"site_id": "nyaa", "code": "timeout"}])
+                return result
+
+            arguments = missing_season_resource_arguments({"items": [
+                {"query": name, "season": 2, "episodes": [3]} for name in names]})
+            with (
+                self.subTest(include_match=include_match),
+                patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit),
+                patch("app.agent.episode_resource_actions.search_resources", side_effect=search),
+                patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
+            ):
+                result = search_missing_season_resources(arguments)
+                self.assertEqual(result.data["recommended_positions"], [2] if include_match else [])
+                self.assertEqual(result.data["review_positions"], [1])
+                self.assertEqual(result.model_data["items"], result.data["items"][1:])
+                self.assertEqual(result.model_data["recommended_positions"], result.data["recommended_positions"])
+                self.assertNotIn("review_positions", result.model_data)
+                for source, projected in zip(result.data["groups"], result.model_data["groups"]):
+                    self.assertEqual({k: v for k, v in projected.items() if k != "uncovered_episodes"},
+                                     {k: v for k, v in source.items() if k not in {"uncovered_episodes", "status", "review_positions"}})
+                    self.assertEqual(len(projected["uncovered_episodes"]), len(source["uncovered_episodes"]))
+                    for row, original in zip(projected["uncovered_episodes"], source["uncovered_episodes"]):
+                        self.assertEqual((row["season"], row["episode"]), (original["season"], original["episode"]))
+                        self.assertEqual(row["reason"], "no_match" if original["reason"] == "needs_review" else original["reason"])
+                        self.assertNotIn("position", row)
+                self.assertEqual(result.status, "partial")
+                self.assertEqual(result.data["groups"][-1]["failed"], 1)
+                self.assertTrue(result.data["groups"][-1]["errors"])
+                candidates = result.references[0].value["candidates"]
+                positions = [1, 2] if include_match else [1]
+                self.assertEqual([row["position"] for row in result.data["items"]], positions)
+                self.assertEqual([row["position"] for row in candidates], positions)
+                self.assertEqual((candidates[0]["match"], candidates[0]["title"]), ("unknown", "未核验 WEB-DL 1080p"))
+                frozen = deepcopy((result.data, result.references))
+                result.to_model_dict()
+                self.assertEqual((result.to_dict()["data"], result.references), frozen)
+
     def test_batch_validation_is_bounded_and_single_contract_is_reused(self):
         args = missing_season_resource_arguments({"items": [{"query": " 示例剧 ", "season": 1}, {"query": "示例剧", "season": 1}]})
         self.assertEqual(len(args["items"]), 1)

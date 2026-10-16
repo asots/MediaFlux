@@ -23,7 +23,7 @@ from app.agent.recent_resource_candidates import (
     attach_resource_candidate_reference,
     merge_resource_candidate_references,
 )
-from app.agent.resource_recommendation import rank_episode_search
+from app.agent.resource_recommendation import episode_search_model_data, matched_episode_items, rank_episode_search
 from app.indexers.runtime import get_indexer_service
 
 
@@ -388,6 +388,7 @@ def search_missing_episode_resources(
             searched.status,
             summary,
             data=data,
+            model_data={**data, "search": episode_search_model_data(ranked_search)},
             evidence=list(audit.evidence)
             + list(searched.evidence)
             + [
@@ -517,10 +518,7 @@ def search_missing_season_resources(
             preference_overrides=arguments.get("preference_overrides"),
             mapping_context=audit.effect_metadata.get("episode_mapping_context"),
         )
-        items = search_data.get("items", [])
-        item_count = sum(1 for item in items if item["quality"]["eligible"]
-                         and item["quality"]["match"] in {"exact_episode", "episode_pack"})
-        total_candidates += item_count
+        total_candidates += len(matched_episode_items(search_data))
         completed += int(bool(searched.ok))
         failed += int(not searched.ok)
         episode_label = f"S{target['season']:02d}E{target['episode']:02d}"
@@ -566,20 +564,25 @@ def search_missing_season_resources(
         suggestions.append(f"本次最多处理 3 集；剩余 {remaining} 集可再次按季度检索。")
     if failed:
         suggestions.append("部分集的资源站搜索未完成；这不代表资源站中没有相关资源。")
+    data = {
+        "verification": verification,
+        "missing_total": len(missing),
+        "processed": len(episodes),
+        "remaining": remaining,
+        "failed": failed,
+        "truncated": bool(remaining),
+        "episodes": episodes,
+    }
     return attach_resource_candidate_reference(
         ToolResult(
             ok,
             status,
             summary,
-            data={
-                "verification": verification,
-                "missing_total": len(missing),
-                "processed": len(episodes),
-                "remaining": remaining,
-                "failed": failed,
-                "truncated": bool(remaining),
-                "episodes": episodes,
-            },
+            data=data,
+            model_data={**data, "episodes": [
+                {**item, "search": episode_search_model_data(item["search"])}
+                for item in episodes
+            ]},
             evidence=evidence[:16]
             + [
                 Evidence(
@@ -753,11 +756,7 @@ def _search_missing_resource_batch(
     )
     status = "partial" if partial else "success" if presented else "empty"
     proved_groups = sum(bool(group["positions"]) for group in groups)
-    review_groups = sum(bool(group["review_positions"]) for group in groups)
-    summary = (
-        f"已核对 {len(groups)} 部/季，{proved_groups} 部有季集标题匹配候选"
-        f"，{review_groups} 部仅有未核验线索，不作为匹配结果推荐"
-    )
+    summary = f"已核对 {len(groups)} 部/季，{proved_groups} 部找到匹配目标集的资源"
     unsearched = sum(group["resource_search_attempted"] is False for group in groups)
     if unsearched:
         summary += f"；{unsearched} 部未执行资源站检索，不能据此判断没有资源"
@@ -780,6 +779,18 @@ def _search_missing_resource_batch(
             "站点失败时简要说明未完成来源，不把检索不完整说成全网无资源；本工具不提交下载。",
         ],
     )
+    result.model_data = {
+        "groups": [{
+            **{key: value for key, value in group.items() if key not in {"review_positions", "status", "uncovered_episodes"}},
+            "uncovered_episodes": [
+                {**{key: value for key, value in item.items() if key != "position"},
+                 "reason": "no_match" if item["reason"] == "needs_review" else item["reason"]}
+                for item in group["uncovered_episodes"]
+            ],
+        } for group in groups],
+        "items": [item for item in public_items if item["position"] in recommended_positions],
+        "recommended_positions": recommended_positions,
+    }
     if presented:
         result.references.append(
             merge_resource_candidate_references(presented, status=status)

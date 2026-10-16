@@ -211,6 +211,17 @@ def resource_candidate_items(value: Any, public: Mapping[str, Any]) -> list[dict
             for candidate in snapshot["candidates"]]
 
 
+def model_candidate_numbers(items: list[dict[str, Any]], *, selected_positions: list[int] | None = None) -> list[dict[str, Any]]:
+    """默认只附带匹配的缺集候选；原快照可主动检查/选择，普通搜索不变。"""
+    result = []
+    for item in items:
+        if (item["requested_episode"] and item["match"] not in {"exact_episode", "episode_pack"}
+                and item["position"] not in (selected_positions or [])):
+            continue
+        result.append({key: item[key] for key in ("position", "media_title", "requested_episode", "match", "title", "coverage")})
+    return result
+
+
 def _candidate_summary(items: list[dict[str, Any]], *, explicit_selection: bool = False) -> dict[str, Any] | None:
     """已核验缺集可直接展示；普通命中必须先明确挑选，不能覆盖缺集证据不足。"""
     recommended = _recommend(items)
@@ -218,6 +229,8 @@ def _candidate_summary(items: list[dict[str, Any]], *, explicit_selection: bool 
         not explicit_selection or any(item.get("requested_episode") for item in items)
     )):
         return None
+    if not explicit_selection:
+        items = [item for item in items if item["position"] in recommended]
     summary = {"items": items, "recommended_positions": recommended}
     if explicit_selection:
         summary["explicit_selection"] = True
