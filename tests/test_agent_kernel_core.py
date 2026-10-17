@@ -529,8 +529,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="核对完成。"),
                                    ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
                 model, state, catalog = ScriptedModel(rounds), InMemorySessionStateStore(), ToolCatalog([tool])
-                from tests.error30_model_inputs import ExplicitRepairModel
-                model = ExplicitRepairModel(model, {"corrected"})
+                if effect is ToolEffect.WRITE:
+                    from tests.error30_model_inputs import ExplicitRepairModel
+                    model = ExplicitRepairModel(model, {"corrected"})
                 session = AgentSession(model=model, catalog=catalog,
                     retriever=CapabilityRetriever(minimum=1, maximum=1),
                     pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
@@ -539,6 +540,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 payload = json.loads(error.content)
                 self.assertEqual(payload["code"], "invalid_arguments")
                 self.assertEqual(payload["expected_input_schema"], schema)
+                self.assertEqual(bool(payload.get("repair")), effect is ToolEffect.WRITE)
                 self.assertNotIn("do-not-echo-this", error.content)
                 public_events = json.dumps([e.to_dict() for e in events], ensure_ascii=False)
                 self.assertNotIn("expected_input_schema", public_events)
@@ -1247,7 +1249,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed, ["one", "two"])
         for index, request in enumerate(model.requests):
             self.assertIn(f"实际剩余工具调用 {session.limits.max_tool_calls - index} 次", request.system_prompt)
-            self.assertIn(f"仍可继续 {session.limits.max_model_rounds - index - 1} 轮", request.system_prompt)
+            self.assertIn("剩余规划轮次", request.system_prompt)
         self.assertEqual(tuple(model.requests[-1].tools), ())
         self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
         self.assertEqual(events[-1].payload["status"], "success")
@@ -2244,6 +2246,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(confirmed.error_message, reason)
                 self.assertEqual(dict(confirmed.effect_result), {
                     "ok": False, "status": code, "summary": reason,
+                    "data": {"execution_started": True},
                 })
                 saved = await state.load(owner="owner", session_id="session")
                 self.assertEqual(saved.pending_effect_plan_id, "")

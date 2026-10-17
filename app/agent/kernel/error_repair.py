@@ -1,4 +1,4 @@
-"""Turn-local evidence for correcting rejected calls, never execution authority."""
+"""Turn-local correction evidence for rejected writes, never execution authority."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -21,7 +21,7 @@ class SchemaReplacement:
     equivalent_arguments: str = ""
     required_keys: frozenset[str] = frozenset()
     collision_keys: frozenset[str] = frozenset()
-    guard_key: tuple[str, str] | None = None
+    guard_key: str | None = None
     offered: bool = True
 
 
@@ -30,23 +30,16 @@ def scope(context):
 
 
 def _guard_key(tool, arguments):
-    # A nonempty alternative READ mode is independent; omitting a filter or
-    # falling back to an empty/default request is not a mode switch.
-    properties = tool.input_schema.get("properties", {})
-    keys = arguments.keys() & properties.keys()
-    mode = (next(iter(keys)) if tool.effect is ToolEffect.READ and tool.input_schema.get("maxProperties") == 1
-            and len(properties) > 1 and len(keys) == 1 else "")
-    return json.dumps([arguments.get(key) for key in tool.input_schema.get("required", ())], sort_keys=True, default=str), mode
+    return json.dumps([arguments.get(key) for key in tool.input_schema.get("required", ())], sort_keys=True, default=str)
 
 
 def pending(tool, arguments, context):
-    if not context.schema_replacements:
+    if tool.effect is ToolEffect.READ or not context.schema_replacements:
         return {}
     key = _guard_key(tool, arguments)
     return {ticket: entry for ticket, entry in context.schema_replacements.items()
             if entry.scope == scope(context) and entry.tool == tool.name and entry.guard_key is not None
-            and entry.guard_key[0] == key[0]
-            and not (entry.guard_key[1] and key[1] and entry.guard_key[1] != key[1])}
+            and entry.guard_key == key}
 
 
 def require_presence(entries, arguments, error_type):
@@ -81,6 +74,8 @@ def effective_schema(schema, argument_schemas=None):
 
 
 def issue(tool, arguments, context, validate=None, error_type=Exception, *, collisions=frozenset(), invalid_fields=(), argument_schemas=None, preserve_fields=False):
+    if tool.effect is ToolEffect.READ:
+        return ""
     locked = {}
     schema = effective_schema(tool.input_schema, argument_schemas)
     if schema is None:

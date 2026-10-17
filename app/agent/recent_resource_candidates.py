@@ -82,12 +82,16 @@ def attach_resource_candidate_reference(
     *,
     ttl_seconds: int = 15 * 60,
     result_store: Any | None = None,
+    query_arguments: dict[str, Any] | None = None,
 ) -> ToolResult:
     """把可提交候选附加为 Kernel 私有引用，不改变公开/模型 DTO。"""
 
     snapshot = safe_resource_snapshot(result, search_id=new_resource_search_id())
-    if not snapshot.get("candidates"):
+    if not snapshot.get("candidates") and query_arguments is None:
         return result
+    value = _resource_reference_value(snapshot, result_store=result_store)
+    if query_arguments is not None:
+        value["_query_arguments"] = deepcopy(query_arguments)
     result.references = [
         reference
         for reference in result.references
@@ -96,7 +100,7 @@ def attach_resource_candidate_reference(
     result.references.append(
         ToolReference(
             kind="resource_candidates",
-            value=_resource_reference_value(snapshot, result_store=result_store),
+            value=value,
             ttl_seconds=max(1, int(ttl_seconds)),
         )
     )
@@ -120,6 +124,11 @@ def merge_resource_candidate_references(selections: list[tuple[ToolReference, di
 
 def restore_resource_candidate_reference(value: Any) -> dict[str, Any] | None:
     """校验并恢复可执行候选；兼容切换前仅含安全快照的短期引用。"""
+    if isinstance(value, dict) and "_query_arguments" in value:
+        if not isinstance(value["_query_arguments"], dict):
+            return None
+        # 查询条件只用于显式续查，不参与候选身份、下载授权或 Provider 恢复。
+        value = {key: item for key, item in value.items() if key != "_query_arguments"}
     legacy = validate_safe_resource_snapshot(value)
     if legacy is not None:
         return legacy
@@ -156,6 +165,8 @@ def restore_resource_candidate_reference(value: Any) -> dict[str, Any] | None:
         if item is None:
             return None
         restored.append((expected_id, item))
+    if not restored:
+        return snapshot
     try:
         from app.indexers.runtime import get_indexer_service
 

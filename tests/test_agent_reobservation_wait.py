@@ -154,7 +154,8 @@ def test_synchronous_failed_confirm_uses_effect_wait_with_or_without_task(native
         plan_id = preview[-1].payload["plan_id"]
         initial = await case.cold_store().load(owner=case.owner, session_id=case.sid)
         users = case.users(initial)
-        assert users == [{"role": "user", "content": GOAL}]
+        assert len(users) == 1 and users[0]["history_id"]
+        assert users == [{"role": "user", "content": GOAL, "history_id": users[0]["history_id"]}]
         if tracked_task:
             assert initial.metadata["task"]["root_goal"] == GOAL
             assert initial.metadata["read_wait"]["state"] == "idle"
@@ -187,6 +188,7 @@ def test_synchronous_failed_confirm_uses_effect_wait_with_or_without_task(native
         ) for row in followup["messages"])
         duplicate, unchanged = await case.confirm(plan_id)
         assert duplicate[-1].type is AgentEventType.TURN_FAILED
+        case.assert_source(unchanged, users)
         assert unchanged.metadata["effect_waits"][plan_id] == row
         source["baseline"]["selected"].clear()
         case.clock[0] = record["due_at"]
@@ -195,6 +197,7 @@ def test_synchronous_failed_confirm_uses_effect_wait_with_or_without_task(native
         session, resumed = rebuild(case, ["finish"], "sync-effect-cold")
         assert await session.resume_wait(candidate=candidate)
         restored = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+        case.assert_source(restored, users)
         assert receipt(restored, plan_id) == original_receipt
         assert case.media.executed == ["A"] and len(case.media.reads) == 1
         assert observed == [frozen_source]
@@ -311,6 +314,10 @@ async def failed_background_candidate(case, prepared, client):
     ))]
     case.events.extend(events)
     assert events[-1].payload["status"] == "approval_required"
+    initial = await case.cold_store().load(owner=case.owner, session_id=case.sid)
+    users = case.users(initial)
+    assert len(users) == 1 and users[0]["history_id"]
+    assert users == [{"role": "user", "content": GOAL, "history_id": users[0]["history_id"]}]
     plan_id = events[-1].payload["plan_id"]
     assert prepared == [case.change_arguments]
     with db.get_conn() as conn:
@@ -320,6 +327,7 @@ async def failed_background_candidate(case, prepared, client):
     source = deepcopy(frozen.metadata["reobservation_source"])
     confirmation, state = await case.confirm(plan_id)
     assert confirmation[-1].payload["status"] == "waiting"
+    case.assert_source(state, users)
     assert not script.steps and len(script.requests) == 1
     assert not case.media.executed and not client.write_calls
     assert not state.metadata.get("read_wait")
@@ -350,8 +358,8 @@ async def failed_background_candidate(case, prepared, client):
     assert len(candidates) == 1 and candidates[0]["kind"] == "effect"
     assert candidates[0]["wait_id"] == plan_id
     assert PRIVATE not in json.dumps(candidates, ensure_ascii=False)
-    assert case.users(state) == [{"role": "user", "content": GOAL}]
-    return plan_id, source, original_receipt, candidates[0], script
+    case.assert_source(state, users)
+    return plan_id, source, original_receipt, candidates[0], script, users
 
 
 async def park_read_quota(case, candidate, original_receipt, prefix):
@@ -374,13 +382,13 @@ async def park_read_quota(case, candidate, original_receipt, prefix):
     return deepcopy(record), state, script
 
 
-def assert_one_write(case, prepared, client, plan_id, state):
+def assert_one_write(case, prepared, client, plan_id, state, users):
     assert prepared == [case.change_arguments] and client.write_calls == [("rename", "admitted.mp4")]
     assert case.media.executed == ["A"]
     assert len(case.media.journal.read_text().splitlines()) == 1
     assert case.media.target("A").read_bytes() == b"offline-media-A"
     assert case.media.source("B").is_file() and not case.media.target("B").exists()
-    assert case.users(state) == [{"role": "user", "content": GOAL}]
+    case.assert_source(state, users)
     assert not state.pending_effect_plan_id
     with db.get_conn() as conn:
         assert conn.execute("SELECT COUNT(*) FROM organize_operation_jobs").fetchone()[0] == 1
@@ -397,7 +405,7 @@ def test_failed_effect_quota_cold_resume_preserves_private_source_and_original_r
     scripts = []
 
     async def run():
-        plan_id, source, original_receipt, candidate, script = await failed_background_candidate(
+        plan_id, source, original_receipt, candidate, script, users = await failed_background_candidate(
             case, prepared, client,
         )
         scripts.append(script)
@@ -405,6 +413,7 @@ def test_failed_effect_quota_cold_resume_preserves_private_source_and_original_r
             record, state, script = await park_read_quota(
                 case, candidate, original_receipt, f"quota-{index}",
             )
+            case.assert_source(state, users)
             scripts.append(script)
             assert record["budget"]["wait_segments"] == index + 1
             assert observed == [], "额度拒绝发生在业务 READ/source 恢复之前"
@@ -441,7 +450,7 @@ def test_failed_effect_quota_cold_resume_preserves_private_source_and_original_r
         tool_rows = [row for row in state.conversation if row.get("role") == "tool"]
         assert len({row["tool_call_id"] for row in tool_rows}) == len(tool_rows)
         assert sum("rate_limited" in row["content"] for row in tool_rows) == quota_segments
-        assert_one_write(case, prepared, client, plan_id, state)
+        assert_one_write(case, prepared, client, plan_id, state, users)
         # terminal candidate 的重复领取同样不能重启模型或重放任何业务 IO。
         assert not await session.resume_wait(candidate=candidate)
         assert len(resumed.requests) == 1 and observed == [source]
@@ -456,11 +465,12 @@ def test_cancelled_failed_effect_quota_wait_never_restores_source_or_replays_wri
     scripts = []
 
     async def run():
-        plan_id, _saved_source, original_receipt, candidate, script = await failed_background_candidate(
+        plan_id, _saved_source, original_receipt, candidate, script, users = await failed_background_candidate(
             case, prepared, client,
         )
         scripts.append(script)
         record, before, script = await park_read_quota(case, candidate, original_receipt, "cancel-quota")
+        case.assert_source(before, users)
         scripts.append(script)
         case.clock[0] = record["due_at"]
         candidates = await case.cold_store().due_continuations()
@@ -495,7 +505,7 @@ def test_cancelled_failed_effect_quota_wait_never_restores_source_or_replays_wri
         state = await case.cold_store().load(owner=case.owner, session_id=case.sid)
         assert state.conversation == before.conversation
         assert receipt(state, plan_id) == original_receipt
-        assert_one_write(case, prepared, client, plan_id, state)
+        assert_one_write(case, prepared, client, plan_id, state, users)
         return state
 
     state = asyncio.run(run())

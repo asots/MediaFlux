@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,7 +12,7 @@ from app.agent.kernel.persistence import (
     _DUE_EFFECT_WAITS_SQL,
     SQLiteKernelStore,
 )
-from app.agent.kernel.references import ReferenceError
+from app.agent.kernel.references import InMemoryReferenceStore, ReferenceError
 from app.agent.kernel.session_guard import session_scope_guard
 from app.agent.kernel.state import StalePublicationError, StateUpdate
 
@@ -298,6 +299,35 @@ class SQLiteKernelStoreTests(unittest.IsolatedAsyncioTestCase):
             [record["plan_id"] for record in await store.due_effect_waits(limit=16)],
             ["plan-a", "plan-b", "plan-c"],
         )
+
+    async def test_reference_deadline_uses_remaining_ttl_and_same_scope_checks(self) -> None:
+        for store_type in (InMemoryReferenceStore, SQLiteKernelStore):
+            with self.subTest(store=store_type.__name__):
+                now = [2_000_000_000.0]
+                store = store_type(clock=lambda now=now: now[0])
+                reference = await store.put(owner="owner", session_id="session", kind="payload", value={"id": 1})
+                now[0] += 850
+                deadline = await store.deadline(reference.ref, owner="owner", session_id="session", expected_kind="payload")
+                self.assertAlmostEqual(deadline - time.monotonic(), 50, delta=0.02)
+                for owner, session, kind in (("other", "session", "payload"), ("owner", "other", "payload"),
+                                             ("owner", "session", "wrong")):
+                    with self.assertRaises(ReferenceError):
+                        await store.deadline(reference.ref, owner=owner, session_id=session, expected_kind=kind)
+                now[0] += 51
+                with self.assertRaises(ReferenceError):
+                    await store.deadline(reference.ref, owner="owner", session_id="session", expected_kind="payload")
+
+    async def test_reference_deadline_is_read_only_and_checks_persisted_integrity(self) -> None:
+        reference = await self.store.put(owner="owner", session_id="session", kind="payload", value={"id": 1})
+        with db.get_conn() as conn:
+            original = dict(conn.execute("SELECT * FROM agent_kernel_refs WHERE ref_id=?", (reference.ref,)).fetchone())
+        await self.store.deadline(reference.ref, owner="owner", session_id="session", expected_kind="payload")
+        with db.get_conn() as conn:
+            observed = dict(conn.execute("SELECT * FROM agent_kernel_refs WHERE ref_id=?", (reference.ref,)).fetchone())
+            self.assertEqual(observed, original)
+            conn.execute("UPDATE agent_kernel_refs SET expires_at=expires_at+60 WHERE ref_id=?", (reference.ref,))
+        with self.assertRaisesRegex(ReferenceError, "payload is invalid"):
+            await self.store.deadline(reference.ref, owner="owner", session_id="session", expected_kind="payload")
 
     async def test_reference_is_opaque_owner_scoped_and_persistent(self) -> None:
         reference = await self.store.put(

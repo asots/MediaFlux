@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.agent.indexer_actions import (
+    TECHNICAL_FILTER_CHOICES,
     search_arguments as indexer_search_arguments,
 )
 from app.agent.indexer_actions import (
@@ -26,6 +27,14 @@ from app.agent.models import (
     ToolSpec,
 )
 from app.agent.recent_resource_candidates import MAX_RESOURCE_CANDIDATES
+
+
+_TECHNICAL_PARAMETERS = {
+    key: {"type": "boolean" if key == "exclude_hdr" else "string", "enum": list(choices),
+          "description": ("排除发布名含HDR/DoVi/HLG的版本；未标注仍为未知，不保证SDR。false取消排除。" if key == "exclude_hdr" else
+                          "仅保留发布名明确标注此规格的候选；空值不限，未知不匹配。标题声明非媒体流核验。")}
+    for key, choices in TECHNICAL_FILTER_CHOICES.items()
+}
 
 
 def register_specs(
@@ -58,9 +67,11 @@ def register_specs(
                 "sites 可把本次读取严格限制到指定站点且不会修改站点配置；例如 "
                 'sites=["sukebei"] 只查询 Sukebei。需要近期结果时使用 '
                 "sort_mode=published_desc。"
-                "可提交的候选会同时返回 owner/session 绑定的 resource_candidates_ref，后续资源检查或"
-                "提交必须原样使用该引用。"
+                "结果（包括空结果）返回 owner/session 绑定的 resource_candidates_ref。续查同一目标时传该引用和要改的字段，未传字段继承，返回 effective_query 核对完整条件。"
+                "画质/类型空字符串、aliases/sites空数组、year/season/episode为null明确取消该条件；续查默认回到第1页，翻页须指定page。独立新搜索不传引用，必须传title。后续资源检查/提交原样使用候选引用。"
                 "可用于交叉核对连载资源跟进到哪一集，但资源标题只能作为旁证，不能证明官方播出进度。"
+                "technical_evidence 是发布名声明而非媒体流探测，null 表示未知；未标 HDR 不等于已核实 SDR、位深或色域。"
+                "用户将画质或动态范围明确作为硬条件时传 resolution/dynamic_range，由工具过滤未知或不符项；优先等软偏好不强制过滤，不把规格塞进片名。"
                 "普通搜索只供模型研究，不自动出卡；找到符合用户要求的候选后，使用 indexer.present_candidates 挑选展示，没找到不要展示。"
                 "已确认缺集后找资源应使用 library.search_missing_episode_resources 或 library.search_missing_season_resources，避免把旧集当更新。"
             ),
@@ -70,8 +81,12 @@ def register_specs(
             freshness="realtime",
             parameters={
                 "type": "object",
-                "required": ["title"],
+                "anyOf": [{"required": ["title"]}, {"required": ["resource_candidates_ref"]}],
                 "properties": {
+                    "resource_candidates_ref": {
+                        "type": "string", "pattern": "^ref_[A-Za-z0-9_-]{16,160}$",
+                        "description": "续查使用最近一次搜索/筛选返回的引用；只需传改动字段，省略字段继承，空结果也可续改。",
+                    },
                     "title": {"type": "string", "minLength": 1, "maxLength": 120},
                     "original_title": {"type": "string", "maxLength": 120},
                     "english_title": {"type": "string", "maxLength": 120},
@@ -80,18 +95,19 @@ def register_specs(
                         "maxItems": 8,
                         "items": {"type": "string", "minLength": 1, "maxLength": 120},
                     },
-                    "year": {"type": "integer", "minimum": 1800, "maximum": 2200},
+                    "year": {"type": ["integer", "null"], "minimum": 1800, "maximum": 2200},
                     "media_type": {
                         "type": "string",
                         "enum": ["", "movie", "tv", "anime"],
                     },
+                    **_TECHNICAL_PARAMETERS,
                     "season": {
-                        "type": "integer",
+                        "type": ["integer", "null"],
                         "minimum": 0,
                         "maximum": 100,
                     },
                     "episode": {
-                        "type": "integer",
+                        "type": ["integer", "null"],
                         "minimum": 1,
                         "maximum": 1000,
                     },
@@ -145,6 +161,7 @@ def register_specs(
             name="indexer.present_candidates",
             description=(
                 "从已有 resource_candidates_ref 的完整候选快照中，按原 position 显式筛选要展示的资源候选。"
+                "resolution/dynamic_range/exclude_hdr 可直接筛选已有候选，无须重新搜索；省略继承该引用的查询条件，空字符串或false取消对应条件，返回effective_query、实际positions与排除统计。严格规格条件不匹配未知项；仅排除HDR不等于已核实SDR。放宽条件须由用户明确提出；原快照不补回已排除项，应传同一引用按新条件搜索。"
                 "这是纯只读展示动作，不恢复 Provider、不读取最近快照、不重新搜索、不访问云盘或索引网络；"
                 "positions 为空表示本轮明确不展示候选。如需继续接入本次筛选结果，请使用本次返回的 reference_arguments.resource_candidates_ref；新引用值可能不同于输入，但仍绑定同一份候选快照，再传给 ingest.inspect 或 ingest.submit。"
             ),
@@ -166,8 +183,9 @@ def register_specs(
                             "minimum": 1,
                             "maximum": MAX_RESOURCE_CANDIDATES,
                         },
-                        "description": "要展示的原候选位置；允许空数组以明确清除本轮候选展示。",
+                        "description": "要展示的原候选位置；只筛指定子集，不代表搜遍全部。空数组明确清除候选展示。",
                     },
+                    **_TECHNICAL_PARAMETERS,
                 },
                 "additionalProperties": False,
             },

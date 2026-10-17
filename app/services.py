@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import unicodedata
@@ -21,6 +22,7 @@ from app.clients.base import (
 from app.clients.emby import EmbyClient
 from app.clients.jellyfin import JellyfinClient
 from app.config import get, get_bool, get_int
+from app.discovery.models import MediaCard, ProviderError
 from app.logger import get_logger, log_throttled
 
 logger = get_logger(__name__)
@@ -567,91 +569,30 @@ def _normalize_series_identity_title(value: object) -> str:
     return "".join(char for char in normalized if char.isalnum())
 
 
-def _media_identity_batch_source_payload(
-    server_type: str,
-    server_name: str,
-    client: MediaServerClient,
-    identities: list[dict[str, str]],
+def _media_identity_inventory_source_payload(
+    server_type: str, server_name: str, client: MediaServerClient,
+    media_types: tuple[str, ...], deadline_at: float | None,
+    cancelled: Callable[[], bool] | None,
 ) -> dict:
-    """一次枚举一个媒体源并核对一批公开 TMDB 身份。"""
+    """一次读取并索引一个媒体源；索引只属于当前请求，不持有客户端。"""
     try:
-        media_types = tuple(
-            dict.fromkeys(str(item["media_type"]) for item in identities)
-        )
-        inventories = {
-            media_type: client.list_media_identity_inventory(
-                media_type,
-                max_items=5_000,
-                page_size=200,
-            )
-            for media_type in media_types
-        }
-        exact_ids = {
-            media_type: {
-                candidate.tmdb_id
-                for candidate in inventory.candidates
-                if candidate.tmdb_id
+        inventories = {}
+        for media_type in dict.fromkeys(media_types):
+            if (cancelled and cancelled()) or (deadline_at is not None and time.monotonic() >= deadline_at):
+                break
+            options: dict[str, Any] = {"max_items": 5_000, "page_size": 200}
+            if deadline_at is not None:
+                options["deadline_at"] = deadline_at
+            inventory = client.list_media_identity_inventory(media_type, **options)
+            inventories[media_type] = {
+                "total": inventory.total, "truncated": inventory.truncated, "unmapped": inventory.unmapped,
+                "exact_ids": frozenset(item.tmdb_id for item in inventory.candidates if item.tmdb_id),
+                "unmapped_titles": frozenset(
+                    (_normalize_series_identity_title(item.name), str(item.year or "").strip())
+                    for item in inventory.candidates if not item.tmdb_id and _normalize_series_identity_title(item.name)),
             }
-            for media_type, inventory in inventories.items()
-        }
-        unmapped_titles = {
-            media_type: {
-                (
-                    _normalize_series_identity_title(candidate.name),
-                    str(candidate.year or "").strip(),
-                )
-                for candidate in inventory.candidates
-                if not candidate.tmdb_id
-                and _normalize_series_identity_title(candidate.name)
-            }
-            for media_type, inventory in inventories.items()
-        }
-        results: list[dict[str, Any]] = []
-        for identity in identities:
-            media_type = identity["media_type"]
-            inventory = inventories[media_type]
-            if identity["tmdb_id"] in exact_ids[media_type]:
-                status = "present"
-                match = "provider_id"
-            else:
-                title_key = _normalize_series_identity_title(identity.get("title"))
-                year = str(identity.get("year") or "").strip()
-                possible = bool(
-                    title_key
-                    and (title_key, year) in unmapped_titles[media_type]
-                )
-                if possible:
-                    status = "possible"
-                    match = "title_year"
-                elif inventory.truncated:
-                    status = "indeterminate"
-                    match = "none"
-                else:
-                    status = "missing"
-                    match = "none"
-            results.append(
-                {
-                    "tmdb_id": identity["tmdb_id"],
-                    "media_type": media_type,
-                    "status": status,
-                    "match": match,
-                }
-            )
-        return {
-            "server_type": server_type,
-            "server_name": server_name,
-            "status": "ready",
-            "inventories": {
-                media_type: {
-                    "total": inventory.total,
-                    "truncated": inventory.truncated,
-                    "unmapped": inventory.unmapped,
-                }
-                for media_type, inventory in inventories.items()
-            },
-            "items": results,
-            "error": "",
-        }
+        return {"server_type": server_type, "server_name": server_name, "status": "ready",
+                "inventories": inventories, "error": ""}
     except Exception as exc:  # noqa: BLE001 - 隔离单个媒体服务器故障，保留其他来源结果
         logger.warning(
             "媒体服务器批量身份审计失败 server=%s type=%s",
@@ -663,15 +604,6 @@ def _media_identity_batch_source_payload(
             "server_name": server_name,
             "status": "unavailable",
             "inventories": {},
-            "items": [
-                {
-                    "tmdb_id": identity["tmdb_id"],
-                    "media_type": identity["media_type"],
-                    "status": "indeterminate",
-                    "match": "none",
-                }
-                for identity in identities
-            ],
             "error": "媒体服务器暂时不可用",
         }
 
@@ -1197,24 +1129,49 @@ def inspect_media_identity_sources(tmdb_id: str, media_type: str) -> list[dict]:
     return _run_media_source_jobs(jobs)
 
 
-def inspect_media_identity_batch(
-    identities: list[dict[str, str]],
+def load_media_identity_snapshot(
+    media_types: tuple[str, ...], *, deadline_at: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
-    """一次并发枚举各媒体服务器，核对一批电影或剧集 TMDB 身份。"""
+    """每个请求读取自己的库存快照；仅保存身份索引，不全局缓存库存。"""
     jobs: list[Callable[[], dict]] = []
     for server_type, server_name, _web_url, client in _configured_media_sources():
         jobs.append(
             lambda server_type=server_type, server_name=server_name, client=client: _run_owned_media_source_job(
                 client,
-                lambda: _media_identity_batch_source_payload(
-                    server_type,
-                    server_name,
-                    client,
-                    identities,
+                lambda: _media_identity_inventory_source_payload(
+                    server_type, server_name, client, media_types, deadline_at, cancelled,
                 ),
             )
         )
     return _run_media_source_jobs(jobs)
+
+
+def inspect_media_identity_batch(
+    identities: list[dict[str, str]], *, snapshot: list[dict] | None = None,
+) -> list[dict]:
+    """统一身份匹配；独立核验读取新快照，续页显式复用当前请求的快照。"""
+    if snapshot is None:
+        snapshot = load_media_identity_snapshot(tuple(dict.fromkeys(item["media_type"] for item in identities)))
+    sources = []
+    for source in snapshot:
+        results = []
+        for identity in identities:
+            inventory = source["inventories"].get(identity["media_type"])
+            status, match = "indeterminate", "none"
+            if source["status"] == "ready" and inventory is not None:
+                if identity["tmdb_id"] in inventory["exact_ids"]:
+                    status, match = "present", "provider_id"
+                elif (_normalize_series_identity_title(identity.get("title")), str(identity.get("year") or "").strip()) in inventory["unmapped_titles"]:
+                    status, match = "possible", "title_year"
+                elif not inventory["truncated"]:
+                    status = "missing"
+            results.append({"tmdb_id": identity["tmdb_id"], "media_type": identity["media_type"],
+                            "status": status, "match": match})
+        sources.append({**{key: source[key] for key in ("server_type", "server_name", "status", "error")},
+                        "inventories": {kind: {key: value[key] for key in ("total", "truncated", "unmapped")}
+                                        for kind, value in source["inventories"].items()}, "items": results})
+    return sources
 
 
 def summarize_media_identity_batch(
@@ -1278,4 +1235,114 @@ def summarize_media_identity_batch(
             }
             for source in sources
         ],
+    }
+
+
+def collect_discovery_recommendations(
+    service_factory: Callable[[], Any], *, provider: str, media_type: str,
+    page: int, limit: int, filters: dict[str, str],
+    year_from: str = "", year_to: str = "", exclude_library: bool = False,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """有界收集推荐；共享单页来源和身份核验，不改变探索页的显式分页。"""
+    deadline_at = time.monotonic() + 20
+    category = "discover" if provider == "tmdb" else "recommend"
+    service = None
+    snapshot = None
+    cards: list[MediaCard] = []
+    accepted: list[MediaCard] = []
+    seen: set[tuple[str, str]] = set()
+    pages_read: list[int] = []
+    candidates_seen = duplicates = retry_after = 0
+    cached, stale, has_more = True, False, False
+    provider_status, error_code = "healthy", ""
+    library_check = None
+
+    def interrupted() -> str:
+        if cancelled and cancelled():
+            return "cancelled"
+        return "timeout" if time.monotonic() >= deadline_at else ""
+
+    stop_reason = interrupted()
+    while not stop_reason:
+        try:
+            if service is None:
+                service = service_factory()
+            stop_reason = interrupted()
+            if stop_reason:
+                break
+            source_page = service.list_items(provider, category, media_type, page, filters)
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 隔离 Provider 故障，保留已接收的分页事实
+            error_code = exc.code if isinstance(exc, ProviderError) else "unavailable"
+            retry_after = exc.retry_after if isinstance(exc, ProviderError) else 0
+            provider_status = "not_configured" if error_code == "not_configured" else "unavailable"
+            stop_reason = interrupted() or ("timeout" if error_code == "timeout" or isinstance(exc, TimeoutError) else "provider_error")
+            break
+        pages_read.append(page)
+        has_more = bool(source_page.has_more)
+        cached, stale = cached and bool(source_page.cached), stale or bool(source_page.stale)
+        if source_page.provider.status != "healthy":
+            provider_status = source_page.provider.status
+        retry_after = max(retry_after, source_page.provider.retry_after)
+        for card in source_page.items:
+            if not isinstance(card, MediaCard) or card.media_type != media_type:
+                continue
+            candidates_seen += 1
+            key = (card.media_type, card.tmdb_id or card.stable_id)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            year = str(card.year or "").strip()
+            if (year_from or year_to) and (not re.fullmatch(r"(?:19|20)[0-9]{2}", year)
+                    or (year_from and year < year_from) or (year_to and year > year_to)):
+                continue
+            cards.append(card)
+        stop_reason = interrupted()
+        if exclude_library:
+            identities = [{"tmdb_id": card.tmdb_id, "media_type": card.media_type,
+                           "title": card.title, "year": str(card.year or "").strip()}
+                          for card in cards if re.fullmatch(r"[1-9][0-9]{0,9}", card.tmdb_id)]
+            if identities and snapshot is None and not stop_reason:
+                try:
+                    snapshot = load_media_identity_snapshot(
+                        (media_type,), deadline_at=deadline_at, cancelled=cancelled,
+                    )
+                except Exception:  # noqa: BLE001 - 库存读取失败只能降为未知
+                    # 无法建立库存时仍返回候选范围，但绝不把未知状态当成未入库。
+                    snapshot = []
+                stop_reason = interrupted()
+            sources = inspect_media_identity_batch(identities, snapshot=snapshot or []) if identities else []
+            library_check = summarize_media_identity_batch(identities, sources)
+            library_check["unmapped_candidates"] = len(cards) - len(identities)
+            missing = {(item["media_type"], item["tmdb_id"]) for item in library_check["items"]
+                       if item["library_status"] == "missing"}
+            accepted = [card for card in cards if (card.media_type, card.tmdb_id) in missing]
+        else:
+            accepted = cards
+        stop_reason = interrupted() or stop_reason or ("target_reached" if len(accepted) >= limit else
+            "source_exhausted" if not has_more else "page_limit" if len(pages_read) >= 8 or page >= 100 else "")
+        if not stop_reason:
+            page += 1
+
+    returned = min(len(accepted), limit)
+    next_page = pages_read[-1] + 1 if pages_read else page
+    if next_page > 100 or (pages_read and not has_more):
+        next_page = None
+    return {
+        "items": accepted[:limit], "total": len(accepted), "returned": returned,
+        "has_more": has_more or len(accepted) > limit,
+        "cached": bool(pages_read) and cached, "stale": stale,
+        "provider_status": provider_status, "retry_after": retry_after,
+        "error_code": error_code,
+        **({"library_check": library_check} if library_check is not None else {}),
+        "scope": {
+            "requested": limit, "returned": returned, "shortfall": limit - returned,
+            "pages_read": pages_read, "candidates_seen": candidates_seen, "duplicates": duplicates,
+            "stop_reason": stop_reason, "complete": stop_reason == "target_reached",
+            "next_page": next_page,
+            "max_pages": 8, "timeout_seconds": 20,
+        },
     }

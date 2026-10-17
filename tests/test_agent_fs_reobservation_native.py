@@ -164,6 +164,10 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             initial = [event async for event in session.run(AgentInput(
                 owner=OWNER, session_id=SESSION_ID, message=GOAL, request_id="original-user"))]
             assert initial[-1].payload["status"] == "approval_required"
+            initial_state = await store.load(owner=OWNER, session_id=SESSION_ID)
+            source_users = [row for row in initial_state.conversation if row.get("role") == "user"]
+            assert len(source_users) == 1 and source_users[0]["history_id"]
+            assert source_users == [{"role": "user", "content": GOAL, "history_id": source_users[0]["history_id"]}]
             old = await pipeline.get_pending_plan(owner=OWNER, session_id=SESSION_ID)
             assert old is not None and old.arguments == script.calls[1]["arguments"]
             source = old.metadata["reobservation_source"]
@@ -224,7 +228,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert new_frozen["operations"][0]["new_name"] == "Final.mp4"
             cold = SQLiteKernelStore(secret_provider=lambda: SECRET)
             state = await cold.load(owner=OWNER, session_id=SESSION_ID)
-            assert [row for row in state.conversation if row.get("role") == "user"] == [{"role": "user", "content": GOAL}]
+            assert [row for row in state.conversation if row.get("role") == "user"] == source_users
             assert len([row for row in state.conversation if row.get("completion_receipt_id") == old.plan_id]) == 1
             assert state.pending_effect_plan_id == new.plan_id
             assert len(script.requests) == len(script.model_requests) == 3 and not script.steps
@@ -268,7 +272,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
                 assert conn.execute("SELECT COUNT(*) FROM organize_operation_jobs").fetchone()[0] == 1
             final = await cold.load(owner=OWNER, session_id=SESSION_ID)
             assert not final.pending_effect_plan_id
-            assert [row for row in final.conversation if row.get("role") == "user"] == [{"role": "user", "content": GOAL}]
+            assert [row for row in final.conversation if row.get("role") == "user"] == source_users
             for plan_id in (old.plan_id, new.plan_id):
                 assert len([row for row in final.conversation if row.get("completion_receipt_id") == plan_id]) == 1
             assert len(script.requests) == len(script.model_requests) == 4 and not script.steps

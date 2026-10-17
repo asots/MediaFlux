@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 import unicodedata
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -36,6 +37,7 @@ from app.indexers.errors import IndexerError, IndexerResultExpired, IndexerValid
 from app.indexers.models import IndexerMediaSearchRequest
 from app.indexers.runtime import get_indexer_service, run_indexer_awaitable_sync
 from app.modules.download_dispatcher import public_dispatch_summary
+from app.modules.media_probe import infer_dynamic_ranges, infer_media_profile
 
 _SITE_ID_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 _RESULT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -123,104 +125,105 @@ def validate_enabled_search_sites(sites: list[str]) -> None:
         raise AgentToolError(f"站点未启用或不存在：{', '.join(invalid)}")
 
 
+TECHNICAL_FILTER_CHOICES = {
+    "resolution": ("", "2160p", "1080p", "720p", "480p"),
+    "dynamic_range": ("", "SDR", "HDR", "HDR10", "HDR10+", "DoVi", "HLG"),
+    "exclude_hdr": (False, True),
+}
+
+
+def technical_filter_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """搜索和既有候选筛选使用相同规格；省略/空值不限，不继承别次搜索条件。"""
+    quality = {key: arguments[key] for key in TECHNICAL_FILTER_CHOICES if key in arguments}
+    for key, value in quality.items():
+        choices = TECHNICAL_FILTER_CHOICES[key]
+        if type(value) is not type(choices[0]) or value not in choices:
+            raise AgentToolError(f"{key} 不在允许范围内")
+    return quality
+
+
+def filter_technical_candidates(
+    items: list[dict[str, Any]], arguments: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """仅使用可见发布名证据，未知与冲突分开统计；保留原候选身份/序号。"""
+    requirements = {key: value for key, value in technical_filter_arguments(arguments).items() if value}
+    matched, unknown, mismatched = [], 0, 0
+    for item in items:
+        title = _safe_text(item.get("title"), 300)
+        profile = infer_media_profile(title) if requirements else None
+        observed = {key: getattr(profile, key) for key in requirements if key != "exclude_hdr"}
+        ranges = infer_dynamic_ranges(title) if requirements.get("exclude_hdr") or requirements.get("dynamic_range") else ()
+        if requirements.get("exclude_hdr"):
+            observed["exclude_hdr"] = not any(value != "SDR" for value in ranges)
+        if desired := requirements.get("dynamic_range"):
+            matches = (ranges == ("SDR",) if desired == "SDR" else
+                       any(value != "SDR" for value in ranges) if desired == "HDR" else desired in ranges)
+            observed["dynamic_range"] = desired if matches else "mismatch" if ranges else ""
+        if any(value != requirements[key] for key, value in observed.items() if value != ""):
+            mismatched += 1
+        elif any(not value for value in observed.values()):
+            unknown += 1
+        else:
+            matched.append(item)
+    return matched, {"requested": requirements, "basis": "release_title_only", "considered": len(items),
+                     "scope": "input_candidate_titles",
+                     "unknown_excluded": unknown, "mismatched_excluded": mismatched,
+                     "stream_verified": False}
+
+
 def search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    _reject_extra(
-        arguments,
-        {
-            "title",
-            "original_title",
-            "english_title",
-            "aliases",
-            "year",
-            "media_type",
-            "season",
-            "episode",
-            "page",
-            "sort_mode",
-            "sites",
-            "limit",
-        },
-    )
-    title = _visible_text(arguments.get("title"), name="title", required=True)
-    original_title = _visible_text(
-        arguments.get("original_title", ""), name="original_title"
-    )
-    english_title = _visible_text(
-        arguments.get("english_title", ""), name="english_title"
-    )
-
-    raw_aliases = arguments.get("aliases", [])
-    if not isinstance(raw_aliases, list) or len(raw_aliases) > 8:
-        raise AgentToolError("aliases 必须是最多包含 8 项的数组")
-    aliases = [
-        _visible_text(value, name="alias", required=True) for value in raw_aliases
-    ]
-
-    year = arguments.get("year")
-    if year is not None and (
-        isinstance(year, bool) or not isinstance(year, int) or not 1800 <= year <= 2200
-    ):
-        raise AgentToolError("year 必须是 1800 到 2200 的整数")
-    media_type = arguments.get("media_type", "")
-    if not isinstance(media_type, str) or media_type.strip().lower() not in {
-        "",
-        "movie",
-        "tv",
-        "anime",
-    }:
-        raise AgentToolError("media_type 仅支持 movie、tv 或 anime")
-    media_type = media_type.strip().lower()
-
-    page = arguments.get("page", 1)
-    if isinstance(page, bool) or not isinstance(page, int) or not 1 <= page <= 100:
-        raise AgentToolError("page 必须是 1 到 100 的整数")
-    sort_mode = arguments.get("sort_mode", "relevance_desc")
-    if (
-        not isinstance(sort_mode, str)
-        or sort_mode.strip().lower() not in _SORT_MODES
-    ):
-        raise AgentToolError(
-            "sort_mode 仅支持 published_desc、relevance_desc、episode_desc、"
-            "seeders_desc、size_desc 或 size_asc"
-        )
-    sort_mode = sort_mode.strip().lower()
-    limit = arguments.get("limit", 20)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESOURCE_CANDIDATES:
-        raise AgentToolError(f"limit 必须是 1 到 {MAX_RESOURCE_CANDIDATES} 的整数")
-
-    sites = normalize_search_sites(arguments.get("sites", []))
-
-    try:
-        request = IndexerMediaSearchRequest.create(
-            title=title,
-            original_title=original_title,
-            english_title=english_title,
-            aliases=aliases,
-            year=year,
-            media_type=media_type,
-            season=arguments.get("season"),
-            episode=arguments.get("episode"),
-            page=page,
-            sort_mode=sort_mode,
-        )
-    except IndexerValidationError as exc:
-        raise AgentToolError(exc.public_message) from exc
-
-    validate_enabled_search_sites(sites)
-    return {
-        "title": request.title,
-        "original_title": request.original_title,
-        "english_title": request.english_title,
-        "aliases": list(request.aliases),
-        "year": request.year,
-        "media_type": request.media_type,
-        "season": request.season,
-        "episode": request.episode,
-        "page": request.page,
-        "sort_mode": request.sort_mode,
-        "sites": sites,
-        "limit": limit,
+    """新搜索规范化全部条件；显式引用续查只规范化覆盖字段，不注入默认值。"""
+    defaults: dict[str, Any] = {
+        "title": "", "original_title": "", "english_title": "", "aliases": [],
+        "year": None, "media_type": "", "season": None, "episode": None,
+        "page": 1, "sort_mode": "relevance_desc", "sites": [], "limit": 20,
+        "resolution": "", "dynamic_range": "", "exclude_hdr": False,
     }
+    _reject_extra(arguments, {*defaults, "resource_candidates_ref"})
+    reference = arguments.get("resource_candidates_ref")
+    if "resource_candidates_ref" in arguments and (
+        not isinstance(reference, str) or not re.fullmatch(r"ref_[A-Za-z0-9_-]{16,160}", reference)
+    ):
+        raise AgentToolError("resource_candidates_ref 不是有效的资源候选引用")
+    normalized = {**({} if reference else defaults), **arguments}
+    for key in ("title", "original_title", "english_title"):
+        if key in normalized:
+            normalized[key] = _visible_text(normalized[key], name=key, required=key == "title")
+    if "aliases" in normalized:
+        raw_aliases = normalized["aliases"]
+        if not isinstance(raw_aliases, list) or len(raw_aliases) > 8:
+            raise AgentToolError("aliases 必须是最多包含 8 项的数组")
+        normalized["aliases"] = [_visible_text(value, name="alias", required=True) for value in raw_aliases]
+    for key, minimum, maximum in (
+        ("year", 1800, 2200), ("season", 0, 100), ("episode", 1, 1000),
+        ("page", 1, 100), ("limit", 1, MAX_RESOURCE_CANDIDATES),
+    ):
+        if key not in normalized or (normalized[key] is None and key in {"year", "season", "episode"}):
+            continue
+        value = normalized[key]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise AgentToolError(f"{key} 必须是 {minimum} 到 {maximum} 的整数")
+    for key, choices in (("media_type", {"", "movie", "tv", "anime"}), ("sort_mode", _SORT_MODES)):
+        if key not in normalized:
+            continue
+        value = normalized[key]
+        if not isinstance(value, str) or value.strip().lower() not in choices:
+            raise AgentToolError(f"{key} 不在允许范围内")
+        normalized[key] = value.strip().lower()
+    normalized.update(technical_filter_arguments(normalized))
+    if "sites" in normalized:
+        normalized["sites"] = normalize_search_sites(normalized["sites"])
+        validate_enabled_search_sites(normalized["sites"])
+    if not reference:
+        try:
+            request = IndexerMediaSearchRequest.create(**{
+                key: value for key, value in normalized.items()
+                if key not in {"sites", "limit", *TECHNICAL_FILTER_CHOICES}
+            })
+        except IndexerValidationError as exc:
+            raise AgentToolError(exc.public_message) from exc
+        normalized.update(asdict(request), aliases=list(request.aliases))
+    return normalized
 
 
 def submit_arguments(arguments: dict[str, Any]) -> dict[str, str]:
@@ -263,6 +266,7 @@ def _public_item(item) -> dict[str, Any]:
         "downloads": _safe_nonnegative(payload.get("downloads"), 10**9),
         "published_at": _safe_text(payload.get("published_at"), 40),
         "download_state": _safe_text(payload.get("download_state"), 24),
+        "match_reasons": [_safe_text(reason, 80) for reason in payload.get("match_reasons", [])],
         "download_kinds": [
             kind
             for kind in payload.get("download_kinds", [])
@@ -294,6 +298,16 @@ def search_resources(
             "资源检索当前调用上下文不可用",
             error="请从同步 Agent 查询入口调用资源检索。",
         )
+
+    if "resource_candidates" in arguments:
+        snapshot = arguments["resource_candidates"]
+        base = snapshot.get("_query_arguments") if isinstance(snapshot, dict) else None
+        if not isinstance(base, dict):
+            raise AgentToolError("此候选引用没有单次查询条件，请提供完整条件重新搜索", code="precondition_failed")
+        arguments = search_arguments({
+            **base, "page": 1,
+            **{key: value for key, value in arguments.items() if key != "resource_candidates"},
+        })
 
     request = IndexerMediaSearchRequest.create(
         title=arguments["title"],
@@ -331,10 +345,12 @@ def search_resources(
     except IndexerError as exc:
         return ToolResult(False, exc.code, exc.public_message, error=exc.public_message)
 
-    items: list[dict[str, Any]] = []
+    matching_items, technical_filter = filter_technical_candidates(
+        [_public_item(item) for item in result.items], arguments,
+    )
+    items = matching_items[: arguments["limit"]]
     candidate_position = 0
-    for raw_item in result.items[: arguments["limit"]]:
-        item = _public_item(raw_item)
+    for item in items:
         if (
             _RESULT_ID_RE.fullmatch(str(item.get("result_id") or ""))
             and str(item.get("download_state") or "").lower() in {"ready", "resolvable"}
@@ -342,7 +358,6 @@ def search_resources(
         ):
             candidate_position += 1
             item["position"] = candidate_position
-        items.append(item)
     errors = [
         {
             "site_id": _safe_text(error.site_id, 32),
@@ -364,18 +379,23 @@ def search_resources(
                    else "本轮未找到匹配资源，部分来源未完成，暂不能确认是否无资源")
     elif not items:
         summary = "已完成多站搜索，暂未找到匹配资源"
-    truncated = any(result.site_truncated_counts.values()) or len(result.items) > len(items)
+    truncated = any(result.site_truncated_counts.values()) or len(matching_items) > len(items)
     if truncated:
-        summary += "；候选已按上限截取，可细化条件后重搜，不代表已穷尽资源"
+        summary += "；仅覆盖本次返回范围，未覆盖部分仍未知"
+    visible = [item for item in items if "episode_conflict" not in item["match_reasons"]]
+    if len(visible) != len(items):
+        summary += f"；其中 {len(items) - len(visible)} 项与请求季集冲突，不作为匹配候选"
     tool_result = ToolResult(
         ok=ok,
         status=status,
         summary=summary,
         data={
             "query": _safe_text(result.query, 120),
+            "effective_query": dict(arguments),
             "page": int(result.page),
             "sort_mode": request.sort_mode,
             "items": items,
+            "technical_filter": technical_filter,
             "sites_attempted": [
                 _safe_text(value, 32) for value in result.sites_attempted[:16]
             ],
@@ -400,13 +420,16 @@ def search_resources(
                 _now(),
             )
         ],
-        suggestions=(
-            ["回复“第 2 个到 qB / 光鸭 / 两边”，即可进入提交确认。"] if items else []
-        ),
     )
+    if len(visible) != len(items):
+        tool_result.model_data = {**tool_result.data, "items": visible,
+                                  "query_scope": {"basis": "returned_release_titles", "returned": len(items),
+                                                  "known_conflicts": len(items) - len(visible),
+                                                  "without_known_conflict": len(visible), "global_availability": "unknown"}}
     return attach_resource_candidate_reference(
         tool_result,
         result_store=service.result_store,
+        query_arguments=arguments,
     )
 
 

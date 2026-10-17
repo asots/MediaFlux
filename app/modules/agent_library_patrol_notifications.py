@@ -93,7 +93,7 @@ def build_library_patrol_event(projection: Any) -> NotificationEvent:
         )
 
     lines = tuple(_episode_text(item) for item in safe["options"][:_MAX_LINES])
-    footer_parts = ["可在 Agent 中查询最近巡检结果并继续找资源。"]
+    footer_parts = ["按钮查询最近一次巡检结果，可能与本条通知时的快照不同。"]
     if safe["findings_truncated"] or len(safe["options"]) > _MAX_LINES:
         footer_parts.insert(0, "通知仅展示部分安全候选。")
     return NotificationEvent(

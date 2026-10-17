@@ -356,11 +356,14 @@ def test_completed_read_and_native_private_group_survive_but_current_truncated_g
         assert events[-1].payload["model_calls"] == 4
         assert events[-1].payload["business_tool_calls"] == 2
         assert phases(events) == ["planning", "planning", "answer_recovery", "planning"]
+        assert [e.payload["round"] for e in events if e.type is AgentEventType.MODEL_STARTED] == [1, 2, 3, 4]
         assert RECOVERY_HINT not in system_text(protocol, wire.requests[1])
         assert RECOVERY_HINT in system_text(protocol, wire.requests[2])
         assert RECOVERY_HINT not in system_text(protocol, wire.requests[3])
-        assert "业务工具调用已使用 1/2" in system_text(protocol, wire.requests[2])
-        assert "当前模型轮次 3/4" in system_text(protocol, wire.requests[2])
+        assert "实际剩余工具调用 1 次" in system_text(protocol, wire.requests[2])
+        assert "剩余规划轮次 1" in system_text(protocol, wire.requests[2])
+        assert "实际剩余工具调用 0 次" in system_text(protocol, wire.requests[3])
+        assert "剩余规划轮次 0" in system_text(protocol, wire.requests[3])
         assert wire.requests[2].get("tools") == wire.requests[1].get("tools")
         assert not wire.requests[3].get("tools")
         original = private_blocks(protocol, wire.requests[1])

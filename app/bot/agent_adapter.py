@@ -1087,7 +1087,7 @@ def handle_agent_patrol_callback(
             call.id, "当前身份无权使用 Media Agent", show_alert=True
         )
         return
-    bot.answer_callback_query(call.id, "正在交给 Media Agent")
+    bot.answer_callback_query(call.id, "正在读取最近一次巡检结果")
     try:
         _execute_query(
             bot,
@@ -1099,6 +1099,10 @@ def handle_agent_patrol_callback(
         )
     except Exception as exc:  # noqa: BLE001 - Telegram transport boundary
         logger.warning("Telegram Agent 巡检续接失败 type=%s", type(exc).__name__)
+        bot.send_message(
+            chat_id, "未能取得最近一次巡检结果，请稍后重试；旧通知不代表当前缺集状态。",
+            **_thread_kwargs(call.message),
+        )
 
 
 def _control_markup(

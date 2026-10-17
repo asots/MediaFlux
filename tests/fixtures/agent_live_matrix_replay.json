@@ -1,0 +1,250 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "kind": "synthetic_contract_replay",
+    "contract": "tests/test_agent_discovery_recommend.py:AgentRecommendationCompletionTests.test_empty_front_pages_and_library_filter_still_fill_requested_number",
+    "note": "复用DiscoveryPage/MediaCard/MediaIdentityInventory契约和现有测试的分页库存模式；所有标题/ID为明确合成测试数据，不是生产作品或回执。"
+  },
+  "cards": [
+    {
+      "provider": "tmdb",
+      "external_id": "2001",
+      "tmdb_id": "2001",
+      "media_type": "tv",
+      "title": "契约回放动画01",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2002",
+      "tmdb_id": "2002",
+      "media_type": "tv",
+      "title": "契约回放动画02",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2003",
+      "tmdb_id": "2003",
+      "media_type": "tv",
+      "title": "契约回放动画03",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2004",
+      "tmdb_id": "2004",
+      "media_type": "tv",
+      "title": "契约回放动画04",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2005",
+      "tmdb_id": "2005",
+      "media_type": "tv",
+      "title": "契约回放动画05",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2006",
+      "tmdb_id": "2006",
+      "media_type": "tv",
+      "title": "契约回放动画06",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2007",
+      "tmdb_id": "2007",
+      "media_type": "tv",
+      "title": "契约回放动画07",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2008",
+      "tmdb_id": "2008",
+      "media_type": "tv",
+      "title": "契约回放动画08",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2009",
+      "tmdb_id": "2009",
+      "media_type": "tv",
+      "title": "契约回放动画09",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2010",
+      "tmdb_id": "2010",
+      "media_type": "tv",
+      "title": "契约回放动画10",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2011",
+      "tmdb_id": "2011",
+      "media_type": "tv",
+      "title": "契约回放动画11",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2012",
+      "tmdb_id": "2012",
+      "media_type": "tv",
+      "title": "契约回放动画12",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2013",
+      "tmdb_id": "2013",
+      "media_type": "tv",
+      "title": "契约回放动画13",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2014",
+      "tmdb_id": "2014",
+      "media_type": "tv",
+      "title": "契约回放动画14",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2015",
+      "tmdb_id": "2015",
+      "media_type": "tv",
+      "title": "契约回放动画15",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2016",
+      "tmdb_id": "2016",
+      "media_type": "tv",
+      "title": "契约回放动画16",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2017",
+      "tmdb_id": "2017",
+      "media_type": "tv",
+      "title": "契约回放动画17",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2018",
+      "tmdb_id": "2018",
+      "media_type": "tv",
+      "title": "契约回放动画18",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2019",
+      "tmdb_id": "2019",
+      "media_type": "tv",
+      "title": "契约回放动画19",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2020",
+      "tmdb_id": "2020",
+      "media_type": "tv",
+      "title": "契约回放动画20",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2021",
+      "tmdb_id": "2021",
+      "media_type": "tv",
+      "title": "契约回放动画21",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2022",
+      "tmdb_id": "2022",
+      "media_type": "tv",
+      "title": "契约回放动画22",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2023",
+      "tmdb_id": "2023",
+      "media_type": "tv",
+      "title": "契约回放动画23",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2024",
+      "tmdb_id": "2024",
+      "media_type": "tv",
+      "title": "契约回放动画24",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2025",
+      "tmdb_id": "2025",
+      "media_type": "tv",
+      "title": "契约回放动画25",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2026",
+      "tmdb_id": "2026",
+      "media_type": "tv",
+      "title": "契约回放动画26",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2027",
+      "tmdb_id": "2027",
+      "media_type": "tv",
+      "title": "契约回放动画27",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2028",
+      "tmdb_id": "2028",
+      "media_type": "tv",
+      "title": "契约回放动画28",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2029",
+      "tmdb_id": "2029",
+      "media_type": "tv",
+      "title": "契约回放动画29",
+      "year": "2026"
+    },
+    {
+      "provider": "tmdb",
+      "external_id": "2030",
+      "tmdb_id": "2030",
+      "media_type": "tv",
+      "title": "契约回放动画30",
+      "year": "2026"
+    }
+  ]
+}

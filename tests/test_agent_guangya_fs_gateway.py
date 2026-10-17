@@ -2810,6 +2810,58 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             )
         self.assertIsNotNone(client.file_info("trash"))
 
+    def test_initial_execution_does_not_hide_newer_details_behind_old_listing(self):
+        for drift in ("source_version", "source_missing", "target_name", "target_missing"):
+            with self.subTest(drift=drift):
+                client = FakeGatewayClient()
+                plan = self._confirmed_plan(client, {
+                    "op": "move", "source_name": "Move.mp4", "target_path": "/target",
+                })
+                payload = self._queued_payload(plan)
+                info = client.file_info
+
+                def newer_info(file_id):
+                    current = info(file_id)
+                    if file_id == "move" and drift.startswith("source"):
+                        if drift == "source_missing":
+                            return None
+                        current.etag = "changed-after-preview"
+                    if file_id == "target" and drift.startswith("target"):
+                        if drift == "target_missing":
+                            return None
+                        current.name = "externally-renamed-target"
+                    return current
+
+                with mock.patch.object(client, "file_info", side_effect=newer_info), \
+                        mock.patch.object(client, "move", wraps=client.move) as moved:
+                    with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                moved.assert_not_called()
+
+    def test_initial_execution_allows_target_content_version_changes(self):
+        client = FakeGatewayClient()
+        plan = self._confirmed_plan(client, {
+            "op": "move", "source_name": "Move.mp4", "target_path": "/target",
+        })
+        payload = self._queued_payload(plan)
+        client.directories["0"][1].etag = "changed-by-other-child"
+        with mock.patch.object(client, "move", wraps=client.move) as moved:
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+        self.assertEqual(result["operation_items"][0]["status"], "completed")
+        moved.assert_called_once_with(["move"], "target")
+
+    def test_detail_read_failure_can_fall_back_but_absence_cannot(self):
+        client = FakeGatewayClient()
+        snapshot = {"file_id": "move", "parent_id": "source"}
+        with mock.patch.object(client, "file_info", side_effect=TimeoutError("detail unavailable")):
+            self.assertEqual(guangya_fs_change._find_current(client, snapshot).file_id, "move")
+            with mock.patch.object(client, "list_dir", side_effect=TimeoutError("list unavailable")):
+                self.assertIsNone(guangya_fs_change._find_current(client, snapshot))
+        with mock.patch.object(client, "file_info", return_value=None), \
+                mock.patch.object(client, "list_dir", wraps=client.list_dir) as listing:
+            self.assertIsNone(guangya_fs_change._find_current(client, snapshot))
+        listing.assert_not_called()
+
     def test_external_parent_change_invalidates_frozen_source_location(self):
         client = FakeGatewayClient()
         observed = self._query(client)

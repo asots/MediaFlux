@@ -25,7 +25,7 @@ from app.agent.kernel.state import (
     CancellationToken,
     InMemorySessionStateStore,
 )
-from tests.test_agent_tool_argument_ingress import encode, wire
+from tests.test_agent_tool_argument_ingress import Wire, encode, wire
 
 
 def catalog_schema(name):
@@ -192,9 +192,8 @@ def test_native_composed_schema_invalid_arguments_corrected_call(name, invalid, 
                               input_schema=schema, effect=ToolEffect.READ, validator=dict,
                               read=lambda args, ctx: executed.append(args) or {"ok": True, "summary": "read"})
         final = {"choices": [{"message": {"content": "已核验"}, "finish_reason": "stop"}]}
-        from tests.error30_model_inputs import explicit_repair_wire
-        transport = explicit_repair_wire("chat_completions", [wire("chat_completions", "json", encode(invalid)),
-                         wire("chat_completions", "json", encode(valid)), (encode(final).encode(), "application/json")], index=1, arguments=valid)
+        transport = Wire("chat_completions", [wire("chat_completions", "json", encode(invalid)),
+                         wire("chat_completions", "json", encode(valid)), (encode(final).encode(), "application/json")])
         catalog, store = ToolCatalog([tool]), InMemorySessionStateStore()
         session = AgentSession(model=transport.adapter, catalog=catalog, state_store=store,
                                retriever=CapabilityRetriever(minimum=1, maximum=1),

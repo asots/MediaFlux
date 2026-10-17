@@ -1631,6 +1631,8 @@ class DiscoveryResourceSiteFilterBrowserTests(unittest.TestCase):
         return page, errors
 
     def test_detail_dates_fill_cards_and_saved_views_without_extra_requests(self):
+        from playwright.sync_api import expect
+
         for width in (1440, 390):
             with self.subTest(width=width):
                 cards = [
@@ -1643,7 +1645,11 @@ class DiscoveryResourceSiteFilterBrowserTests(unittest.TestCase):
                 page, errors = self.open_catalogue(width=width, cards=cards, details=detail, requests=requests)
                 selector = '[data-media-key="douban:tv:37560173"]'
                 page.locator(selector).first.evaluate("node => window.__originalCard = node")
-                self.assertEqual(page.locator(selector).first.locator('.discovery-card-source span').first.inner_text(), "剧集")
+                meta = page.locator(selector).first.locator('.discovery-card-source span').first
+                self.assertEqual(meta.text_content(), "剧集")
+                # shelf 使用 content-visibility:auto；DOM 附着不等于已完成可见文本布局。
+                meta.scroll_into_view_if_needed()
+                expect(meta).to_have_text("剧集", use_inner_text=True)
                 page.locator(selector).first.locator('.discovery-card-open').click()
                 page.locator('.discovery-detail-fields').wait_for()
                 page.keyboard.press("Escape")

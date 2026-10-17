@@ -15,8 +15,11 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import StreamingResponse
 
 from app import config
+from app.agent.errors import AgentToolError
 from app.agent.feature_gate import is_agent_enabled
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
+from app.agent.kernel.capabilities import ToolEffect
+from app.agent.kernel.pipeline import ToolPipelineError
 from app.agent.kernel.continuation import ACTIVE as READ_WAIT_ACTIVE
 from app.agent.kernel.state import SelectionInvalidError, SessionBusyError
 from app.agent.kernel.transports import (
@@ -30,7 +33,7 @@ from app.agent.kernel.ux_selection import current_candidate_view, normalize_sele
 from app.agent.owner_routes import web_kernel_owner
 from app.agent.public_view import public_conversation_messages
 from app.agent.rate_limit import agent_rate_limiter
-from app.agent.workspace_next_actions import summarize_workspace_next_actions
+from app.agent.workspace_next_actions import resolve_workspace_action_handoff, summarize_workspace_next_actions
 from app.modules.web_secret import get_web_secret
 from app.web import api_error, api_response, require_api_login
 
@@ -159,6 +162,7 @@ def _last_turn_view(
 
 
 def _draft_scope(owner: str) -> str:
+    # 使用本请求已捕获的登录主体，异步读取期间切换账号不改变草稿归属。
     secret = str(get_web_secret() or "")
     if not secret:
         raise RuntimeError("draft scope secret unavailable")
@@ -167,22 +171,20 @@ def _draft_scope(owner: str) -> str:
     ).hexdigest()
 
 
-def _owner(request: Request) -> str:
-    """把已登录 Web principal 绑定到稳定 owner，而不是临时 CSRF 会话。"""
-    del request  # 鉴权由每个入口的 require_api_login 统一完成。
+def _owner() -> str:
+    """Web 会话只属于登录主体；鉴权由入口 require_api_login 完成。"""
     username, _password = config.web_credentials()
     return web_kernel_owner(username)
 
 
 def _check_rate_limit(
-    request: Request,
     scope: str,
     *,
     limit: int,
     cost: int = 1,
 ) -> None:
     owner_digest = hashlib.sha256(
-        b"mediaflux-agent-kernel-http-rate:v1\0" + _owner(request).encode()
+        b"mediaflux-agent-kernel-http-rate:v1\0" + _owner().encode()
     ).hexdigest()[:32]
     if not agent_rate_limiter.allow(
         f"webk:{owner_digest}:{scope}",
@@ -196,6 +198,11 @@ def _check_rate_limit(
 def _error(exc: Exception):
     if isinstance(exc, AgentRateLimitError):
         return api_error(str(exc), 429)
+    if isinstance(exc, AgentToolError):
+        return api_error(exc.safe_message, 409 if exc.code == "precondition_failed" else 400)
+    if isinstance(exc, ToolPipelineError):
+        return api_response({"error": str(exc), "code": exc.code,
+                             "old_plan_invalidated": exc.plan_invalidated}, 409)
     if isinstance(exc, (TransportInputError, SelectionInvalidError)):
         return api_error(str(exc), 400)
     if isinstance(exc, SessionBusyError):
@@ -231,7 +238,7 @@ async def next_actions(request: Request):
     require_api_login(request)
     try:
         _require_enabled()
-        _check_rate_limit(request, "next-actions", limit=30)
+        _check_rate_limit("next-actions", limit=30)
         try:
             result = await asyncio.to_thread(summarize_workspace_next_actions, {})
             payload = next_actions_view(result)
@@ -264,25 +271,40 @@ async def query(request: Request, data: Annotated[Any, Body()] = None):
             "stream",
             "request_id",
             "selection",
+            "action_key",
         }
     ):
         return api_error("请求字段无效", 400)
     try:
         _require_enabled()
-        _check_rate_limit(request, "query", limit=20)
+        _check_rate_limit("query", limit=20)
+        owner = _owner()
+        session_id = _session_id(data.get("session_id"))
+        request_id = _request_id(data.get("request_id"))
         message = data.get("message")
-        if not isinstance(message, str):
+        initial_read_tool = ""
+        if "action_key" in data:
+            if {"message", "selection"}.intersection(data):
+                raise TransportInputError("工作区行动不能与 message 或 selection 混用")
+            handoff = await asyncio.to_thread(resolve_workspace_action_handoff, {"action_key": data["action_key"]})
+            message, initial_read_tool = handoff["label"], handoff["target_tool"]
+        elif not isinstance(message, str):
             raise TransportInputError("message 必须是字符串")
         envelope = QueryEnvelope(
-            owner=_owner(request),
-            session_id=_session_id(data.get("session_id")),
+            owner=owner,
+            session_id=session_id,
             message=message,
-            request_id=_request_id(data.get("request_id")),
+            request_id=request_id,
             channel="web",
             selection=normalize_selection(data["selection"]) if "selection" in data else None,
+            initial_read_tool=initial_read_tool,
         )
         envelope.to_agent_input()
-        transport = get_agent_kernel_runtime().web
+        runtime = get_agent_kernel_runtime()
+        if initial_read_tool and (not runtime.session.catalog.has(initial_read_tool)
+                or runtime.session.catalog.get(initial_read_tool).effect is not ToolEffect.READ):
+            raise AgentToolError("该工作区只读行动当前不可用", code="precondition_failed")
+        transport = runtime.web
         if data.get("stream", True) is not False:
             return StreamingResponse(
                 transport.query(envelope),
@@ -310,7 +332,7 @@ async def cancel_query(request: Request, data: Annotated[Any, Body()] = None):
             raise TransportInputError("停止任务必须提供 request_id，不能通配取消当前会话")
         runtime = get_agent_kernel_runtime()
         cancelled = await runtime.web.cancel(
-            owner=_owner(request),
+            owner=_owner(),
             session_id=_session_id(data.get("session_id")),
             request_id=request_id,
         )
@@ -324,6 +346,21 @@ async def cancel_query(request: Request, data: Annotated[Any, Body()] = None):
         return _error(exc)
 
 
+@router.post("/session/stop")
+async def stop_session(request: Request, data: Annotated[Any, Body()] = None):
+    require_api_login(request)
+    if not isinstance(data, dict) or set(data) != {"session_id"}:
+        return api_error("请求字段无效", 400)
+    try:
+        from app.agent.task_stop import stop_agent_session
+
+        owner = _owner()
+        session_id = _session_id(data.get("session_id"))
+        return api_response(await stop_agent_session(get_agent_kernel_runtime(), owner, session_id))
+    except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
+        return _error(exc)
+
+
 @router.post("/actions/explain")
 async def explain_action(request: Request, data: Annotated[Any, Body()] = None):
     require_api_login(request)
@@ -331,10 +368,10 @@ async def explain_action(request: Request, data: Annotated[Any, Body()] = None):
         return api_error("请求字段无效", 400)
     try:
         _require_enabled()
-        _check_rate_limit(request, "explain", limit=12)
+        _check_rate_limit("explain", limit=12)
         if not isinstance(data.get("message"), str) or ("stream" in data and type(data["stream"]) is not bool):
             raise TransportInputError("message 无效")
-        envelope = ExplainEnvelope(owner=_owner(request), session_id=_session_id(data.get("session_id")),
+        envelope = ExplainEnvelope(owner=_owner(), session_id=_session_id(data.get("session_id")),
             plan_id=data.get("plan_id"), message=data["message"],
             request_id=_request_id(data.get("request_id")), channel="web").normalized()
         transport = get_agent_kernel_runtime().web
@@ -361,9 +398,9 @@ async def confirm_action(request: Request, data: Annotated[Any, Body()] = None):
         return api_error("请求字段无效", 400)
     try:
         _require_enabled()
-        _check_rate_limit(request, "confirm", limit=12)
+        _check_rate_limit("confirm", limit=12)
         envelope = EffectEnvelope(
-            owner=_owner(request),
+            owner=_owner(),
             session_id=_session_id(data.get("session_id")),
             plan_id=str(data.get("plan_id") or ""),
             request_id=_request_id(data.get("request_id")),
@@ -383,6 +420,26 @@ async def confirm_action(request: Request, data: Annotated[Any, Body()] = None):
         return _error(exc)
 
 
+@router.post("/actions/confirm/edit")
+async def edit_confirmation_action(request: Request, data: Annotated[Any, Body()] = None):
+    require_api_login(request)
+    if (not isinstance(data, dict) or not set(data).issubset({"session_id", "plan_id", "arguments", "request_id"})
+            or not isinstance(data.get("arguments"), dict)):
+        return api_error("请求字段无效", 400)
+    try:
+        _require_enabled()
+        _check_rate_limit("confirmation_edit", limit=12)
+        envelope = EffectEnvelope(owner=_owner(), session_id=_session_id(data.get("session_id")),
+                                  plan_id=data.get("plan_id"), request_id=_request_id(data.get("request_id")), channel="web").normalized()
+        result = await get_agent_kernel_runtime().session.edit_confirmation(
+            owner=envelope.owner, session_id=envelope.session_id, plan_id=envelope.plan_id,
+            arguments=data["arguments"], request_id=envelope.request_id, channel="web")
+        return api_response({"plan": result.effect_plan.public_approval_dict() if result.effect_plan else None,
+                             "result": dict(result.outcome.public_content), "old_plan_invalidated": True})
+    except Exception as exc:
+        return _error(exc)
+
+
 @router.post("/actions/confirm/discard")
 async def discard_action(request: Request, data: Annotated[Any, Body()] = None):
     require_api_login(request)
@@ -395,9 +452,9 @@ async def discard_action(request: Request, data: Annotated[Any, Body()] = None):
     ):
         return api_error("请求字段无效", 400)
     try:
-        _check_rate_limit(request, "discard", limit=20)
+        _check_rate_limit("discard", limit=20)
         envelope = EffectEnvelope(
-            owner=_owner(request),
+            owner=_owner(),
             session_id=_session_id(data.get("session_id")),
             plan_id=str(data.get("plan_id") or ""),
             request_id=_request_id(data.get("request_id")),
@@ -409,13 +466,32 @@ async def discard_action(request: Request, data: Annotated[Any, Body()] = None):
         return _error(exc)
 
 
+@router.post("/actions/trust")
+async def scoped_trust_action(request: Request, data: Annotated[Any, Body()] = None):
+    require_api_login(request)
+    if (not isinstance(data, dict) or not set(data).issubset(
+            {"session_id", "request_id", "operation", "plan_id", "tool_name", "scope", "ttl_seconds", "max_actions"})
+            or data.get("operation") not in {"grant", "revoke"}):
+        return api_error("请求字段无效", 400)
+    try:
+        _require_enabled()
+        _check_rate_limit("scoped_trust", limit=12)
+        selected = {key: data[key] for key in ("plan_id", "tool_name", "scope", "ttl_seconds", "max_actions") if key in data}
+        result = await get_agent_kernel_runtime().session.set_scoped_trust(
+            owner=_owner(), session_id=_session_id(data.get("session_id")),
+            request_id=_request_id(data.get("request_id")), operation=data["operation"], **selected)
+        return api_response(result)
+    except Exception as exc:
+        return _error(exc)
+
+
 @router.post("/session/reset")
 async def reset_session(request: Request, data: Annotated[Any, Body()] = None):
     require_api_login(request)
     if not isinstance(data, dict) or set(data) != {"session_id"}:
         return api_error("请求字段无效", 400)
     try:
-        owner = _owner(request)
+        owner = _owner()
         session_id = _session_id(data.get("session_id"))
         runtime = get_agent_kernel_runtime()
         state = await runtime.lifecycle.reset(owner=owner, session_id=session_id)
@@ -428,9 +504,9 @@ async def reset_session(request: Request, data: Annotated[Any, Body()] = None):
 async def list_sessions(request: Request):
     require_api_login(request)
     try:
-        owner = _owner(request)
-        sessions = await get_agent_kernel_runtime().store.list_sessions(owner=owner)
+        owner = _owner()
         draft_scope = _draft_scope(owner)
+        sessions = await get_agent_kernel_runtime().store.list_sessions(owner=owner)
         response = api_response({
             "sessions": sessions, "draft_scope": draft_scope,
             "scope": "recent_sessions",
@@ -447,14 +523,14 @@ async def patch_session(request: Request, session_id: str, data: Annotated[Any, 
     # 写入口沿用主应用 SecurityMiddleware 的登录与 X-CSRF-Token 校验。
     try:
         _require_enabled()
-        _check_rate_limit(request, "session-display", limit=30)
+        _check_rate_limit("session-display", limit=30)
         normalized = _session_id(session_id)
         try:
             patch = session_display_patch(data)
         except ValueError as exc:
             raise TransportInputError(str(exc)) from exc
         summary = await get_agent_kernel_runtime().store.patch_session_display(
-            owner=_owner(request), session_id=normalized, patch=patch,
+            owner=_owner(), session_id=normalized, patch=patch,
         )
         if summary is None:
             return api_error("会话不存在", 404)
@@ -470,7 +546,8 @@ async def get_session(request: Request, session_id: str):
         normalized = _session_id(session_id)
         observed_request = _request_id(request.headers.get("X-Agent-Request-Id"))
         runtime = get_agent_kernel_runtime()
-        owner = _owner(request)
+        owner = _owner()
+        draft_scope = _draft_scope(owner)
         activity_before = await runtime.web.activity(owner=owner, session_id=normalized)
         # 终态事件在会话结果提交之后发布：先读事件再读状态，避免
         # 空→活动→空的快速轮次返回“新完成事件 + 旧对话”。
@@ -520,12 +597,13 @@ async def get_session(request: Request, session_id: str):
         response = api_response(
             {
                 "session_id": normalized,
-                "draft_scope": _draft_scope(owner),
+                "draft_scope": draft_scope,
                 "generation": state.generation,
                 "task": task_projection(getattr(state, "metadata", {}).get("task")),
                 "turn_status": active_turn["status"] if active_turn else terminal_payload.get("turn_status", terminal_payload.get("status", (last_turn or {}).get("status"))),
                 "messages": messages,
                 "pending_approval": pending_approval,
+                "scoped_trust": runtime.session.pipeline.scoped_trust_view(state),
                 "candidate_view": candidate_view,
                 "active_turn": active_turn,
                 "pending_effect_count": pending_effect_count,
@@ -542,7 +620,7 @@ async def get_session(request: Request, session_id: str):
 async def delete_session(request: Request, session_id: str):
     require_api_login(request)
     try:
-        owner = _owner(request)
+        owner = _owner()
         normalized = _session_id(session_id)
         runtime = get_agent_kernel_runtime()
         deleted = await runtime.lifecycle.delete(owner=owner, session_id=normalized)

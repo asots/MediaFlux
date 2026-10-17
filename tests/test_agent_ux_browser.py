@@ -194,12 +194,12 @@ class AgentUXBrowserTests(unittest.TestCase):
         page = self.page({'queryEvents': [harness._event(1, 'turn.started')], 'holdQueryOpen': True})
         page.locator('#agentPrompt').fill('检查下载状态')
         page.locator('#agentSend').click()
-        page.wait_for_selector('#agentStop:not([hidden])')
+        page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'true'")
         self.assertTrue(page.locator('#agentPrompt').is_enabled())
         page.locator('#agentPrompt').fill('另外只看失败任务')
         page.locator('#agentPrompt').press('Enter')
         self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query').length"), 1)
-        page.locator('#agentStop').click()
+        page.locator('#agentStopSession').click()
         page.wait_for_selector('.agent-retry-draft')
         self.assertEqual(page.locator('#agentPrompt').input_value(), '另外只看失败任务')
         page.locator('.agent-retry-draft').click()
@@ -298,7 +298,7 @@ class AgentUXBrowserTests(unittest.TestCase):
                 page.locator('#agentSend').click()
                 page.wait_for_function("() => document.querySelector('#agentTranscript').scrollHeight > 2000")
                 page.evaluate("() => { const node = document.querySelector('#agentTranscript'); node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); }")
-                page.wait_for_function("() => document.querySelector('#agentStop').hidden")
+                page.wait_for_function("() => document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
                 self.assertLess(page.locator('#agentTranscript').evaluate('(node) => node.scrollTop'), 10)
                 self.assertTrue(page.locator('#agentNewReplies').is_visible())
                 page.locator('#agentNewReplies').click()
@@ -462,7 +462,7 @@ class AgentUXBrowserTests(unittest.TestCase):
         page.locator('#agentPrompt').fill('显示旧的搜索结果')
         page.locator('#agentSend').click()
         page.wait_for_selector('.agent-candidate-row', state='attached')
-        page.wait_for_function("() => document.querySelector('#agentStop').hidden")
+        page.wait_for_function("() => document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
         self.assertTrue(page.locator('.agent-candidate-select').first.is_disabled())
         self.assertIn('仅供回看', page.locator('.agent-candidates-note').inner_text())
         self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 390)
@@ -534,7 +534,7 @@ class AgentUXBrowserTests(unittest.TestCase):
             arg=session_path,
         )
         self.assertTrue(page.locator('#agentPrompt').is_enabled())
-        self.assertTrue(page.locator('#agentStop').is_hidden())
+        self.assertTrue(page.locator('#agentSend').get_attribute("aria-busy") == "false")
 
         page.locator('#agentPrompt').fill('观察期间保留的草稿')
         before = page.evaluate("""() => {
@@ -558,7 +558,7 @@ class AgentUXBrowserTests(unittest.TestCase):
         self.assertAlmostEqual(after, before, delta=1)
         self.assertEqual(page.locator('#agentPrompt').input_value(), '观察期间保留的草稿')
         self.assertTrue(page.locator('#agentPrompt').is_enabled())
-        self.assertTrue(page.locator('#agentStop').is_hidden())
+        self.assertTrue(page.locator('#agentSend').get_attribute("aria-busy") == "false")
         self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query' && call.method === 'POST').length"), 0)
 
     def test_receipt_observation_pauses_while_hidden_and_reloads_on_focus(self):
@@ -602,7 +602,7 @@ class AgentUXBrowserTests(unittest.TestCase):
         detail_reads = page.evaluate("(path) => window.__kernelCalls.filter(call => call.url === path).length", session_path)
         self.assertEqual(detail_reads, 2)
         self.assertTrue(page.locator('#agentPrompt').is_enabled())
-        self.assertTrue(page.locator('#agentStop').is_hidden())
+        self.assertTrue(page.locator('#agentSend').get_attribute("aria-busy") == "false")
 
     def test_switching_sessions_stops_the_previous_receipt_poll(self):
         page = self.page({
@@ -717,7 +717,7 @@ class AgentUXBrowserTests(unittest.TestCase):
 
         page.locator('#agentPrompt').fill('发起新请求')
         page.locator('#agentSend').click()
-        page.locator('#agentStop').wait_for(state='visible')
+        page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'true'")
         page.locator('#agentPrompt').fill('新请求期间保留的草稿')
         page.evaluate('window.__releaseReceiptRead()')
         page.wait_for_timeout(100)
@@ -725,7 +725,7 @@ class AgentUXBrowserTests(unittest.TestCase):
         self.assertIn('发起新请求', page.locator('#agentTranscript').inner_text())
         self.assertNotIn('不应覆盖新请求的晚到回执。', page.locator('#agentTranscript').inner_text())
         self.assertEqual(page.locator('#agentPrompt').input_value(), '新请求期间保留的草稿')
-        self.assertTrue(page.locator('#agentStop').is_visible())
+        self.assertTrue(page.locator('#agentStopSession').is_visible())
         self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/query' && call.method === 'POST').length"), 1)
 
     def test_accepted_cancel_waits_for_verified_terminal_instead_of_aborting_ui(self):
@@ -736,8 +736,8 @@ class AgentUXBrowserTests(unittest.TestCase):
         payload = session_snapshot(SESSION_A)
         payload.update(generation=3, messages=[{'role': 'user', 'content': '等待停止'}], active_turn=current)
         page = self.page({'cancelPending': True, 'sessions': {'draft_scope': SCOPE, 'sessions': []}, 'sessionDetails': {SESSION_A: payload}}, stored_session=SESSION_A)
-        page.locator('#agentStop').wait_for(state='visible')
-        page.locator('#agentStop').click()
+        page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'true'")
+        page.locator('#agentStopSession').click()
         page.wait_for_timeout(2200)
         self.assertNotIn('请求已停止', page.locator('#agentResponseStatus').inner_text())
         self.assertIn('停止', page.locator('#agentResponseStatus').inner_text())
@@ -746,8 +746,8 @@ class AgentUXBrowserTests(unittest.TestCase):
             last_turn: {...turn, status: 'cancelled', message: '已核实取消'},
         }; }""", {'id': SESSION_A, 'turn': current})
         page.get_by_text('已核实取消', exact=True).wait_for(timeout=10000)
-        self.assertTrue(page.locator('#agentStop').is_hidden())
-        self.assertEqual(page.evaluate("window.__kernelCalls.filter(c => c.url === '/api/agent/query/cancel').length"), 1)
+        self.assertTrue(page.locator('#agentSend').get_attribute("aria-busy") == "false")
+        self.assertEqual(page.evaluate("window.__kernelCalls.filter(c => c.url === '/api/agent/session/stop').length"), 1)
         self.assertEqual(page.evaluate("window.__kernelCalls.filter(c => c.url === '/api/agent/query').length"), 0)
 
     def test_failed_terminal_turn_is_restored_after_refresh(self):
@@ -830,6 +830,104 @@ class AgentUXBrowserTests(unittest.TestCase):
                 self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
                 self.snapshot(page, 'batch-preview-' + str(viewport['width']))
 
+    def test_frozen_twenty_resources_expand_without_candidate_view_and_cancel_once(self):
+        resources = [
+            {'position': index, 'title': f'冻结剧集 {index:02d}', 'site_name': '资源站 A'}
+            for index in range(1, 21)
+        ]
+        resources[-1]['title'] += ' FrozenEpisode20' + 'LongTitle' * 30
+        plan_id = 'plan_frozen_twenty_00001'
+        events = [
+            harness._event(1, 'turn.started'),
+            harness._event(2, 'effect.approval_required', {
+                'tool': 'ingest.submit',
+                'plan': {
+                    'plan_id': plan_id, 'effect': 'WRITE',
+                    'preview': {'data': {'count': 20, 'target': 'qb', 'resources': resources}},
+                    'confirmation': {},
+                },
+            }),
+            harness._event(3, 'turn.completed', {'status': 'approval_required'}),
+        ]
+        expected = [f"#{item['position']} · {item['title']} · {item['site_name']}" for item in resources]
+        for viewport in ({'width': 1280, 'height': 800}, {'width': 390, 'height': 844}):
+            with self.subTest(viewport=viewport):
+                page = self.page({'queryEvents': events}, viewport=viewport)
+                page.locator('#agentPrompt').fill('提交这 20 项，先让我核对冻结清单')
+                page.locator('#agentSend').click()
+                card = page.locator('.agent-confirmation-card')
+                card.wait_for()
+                scope = card.locator('.agent-confirmation-scope')
+                self.assertEqual(card.count(), 1)
+                self.assertEqual(page.locator('.agent-candidates').count(), 0)
+                self.assertEqual(scope.locator('li').count(), 20)
+                self.assertEqual(scope.locator(':scope > ul > li').all_text_contents(), expected[:8])
+                more = scope.locator('details')
+                self.assertEqual(more.count(), 1)
+                self.assertEqual(more.locator('li').all_text_contents(), expected[8:])
+                self.assertFalse(more.evaluate('node => node.open'))
+                self.assertTrue(all(item.is_visible() for item in scope.locator(':scope > ul > li').all()))
+                self.assertTrue(all(not item.is_visible() for item in more.locator('li').all()))
+                summary = more.locator('summary')
+                summary_text = summary.inner_text()
+                self.assertIn('另有 12 项', summary_text)
+                summary_box = summary.bounding_box()
+                collapsed_box = card.bounding_box()
+                self.assertGreaterEqual(summary_box['height'], 44)
+
+                summary.focus()
+                summary.press('Enter')
+                self.assertTrue(more.evaluate('node => node.open'))
+                self.assertNotEqual(summary.evaluate('node => getComputedStyle(node).outlineStyle'), 'none')
+                self.assertEqual(scope.locator('li').all_text_contents(), expected)
+                self.assertTrue(all(item.is_visible() for item in scope.locator('li').all()))
+                self.assertEqual(summary.inner_text(), summary_text)
+                expanded_summary_box = summary.bounding_box()
+                for dimension in ('width', 'height'):
+                    self.assertLessEqual(abs(expanded_summary_box[dimension] - summary_box[dimension]), 0.5)
+                self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
+
+                summary.press('Space')
+                self.assertFalse(more.evaluate('node => node.open'))
+                summary.click()
+                self.assertTrue(more.evaluate('node => node.open'))
+                summary.click()
+                self.assertFalse(more.evaluate('node => node.open'))
+                self.assertEqual(summary.inner_text(), summary_text)
+                restored_box = card.bounding_box()
+                for dimension in ('width', 'height'):
+                    self.assertLessEqual(abs(restored_box[dimension] - collapsed_box[dimension]), 0.5)
+                self.assertEqual(scope.locator('li').count(), 20)
+                self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.method === 'POST').map(call => call.url)"), ['/api/agent/query'])
+
+                # 快速重复激活取消：第一次须同步禁用按钮，不能产生第二次写请求。
+                card.locator('[data-effect-cancel]').evaluate('button => { button.click(); button.click(); }')
+                page.wait_for_selector('.agent-result-card')
+                self.assertIn('本次计划已取消，没有执行任何写操作。', page.locator('.agent-result-card').inner_text())
+                self.assertEqual(page.locator('.agent-confirmation-card').count(), 0)
+                calls = page.evaluate("window.__kernelCalls.filter(call => call.method === 'POST')")
+                self.assertEqual([call['url'] for call in calls], ['/api/agent/query', '/api/agent/actions/confirm/discard'])
+                self.assertEqual(json.loads(calls[-1]['body'])['plan_id'], plan_id)
+
+    def test_small_frozen_resource_lists_have_no_empty_disclosure(self):
+        for count in (0, 1, 8):
+            with self.subTest(count=count):
+                resources = [{'position': index, 'title': f'冻结剧集 {index:02d}'} for index in range(1, count + 1)]
+                data = {'count': count, 'target': 'qb'}
+                data.update({'resource': resources[0]} if count == 1 else {'resources': resources})
+                approval = {
+                    'plan_id': f'plan_frozen_small_{count:05d}', 'effect': 'WRITE',
+                    'preview': {'data': data}, 'confirmation': {},
+                }
+                page = self.page({'sessionDetails': {SESSION_A: session_snapshot(SESSION_A, pending_approval=approval)}}, stored_session=SESSION_A)
+                card = page.locator('.agent-confirmation-card')
+                card.wait_for()
+                self.assertEqual(card.locator('.agent-confirmation-scope li').count(), count)
+                self.assertEqual(card.locator('.agent-confirmation-scope details').count(), 0)
+                self.assertNotIn('另有', card.inner_text())
+                self.assertTrue(all(item.is_visible() for item in card.locator('.agent-confirmation-scope li').all()))
+                self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.method === 'POST').length"), 0)
+
     def test_confirmation_waiting_keeps_composer_slot_stable_and_shows_safe_progress(self):
         approval = {
             'plan_id': 'plan_ux_followup_0001',
@@ -875,8 +973,8 @@ class AgentUXBrowserTests(unittest.TestCase):
         during = page.locator('.agent-submit-slot').bounding_box()
         self.assertAlmostEqual(before['width'], during['width'], delta=0.5)
         self.assertAlmostEqual(before['height'], during['height'], delta=0.5)
-        self.assertTrue(page.locator('#agentStop').is_visible())
-        self.assertTrue(page.locator('#agentSend').is_hidden())
+        self.assertTrue(page.locator('#agentStopSession').is_visible())
+        self.assertTrue(page.locator('#agentSend').is_disabled())
         self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 390)
 
         page.locator('.agent-narrative').wait_for()
@@ -1158,42 +1256,45 @@ class AgentUXBrowserTests(unittest.TestCase):
         page.wait_for_function(
             "() => document.querySelector('.agent-stream-head')?.textContent.includes('安全排队中，等待实际状态回执')"
         )
-        self.assertTrue(page.locator('#agentStop').is_visible())
-        self.assertTrue(page.locator('#agentSend').is_hidden())
+        self.assertTrue(page.locator('#agentStopSession').is_visible())
+        self.assertTrue(page.locator('#agentSend').is_disabled())
         self.assertEqual(page.locator('.agent-streaming').count(), 1)
 
         page.evaluate("""() => {
           const original = window.fetch;
           window.fetch = async (url, options = {}) => {
             const path = new URL(String(url), location.href).pathname;
-            if (path === '/api/agent/query/cancel') {
+            if (path === '/api/agent/session/stop') {
               const request = JSON.parse(options.body || '{}');
+              const confirm = window.__kernelCalls.findLast(call => call.url === '/api/agent/actions/confirm');
+              const requestId = JSON.parse(confirm.body).request_id;
               window.__kernelCalls.push({url: path, method: 'POST', body: options.body || ''});
               window.__kernelConfig.sessionDetails ||= {};
               window.__kernelConfig.sessionDetails[request.session_id] = {
                 session_id: request.session_id, generation: 1, draft_scope: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                 messages: [{role: 'user', content: '暂停任务并等待实际状态'}],
                 pending_approval: null, candidate_view: null, last_turn: null,
-                active_turn: {request_id: request.request_id, turn_id: `turn-${request.request_id}`, generation: 1,
+                active_turn: {request_id: requestId, turn_id: `turn-${requestId}`, generation: 1,
                   protected: true, status: 'running', detail: '安全排队中，等待实际状态回执'},
               };
-              return new Response(JSON.stringify({cancelled: false}), {status: 200});
+              return new Response(JSON.stringify({status: 'critical_pending', stopped: false, model_turn: 'critical_pending'}), {status: 200});
             }
             return original(url, options);
           };
         }""")
-        page.locator('#agentStop').click()
-        page.wait_for_function("() => document.querySelector('#agentResponseStatus').textContent.includes('未被接受')")
-        page.wait_for_function("() => document.querySelector('#agentStop').hidden")
+        page.locator('#agentStopSession').click()
+        page.wait_for_function("() => document.querySelector('#agentResponseStatus').textContent.includes('不可中断')")
+        self.assertTrue(page.locator('#agentSend').is_disabled())
+        self.assertTrue(page.locator('#agentStopSession').is_visible())
         self.assertEqual(page.locator('.agent-streaming').count(), 1)
         self.assertEqual(page.locator('.agent-cancelled, .is-interrupted').count(), 0)
         calls = page.evaluate('window.__kernelCalls')
         self.assertEqual(sum(call['url'] == '/api/agent/actions/confirm' for call in calls), 1)
         self.assertEqual(sum(call['url'] == '/api/agent/query' for call in calls), 1)
-        cancel = next(call for call in calls if call['url'] == '/api/agent/query/cancel')
+        cancel = next(call for call in calls if call['url'] == '/api/agent/session/stop')
         confirm = next(call for call in calls if call['url'] == '/api/agent/actions/confirm')
         self.assertEqual(json.loads(cancel['body'])['session_id'], json.loads(confirm['body'])['session_id'])
-        self.assertEqual(json.loads(cancel['body'])['request_id'], json.loads(confirm['body'])['request_id'])
+        self.assertEqual(set(json.loads(cancel['body'])), {'session_id'})
 
     def test_candidate_refresh_restores_choices_and_keeps_card_bound_to_search(self):
         view = candidate_view()

@@ -233,6 +233,8 @@ def test_reference_capacity_is_explicit_and_rolls_back_before_wire(store, pressu
         await store.commit(lease, conversation=[{'role': 'user', 'content': 'durable previous task'}],
             updates=[StateUpdate('metadata.padding', 'p' * 110000)] if pressure == 'state' else [])
     asyncio.run(seed())
+    original_conversation = asyncio.run(store.load(owner=owner, session_id=sid)).conversation
+    assert original_conversation[0]['history_id']
     if pressure == 'receipt_merge':
         class ReceiptStore(SQLiteKernelStore):
             async def commit(self, lease, *, conversation=None, updates=()):
@@ -253,7 +255,7 @@ def test_reference_capacity_is_explicit_and_rolls_back_before_wire(store, pressu
     else:
         assert result.error_code in ('reference_capacity_exceeded', 'history_capacity_exceeded'), result
         assert not wire.requests
-        assert cold.conversation == [{'role': 'user', 'content': 'durable previous task'}]
+        assert cold.conversation == original_conversation
         if pressure == 'receipt_merge':
             assert 'legal-plan' in cold.metadata['effect_waits']
         with db.get_conn() as conn:

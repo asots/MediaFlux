@@ -22,7 +22,7 @@ _DISCOVER_FILTERS = {
     "sort_by", "with_genres", "without_genres", "with_keywords", "without_keywords",
     "primary_release_year", "first_air_date_year", "release_date.gte", "release_date.lte",
     "first_air_date.gte", "first_air_date.lte", "vote_average.gte", "vote_average.lte",
-    "vote_count.gte", "with_original_language", "region", "include_adult",
+    "vote_count.gte", "with_original_language", "with_origin_country", "region", "include_adult",
     "include_video", "with_watch_providers", "watch_region",
 }
 

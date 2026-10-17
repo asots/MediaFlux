@@ -73,7 +73,7 @@ def test_provider_pipeline_isolates_normalized_read_budgets_without_bypassing_li
         with pytest.raises(ToolPipelineError) as error:
             await query("invented.items.query")
         assert error.value.code == "invalid_arguments"
-        assert error.value.repair_ticket
+        assert not error.value.repair_ticket
         assert len(calls) == 9
 
     from app.agent.provider_actions import get_provider_gateway

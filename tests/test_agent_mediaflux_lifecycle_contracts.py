@@ -284,11 +284,13 @@ def test_plain_qa_keeps_one_model_zero_tool_eight_write_transactions():
             ["model.delta", 4, {"delta": "离线回答。", "round": 1}],
             ["turn.completed", 5, {"answer": "离线回答。", "finish_reason": "stop",
                                    "model_calls": 1, "status": "success", "tool_calls": 0, "usage": {},
-                                   "business_tool_calls": 0, "discovery_tool_calls": 0,
+                                   "business_tool_calls": 0, "discovery_tool_calls": 0, "successful_read_queries": 0,
                                    "turn_status": "success", "task": None}],
         ]
+        user_event_id = loaded.conversation[0]["history_id"]
+        assert isinstance(user_event_id, str) and user_event_id
         assert loaded.conversation == [
-            {"content": "你好", "role": "user"}, {"content": "离线回答。", "role": "assistant"},
+            {"content": "你好", "role": "user", "history_id": user_event_id}, {"content": "离线回答。", "role": "assistant"},
         ]
         assert [row["type"] for row in history] == [event.type.value for event in events]
     asyncio.run(check())

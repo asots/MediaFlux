@@ -399,6 +399,32 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             )
         self.assertEqual(operations, [])
 
+    def test_remote_restore_waits_for_visibility_without_repeating_writes(self) -> None:
+        from dataclasses import replace
+        from unittest.mock import Mock
+        from app.modules.guangya_compensation import GuangYaCompensationError, restore_guangya_file
+
+        expected = GuangYaFile("video", "Movie.mkv", False, 100, "etag", "source")
+        before = replace(expected, name="Renamed.mkv", parent_id="target")
+        for states, error in (
+            ([before, before, expected], None),
+            ([before] * 6, "补偿结果不一致"),
+            ([before, before, replace(expected, etag="other-content")], "内容身份已变化"),
+        ):
+            with self.subTest(error=error), patch("app.modules.guangya_compensation.time.sleep") as sleep:
+                client = Mock()
+                client.file_info.side_effect = states
+                client.rename.return_value = client.move.return_value = True
+                if error:
+                    with self.assertRaisesRegex(GuangYaCompensationError, error):
+                        restore_guangya_file(client, expected)
+                else:
+                    self.assertEqual(restore_guangya_file(client, expected), expected)
+                client.rename.assert_called_once_with("video", "Movie.mkv")
+                client.move.assert_called_once_with(["video"], "source")
+                self.assertEqual(client.file_info.call_count, len(states))
+                self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 3.75)
+
 
 class StrmRobustnessTests(IsolatedDatabaseTestCase):
     def _cleanup(self, source_id: str) -> None:

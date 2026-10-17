@@ -51,6 +51,12 @@ class ReferenceStore(Protocol):
         expected_kind: str = "",
     ) -> Any: ...
 
+    async def deadline(
+        self, ref: str, *, owner: str, session_id: str, expected_kind: str = "",
+    ) -> float:
+        """读取已校验引用的剩余 TTL，换算成当前进程的 monotonic 截止。"""
+        ...
+
 
 class InMemoryReferenceStore:
     def __init__(self, *, clock=time.monotonic, max_entries: int = 2048) -> None:
@@ -102,11 +108,24 @@ class InMemoryReferenceStore:
         session_id: str,
         expected_kind: str = "",
     ) -> Any:
+        value, _ = await self._read(ref, owner=owner, session_id=session_id, expected_kind=expected_kind)
+        return value
+
+    async def deadline(
+        self, ref: str, *, owner: str, session_id: str, expected_kind: str = "",
+    ) -> float:
+        _, deadline = await self._read(ref, owner=owner, session_id=session_id, expected_kind=expected_kind)
+        return deadline
+
+    async def _read(
+        self, ref: str, *, owner: str, session_id: str, expected_kind: str,
+    ) -> tuple[Any, float]:
         token = str(ref or "").strip()
         if not token.startswith("ref_") or len(token) > 200:
             raise ReferenceError("reference is invalid")
-        now = self._clock()
         async with self._lock:
+            observed_at = time.monotonic()
+            now = self._clock()
             self._prune(now)
             record = self._records.get(token)
             if record is None:
@@ -120,7 +139,7 @@ class InMemoryReferenceStore:
             kind = str(expected_kind or "").strip().casefold()
             if kind and record.kind != kind:
                 raise ReferenceError("reference type mismatch")
-            return deepcopy(record.value)
+            return deepcopy(record.value), observed_at + (record.expires_at - now)
 
     def _prune(self, now: float) -> None:
         expired = [

@@ -61,6 +61,30 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers.get("location"), "http://testserver/login")
 
+    def test_session_stop_requires_login_and_csrf_but_allows_disabled_cleanup(self):
+        from unittest.mock import AsyncMock, sentinel
+
+        body = {"session_id": "session_web_stop_0001"}
+        result = {"ok": True, "status": "already_stopped", "stopped": True}
+        with (
+            patch("app.agent.task_stop.stop_agent_session", new_callable=AsyncMock, return_value=result) as stop,
+            patch("app.routes.agent_api.get_agent_kernel_runtime", return_value=sentinel.runtime),
+        ):
+            anonymous = self.client.post("/api/agent/session/stop", json=body)
+            self.assertIn(anonymous.status_code, (401, 403))
+            stop.assert_not_awaited()
+            self._login()
+            csrf = self._csrf_token(self.client.get("/agent"))
+            rejected = self.client.post("/api/agent/session/stop", json=body)
+            self.assertEqual(rejected.status_code, 403, rejected.text)
+            stop.assert_not_awaited()
+            with patch("app.routes.agent_api.is_agent_enabled", return_value=False):
+                response = self.client.post("/api/agent/session/stop", json=body, headers={"X-CSRF-Token": csrf})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), result)
+            from app.agent.owner_routes import web_kernel_owner
+            self.assertEqual(stop.await_args.args[1:], (web_kernel_owner(web_credentials()[0]), body["session_id"]))
+
     def test_global_switch_hides_navigation_and_redirects_agent_page(self):
         self._login()
         with (
@@ -91,7 +115,9 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertIn('id="agentPrompt"', response.text)
         self.assertIn('maxlength="1000"', response.text)
         self.assertIn('id="agentSend"', response.text)
-        self.assertIn('id="agentStop"', response.text)
+        self.assertIn('id="agentStopSession"', response.text)
+        self.assertNotIn('id="agentStop"', response.text)
+        self.assertEqual(response.text.count('aria-label="停止任务"'), 1)
         self.assertIn('id="agentNewSession"', response.text)
         self.assertIn('id="agentNewSession" aria-label="新会话"', response.text)
         self.assertNotIn('class="workspace-bar"', response.text)
@@ -332,7 +358,7 @@ class AgentPageTests(InitializedWebTestCase):
             styles,
             re.compile(
                 r"@media \(max-width: 680px\)[\s\S]*?"
-                r"\.agent-send, \.agent-stop \{[^}]*width: 44px;[^}]*height: 44px;",
+                r"\.agent-send \{[^}]*width: 44px;[^}]*height: 44px;",
                 re.DOTALL,
             ),
         )
@@ -359,7 +385,7 @@ class AgentPageTests(InitializedWebTestCase):
         self.assertRegex(
             source,
             re.compile(
-                r"\.agent-send,\s*\n\.agent-stop\s*\{[^}]*"
+                r"\.agent-send\s*\{[^}]*"
                 r"width:\s*38px[^}]*height:\s*38px[^}]*min-width:\s*38px",
                 re.DOTALL,
             ),
@@ -368,7 +394,7 @@ class AgentPageTests(InitializedWebTestCase):
             source,
             re.compile(
                 r"@media \(max-width:\s*680px\)[\s\S]*?"
-                r"\.agent-send,\s*\.agent-stop\s*\{[^}]*"
+                r"\.agent-send\s*\{[^}]*"
                 r"width:\s*44px[^}]*height:\s*44px",
                 re.DOTALL,
             ),
@@ -407,7 +433,7 @@ class AgentPageTests(InitializedWebTestCase):
             source,
             re.compile(
                 r"@media \(prefers-reduced-motion: reduce\)[\s\S]*?"
-                r"\.agent-send, \.agent-stop\s*\{[^}]*"
+                r"\.agent-send\s*\{[^}]*"
                 r"transition:\s*none\s*!important",
                 re.DOTALL,
             ),
@@ -416,7 +442,7 @@ class AgentPageTests(InitializedWebTestCase):
             source,
             re.compile(
                 r"@media \(prefers-reduced-motion: reduce\)[\s\S]*?"
-                r"\.agent-stop:hover\s*\{[^}]*"
+                r"\.agent-send:hover\s*\{[^}]*"
                 r"transform:\s*none\s*!important",
                 re.DOTALL,
             ),

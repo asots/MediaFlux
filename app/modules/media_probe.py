@@ -253,6 +253,25 @@ def infer_media_source(value: object) -> str:
     return ""
 
 
+def infer_dynamic_ranges(value: object) -> tuple[str, ...]:
+    """保留发布名明确声明的组合格式；没有标签不等于 SDR。"""
+    lowered = str(value or "").casefold()
+    compact = re.sub(r"[^a-z0-9+]", "", lowered)
+    ranges = []
+    if "dolbyvision" in compact or "dovi" in compact or re.search(r"(?:^|[._ /-])dv(?:[._ /-]|$)", lowered):
+        ranges.append("DoVi")
+    if "hdr10+" in lowered or "hdr10plus" in compact:
+        ranges.append("HDR10+")
+    elif "hdr10" in compact:
+        ranges.append("HDR10")
+    elif re.search(r"(?:^|[._ /-])hdr(?:[._ /-]|$)", lowered):
+        ranges.append("HDR")
+    for tag in ("HLG", "SDR"):
+        if re.search(rf"(?:^|[._ /-]){tag.lower()}(?:[._ /-]|$)", lowered):
+            ranges.append(tag)
+    return tuple(ranges)
+
+
 def infer_media_profile(value: object) -> MediaProfile:
     """从发布名/路径提取强证据，作为 ffprobe 缺失字段的无网络降级。"""
     text = str(value or "")
@@ -262,24 +281,9 @@ def infer_media_profile(value: object) -> MediaProfile:
         (token for token in ("2160p", "1080p", "720p", "480p") if token in lowered),
         "",
     )
-    if "dolbyvision" in compact or "dovi" in compact:
-        dynamic_range = "DoVi"
-        dolby_vision: bool | None = True
-    elif "hdr10+" in lowered or "hdr10plus" in compact:
-        dynamic_range = "HDR10+"
-        dolby_vision = None
-    elif "hdr10" in compact:
-        dynamic_range = "HDR10"
-        dolby_vision = None
-    elif re.search(r"(?:^|[._ /-])hdr(?:[._ /-]|$)", lowered):
-        dynamic_range = "HDR"
-        dolby_vision = None
-    elif re.search(r"(?:^|[._ /-])sdr(?:[._ /-]|$)", lowered):
-        dynamic_range = "SDR"
-        dolby_vision = None
-    else:
-        dynamic_range = ""
-        dolby_vision = None
+    ranges = infer_dynamic_ranges(text)
+    dynamic_range = ranges[0] if ranges else ""
+    dolby_vision = True if "DoVi" in ranges else None
 
     if any(token in compact for token in ("h265", "x265", "hevc")):
         video_codec = "H.265"

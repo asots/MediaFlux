@@ -446,6 +446,7 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
                 mapping_context = {
                     "detail": {
                         "name": str(details.get("name") or ""),
+                        "original_name": str(details.get("original_name") or ""),
                         "seasons": [
                             {
                                 "season_number": item.get("season_number"),

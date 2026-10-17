@@ -142,6 +142,7 @@ class FakeEffectStore:
 class FakeApprovalPlan:
     def __init__(self, payload):
         self.payload = payload
+        self.arguments = {}
 
     def public_approval_dict(self):
         return dict(self.payload)
@@ -366,6 +367,24 @@ class AgentKernelApiTests(unittest.TestCase):
                 "plan_id": "plan-restore-0001",
             }],
         )
+
+    def test_session_restore_reads_card_if_confirmation_starts_after_activity_snapshot(self):
+        from app.agent.kernel.session_guard import session_scope_guard
+
+        owner, sid = "webk:v1:" + "a" * 64, "session_1234567890"
+        self.runtime.store.state = types.SimpleNamespace(
+            generation=4, conversation=[], metadata={},
+            pending_effect_plan_id="plan-restore-0001",
+        )
+        self.lifecycle.effect_store.plan = FakeApprovalPlan({"plan_id": "plan-restore-0001"})
+        # Web activity 尚未观察到保护轮次，但另一个线程已持有确认写锁。
+        # GET 只读卡片，不应返回“不能重置或删除”的 409，也不消费票据。
+        with session_scope_guard(owner, sid, kind="effect"):
+            response = self.client.get(f"/api/agent/sessions/{sid}")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["pending_approval"]["plan_id"], "plan-restore-0001")
+        self.assertEqual(self.runtime.store.state.pending_effect_plan_id, "plan-restore-0001")
+        self.assertEqual(self.web.confirmations, [])
 
     def test_session_restore_includes_active_turn_with_safe_phase_detail(self):
         from app.agent.kernel.events import AgentEventType
@@ -656,6 +675,103 @@ class AgentKernelApiTests(unittest.TestCase):
         )
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(len(self.web.cancel_calls), 1)
+
+    def test_session_stop_reuses_shared_service_and_preserves_actual_outcomes(self):
+        for status in (
+            "stopped", "already_stopped", "stopping", "partially_stopping",
+            "partial", "critical_pending", "superseded", "stop_unconfirmed",
+        ):
+            with self.subTest(status=status):
+                result = {
+                    "ok": True, "status": status,
+                    "stopped": status in {"stopped", "already_stopped"},
+                    "model_turn": "not_running", "confirmation": "none",
+                    "background_tasks": [{"kind": "guangya_download", "status": "uncancellable"}],
+                    "uncancellable": [{"kind": "guangya_download", "status": "uncancellable"}],
+                    "cancelled_continuations": ["wait-one"], "stop_requested_generation": 3,
+                }
+                with patch("app.agent.task_stop.stop_agent_session", new_callable=AsyncMock, return_value=result) as stop:
+                    response = self.client.post("/api/agent/session/stop", json={"session_id": "session_1234567890"})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json(), result)
+                stop.assert_awaited_once_with(self.runtime, "webk:v1:" + "a" * 64, "session_1234567890")
+        self.assertEqual(self.web.cancel_calls, [])
+
+    def test_session_stop_rejects_invalid_scope_and_requires_login(self):
+        from fastapi import HTTPException
+
+        with patch("app.agent.task_stop.stop_agent_session", new_callable=AsyncMock) as stop:
+            for body in (None, [], {}, {"session_id": "bad/id"},
+                         {"session_id": "session_1234567890", "owner": "someone-else"},
+                         {"session_id": "session_1234567890", "request_id": "request-one"}):
+                with self.subTest(body=body):
+                    response = self.client.post("/api/agent/session/stop", json=body)
+                    self.assertEqual(response.status_code, 400, response.text)
+            with patch.object(agent_kernel_api, "require_api_login", side_effect=HTTPException(status_code=401)):
+                response = self.client.post("/api/agent/session/stop", json={"session_id": "session_1234567890"})
+            self.assertEqual(response.status_code, 401, response.text)
+            stop.assert_not_awaited()
+
+    def test_session_stop_remains_available_when_agent_is_disabled(self):
+        result = {"ok": True, "status": "already_stopped", "stopped": True}
+        with (
+            patch.object(agent_kernel_api, "is_agent_enabled", return_value=False),
+            patch.object(agent_kernel_api, "_require_enabled", side_effect=AssertionError("收尾不可受启用开关阻挡")),
+            patch("app.agent.task_stop.stop_agent_session", new_callable=AsyncMock, return_value=result) as stop,
+        ):
+            response = self.client.post("/api/agent/session/stop", json={"session_id": "session_1234567890"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), result)
+        stop.assert_awaited_once()
+
+    def test_session_stop_cancels_parked_read_once_and_isolates_owner_and_session(self):
+        from app import database as db
+        from app.agent.feature_gate import initialize_runtime_fence
+        from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
+        from app.agent.kernel.persistence import SQLiteKernelStore
+        from app.agent.kernel.state import AgentInput
+        from tests.support import isolated_test_database
+        from tests.test_agent_read_wait_lifecycle import WaitScript, Quota, GOAL
+
+        owner, session_id = "webk:v1:" + "a" * 64, "session_wait_stop_0001"
+        scopes = [(owner, session_id), (owner, "session_wait_other_0001"), ("webk:v1:" + "b" * 64, session_id)]
+        with isolated_test_database():
+            db.init_db()
+            initialize_runtime_fence()
+
+            async def park():
+                store = SQLiteKernelStore(clock=lambda: 100)
+                for scoped_owner, scoped_session in scopes:
+                    runtime = build_agent_kernel_runtime(model=WaitScript().adapter, store=store)
+                    runtime.session.continuation_binding = _capture_creation_binding()
+                    runtime.session.pipeline.rate_limiter = Quota()
+                    events = [event async for event in runtime.session.run(AgentInput(
+                        owner=scoped_owner, session_id=scoped_session, message=GOAL,
+                        request_id="waiting-source", channel="web",
+                    ))]
+                    self.assertEqual(events[-1].payload.get("status"), "waiting", [(event.type.value, dict(event.payload)) for event in events[-3:]])
+                return runtime
+
+            runtime = asyncio.run(park())
+            with patch.object(agent_kernel_api, "get_agent_kernel_runtime", return_value=runtime):
+                exact = self.client.post("/api/agent/query/cancel", json={"session_id": session_id, "request_id": "stale-request"})
+                self.assertEqual(exact.status_code, 200, exact.text)
+                self.assertFalse(exact.json()["cancelled"])
+                before = asyncio.run(runtime.store.load(owner=owner, session_id=session_id))
+                self.assertEqual(before.metadata["read_wait"]["state"], "pending")
+                first = self.client.post("/api/agent/session/stop", json={"session_id": session_id})
+                self.assertEqual(first.status_code, 200, first.text)
+                self.assertEqual(first.json()["status"], "stopped")
+                self.assertEqual(first.json()["cancelled_continuations"], [before.metadata["read_wait"]["wait_id"]])
+                repeated = self.client.post("/api/agent/session/stop", json={"session_id": session_id})
+                self.assertEqual(repeated.status_code, 200, repeated.text)
+                self.assertEqual(repeated.json()["status"], "already_stopped")
+                self.assertEqual(repeated.json()["cancelled_continuations"], [])
+            for scoped_owner, scoped_session in scopes:
+                state = asyncio.run(runtime.store.load(owner=scoped_owner, session_id=scoped_session))
+                self.assertEqual(state.metadata["read_wait"]["state"], "cancelled" if (scoped_owner, scoped_session) == scopes[0] else "pending")
+                if (scoped_owner, scoped_session) == scopes[0]:
+                    self.assertEqual(state.conversation, before.conversation)
 
     def test_pipeline_snapshots_the_exact_projected_public_result(self):
         from app.agent.confirmation import ConfirmationStore

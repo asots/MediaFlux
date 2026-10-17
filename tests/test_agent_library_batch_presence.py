@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -12,7 +12,7 @@ from app.agent.library_batch_presence import (
 )
 from app.clients.base import MediaIdentityCandidate, MediaIdentityInventory
 from app.services import (
-    _media_identity_batch_source_payload,
+    inspect_media_identity_batch,
     summarize_media_identity_batch,
 )
 
@@ -47,9 +47,8 @@ class _FakeMediaClient:
 
 def test_service_batch_presence_enumerates_library_once_per_media_type():
     client = _FakeMediaClient()
-    result = _media_identity_batch_source_payload(
-        "jellyfin", "Jellyfin", client, _ITEMS
-    )
+    with patch("app.services._configured_media_sources", return_value=[("jellyfin", "Jellyfin", "", client)]):
+        result = inspect_media_identity_batch(_ITEMS)[0]
 
     assert client.calls == 1
     assert [item["status"] for item in result["items"]] == [
@@ -57,6 +56,48 @@ def test_service_batch_presence_enumerates_library_once_per_media_type():
         "possible",
         "missing",
     ]
+
+
+def test_identity_snapshot_reuses_each_server_and_type_only_within_one_request():
+    from app import services
+
+    movie = MediaIdentityInventory(candidates=[], total=0)
+    tv = MediaIdentityInventory(candidates=[], total=0)
+    client = Mock()
+    client.list_media_identity_inventory.side_effect = lambda media_type, **_: movie if media_type == "movie" else tv
+    with patch("app.services._configured_media_sources", return_value=[("jellyfin", "Jellyfin", "", client)]):
+        snapshot = services.load_media_identity_snapshot(("movie", "tv"))
+        for number in (1, 2):
+            identities = [{"tmdb_id": str(number), "media_type": kind, "title": "作品"} for kind in ("movie", "tv")]
+            sources = services.inspect_media_identity_batch(identities, snapshot=snapshot)
+            assert [item["status"] for item in sources[0]["items"]] == ["missing", "missing"]
+        assert client.list_media_identity_inventory.call_count == 2
+        movie.candidates.append(MediaIdentityCandidate(name="作品", tmdb_id="1", media_type="movie"))
+        next_snapshot = services.load_media_identity_snapshot(("movie",))
+        current = services.inspect_media_identity_batch([{"tmdb_id": "1", "media_type": "movie"}], snapshot=next_snapshot)
+        assert current[0]["items"][0]["status"] == "present"
+        assert client.list_media_identity_inventory.call_count == 3
+        # 旧请求继续使用原快照，不能被下一次枚举的可变列表偷偷更新。
+        original = services.inspect_media_identity_batch([{"tmdb_id": "1", "media_type": "movie"}], snapshot=snapshot)
+        assert original[0]["items"][0]["status"] == "missing"
+
+
+def test_identity_snapshot_enumerates_each_server_and_type_once_and_closes_clients():
+    from app import services
+
+    clients = [Mock(), Mock()]
+    for client in clients:
+        client.list_media_identity_inventory.return_value = MediaIdentityInventory(candidates=[], total=0)
+    configured = [("emby", "Emby", "", clients[0]), ("jellyfin", "Jellyfin", "", clients[1])]
+    with patch("app.services._configured_media_sources", return_value=configured):
+        snapshot = services.load_media_identity_snapshot(("movie", "tv", "movie"))
+    for number in (1, 2):
+        identities = [{"tmdb_id": str(number), "media_type": kind} for kind in ("movie", "tv")]
+        sources = services.inspect_media_identity_batch(identities, snapshot=snapshot)
+        assert services.summarize_media_identity_batch(identities, sources)["counts"]["missing"] == 2
+    for client in clients:
+        assert [call.args[0] for call in client.list_media_identity_inventory.call_args_list] == ["movie", "tv"]
+        client.close.assert_called_once_with()
 
 
 def test_batch_presence_aggregates_all_sources_without_per_title_search():

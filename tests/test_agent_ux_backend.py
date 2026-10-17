@@ -45,6 +45,7 @@ from app.agent.recent_resource_candidates import (
     safe_resource_snapshot,
 )
 from app.routes import agent_api
+from tests.test_agent_ux_model_context import model_resource_candidates
 
 SECRET = "agent-ux-backend-test-secret"
 OWNER = "owner-ux"
@@ -76,7 +77,9 @@ def api(store, monkeypatch):
         request.session.update(logged_in=True, csrf_token="ux-csrf")
         return {"ok": True}
 
-    runtime = SimpleNamespace(store=store, web=SimpleNamespace(activity=AsyncMock(return_value=None)))
+    session, _, _ = _runtime(store)
+    runtime = SimpleNamespace(store=store, session=session,
+                              web=SimpleNamespace(activity=AsyncMock(return_value=None)))
     principal = {"username": "ux-account-a"}
     monkeypatch.setattr(agent_api.config, "web_credentials", lambda: (principal["username"], "unused"))
     monkeypatch.setattr(agent_api, "get_agent_kernel_runtime", lambda: runtime)
@@ -212,6 +215,27 @@ def test_patch_auth_csrf_owner_missing_clean_title_and_stable_draft_scope(api, m
     assert api.client.get("/api/agent/sessions").json()["draft_scope"] != scope
 
 
+@pytest.mark.parametrize("binding", ["", "old-binding", "f" * 64])
+def test_retired_tg_header_cannot_read_or_modify_telegram_session(api, binding):
+    _login(api)
+    tg_owner = "tg:v1:100\x1f200"
+    asyncio.run(_seed(api.store, owner=tg_owner))
+    tg_before = asyncio.run(api.store.load(owner=tg_owner, session_id=SESSION))
+    headers = {**CSRF, "X-Agent-Handoff": binding}
+    path = f"/api/agent/sessions/{SESSION}"
+    response = api.client.get(path, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["messages"] == []
+    assert response.json()["pending_approval"] is None
+    assert api.client.patch(path, headers=headers, json={"title": "不得改TG"}).status_code == 404
+    asyncio.run(_seed(api.store, owner=_web_owner(api)))
+    assert api.client.patch(path, headers=headers, json={"title": "仅Web"}).status_code == 200
+    tg_after = asyncio.run(api.store.load(owner=tg_owner, session_id=SESSION))
+    assert tg_after == tg_before
+    sessions = api.client.get("/api/agent/sessions", headers=headers).json()["sessions"]
+    assert len(sessions) == 1 and sessions[0]["title"] == "仅Web"
+
+
 @pytest.mark.parametrize("payload", [None, {}, {"title": 42}, {"title": " "}, {"title": "a" * 81},
     {"title": "https://internal/private"}, {"pinned": 1}, {"pinned": "true"},
     {"title": "有效", "conversation": []}, {"generation": 1}, {"title": "\u0000\u200b"}])
@@ -239,12 +263,12 @@ def test_metadata_patch_keeps_inflight_pending_generation_and_concurrent_turn(st
         assert _row_snapshot()["agent_kernel_session_epochs"] == rows_before["agent_kernel_session_epochs"]
         assert _row_snapshot()["agent_kernel_sessions"][0][-1] == rows_before["agent_kernel_sessions"][0][-1]
         await asyncio.gather(
-            second_store.commit(lease, conversation=[{"role": "user", "content": "新回合内容"}],
+            second_store.commit(lease, conversation=[{"role": "user", "content": "新回合内容", "history_id": "concurrent-user-event"}],
                                 updates=(StateUpdate("metadata.new_turn", True),)),
             store.patch_session_display(owner=OWNER, session_id=SESSION, patch={"pinned": True}),
         )
         state = await second_store.load(owner=OWNER, session_id=SESSION)
-        assert state.conversation == [{"role": "user", "content": "新回合内容"}]
+        assert state.conversation == [{"role": "user", "content": "新回合内容", "history_id": "concurrent-user-event"}]
         assert state.metadata == {
             "inflight": {"operation": "protected"}, "title": "用户标题", "pinned": True,
             "new_turn": True,
@@ -367,8 +391,8 @@ async def _publish_candidates(pipeline, states, *, owner=OWNER, session_id=SESSI
     result = await pipeline.execute("indexer.search_resources", {"title": "Example"}, context=context)
     view = result.outcome.public_content["candidate_view"]
     if view is None:
-        numbers = json.loads(result.outcome.model_content)["candidate_numbers"]
-        if not any(item["requested_episode"] for item in numbers):
+        numbers = model_resource_candidates(json.loads(result.outcome.model_content))
+        if not any(item.get("requested_episode") for item in numbers):
             result = await pipeline.execute("indexer.present_candidates", {
                 **result.outcome.public_content["reference_arguments"],
                 "positions": [item["position"] for item in numbers],
@@ -551,10 +575,11 @@ def test_pipeline_rejects_model_rewriting_verified_choice_before_provider(store)
 def test_get_session_restores_only_valid_current_candidates_and_query_accepts_selection(api):
     _login(api)
     owner = _web_owner(api)
-    _, pipeline, states = _runtime(api.store)
-    view, _ = asyncio.run(_publish_candidates(pipeline, states, owner=owner))
+    pipeline = api.runtime.session.pipeline
+    view, _ = asyncio.run(_publish_candidates(pipeline, api.store, owner=owner))
     response = api.client.get(f"/api/agent/sessions/{SESSION}")
     assert response.status_code == 200 and response.json()["candidate_view"] == view
+    assert response.json()["scoped_trust"] == {"active": False}
     class Web:
         async def activity(self, *, owner, session_id):
             return None
@@ -570,7 +595,9 @@ def test_get_session_restores_only_valid_current_candidates_and_query_accepts_se
     for selection in (None, {}, {"ref": view["ref"], "position": True}, {**_selection(view), "url": "https://private"}):
         assert api.client.post("/api/agent/query", json={"message": "选择", "session_id": SESSION, "selection": selection}, headers=CSRF).status_code == 400
     api.principal["username"] = "foreign"
-    assert api.client.get(f"/api/agent/sessions/{SESSION}").json()["candidate_view"] is None
+    response = api.client.get(f"/api/agent/sessions/{SESSION}")
+    assert response.status_code == 200 and response.json()["candidate_view"] is None
+    assert response.json()["scoped_trust"] == {"active": False}
 
 
 def test_patch_preserves_signed_unknown_fields_and_full_conversation_json(store):
@@ -843,7 +870,7 @@ def test_general_search_does_not_recommend_old_episodes_or_suggest_ingest(store)
         assert view["items"], "普通搜索仍应允许用户手动挑选"
         assert view["recommended_positions"] == []
         assert '"recommended_ingest_arguments":' not in result.outcome.model_content
-        assert '"candidate_numbers":' in result.outcome.model_content
+        assert model_resource_candidates(json.loads(result.outcome.model_content))
         view, _ = await _publish_candidates(pipeline, states, context=context)
         # 旧会话曾按标题给出自动推荐，重新读取时不能继续沿用。
         state = await states.load(owner=OWNER, session_id=SESSION)
@@ -960,7 +987,7 @@ def test_raw_search_keeps_model_evidence_without_publishing_unselected_cards(sto
         for title in ("狐妖小红娘", "Fox Spirit Matchmaker"):
             result = await pipeline.execute("indexer.search_resources", {"title": title}, context=context)
             assert result.outcome.public_content["candidate_view"] is None
-            assert '"candidate_numbers":' in result.outcome.model_content
+            assert model_resource_candidates(json.loads(result.outcome.model_content))
             assert "resource_candidates_ref" in result.outcome.model_content
             assert '"recommended_ingest_arguments":' not in result.outcome.model_content
         state = await states.load(owner=OWNER, session_id=SESSION)
@@ -1001,8 +1028,52 @@ def test_explicit_presentation_preserves_positions_and_can_clear_the_view(store)
             "resource_candidates_ref": view["ref"], "positions": [],
         }, context=context)
         assert cleared.outcome.public_content["candidate_view"] is None
+        assert not json.loads(cleared.outcome.model_content).get("candidate_numbers")
         state = await states.load(owner=OWNER, session_id=SESSION)
         assert await current_candidate_view(state=state, store=store) is None
+    asyncio.run(exercise())
+
+
+def test_candidate_refinement_filters_model_card_and_selection_from_one_result(store, monkeypatch):
+    resources = _resources()
+    resources.data["items"][1]["title"] += ".SDR"
+    resources.references = [ToolReference("resource_candidates", safe_resource_snapshot(resources, search_id=new_resource_search_id()))]
+    monkeypatch.setattr(__import__(__name__, fromlist=["_resources"]), "_resources", lambda **_: resources)
+
+    async def exercise():
+        _, pipeline, states = _runtime(store)
+        original, context = await _publish_candidates(pipeline, states)
+        result = await pipeline.execute("indexer.present_candidates", {
+            "resource_candidates_ref": original["ref"], "positions": [1, 2],
+            "resolution": "2160p", "dynamic_range": "SDR",
+        }, context=context)
+        model = json.loads(result.outcome.model_content)
+        view = result.outcome.public_content["candidate_view"]
+        assert model["data"]["positions"] == [2]
+        assert model["data"]["technical_filter"]["unknown_excluded"] == 1
+        assert model["data"]["scope"]["complete"] is True
+        assert [item["position"] for item in model["candidate_numbers"]] == [2]
+        assert [item["position"] for item in view["items"]] == [2]
+        state = await states.load(owner=OWNER, session_id=SESSION)
+        assert (await current_candidate_view(state=state, store=store))["items"] == view["items"]
+        assert (await validate_selection(_selection(view, [2]), state=state, store=store)).arguments["positions"] == [2]
+        with pytest.raises(SelectionInvalidError):
+            await validate_selection(_selection(view, [1]), state=state, store=store)
+
+        empty = await pipeline.execute("indexer.present_candidates", {
+            "resource_candidates_ref": original["ref"], "positions": [1, 2], "dynamic_range": "HDR",
+        }, context=context)
+        model = json.loads(empty.outcome.model_content)
+        assert model["data"]["positions"] == []
+        assert not model.get("candidate_numbers")
+        assert empty.outcome.public_content["candidate_view"] is None
+        assert await current_candidate_view(state=await states.load(owner=OWNER, session_id=SESSION), store=store) is None
+        # 筛选不破坏原快照，也不把当前展示作为隐藏的永久检索条件。
+        unrestricted = await pipeline.execute("indexer.present_candidates", {
+            "resource_candidates_ref": original["ref"], "positions": [1, 2],
+        }, context=context)
+        assert len(unrestricted.outcome.public_content["candidate_view"]["items"]) == 2
+
     asyncio.run(exercise())
 
 
@@ -1025,7 +1096,8 @@ def test_explicit_presentation_cannot_override_missing_episode_coverage(store):
 
 
 @pytest.mark.parametrize("scope", ["expired", "foreign_owner", "foreign_session"])
-def test_present_requires_a_live_reference_in_this_session(store, scope):
+@pytest.mark.parametrize("tool", ["indexer.present_candidates", "indexer.search_resources"])
+def test_refinement_requires_a_live_reference_in_this_session(store, scope, tool):
     async def exercise():
         _, pipeline, states = _runtime(store)
         view, context = await _publish_candidates(pipeline, states)
@@ -1036,8 +1108,9 @@ def test_present_requires_a_live_reference_in_this_session(store, scope):
             lease, _ = await states.begin_turn(owner=owner, session_id=session_id, request_id="other")
             context = replace(context, owner=owner, session_id=session_id, lease=lease, turn_id=lease.turn_id)
         with pytest.raises(ToolPipelineError) as error:
-            await pipeline.execute("indexer.present_candidates", {
-                "resource_candidates_ref": view["ref"], "positions": [1],
+            await pipeline.execute(tool, {
+                "resource_candidates_ref": view["ref"],
+                **({"positions": [1]} if tool == "indexer.present_candidates" else {"resolution": "2160p"}),
             }, context=context)
         assert error.value.code == "reference_invalid"
     asyncio.run(exercise())
@@ -1116,7 +1189,10 @@ def test_general_resource_search_can_explicitly_present_a_relevant_subset(store)
                 tool = ModelToolCall("search", "indexer.search_resources", {"title": "Example"})
             elif self.calls == 2:
                 evidence = next(message.content for message in reversed(request.messages) if message.role == "tool")
-                refs = json.loads(evidence)["reference_arguments"]
+                payload = json.loads(evidence)
+                assert all(row["technical_evidence"]["stream_verified"] is False
+                           for row in model_resource_candidates(payload))
+                refs = payload["reference_arguments"]
                 tool = ModelToolCall("present", "indexer.present_candidates", {**refs, "positions": [2]})
             else:
                 yield ModelEvent(ModelEventType.TEXT_DELTA, text="已挑选第2个版本，可先预览，尚未下载。")
@@ -1141,4 +1217,91 @@ def test_general_resource_search_can_explicitly_present_a_relevant_subset(store)
         messages = public_conversation_messages(state.conversation, candidate_view=restored)
         assert sum(bool(message.get("candidate_view")) for message in messages) == 1
         assert "尚未下载" in result.answer
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("suffix,dynamic,depth", [
+    ("1080p.H264", None, None),
+    ("1080p.HEVC.10-bit", None, "10-bit"),
+    ("1080p.SDR.H264", "SDR", None),
+    ("2160p.HDR10.HEVC.10-bit", "HDR10", "10-bit"),
+    ("2160p.DoVi.HEVC", "DoVi", None),
+    ("2160p.DV.HDR10.HEVC", "DoVi", None),
+    ("2160p.HLG.HEVC", "HLG", None),
+])
+def test_candidate_technical_evidence_is_title_only_and_unknown_is_not_sdr(suffix, dynamic, depth):
+    from app.agent.kernel.ux_selection import annotate_resource_candidates
+
+    item = {"position": 1, "media_title": "Example", "requested_episode": "",
+            "match": "unknown", "title": f"Example.S03E01.{suffix}", "coverage": {}}
+    for positions in (None, [1]):
+        payload = {}
+        annotate_resource_candidates(payload, [item], selected_positions=positions)
+        evidence = model_resource_candidates(payload)[0]["technical_evidence"]
+        assert evidence["basis"] == "release_title_only"
+        assert evidence["stream_verified"] is False
+        assert evidence["dynamic_range"] == dynamic
+        assert evidence["bit_depth"] == depth
+    assert "technical_evidence" not in item  # 不改变已冻结的历史候选或持久化格式。
+
+
+def test_eight_step_query_contract_survives_empty_results_and_database_reload(store, monkeypatch):
+    """八步工具合同回归，非真实模型八轮对话验收。"""
+    from tests.test_agent_indexer_actions import FakeIndexerService, _resource_item
+
+    service = FakeIndexerService(items=[], partial=False)
+    monkeypatch.setattr('app.agent.indexer_actions.config.get_bool', lambda _: True)
+    monkeypatch.setattr('app.agent.indexer_actions.get_indexer_service', lambda: service)
+
+    async def exercise():
+        specs = build_tool_specs(RecentResourceCandidateStore(), AgentIngestSessionStore())
+        catalog = catalog_from_tool_specs(spec for spec in specs if spec.name in {
+            'indexer.search_resources', 'indexer.present_candidates', 'ingest.inspect', 'ingest.submit',
+        })
+        pipeline = ToolPipeline(catalog=catalog, state_store=store, reference_store=store)
+        reference = None
+        expected = {}
+        steps = [
+            ('search', {'title': 'Black Mirror', 'season': 1, 'episode': 1, 'resolution': '1080p', 'media_type': 'tv'}),
+            ('search', {'season': 2}), ('search', {'resolution': '2160p'}),
+            ('present', {'exclude_hdr': True}), ('search', {'season': 3}),
+            ('present', {'dynamic_range': 'SDR'}), ('search', {'resolution': '1080p'}), ('present', {}),
+        ]
+        for turn, (action, patch_args) in enumerate(steps, 1):
+            if turn == 7:
+                service.items = [_resource_item(title='Black.Mirror.S03E01.1080p.SDR')]
+            # 真正切换回合/SQLite实例，确保条件不是同一个 Python 局部对象在续接。
+            lease, _ = await store.begin_turn(owner=OWNER, session_id=SESSION, request_id=f'query-{turn}')
+            context = ToolCallContext(owner=OWNER, session_id=SESSION, request_id=f'query-{turn}',
+                                      turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=AsyncMock())
+            pipeline.reference_store = SQLiteKernelStore(secret_provider=lambda: SECRET)
+            arguments = {**({'resource_candidates_ref': reference} if reference else {}), **patch_args}
+            if action == 'present':
+                arguments['positions'] = [1] if turn == 8 else []
+            result = await pipeline.execute('indexer.' + ('search_resources' if action == 'search' else 'present_candidates'), arguments, context=context)
+            expected.update(patch_args)
+            document = json.loads(result.outcome.model_content)
+            effective = document['data']['effective_query']
+            assert {key: effective[key] for key in expected} == expected
+            reference = result.outcome.public_content['reference_arguments']['resource_candidates_ref']
+            snapshot = await pipeline.reference_store.resolve(reference, owner=OWNER, session_id=SESSION, expected_kind='resource_candidates')
+            assert snapshot['_query_arguments'] == effective
+            if turn < 7:
+                assert snapshot['candidates'] == [] and not document.get('candidate_numbers')
+                assert result.outcome.public_content['candidate_view'] is None
+                assert 'recommended_ingest_arguments' not in document
+            if turn == 3:
+                intent = {'source_type': 'resource_candidates', 'resource_candidates_ref': reference, 'positions': [1]}
+                for tool, extra in [('ingest.inspect', {}), ('ingest.submit', {'target': 'guangya'})]:
+                    with pytest.raises(ToolPipelineError) as error:
+                        await pipeline.execute(tool, {**intent, **extra}, context=context)
+                    assert error.value.code == 'precondition_failed'
+                    assert '过期' not in str(error.value)
+            if turn == 8:
+                assert document['data']['positions'] == [1]
+                view = result.outcome.public_content['candidate_view']
+                assert [item['position'] for item in view['items']] == [1]
+                assert document['candidate_numbers'][0]['technical_evidence']['dynamic_range'] == 'SDR'
+                assert not (await store.load(owner=OWNER, session_id=SESSION)).pending_effect_plan_id
+        assert len(service.search_calls) == 5  # 展示只读快照，不重新搜站点。
     asyncio.run(exercise())

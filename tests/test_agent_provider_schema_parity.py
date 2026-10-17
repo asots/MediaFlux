@@ -231,7 +231,7 @@ def test_failed_provider_normalization_retains_registered_schema_without_changin
 
 
 @pytest.mark.parametrize("bad_operation,bad_profile", [(True, True), (True, False), (False, True)])
-def test_unknown_query_selectors_offer_scoped_repair_at_real_admission(bad_operation, bad_profile):
+def test_unknown_query_selectors_directly_retry_at_real_admission(bad_operation, bad_profile):
     from unittest.mock import patch
     from app.agent.domain_catalog import build_tool_specs
     from app.agent.kernel.capabilities import ToolCatalog
@@ -256,24 +256,18 @@ def test_unknown_query_selectors_offer_scoped_repair_at_real_admission(bad_opera
         with pytest.raises(ToolPipelineError) as caught:
             await pipeline.execute("provider.query", initial, context=context)
         failure = caught.value
-        assert failure.code == "invalid_arguments" and failure.repair_ticket
+        assert failure.code == "invalid_arguments" and not failure.repair_ticket
+        assert context.schema_replacements == {}
         assert failure.argument_schemas and transport.calls == []
         discovered = await pipeline.execute("provider.capabilities", {"provider": "media"}, context=context)
         assert not discovered.recovered_failures and transport.calls == []
         corrected = {"profile_ref": "configured:media", "operation": "media.items.counts", "arguments": {}}
-        # A separate successful call is not proof that this rejected attempt was replaced.
         separate = await pipeline.execute("provider.query", corrected, context=context)
         assert not separate.recovered_failures
-        if not bad_operation:
-            with pytest.raises(ToolPipelineError):
-                await pipeline.execute("agent.repair", {"ticket": failure.repair_ticket,
-                    "arguments": {**corrected, "operation": "media.system.info"}}, context=context)
-        repaired = await pipeline.execute("agent.repair", {"ticket": failure.repair_ticket, "arguments": corrected}, context=context)
-        assert failure.repair_ticket in repaired.recovered_failures
-        assert transport.calls == [("media.items.counts", {}), ("media.items.counts", {})]
+        assert transport.calls == [("media.items.counts", {})]
         with pytest.raises(ToolPipelineError):
-            await pipeline.execute("agent.repair", {"ticket": failure.repair_ticket, "arguments": corrected}, context=context)
-        assert len(transport.calls) == 2
+            await pipeline.execute("agent.repair", {"ticket": "not-a-read-ticket", "arguments": corrected}, context=context)
+        assert len(transport.calls) == 1
     with patch("app.agent.provider_actions.get_provider_gateway", return_value=gw), \
          patch("app.agent.kernel.ports.mediaflux_policy.get_provider_gateway", return_value=gw), \
          patch("app.agent.rate_limit.agent_rate_limiter", AgentRateLimiter(clock=lambda: 100.0)):
@@ -294,7 +288,7 @@ def test_query_selector_contract_does_not_turn_permissions_into_repair_authority
     assert disabled.value.argument_schemas is None and transport.calls == []
 
 
-def test_selector_repair_preserves_valid_normalized_identity_and_existing_filters():
+def test_query_retry_changes_optional_filters_but_keeps_real_profile_validation():
     from unittest.mock import patch
     from app.agent.domain_catalog import build_tool_specs
     from app.agent.kernel.capabilities import ToolCatalog
@@ -317,17 +311,17 @@ def test_selector_repair_preserves_valid_normalized_identity_and_existing_filter
         with pytest.raises(ToolPipelineError) as caught:
             await pipeline.execute("provider.query", initial, context=context)
         assert set(caught.value.argument_schemas) == {"operation"}, "已规范化且有效的profile不能解锁"
-        ticket = caught.value.repair_ticket
+        assert not caught.value.repair_ticket and not context.schema_replacements
         corrected = {**initial, "operation": "media.items.recent_added"}
-        for changed in ({**corrected, "profile_ref": "configured:other"},
-                        {**corrected, "arguments": {}}, {**corrected, "arguments": {"limit": 6}}):
-            with pytest.raises(ToolPipelineError) as conflict:
-                await pipeline.execute("agent.repair", {"ticket": ticket, "arguments": changed}, context=context)
-            assert conflict.value.code == "repair_conflict"
-            assert not transport.calls
-        repaired = await pipeline.execute("agent.repair", {"ticket": ticket, "arguments": corrected}, context=context)
-        assert ticket in repaired.recovered_failures
-        assert transport.calls == [("media.items.recent_added", {"limit": 5})]
+        with pytest.raises(ToolPipelineError) as invalid_profile:
+            await pipeline.execute("provider.query", {**corrected, "profile_ref": "configured:other"}, context=context)
+        assert invalid_profile.value.code == "invalid_arguments" and not invalid_profile.value.repair_ticket
+        assert not transport.calls
+        for arguments in ({}, {"limit": 6}):
+            retried = await pipeline.execute("provider.query", {**corrected, "arguments": arguments}, context=context)
+            assert not retried.recovered_failures and retried.effect_plan is None
+        assert len(transport.calls) == 2
+        assert transport.calls[-1] == ("media.items.recent_added", {"limit": 6})
     with patch("app.agent.provider_actions.get_provider_gateway", return_value=gw), \
          patch("app.agent.kernel.ports.mediaflux_policy.get_provider_gateway", return_value=gw), \
          patch("app.agent.rate_limit.agent_rate_limiter", AgentRateLimiter(clock=lambda: 100.0)):

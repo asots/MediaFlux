@@ -1203,18 +1203,12 @@ def _copy_tree_snapshot(client, root_id, cancel_check=None):
     return {"identity": digest(rows), "content": digest(content), "items": len(rows)}
 
 
-def _find_current(
-    client: GuangYaClient, snapshot: dict[str, Any], *, authoritative: bool = False
-) -> GuangYaFile | None:
+def _find_current(client: GuangYaClient, snapshot: dict[str, Any]) -> GuangYaFile | None:
     try:
-        current = client.file_info(str(snapshot.get("file_id") or ""))
+        # 明确的当前详情（包括对象不存在）不能被较旧的列表翻案。
+        return client.file_info(str(snapshot.get("file_id") or ""))
     except Exception:  # noqa: BLE001 - Provider/SDK 可抛出多种传输异常
-        current = None
-    if current is not None and authoritative:
-        # 半步续行不能用可能较旧的目录列表覆盖明确的对象版本变化。
-        return current
-    if _snapshot_matches(current, snapshot):
-        return current
+        pass  # 只有详情读取失败才使用父目录列表回退。
     try:
         return {
             str(item.file_id): item
@@ -1225,13 +1219,13 @@ def _find_current(
 
 
 def _verify_directory_snapshot(
-    client: GuangYaClient, directory_id: str, snapshot: dict[str, Any] | None, *, authoritative: bool = False
+    client: GuangYaClient, directory_id: str, snapshot: dict[str, Any] | None
 ) -> bool:
     if directory_id == "0":
         return True
     if not isinstance(snapshot, dict):
         return False
-    current = _find_current(client, snapshot, authoritative=authoritative)
+    current = _find_current(client, snapshot)
     # 目录内容变化可能更新 etag/utime；目标目录只冻结身份、名称与位置，
     # 同名占用会在每一项写入前另行完整读取。
     return bool(
@@ -1288,8 +1282,7 @@ def _preflight_operation(
     dependency = str(item.get("parent_create_path" if op == "create_directory" else "target_create_path") or "")
     while dependency and created_targets is not None:
         directory = created_targets.get(dependency) or {}
-        if not _verify_directory_snapshot(client, str(directory.get("file_id") or ""), directory,
-                                              authoritative=source_snapshot is not None):
+        if not _verify_directory_snapshot(client, str(directory.get("file_id") or ""), directory):
             raise GuangYaFSChangeStale("计划中新建目录尚未就绪或位置已变化，请重新预览")
         dependency = str(directory.get("parent_create_path") or "")
     if op == "create_directory":
@@ -1315,7 +1308,7 @@ def _preflight_operation(
         source_matches = _verify_directory_snapshot(client, str((source or {}).get("file_id") or ""), source)
     else:
         source_matches = isinstance(source, dict) and _snapshot_matches(
-            _find_current(client, source, authoritative=source_snapshot is not None), source,
+            _find_current(client, source), source,
             exact_updated_at=source_snapshot is not None)
     if not source_matches:
         raise GuangYaFSChangeStale("光鸭对象已变化，请重新预览")
@@ -1351,7 +1344,7 @@ def _preflight_operation(
         if not target_id:
             return
         if not item.get("target_create_path") and not _verify_directory_snapshot(
-            client, target_id, item.get("target_snapshot"), authoritative=source_snapshot is not None
+            client, target_id, item.get("target_snapshot")
         ):
             raise GuangYaFSChangeStale("目标目录已变化，请重新预览")
         siblings = {str(row.file_id): row for row in client.list_dir(target_id)}

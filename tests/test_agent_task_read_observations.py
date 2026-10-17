@@ -12,18 +12,23 @@ import pytest
 
 from app.agent.kernel import bootstrap, task_state
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
-from app.agent.kernel.capabilities import ToolCatalog
+from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
+from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput, retain_conversation
 from app.agent.models import ToolResult
 from app.agent.provider_actions import get_provider_gateway
 from app.agent.provider_models import ProviderProfileView
-from tests.test_agent_kernel_core import ScriptedModel
+from tests.test_agent_kernel_core import ScriptedModel, read_tool
+from tests.test_agent_recovered_progress import reply
 from tests.test_agent_task_cas import command, observe
 from tests.test_agent_task_cas import task_store as isolated_store
 from tests.test_agent_task_first_slice import OWNER, declaration
+from tests.test_agent_tool_argument_ingress import Wire
 
 GOAL = "观察 TMDB 配置，读取 Jellyfin 库名和类型；仅观察、不修改。"
 TOOL = "provider.query"
@@ -333,3 +338,93 @@ def test_forty_read_observations_are_count_and_byte_bounded_preserving_linked_re
         assert task["obligations"][1]["state"] == "pending"
     if not distinct:
         assert len(reads(task)) <= 3
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_short_model_data_survives_task_receipt_through_native_wire_and_cold_sqlite(task_store, tracked):
+    async def run():
+        if tracked:
+            await seed(task_store, declared())
+        dto = ToolResult(ok=True, status="success", summary="读取完成",
+                         data={"public_only": True}, model_data={"model_only": True})
+        tool = read_tool("records.inspect", handler=lambda *_: dto)
+        catalog = ToolCatalog([tool])
+        wire = Wire("chat_completions", [
+            reply("chat_completions", name=tool.model_name, arguments={}),
+            reply("chat_completions", text="已依据实际观察回答。"),
+        ])
+        session = AgentSession(model=wire.adapter, catalog=catalog,
+            retriever=CapabilityRetriever(minimum=1, maximum=1),
+            pipeline=ToolPipeline(catalog=catalog, state_store=task_store), state_store=task_store)
+        completed = []
+        async for event in session.run(AgentInput(message=GOAL, owner=OWNER, session_id="cas")):
+            assert event.type not in {AgentEventType.TOOL_FAILED, AgentEventType.TURN_FAILED}
+            if event.type is AgentEventType.TOOL_COMPLETED:
+                completed.append(event)
+                cold = await SQLiteKernelStore(secret_provider=lambda: "task-test-only").load(owner=OWNER, session_id="cas")
+                [saved] = [row for row in cold.conversation if row.get("role") == "tool"]
+                saved_payload = json.loads(saved["content"])
+                assert saved_payload["data"] == dto.model_data
+                if tracked:
+                    assert saved_payload["task"] == event.payload["result"]["task"] == task_state.task_projection(cold.metadata["task"])
+                    assert reads(cold.metadata["task"])[0]["call_id"] == saved["tool_call_id"]
+        wire.verify(2)
+        [public] = [event.payload["result"] for event in completed]
+        [message] = [row for row in wire.requests[-1]["messages"] if row["role"] == "tool"]
+        model_payload = json.loads(message["content"])
+        assert model_payload["data"] == dto.model_data
+        assert public["data"] == dto.data
+        assert "result_handle" not in model_payload and "result_handle" not in public
+        assert ("task" in model_payload) is tracked
+        [assistant] = [row for row in wire.requests[-1]["messages"] if row.get("tool_calls")]
+        assert assistant["tool_calls"][0]["id"] == message["tool_call_id"]
+    asyncio.run(run())
+
+
+def test_read_task_patch_commit_conflict_never_publishes_success_or_earns_progress(task_store, monkeypatch):
+    async def run():
+        initial = await seed(task_store, declared())
+        original_commit = task_store.commit
+        rejected = []
+
+        async def conflict(lease, **kwargs):
+            task_patch = kwargs.get("task_patch")
+            if task_patch is not None and task_patch.operation == "observe":
+                rejected.append(deepcopy(kwargs["conversation"]))
+                # 预览成功后，在真实 SQLite 事务中触发 revision 冲突。
+                kwargs["task_patch"] = replace(task_patch, expected={
+                    **task_patch.expected, "revision": task_patch.expected["revision"] + 1,
+                })
+            return await original_commit(lease, **kwargs)
+
+        monkeypatch.setattr(task_store, "commit", conflict)
+        marker = "uncommitted-read-result"
+        tool = read_tool("records.inspect", handler=lambda *_: {
+            **SUCCESS, "data": {"marker": marker},
+        })
+        catalog = ToolCatalog([tool])
+        model = ScriptedModel([tool_round([(tool.name, {})]), [
+            ModelEvent(ModelEventType.TEXT_DELTA, text="任务检查点冲突，尚未完成。"),
+            ModelEvent(ModelEventType.FINISH, finish_reason="stop"),
+        ]])
+        session = AgentSession(model=model, catalog=catalog,
+            retriever=CapabilityRetriever(minimum=1, maximum=1),
+            pipeline=ToolPipeline(catalog=catalog, state_store=task_store), state_store=task_store)
+        events = [event async for event in session.run(AgentInput(message=GOAL, owner=OWNER, session_id="cas"))]
+        cold = await SQLiteKernelStore(secret_provider=lambda: "task-test-only").load(owner=OWNER, session_id="cas")
+        assert len(rejected) == 1 and marker in json.dumps(rejected)
+        assert cold.metadata["task"] == initial.metadata["task"]
+        assert not any(event.type is AgentEventType.TOOL_COMPLETED for event in events)
+        [failure] = [event for event in events if event.type is AgentEventType.TOOL_FAILED]
+        assert failure.payload["code"] == "task_conflict"
+        assert events[-1].type is AgentEventType.TURN_FAILED
+        assert events[-1].payload["code"] == "task_conflict"
+        assert marker not in json.dumps(cold.conversation)
+        [call] = [call for row in cold.conversation for call in row.get("tool_calls", [])]
+        [result] = [row for row in cold.conversation if row.get("role") == "tool"]
+        assert result["tool_call_id"] == call["call_id"]
+        assert json.loads(result["content"])["code"] == "task_conflict"
+        assert events[-1].payload["successful_read_queries"] == 0
+        assert len(model.requests) == 2
+        assert len([message for message in model.requests[-1].messages if message.role == "tool"]) == 1
+    asyncio.run(run())

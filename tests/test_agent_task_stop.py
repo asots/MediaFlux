@@ -30,6 +30,7 @@ from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.session_guard import session_scope_guard
 from app.agent.kernel.state import (
+    CancellationToken,
     InMemorySessionStateStore,
     PublicationLease,
     SessionBusyError,
@@ -84,6 +85,20 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         )
         self.guard.start()
         self.addCleanup(self.guard.stop)
+
+    async def test_queued_interrupt_cannot_cancel_model_cancellation_settlement(self):
+        token = CancellationToken()
+        token.interruptible = True
+        token.cancel("user_cancelled", asyncio.current_task())
+        # 模型先观察到协作取消，离开可打断阶段；排队的强制取消还未交付。
+        with self.assertRaises(asyncio.CancelledError):
+            token.raise_if_cancelled()
+        token.interruptible = False
+        # 真实事件循环交付此前回调，不可再次打断终态保存。
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertTrue(token.cancelled)
+        self.assertEqual(token.reason, "user_cancelled")
 
     async def _start_local_waiter(
         self, owner: str, session_id: str, *, protected: bool = False

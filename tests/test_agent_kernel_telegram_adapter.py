@@ -2014,3 +2014,28 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                 handlers._progress_recovery_thread, handlers._progress_recovery_stop,
                 handlers._registered_bot_id,
             ) = saved_bot_state
+
+
+class PatrolCallbackFeedbackTests(unittest.TestCase):
+    def test_callback_explicitly_uses_latest_result_not_notification_snapshot(self):
+        bot = FakeBot()
+        with patch.object(adapter, 'telegram_agent_access', return_value='allowed'), \
+                patch.object(adapter, '_execute_query') as execute:
+            adapter.handle_agent_patrol_callback(bot, Call('agp:summary', Message()), TELEBOT)
+        self.assertIn('最近', bot.answers[-1][1])
+        self.assertIn('最近一次', execute.call_args.kwargs['text'])
+
+    def test_failed_callback_reports_failure_to_same_topic_without_raw_exception(self):
+        bot = FakeBot()
+        message = Message()
+        message.message_thread_id = 42
+        with patch.object(adapter, 'telegram_agent_access', return_value='allowed'), \
+                patch.object(adapter, '_execute_query', side_effect=RuntimeError('secret=PRIVATE')):
+            adapter.handle_agent_patrol_callback(bot, Call('agp:resources', message), TELEBOT)
+        self.assertEqual(len(bot.sent), 1)
+        chat_id, text, kwargs = bot.sent[0]
+        self.assertEqual(chat_id, '-100')
+        self.assertEqual(kwargs['message_thread_id'], 42)
+        self.assertIn('未能取得', text)
+        self.assertNotIn('PRIVATE', text)
+        self.assertNotIn('没有缺集', text)

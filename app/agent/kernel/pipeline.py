@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from app.agent.model_context_budget import RESULT_PATH_MAX, compact_tool_content, decode_tool_content
+from app.agent.errors import AgentToolError
 from app.agent.public_safety import sanitize_public_text
 from app.concurrency import CrossLoopAsyncLock
 
@@ -24,8 +25,10 @@ from .effects import (
     ConfirmationEffectPlanStore,
     EffectPlan,
     EffectPlanError,
+    EffectPlanExpiredError,
     EffectPlanStore,
     PreparedEffect,
+    confirmation_editing,
 )
 from .projection import DefaultProjector, ReferenceValue, ToolOutcome
 from .references import InMemoryReferenceStore, ReferenceError, ReferenceStore
@@ -40,13 +43,14 @@ from .state import (
     StalePublicationError,
     StateUpdate,
     _PendingEffectTransition,
+    _ScopedTrustTransition,
 )
 from .ux_selection import (
     CANDIDATE_VIEW_KEY,
     RESOURCE_KIND,
     candidate_result,
     issue_candidate_view,
-    model_candidate_numbers,
+    annotate_resource_candidates,
     resource_candidate_items,
     resource_model_content,
 )
@@ -65,6 +69,15 @@ class ToolPipelineError(RuntimeError):
         self.repair_ticket = ""
         self.invalid_fields = invalid_fields
         self.argument_schemas = argument_schemas
+        self.execution_started: bool | None = None
+        self.plan_invalidated = False
+
+    def mark_execution_started(self, started: bool) -> None:
+        if self.execution_started is not None:
+            return
+        self.execution_started = started
+        if not started:
+            self.args = (f"本次未执行业务操作：{self}。原确认已使用，请重新预检后确认。",)
 
 
 class ToolRateLimitError(ToolPipelineError):
@@ -116,6 +129,9 @@ class _SchemaCollisionError(ToolPipelineError):
 
 ProgressSink = Callable[[Mapping[str, Any]], Awaitable[None]]
 
+# 首版只开放向本地探索收藏添加 TMDB 条目；不放行删除、外发或公开操作。
+_SCOPED_TRUST_TOOLS = frozenset({"discovery.add_watchlist"})
+
 
 @dataclass(frozen=True, slots=True)
 class ToolCallContext:
@@ -146,6 +162,7 @@ class ToolCallContext:
     call_id: str = ""
     schema_replacements: dict[str, error_repair.SchemaReplacement] = field(default_factory=dict)
     reobservation_source: Mapping[str, Any] | None = field(default=None, repr=False)
+    scoped_trust: bool = False
 
     def policy_context(self) -> dict[str, Any]:
         return {
@@ -480,7 +497,7 @@ class ToolPipeline:
         if not catalog.has(error_repair.REPAIR_TOOL):
             catalog.register(KernelToolSpec(
                 name=error_repair.REPAIR_TOOL, domain="agent", effect=ToolEffect.READ,
-                description="明确替代本轮指定的参数拒绝调用，不是声称旧目标已知。使用失败返回的一次性ticket，提供原工具完整修正arguments；只修改错误涉及的字段，保留其他有效参数。仍需原权限与写入确认，预览/提交不代表业务完成。",
+                description="仅修复本轮 WRITE/DANGER 工具的参数拒绝调用，不是声称旧目标已知。READ 参数错误按 schema 直接重试原工具，不用 ticket。写侧使用失败返回的一次性ticket，提供原工具完整修正arguments；只修改错误涉及的字段，保留其他有效参数。仍需原权限与写入确认，预览/提交不代表业务完成。",
                 input_schema={"type": "object", "required": ["ticket", "arguments"], "properties": {
                     "ticket": {"type": "string"}, "arguments": {"type": "object"}}, "additionalProperties": False},
                 read=self._replace_schema_failure, availability=lambda context: False,
@@ -660,6 +677,7 @@ class ToolPipeline:
         _returned_read=None,
         _read_admitted: asyncio.Event | None = None,
         _read_publication_lock: asyncio.Lock | None = None,
+        _confirmation_deadline: float | None = None,
     ) -> PipelineResult:
         started = time.monotonic()
         context.cancellation.raise_if_cancelled()
@@ -673,12 +691,6 @@ class ToolPipeline:
         if tool.name == error_repair.REPAIR_TOOL:
             _validate_json_schema(raw_arguments, tool.input_schema)
             return await self._replace_schema_failure(raw_arguments, context)
-        if (
-            context.resource_candidate_ref and tool.name == "ingest.submit"
-            and raw_arguments.get("source_type") == RESOURCE_KIND
-            and raw_arguments.get("resource_candidates_ref") != context.resource_candidate_ref
-        ):
-            raise ToolPipelineError("请从回复消息所属的候选批次选择，不可替换为其他搜索编号", code="candidate_scope_mismatch")
         if context.selection_arguments is not None:
             expected = dict(context.selection_arguments)
             # 卡片选择限定为既有提交工具的预检；模型不能换资源、扩选或另选目标。
@@ -697,8 +709,7 @@ class ToolPipeline:
         try:
             _validate_json_schema(raw_arguments, tool.input_schema)
         except ToolPipelineError as exc:
-            collision = (exc.keys if isinstance(exc, _SchemaCollisionError) else
-                         frozenset(exc.invalid_fields) if tool.effect is ToolEffect.READ else frozenset())
+            collision = exc.keys if isinstance(exc, _SchemaCollisionError) else frozenset()
             exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema,
                                                   ToolPipelineError, collisions=collision, preserve_fields=True)
             raise
@@ -724,6 +735,7 @@ class ToolPipeline:
         try:
             async with (_read_publication_lock if _read_publication_lock is not None else nullcontext()):
                 resolved = await self._authorize(tool, normalized, context)
+                await self._admit(tool, resolved, context)
         except ToolPipelineError as exc:
             if exc.code == "invalid_arguments":
                 exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema,
@@ -764,8 +776,6 @@ class ToolPipeline:
             try:
                 value = await _invoke(tool.read, resolved, context)
             except ToolPipelineError as exc:
-                if exc.code == "invalid_arguments":
-                    exc.repair_ticket = error_repair.issue(tool, raw_arguments, context, _validate_json_schema, ToolPipelineError, invalid_fields=exc.invalid_fields, argument_schemas=exc.argument_schemas)
                 if tool.observe is not None:
                     exc.task_patch = observation_patch(context.current_task, owner=context.owner,
                         session_id=context.session_id, tool=tool.name, call_id=context.call_id,
@@ -819,7 +829,7 @@ class ToolPipeline:
             async with (_read_publication_lock if _read_publication_lock is not None else nullcontext()):
                 outcome = await self._materialize_refs(
                     projected, context=context,
-                    selected_positions=normalized["positions"] if resource_presentation else None,
+                    selected_positions=projected.public_content["data"]["positions"] if resource_presentation else None,
                     preserve_native=snapshot_only,
                 )
                 await self._commit_updates(context.lease, outcome.state_updates)
@@ -829,7 +839,6 @@ class ToolPipeline:
                 outcome=outcome,
                 elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
                 task_patch=patch,
-                recovered_failures=error_repair.completed(tool, raw_arguments, context, outcome.public_content),
             )
 
         if tool.prepare is None:  # pragma: no cover - ToolSpec 已校验
@@ -862,6 +871,15 @@ class ToolPipeline:
             prepared=prepared_value,
             context=context,
         )
+        trust_scope = self._trust_scope(tool, prepared_value.arguments or normalized, prepared_value.metadata)
+        prepared_value = replace(prepared_value, metadata={
+            **prepared_value.metadata,
+            "confirmation_input": normalized,
+            "editing": confirmation_editing(tool, normalized),
+            "trust_eligible": trust_scope is not None,
+            "trust_scope": trust_scope,
+            **({"confirmation_deadline": _confirmation_deadline} if _confirmation_deadline is not None else {}),
+        })
         if _prepare_only:
             return PipelineResult(tool=tool, arguments=normalized, prepared_effect=prepared_value,
                                   outcome=self.projector.project(prepared_value.preview))
@@ -874,17 +892,27 @@ class ToolPipeline:
                     preview_outcome = await self._materialize_refs(
                         self.projector.project(prepared_value.preview), context=context
                     )
-                    plan = await asyncio.to_thread(
-                        self.effect_store.freeze,
-                        owner=context.owner,
-                        session_id=context.session_id,
-                        generation=context.lease.generation,
-                        tool_name=tool.name,
-                        effect=tool.effect,
-                        arguments=normalized,
-                        prepared=prepared_value,
-                        public_result=preview_outcome.public_content,
-                    )
+                    try:
+                        deadline = await self._reference_deadline(
+                            [normalized, prepared_value.arguments], owner=context.owner, session_id=context.session_id,
+                        )
+                        plan = await asyncio.to_thread(
+                            self.effect_store.freeze,
+                            owner=context.owner,
+                            session_id=context.session_id,
+                            generation=context.lease.generation,
+                            tool_name=tool.name,
+                            effect=tool.effect,
+                            arguments=normalized,
+                            prepared=prepared_value,
+                            public_result=preview_outcome.public_content,
+                            deadline=deadline,
+                        )
+                    except ReferenceError as exc:
+                        raise ToolPipelineError("输入引用在预检期间已失效，本次未执行；请重新观察并预检",
+                                                code="reference_invalid") from exc
+                    except AgentToolError as exc:
+                        raise ToolPipelineError(str(exc), code=exc.code) from exc
                 except BaseException:
                     self._notify_effect("prepare_failed", prepared=prepared_value, context=context)
                     raise
@@ -933,23 +961,142 @@ class ToolPipeline:
             return binding["plan_generation"]
         return None
 
-    async def get_pending_plan(self, *, owner: str, session_id: str, scoped: bool = False) -> EffectPlan | None:
-        with nullcontext() if scoped else session_scope_guard(owner, session_id):
-            state = await self.state_store.load(owner=owner, session_id=session_id)
-            generation = self._pending_generation(state)
-            if not state.pending_effect_plan_id or generation is None:
-                return None
-            return await asyncio.to_thread(self.effect_store.get_active_plan,
-                owner=owner, session_id=session_id, generation=generation, plan_id=state.pending_effect_plan_id)
+    async def edit_confirmation(
+        self, plan_id: str, patch: Mapping[str, Any], *, context: ToolCallContext,
+    ) -> PipelineResult:
+        with session_scope_guard(context.owner, context.session_id):
+            plan = await self.get_pending_plan(owner=context.owner, session_id=context.session_id)
+            if plan is None or plan.plan_id != plan_id:
+                raise ConfirmationClaimError()
+            # 与确认共享会话互斥；撤销成功前绝不进入新预检。
+            if not await self._cancel_effect_scoped(plan_id, lease=context.lease):
+                raise ConfirmationClaimError()
+            try:
+                tool = self.catalog.get(plan.tool_name)
+                original = plan.metadata.get("confirmation_input")
+                if not isinstance(original, Mapping):
+                    raise ToolPipelineError("原确认卡不支持编辑，请重新预检。", code="confirmation_edit_invalid")
+                editable = confirmation_editing(tool, original)["schema"]["properties"]
+                if not isinstance(patch, Mapping) or not patch or not set(patch) <= editable.keys():
+                    raise ToolPipelineError("只能修改卡片允许的字段，请重新预检。", code="confirmation_edit_invalid")
+                # 仍走完整 Schema、validator、鉴权、限流、原 prepare 与冻结链路。
+                return await self.execute(tool.name, {**original, **patch}, context=context,
+                                          _confirmation_deadline=plan.expires_at)
+            except Exception as exc:
+                error = exc if isinstance(exc, ToolPipelineError) else ToolPipelineError(
+                    "修改预检未完成，请重新预检。", code="confirmation_edit_failed")
+                error.plan_invalidated = True
+                raise error from (exc if error is not exc else None)
+
+    @staticmethod
+    def _trust_scope(tool: KernelToolSpec, arguments: Mapping[str, Any], metadata: Mapping[str, Any]) -> dict[str, str] | None:
+        if (tool.name not in _SCOPED_TRUST_TOOLS or tool.effect is not ToolEffect.WRITE
+                or tool.metadata.get("risk") != "low_write" or metadata.get("risk") != "low_write"
+                or set(arguments) != {"provider", "media_type", "external_id"}
+                or arguments.get("provider") != "tmdb" or arguments.get("media_type") not in {"movie", "tv"}
+                or not isinstance(arguments.get("external_id"), str) or not re.fullmatch(r"[1-9][0-9]{0,17}", arguments["external_id"])):
+            return None
+        return {"provider": "tmdb", "media_type": arguments["media_type"]}
+
+    def _effect_clock(self) -> float:
+        return getattr(getattr(self.effect_store, "store", None), "_clock", time.time)()
+
+    def scoped_trust_view(self, state: SessionState) -> dict[str, Any]:
+        grant = getattr(state, "metadata", {}).get("scoped_trust") or {}
+        if not grant:
+            return {"active": False}
+        if (not isinstance(grant, Mapping) or grant.get("owner") != state.owner or grant.get("session_id") != state.session_id
+                or type(grant.get("expires_at")) not in (int, float) or grant["expires_at"] <= self._effect_clock()
+                or grant.get("tool_name") not in _SCOPED_TRUST_TOOLS or type(grant.get("remaining")) is not int or grant["remaining"] <= 0):
+            return {"active": False}
+        return {"active": True, "tool_name": grant["tool_name"], "scope": dict(grant["scope"]),
+                "remaining": grant["remaining"], "expires_at": grant["expires_at"]}
+
+    async def set_scoped_trust(
+        self, *, context: ToolCallContext, operation: str, plan_id: str = "", tool_name: str = "",
+        scope: Mapping[str, Any] | None = None, ttl_seconds: int = 0, max_actions: int = 0,
+    ) -> dict[str, Any]:
+        with session_scope_guard(context.owner, context.session_id, kind="effect"):
+            state = await self.state_store.load(owner=context.owner, session_id=context.session_id)
+            if state.generation != context.lease.generation:
+                raise StalePublicationError("turn lost publication authority")
+            if operation == "revoke":
+                if state.metadata.get("scoped_trust"):
+                    await self.state_store.commit(context.lease, updates=(_ScopedTrustTransition("metadata.scoped_trust", None),))
+                return {"active": False}
+            if (operation != "grant" or not isinstance(scope, Mapping)
+                    or type(ttl_seconds) is not int or ttl_seconds not in {300, 900, 1800}
+                    or type(max_actions) is not int or max_actions not in {5, 10, 20}):
+                raise ToolPipelineError("请选择本会话的收藏来源/类型、5/10/20次上限及5/15/30分钟有效期。", code="scoped_trust_invalid")
+            plan = await self.get_pending_plan(owner=context.owner, session_id=context.session_id)
+            if plan is None or plan.plan_id != plan_id or plan.tool_name != tool_name:
+                raise ConfirmationClaimError()
+            tool = self.catalog.get(plan.tool_name).for_arguments(plan.arguments)
+            allowed_scope = self._trust_scope(tool, plan.arguments, plan.metadata)
+            if allowed_scope is None or dict(scope) != allowed_scope:
+                raise ToolPipelineError("该工具或目标范围不支持预授权，仍需逐次确认。", code="scoped_trust_denied")
+            grant = {"owner": context.owner, "session_id": context.session_id, "tool_name": tool.name,
+                     "scope": allowed_scope, "remaining": max_actions, "expires_at": self._effect_clock() + ttl_seconds}
+            state = await self.state_store.commit(context.lease, updates=(_ScopedTrustTransition("metadata.scoped_trust", grant),))
+            return self.scoped_trust_view(state)
+
+    async def has_scoped_trust(self, plan: EffectPlan, *, context: ToolCallContext) -> bool:
+        if (plan.owner, plan.session_id) != (context.owner, context.session_id) or plan.expires_at <= self._effect_clock():
+            return False
+        state = await self.state_store.load(owner=context.owner, session_id=context.session_id)
+        grant = state.metadata.get("scoped_trust") or {}
+        if (not isinstance(grant, Mapping) or grant.get("owner") != context.owner or grant.get("session_id") != context.session_id
+                or type(grant.get("expires_at")) not in (int, float) or grant["expires_at"] <= self._effect_clock()
+                or type(grant.get("remaining")) is not int or grant["remaining"] <= 0):
+            return False
+        tool = self.catalog.get(plan.tool_name).for_arguments(plan.arguments)
+        scope = self._trust_scope(tool, plan.arguments, plan.metadata)
+        return scope is not None and grant.get("tool_name") == tool.name and grant.get("scope") == scope
+
+    async def get_pending_plan(self, *, owner: str, session_id: str) -> EffectPlan | None:
+        """只读卡片快照不争抢写锁；确认/编辑入口仍在锁内重新验证票据。"""
+        state = await self.state_store.load(owner=owner, session_id=session_id)
+        generation = self._pending_generation(state)
+        if not state.pending_effect_plan_id or generation is None:
+            return None
+        plan = await asyncio.to_thread(self.effect_store.get_active_plan,
+            owner=owner, session_id=session_id, generation=generation, plan_id=state.pending_effect_plan_id)
+        if plan is None:
+            return None
+        try:
+            deadline = await self._reference_deadline(plan.arguments, owner=owner, session_id=session_id)
+        except ReferenceError:
+            return None
+        if deadline is None:
+            return plan
+        clock = getattr(getattr(self.effect_store, "store", None), "_clock", time.time)
+        now = clock()
+        remaining = deadline - time.monotonic()
+        return replace(plan, expires_at=min(plan.expires_at, now + remaining)) if remaining > 0 else None
 
     def pending_guard(self, state: SessionState, plan: EffectPlan) -> PendingEffectGuard:
         clock = getattr(getattr(self.effect_store, "store", None), "_clock", time.time)
         return PendingEffectGuard(state.generation, plan.plan_id, plan.generation, plan.expires_at, clock)
 
+    async def get_confirmation_evidence(self, *, owner: str, session_id: str, scoped: bool = False) -> EffectPlan | None:
+        """确认入口读取原计划证据；不是可用卡查询，更不是写准入。"""
+        with nullcontext() if scoped else session_scope_guard(owner, session_id):
+            state = await self.state_store.load(owner=owner, session_id=session_id)
+            generation = self._pending_generation(state)
+            if not state.pending_effect_plan_id or generation is None:
+                return None
+            return await asyncio.to_thread(self.effect_store.get_plan_evidence,
+                owner=owner, session_id=session_id, generation=generation, plan_id=state.pending_effect_plan_id)
+
     async def execute_confirmed(
-        self, plan_id: str, *, context: ToolCallContext,
+        self, plan_id: str, *, context: ToolCallContext, scoped_trust: bool = False,
     ) -> PipelineResult:
         with session_scope_guard(context.owner, context.session_id, kind="effect"):
+            if scoped_trust:
+                plan = await self.get_pending_plan(owner=context.owner, session_id=context.session_id)
+                if plan is None or plan.plan_id != plan_id or not await self.has_scoped_trust(plan, context=context):
+                    raise ConfirmationClaimError()
+                context = replace(context, scoped_trust=True)
             return await self._execute_confirmed_scoped(plan_id, context=context)
 
     async def _execute_confirmed_scoped(
@@ -963,12 +1110,13 @@ class ToolPipeline:
         current = await self.state_store.load(owner=context.owner, session_id=context.session_id)
         if current.generation != context.lease.generation:
             raise StalePublicationError("turn lost publication authority")
-        pending = await self.get_pending_plan(owner=context.owner, session_id=context.session_id, scoped=True)
+        pending = await self.get_confirmation_evidence(owner=context.owner, session_id=context.session_id, scoped=True)
         if pending is None or pending.plan_id != plan_id:
             await self._commit_updates(context.lease, (
                 _PendingEffectTransition("pending_effect_plan_id", plan_id, mode="clear_if_equals"),
             ))
             raise ConfirmationClaimError()
+        rejection = None
         try:
             plan = await asyncio.to_thread(
                 self.effect_store.claim,
@@ -977,6 +1125,10 @@ class ToolPipeline:
                 generation=pending.generation,
                 plan_id=plan_id,
             )
+        except EffectPlanExpiredError as exc:
+            # 存储已原子注销过期票据；只登记失败并恢复只读复验，绝不进入 handler。
+            plan = exc.plan
+            rejection = ToolPipelineError("确认计划或输入引用已过期，请重新观察后预检", code="confirmation_stale")
         except ToolPipelineError:
             raise
         except Exception as exc:
@@ -1002,7 +1154,7 @@ class ToolPipeline:
                 get_logger(__name__).warning("确认失败续行登记未完成 type=%s", type(exc).__name__)
 
         try:
-            # 只有真实领到票据才接管同 generation 的发布权。该标记在原状态
+            # 只有真实领取或一次性注销过期票据才接管同 generation 的发布权。该标记在原状态
             # JSON 内持久化，使锁释放/进程结束后旧读回合仍无法覆盖确认回执。
             await self.state_store.commit(
                 context.lease,
@@ -1045,13 +1197,17 @@ class ToolPipeline:
                 origin=effect_origin(current, context, plan),
             )
             context = replace(context, completion_scope=completion_scope)
+            if rejection is not None:
+                raise rejection
             value = await self._run_effect(plan, context=context)
         except ToolPipelineError as exc:
+            exc.mark_execution_started(False)
             self._notify_effect(
                 "failed", plan=plan, code=exc.code,
                 elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
             )
-            await remember_failure({"ok": False, "status": exc.code, "summary": str(exc)})
+            await remember_failure({"ok": False, "status": exc.code, "summary": str(exc),
+                                    "data": {"execution_started": exc.execution_started}})
             raise
         except BaseException:
             self._notify_effect("interrupted", plan=plan)
@@ -1077,47 +1233,64 @@ class ToolPipeline:
         )
 
     async def _run_effect(self, plan: EffectPlan, *, context: ToolCallContext):
-        tool = self.catalog.get(plan.tool_name).for_arguments(plan.arguments)
-        if tool.effect is ToolEffect.READ or tool.effect is not plan.effect:
-            raise ToolPipelineError("确认计划风险类型不匹配", code="confirmation_invalid")
-        context = replace(context, active_effect_plan=plan)
-        resolved_arguments = await self._authorize(tool, dict(plan.arguments), context, confirmation=True)
-        value = await _invoke(
-            tool.execute_confirmed,
-            resolved_arguments,
-            plan.snapshot_fingerprint,
-            context,
-            protection=context,
-        )
-        if tool.verify is not None:
-            verified = await _invoke(
-                tool.verify,
+        try:
+            tool = self.catalog.get(plan.tool_name).for_arguments(plan.arguments)
+            if tool.effect is ToolEffect.READ or tool.effect is not plan.effect:
+                raise ToolPipelineError("确认计划风险类型不匹配", code="confirmation_invalid")
+            context = replace(context, active_effect_plan=plan)
+            resolved_arguments = await self._authorize(tool, dict(plan.arguments), context, confirmation=True)
+            await self._admit(tool, resolved_arguments, context, confirmation=True)
+            if context.scoped_trust:
+                if not await self.has_scoped_trust(plan, context=context):
+                    raise ToolPipelineError("预授权已到期或范围已变化，本次未执行；请重新预检并确认。", code="scoped_trust_expired")
+                state = await self.state_store.load(owner=context.owner, session_id=context.session_id)
+                grant = state.metadata["scoped_trust"]
+                await self.state_store.commit(context.lease, updates=(_ScopedTrustTransition(
+                    "metadata.scoped_trust", {**grant, "remaining": grant["remaining"] - 1}),))
+        except ToolPipelineError as exc:
+            exc.mark_execution_started(False)
+            raise
+        try:
+            value = await _invoke(
+                tool.execute_confirmed,
                 resolved_arguments,
-                value,
+                plan.snapshot_fingerprint,
                 context,
                 protection=context,
             )
-            if verified is False:
-                raise ToolPipelineError(
-                    "写后验证失败", code="post_write_verification_failed"
+            if tool.verify is not None:
+                verified = await _invoke(
+                    tool.verify,
+                    resolved_arguments,
+                    value,
+                    context,
+                    protection=context,
                 )
-            if verified is not True and verified is not None:
-                value = verified
-        return value
+                if verified is False:
+                    raise ToolPipelineError(
+                        "写后验证失败", code="post_write_verification_failed"
+                    )
+                if verified is not True and verified is not None:
+                    value = verified
+            return value
+        except ToolPipelineError as exc:
+            exc.mark_execution_started(True)
+            raise
 
     async def _pending_plan(self, arguments: dict[str, Any], context: ToolCallContext) -> dict[str, Any]:
         with session_scope_guard(context.owner, context.session_id, kind="effect"):
             if not await self.state_store.is_current(context.lease):
                 raise StalePublicationError("turn lost publication authority")
             state = await self.state_store.load(owner=context.owner, session_id=context.session_id)
-            plan = await self.get_pending_plan(owner=context.owner, session_id=context.session_id, scoped=True)
+            plan = await self.get_pending_plan(owner=context.owner, session_id=context.session_id)
             if arguments["operation"] == "cancel" or plan is None:
                 cancelled = bool(state.pending_effect_plan_id) and await self._cancel_effect_scoped(
                     state.pending_effect_plan_id, lease=context.lease)
                 return {"ok": True, "status": "completed", "summary": "已取消原确认卡，未执行业务操作" if cancelled else "当前没有有效的待确认计划",
                         "data": {"pending": False, "cancelled": cancelled}}
             return {"ok": True, "status": "completed", "summary": "原确认卡仍有效，尚未执行",
-                    "data": {"pending": True, "preview": plan.public_result, "confirmation": plan.confirmation_contract}}
+                    "data": {"pending": True, "preview": plan.public_result,
+                             "confirmation": plan.public_dict().get("confirmation", {})}}
 
     async def cancel_effect(
         self, plan_id: str, *, lease: PublicationLease,
@@ -1147,18 +1320,42 @@ class ToolPipeline:
     async def _authorize(
         self, tool: KernelToolSpec, arguments: dict[str, Any], context: ToolCallContext, *, confirmation: bool = False,
     ) -> dict[str, Any]:
+        """解析引用并复核权限；组合预复验不消费执行额度。"""
         try:
             resolved = await self._resolve_references(arguments, context=context)
+            if (
+                context.resource_candidate_ref and tool.name == "ingest.submit"
+                and arguments.get("source_type") == RESOURCE_KIND
+                and arguments.get("resource_candidates_ref") != context.resource_candidate_ref
+            ):
+                bound = await self.reference_store.resolve(
+                    context.resource_candidate_ref, owner=context.owner,
+                    session_id=context.session_id, expected_kind=RESOURCE_KIND,
+                )
+                candidate = resolved.get("resource_candidates")
+                # 展示续改会签发新 token；只允许同一完整业务快照更新查询条件，不能换批次/资源。
+                if not isinstance(bound, dict) or not isinstance(candidate, dict) or (
+                    {key: value for key, value in bound.items() if key != "_query_arguments"}
+                    != {key: value for key, value in candidate.items() if key != "_query_arguments"}
+                ):
+                    raise ToolPipelineError("请从回复消息所属的候选批次选择，不可替换为其他搜索编号", code="candidate_scope_mismatch")
         except ReferenceError as exc:
             raise ToolPipelineError(
                 "确认计划引用无效、已过期或不属于当前会话" if confirmation else "工具引用无效、已过期或不属于当前会话",
                 code="confirmation_stale" if confirmation else "reference_invalid",
             ) from exc
         await self.authorization.authorize(tool, resolved, context)
+        context.cancellation.raise_if_cancelled()
+        return resolved
+
+    async def _admit(
+        self, tool: KernelToolSpec, arguments: dict[str, Any], context: ToolCallContext, *, confirmation: bool = False,
+    ) -> None:
+        """实际调用前领取一次额度，并在等待后复核取消与回合有效性。"""
         try:
             await self.rate_limiter.acquire(
                 owner=context.owner, tool_name=f"confirm:{tool.name}" if confirmation else tool.name,
-                cost=max(1.0, tool.cost) if confirmation else tool.cost, arguments=resolved,
+                cost=max(1.0, tool.cost) if confirmation else tool.cost, arguments=arguments,
             )
         except ToolRateLimitError as exc:
             if not confirmation and tool.effect is ToolEffect.READ and not tool.name.startswith("agent."):
@@ -1175,7 +1372,25 @@ class ToolPipeline:
                 await self.state_store.commit(context.lease)
             elif not await self.state_store.is_current(context.lease):
                 raise StalePublicationError("turn revoked before handler")
-        return resolved
+
+    async def _reference_deadline(self, value: Any, *, owner: str, session_id: str) -> float | None:
+        deadlines = []
+
+        async def visit(node):
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    if key.endswith("_ref") and isinstance(child, str) and child.startswith("ref_"):
+                        deadlines.append(await self.reference_store.deadline(
+                            child, owner=owner, session_id=session_id, expected_kind=key[:-4].strip("_").casefold(),
+                        ))
+                    else:
+                        await visit(child)
+            elif isinstance(node, list):
+                for child in node:
+                    await visit(child)
+
+        await visit(value)
+        return min(deadlines, default=None)
 
     async def _resolve_references(
         self,
@@ -1273,8 +1488,10 @@ class ToolPipeline:
             payload["opaque_refs"] = exposed
             payload["reference_arguments"] = reference_arguments
         numbered_items = candidate_view["items"] if candidate_view else candidate_items
+        if selected_positions is not None:
+            numbered_items = [item for item in numbered_items if item["position"] in selected_positions]
         if numbered_items:
-            payload["candidate_numbers"] = model_candidate_numbers(numbered_items, selected_positions=selected_positions)
+            annotate_resource_candidates(payload, numbered_items, selected_positions=selected_positions)
             if candidate_view and candidate_view["recommended_positions"]:
                 payload["recommended_ingest_arguments"] = {
                     "source_type": RESOURCE_KIND, "resource_candidates_ref": candidate_view["ref"],

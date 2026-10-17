@@ -6,7 +6,6 @@ from tests.test_agent_kernel_browser import _event
 from tests.test_agent_ux_browser import candidate_view
 from tests.test_agent_ux_shell_browser import AgentShellBrowserCase
 
-
 PLAN_A = "plan_pending_dialogue_A_0001"
 PLAN_B = "plan_pending_dialogue_B_0002"
 
@@ -57,7 +56,9 @@ class AgentPendingDialogueBrowserTests(AgentShellBrowserCase):
                     if (!path.startsWith('/api/agent/sessions/') || (options.method || 'GET') !== 'GET') {
                         return fixtureFetch(url, options);
                     }
-                    window.__kernelCalls.push({url: path, method: 'GET', body: ''});
+                    // 与真实 HTTP 一样按大小写不敏感的 Headers 读取，支持所有 HeadersInit 形式。
+                    const headers = new Headers(options.headers || {});
+                    window.__kernelCalls.push({url: path, method: 'GET', body: '', headers: Object.fromEntries(headers.entries())});
                     window.__dialogueReads++;
                     const mode = window.__dialogueMode;
                     if (mode === 'network') throw new TypeError('mock network failure');
@@ -66,7 +67,7 @@ class AgentPendingDialogueBrowserTests(AgentShellBrowserCase):
                     if (mode === 'timeout') await new Promise((resolve, reject) => {
                         options.signal.addEventListener('abort', () => reject(new DOMException('mock timeout', 'AbortError')), {once: true});
                     });
-                    const requestId = options.headers?.['X-Agent-Request-Id'];
+                    const requestId = headers.get('X-Agent-Request-Id');
                     const terminalType = window.__kernelConfig.queryEvents.at(-1)?.type;
                     const payload = {
                         session_id: decodeURIComponent(path.split('/').pop()), generation: 2,
@@ -122,7 +123,7 @@ class AgentPendingDialogueBrowserTests(AgentShellBrowserCase):
         page.locator("#agentPrompt").fill(question)
         page.locator("#agentSend").click()
         if wait:
-            page.wait_for_function("document.querySelector('#agentStop').hidden")
+            page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
 
     def assert_original_card(self, page, *, retired=False):
         self.assertTrue(page.evaluate("window.__originalApproval.isConnected"))
@@ -162,10 +163,43 @@ class AgentPendingDialogueBrowserTests(AgentShellBrowserCase):
                     _event(3, "turn.completed", {"status": "success", "answer": "原冻结计划执行完成"}),
                 ])
                 card.locator("[data-effect-confirm]").click()
-                page.wait_for_function("document.querySelector('#agentStop').hidden")
+                page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
                 calls = page.evaluate("window.__kernelCalls.filter(call => call.url === '/api/agent/actions/confirm')")
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(json.loads(calls[0]["body"])["plan_id"], PLAN_A)
+
+    def test_reconciliation_preserves_request_identity_across_header_forms(self):
+        for header_form in ("lowercase", "mixed_case", "headers", "pairs"):
+            with self.subTest(header_form=header_form):
+                page = self.dialogue_page()
+                page.evaluate(
+                    """headerForm => {
+                        const fixtureFetch = window.fetch;
+                        window.fetch = (url, options = {}) => {
+                            if (!String(url).startsWith('/api/agent/sessions/') || (options.method || 'GET') !== 'GET') {
+                                return fixtureFetch(url, options);
+                            }
+                            const normalized = new Headers(options.headers || {});
+                            const entries = [...normalized.entries()].map(([key, value]) => [
+                                key === 'x-agent-request-id' ? 'x-AgEnT-rEqUeSt-Id' : key, value,
+                            ]);
+                            const headers = headerForm === 'headers' ? normalized
+                                : headerForm === 'pairs' ? entries
+                                : headerForm === 'mixed_case' ? Object.fromEntries(entries)
+                                : Object.fromEntries(normalized.entries());
+                            return fixtureFetch(url, {...options, headers});
+                        };
+                    }""",
+                    header_form,
+                )
+                self.send(page, read_events(), None, "核对已取消的计划")
+                calls = page.evaluate("window.__kernelCalls")
+                query = next(call for call in reversed(calls) if call["url"] == "/api/agent/query")
+                snapshot = next(call for call in reversed(calls) if call["url"].startswith("/api/agent/sessions/") and call["method"] == "GET")
+                request_id = json.loads(query["body"])["request_id"]
+                self.assertTrue(request_id)
+                self.assertEqual(snapshot["headers"].get("x-agent-request-id"), request_id)
+                self.assert_original_card(page, retired=True)
 
     def test_model_cancel_retires_original_card_even_if_final_answer_fails(self):
         for terminal in (

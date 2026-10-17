@@ -372,10 +372,7 @@ def test_malformed_native_binding_cannot_be_dropped(protocol):
 def test_second_batch_repair_does_not_replay_first_result(store):
     async def run():
         executed=[]
-        from tests.error30_model_inputs import explicit_repair_wire
-        transport=explicit_repair_wire('chat_completions',[payload('chat_completions','json','{"query":"first"}','call-first'),payload('chat_completions','json',cid='call-bad'),payload('chat_completions','json','{"query":"corrected"}','call-corrected'),final('chat_completions')],
-            index=2, arguments={"query":"corrected"}, reply_factory=lambda args:
-                payload('chat_completions','json',encode(args),'call-corrected',name='agent__repair'))
+        transport=Wire('chat_completions',[payload('chat_completions','json','{"query":"first"}','call-first'),payload('chat_completions','json',cid='call-bad'),payload('chat_completions','json','{"query":"corrected"}','call-corrected'),final('chat_completions')])
         events=[e async for e in make_session(transport.adapter,store,executed).run(AgentInput(message='只读核验',owner='owner',session_id='second'))]
         transport.verify(4)
         assert executed == [{'query':'first'},{'query':'corrected'}]
@@ -697,18 +694,16 @@ def test_anthropic_shared_parser_invalid_json_remains_strict(allow_argument_erro
 
 
 @pytest.mark.parametrize('mode', ['sse', 'json'])
-def test_anthropic_valid_object_missing_schema_uses_explicit_agent_repair(mode, store):
+def test_anthropic_valid_object_missing_schema_directly_retries_read(mode, store):
     async def run():
-        from tests.error30_model_inputs import explicit_repair_wire, repair_entries
+        from tests.error30_model_inputs import repair_entries
         executed = []
         cold, original = await _seed_original_native_history(mode, store, executed)
         blocks = [{'type': 'thinking', 'thinking': 'valid-schema-thinking', 'signature': 'valid-schema-signature'},
                   {'type': 'tool_use', 'id': 'schema-rejected-native-call', 'name': 'lookup', 'input': {}}]
-        transport = explicit_repair_wire(_NATIVE_PROTOCOL, [_native_response(mode, blocks),
-                                          _native_final(mode), _native_final(mode)], index=1,
-            arguments={'query': _NATIVE_NEW_QUERY}, reply_factory=lambda arguments: _native_response(
+        transport = Wire(_NATIVE_PROTOCOL, [_native_response(mode, blocks), _native_response(
                 mode, [{'type': 'tool_use', 'id': 'schema-repair-native-call',
-                        'name': 'agent__repair', 'input': arguments}]))
+                        'name': 'lookup', 'input': {'query': _NATIVE_NEW_QUERY}}]), _native_final(mode)])
         recorder = _NativeRoundRecorder(transport.adapter, cold, executed)
         events = [event async for event in make_session(recorder, cold, executed).run(
             AgentInput(message='本轮只读核验', owner='owner', session_id=_NATIVE_SESSION))]
@@ -721,9 +716,9 @@ def test_anthropic_valid_object_missing_schema_uses_explicit_agent_repair(mode, 
                    for event in events if event.type is AgentEventType.MODEL_STARTED)
         call = next(event.tool_call for event in recorder.rounds[0]['events'] if event.tool_call)
         assert call.arguments == {} and call.argument_error is None and call.raw_arguments is None
-        assert repair_entries(transport.requests[1]), 'schema validation must still issue its explicit repair ticket'
+        assert not repair_entries(transport.requests[1]), 'READ schema feedback must not offer repair authority'
         repaired = next(event.tool_call for event in recorder.rounds[1]['events'] if event.tool_call)
-        assert repaired.name == 'agent__repair' and repaired.arguments['arguments'] == {'query': _NATIVE_NEW_QUERY}
+        assert repaired.name == 'lookup' and repaired.arguments == {'query': _NATIVE_NEW_QUERY}
         for request in transport.requests:
             _assert_original_native_history(request)
         saved = await cold.load(owner='owner', session_id=_NATIVE_SESSION)

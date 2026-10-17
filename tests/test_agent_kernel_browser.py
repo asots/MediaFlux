@@ -77,7 +77,7 @@ HTML = """
                 <button type="button" class="agent-action-btn" id="agentNewSession">新会话</button>
                 <span class="agent-submit-slot">
                   <button type="submit" class="agent-send" id="agentSend" disabled>发送</button>
-                  <button type="button" class="agent-stop" id="agentStop" hidden disabled>停止</button>
+                  <button type="button" class="agent-send agent-stop" id="agentStopSession" aria-label="停止任务" aria-busy="false" hidden disabled>停止</button>
                 </span>
               </div>
             </div>
@@ -213,19 +213,23 @@ MOCK_FETCH = r"""
         Boolean(window.__kernelConfig.holdQueryOpen),
       );
     }
-    if (path === '/api/agent/query/cancel') {
+    if (path === '/api/agent/session/stop') {
       const request = JSON.parse(String(options.body || '{}'));
-      const result = window.__kernelConfig.cancelResponse || {cancelled: true};
-      if (result.cancelled === true && request.session_id && request.request_id && !window.__kernelConfig.cancelPending) {
+      const pending = Boolean(window.__kernelConfig.cancelPending);
+      const result = {status: pending ? 'stopping' : 'stopped', stopped: !pending, model_turn: 'stop_requested'};
+      if (request.session_id && !pending) {
         window.__kernelConfig.sessionDetails ||= {};
         const snapshot = sessionSnapshot(request.session_id, window.__kernelConfig.sessionDetails[request.session_id] || {});
-        const turnId = snapshot.active_turn?.turn_id || `turn-${request.request_id}`;
+        const lastCall = window.__kernelCalls.findLast(call => ['/api/agent/query', '/api/agent/actions/confirm'].includes(call.url)
+          && JSON.parse(call.body).session_id === request.session_id);
+        const requestId = snapshot.active_turn?.request_id || (lastCall && JSON.parse(lastCall.body).request_id);
+        const turnId = snapshot.active_turn?.turn_id || `turn-${requestId}`;
         if (!snapshot.messages.length && window.__kernelConfig.lastQueryBySession?.[request.session_id]) {
           snapshot.messages = [{role: 'user', content: window.__kernelConfig.lastQueryBySession[request.session_id]}];
         }
         snapshot.active_turn = null;
         snapshot.last_turn = {
-          request_id: request.request_id,
+          request_id: requestId,
           turn_id: turnId,
           status: 'cancelled',
           message: '本次任务已停止。',
@@ -604,7 +608,7 @@ class AgentKernelBrowserTests(unittest.TestCase):
                 page.locator("#agentPrompt").fill("核对媒体库")
                 page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
                 page.locator(".agent-narrative").wait_for()
-                page.locator("#agentStop").wait_for(state="hidden")
+                page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
                 page.locator("#agentPrompt").fill("下一条消息")
                 self.assertTrue(page.locator("#agentSend").is_enabled())
                 self.assertIn("DONE7788", page.locator(".agent-message-assistant").inner_text())
@@ -628,7 +632,7 @@ class AgentKernelBrowserTests(unittest.TestCase):
             window.__waitingCard = document.querySelector('.agent-result-card');
         }""")
         page.get_by_text(answer, exact=True).wait_for(timeout=3000)
-        page.locator("#agentStop").wait_for(state="hidden", timeout=3000)
+        page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'", timeout=3000)
         self.assertTrue(page.evaluate("window.__waitingUser === document.querySelector('.agent-message-user')"))
         self.assertTrue(page.evaluate("window.__waitingCard === document.querySelector('.agent-result-card')"))
         self.assertEqual(page.locator(".agent-retry-draft, .agent-cancelled, .is-interrupted").count(), 0)
@@ -920,7 +924,7 @@ Season 1 / S01E01
         result.wait_for()
         self.assertIn("直接 API 计划已完成", result.inner_text())
         self.assertEqual(page.locator(".agent-streaming").count(), 0)
-        self.assertTrue(page.locator("#agentStop").is_hidden())
+        self.assertTrue(page.locator("#agentSend").get_attribute("aria-busy") == "false")
 
     def test_effect_completed_without_turn_terminal_reports_unknown_after_eof(self):
         approval = {
@@ -960,7 +964,7 @@ Season 1 / S01E01
         transcript = page.locator("#agentTranscript")
         self.assertIn("暂停任务已提交", transcript.text_content())
         self.assertIn("不会自动重试", page.locator("#agentResponseStatus").inner_text())
-        self.assertTrue(page.locator("#agentStop").is_hidden())
+        self.assertTrue(page.locator("#agentSend").get_attribute("aria-busy") == "false")
         self.assertFalse(page.locator("#agentSend").is_hidden())
         self.assertEqual(page.locator(".agent-streaming").count(), 0)
         self.assertEqual(page.locator(".agent-cancelled").count(), 0)
@@ -1379,7 +1383,7 @@ Season 1 / S01E01
         self.assertAlmostEqual(send_before["width"], send_before["height"], delta=0.5)
         self.assertAlmostEqual(send_before["width"], before["width"], delta=0.5)
         page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
-        page.locator("#agentStop").wait_for(state="visible")
+        page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'true'")
         during = page.locator(".agent-submit-slot").bounding_box()
         self.assertAlmostEqual(before["width"], during["width"], delta=0.5)
         self.assertAlmostEqual(before["height"], during["height"], delta=0.5)
@@ -1395,10 +1399,10 @@ Season 1 / S01E01
         self.assertLessEqual(layout["documentWidth"], layout["viewportWidth"])
         self.assertGreaterEqual(layout["composerLeft"], -0.5)
         self.assertLessEqual(layout["composerRight"], layout["viewportWidth"] + 0.5)
-        page.locator("#agentStop").click()
+        page.locator("#agentStopSession").click()
         page.locator(".agent-cancelled").wait_for()
         paths = [call["url"] for call in page.evaluate("window.__kernelCalls")]
-        self.assertIn("/api/agent/query/cancel", paths)
+        self.assertIn("/api/agent/session/stop", paths)
 
 
 if __name__ == "__main__":  # pragma: no cover

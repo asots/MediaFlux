@@ -753,11 +753,17 @@ def test_authoritative_roundtrip_aliasing_cas_atomic_updates_receipt_merge(kind)
             ),
         )
         state = await store.commit(lease, conversation=rows, updates=updates)
-        assert state.conversation == rows
+        history_id = state.conversation[0]["history_id"]
+        assert isinstance(history_id, str) and history_id
+        assert "history_id" not in rows[0], "commit must not mutate caller-owned rows"
+        committed_rows = deepcopy(rows)
+        committed_rows[0]["history_id"] = history_id
+        assert state.conversation == committed_rows
         state.conversation[0]["content"] = "mutation"
+        state.conversation[0]["history_id"] = "mutated-returned-id"
         cold = make_store() if kind == "sqlite" else store
         loaded = await cold.load(owner=OWNER, session_id=SESSION)
-        assert loaded.conversation == rows
+        assert loaded.conversation == committed_rows
         assert isinstance(loaded.conversation[-1]["content"], PendingText)
         assert loaded.metadata["peer"] == {"one": [1, True, None, "😀"]}
         before = loaded.clone()
@@ -782,7 +788,7 @@ def test_authoritative_roundtrip_aliasing_cas_atomic_updates_receipt_merge(kind)
         lease2, after = await cold.begin_turn(
             owner=OWNER, session_id=SESSION, request_id="y"
         )
-        assert after.conversation == rows + [receipt]
+        assert after.conversation == committed_rows + [receipt]
         assert "effect_waits" not in after.metadata
         with pytest.raises(StalePublicationError):
             await store.commit(lease, conversation=[])
@@ -817,13 +823,26 @@ def test_legacy_sqlite_hmac_cold_reopen_and_lazy_rewrite():
         loaded = await reopened()
         assert loaded.conversation == rows
         assert type(loaded.conversation[-1]["content"]) is str
-        await make_store().commit(lease, conversation=rows)
+        with db.get_conn() as conn:
+            persisted = conn.execute(
+                "SELECT state_json,state_hmac FROM agent_kernel_sessions"
+            ).fetchone()
+        assert tuple(persisted) == (encoded, signature), "legacy load must not rewrite signed data"
+        committed = await make_store().commit(lease, conversation=rows)
+        history_id = committed.conversation[0]["history_id"]
+        assert isinstance(history_id, str) and history_id
+        assert "history_id" not in rows[0], "lazy rewrite must not mutate legacy input rows"
+        committed_rows = deepcopy(rows)
+        committed_rows[0]["history_id"] = history_id
+        assert committed.conversation == committed_rows
         with db.get_conn() as conn:
             raw = conn.execute(
                 "SELECT state_json FROM agent_kernel_sessions"
             ).fetchone()[0]
         assert json.loads(raw)["conversation"][0] == 1
-        assert (await reopened()).conversation == rows
+        rewritten = await reopened()
+        assert rewritten.conversation == committed_rows
+        assert type(rewritten.conversation[-1]["content"]) is str
         with db.get_conn() as conn:
             conn.execute("UPDATE agent_kernel_sessions SET state_hmac='bad'")
         with pytest.raises(ValueError):

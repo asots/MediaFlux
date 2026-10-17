@@ -17,7 +17,6 @@ from app.agent.owner_routes import TransportInputError, normalize_delivery_route
 
 from .adapters import EventObserver, TurnView, consume_events, iter_ndjson
 from .events import AgentEventType
-from .metrics import KernelMetrics
 from .session import AgentSession
 from .state import AgentInput, CancellationToken, SelectionInvalidError
 from .ux_selection import normalize_selection
@@ -37,6 +36,7 @@ class QueryEnvelope:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     selection: Mapping[str, Any] | None = None
     delivery_route: Mapping[str, Any] = field(default_factory=dict)
+    initial_read_tool: str = ""
 
     def to_agent_input(self) -> AgentInput:
         owner = _owner(self.owner)
@@ -57,6 +57,7 @@ class QueryEnvelope:
                 channel=channel,
                 reply_context=dict(self.reply_context),
                 metadata=metadata,
+                initial_read_tool=self.initial_read_tool,
                 delivery_route=normalize_delivery_route(
                     self.delivery_route, channel=channel, owner=owner,
                 ),
@@ -119,11 +120,8 @@ class ExplainEnvelope:
 class _KernelTransport:
     """共享会话依赖与确认取消；具体通道仅适配各自的事件协议。"""
 
-    def __init__(
-        self, session: AgentSession, *, metrics: KernelMetrics | None = None
-    ) -> None:
+    def __init__(self, session: AgentSession) -> None:
         self.session = session
-        self.metrics = metrics or KernelMetrics()
 
     async def cancel_effect(self, request: EffectEnvelope) -> bool:
         normalized = request.normalized()
@@ -139,33 +137,33 @@ class WebKernelTransport(_KernelTransport):
     async def explain(self, request: ExplainEnvelope) -> AsyncIterator[bytes]:
         events = self.session.explain(**asdict(replace(request, channel="web").normalized()))
         async with aclosing(events):
-            async for chunk in iter_ndjson(self.metrics.track(events, channel="web")):
+            async for chunk in iter_ndjson(events):
                 yield chunk
 
     async def explain_view(self, request: ExplainEnvelope) -> TurnView:
         events = self.session.explain(**asdict(replace(request, channel="web").normalized()))
         async with aclosing(events):
-            return await consume_events(self.metrics.track(events, channel="web"))
+            return await consume_events(events)
 
     async def query(self, request: QueryEnvelope) -> AsyncIterator[bytes]:
         async with aclosing(self.session.run(replace(request, channel="web", delivery_route={}).to_agent_input())) as events:
-            async for chunk in iter_ndjson(self.metrics.track(events, channel="web")):
+            async for chunk in iter_ndjson(events):
                 yield chunk
 
     async def query_view(self, request: QueryEnvelope) -> TurnView:
         async with aclosing(self.session.run(replace(request, channel="web", delivery_route={}).to_agent_input())) as events:
-            return await consume_events(self.metrics.track(events, channel="web"))
+            return await consume_events(events)
 
     async def confirm(self, request: EffectEnvelope) -> AsyncIterator[bytes]:
         events = self.session.confirm(**asdict(replace(request, channel="web", delivery_route={}).normalized()))
         async with aclosing(events):
-            async for chunk in iter_ndjson(self.metrics.track(events, channel="web")):
+            async for chunk in iter_ndjson(events):
                 yield chunk
 
     async def confirm_view(self, request: EffectEnvelope) -> TurnView:
         events = self.session.confirm(**asdict(replace(request, channel="web", delivery_route={}).normalized()))
         async with aclosing(events):
-            return await consume_events(self.metrics.track(events, channel="web"))
+            return await consume_events(events)
 
     async def activity(self, *, owner: str, session_id: str) -> dict[str, Any] | None:
         return await self.session.coordinator.describe(
@@ -186,7 +184,7 @@ class TelegramKernelTransport(_KernelTransport):
     async def explain(self, request: ExplainEnvelope) -> TurnView:
         events = self.session.explain(**asdict(replace(request, channel="telegram").normalized()))
         async with aclosing(events):
-            return await consume_events(self.metrics.track(events, channel="telegram"))
+            return await consume_events(events)
 
     async def query(
         self,
@@ -196,10 +194,7 @@ class TelegramKernelTransport(_KernelTransport):
         cancellation: CancellationToken | None = None,
     ) -> TurnView:
         normalized = replace(request, channel="telegram")
-        events = self.metrics.track(
-            self.session.run(normalized.to_agent_input()),
-            channel="telegram",
-        )
+        events = self.session.run(normalized.to_agent_input())
         cancel_task = None
 
         async def cancel_on_stop():
@@ -231,7 +226,7 @@ class TelegramKernelTransport(_KernelTransport):
         normalized = replace(request, channel="telegram").normalized()
         events = self.session.confirm(**asdict(normalized))
         return await consume_events(
-            self.metrics.track(events, channel="telegram"),
+            events,
             observe=observe,
         )
 

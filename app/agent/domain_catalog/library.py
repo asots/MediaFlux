@@ -9,6 +9,8 @@ from app.agent.durable_job_actions import (
 )
 from app.agent.episode_audit import audit_series_episodes
 from app.agent.episode_resource_actions import (
+    DEFAULT_MISSING_SEASON_EPISODES,
+    MAX_MISSING_SEASON_EPISODES,
     missing_episode_resource_arguments,
     missing_season_resource_arguments,
     search_missing_episode_resources,
@@ -43,7 +45,6 @@ from app.agent.media_preference_policy import (
     RESOURCE_PREFERENCE_PROPERTIES,
     owner_media_preferences,
 )
-from app.agent.recent_resource_candidates import MAX_RESOURCE_CANDIDATES
 from app.agent.missing_media_workflow_runtime import MissingMediaWorkflowRuntime
 from app.agent.missing_media_workflows import (
     list_missing_workflows,
@@ -53,6 +54,7 @@ from app.agent.models import (
     RiskLevel,
     ToolSpec,
 )
+from app.agent.recent_resource_candidates import MAX_RESOURCE_CANDIDATES
 from app.agent.update_actions import check_library_updates
 
 from .library_search import library_search_arguments, search_library
@@ -258,7 +260,7 @@ def register_specs(
     registry.register(
         ToolSpec(
             name="library.search_missing_season_resources",
-            description="仅用于媒体库补缺；普通指定季集找资源用 indexer.search_resources，不要求缺集审计。单部按query/season核对；多部缺集找资源必须一次传items（最多12部/季），无需逐部重搜。每部可传episodes指定1到3个集号（例如两部S03E04/S01E07分别传[4]/[7]），不传则搜索最早缺集；每部最多搜索3个已播缺集，按偏好选可核验覆盖候选，保留整批候选的统一全局编号和一个resource_candidates_ref，随后一次ingest.submit预检整批。未覆盖/季集映射未知/站点失败逐部报告，不等于全网无资源；不自动下载。",
+            description="仅用于媒体库补缺；普通指定季集找资源用 indexer.search_resources，不要求缺集审计。单部按query/season核对；多部缺集找资源必须一次传items（最多12部/季）。每部默认覆盖20个已播缺集；episodes可指定最多100个集号，默认完整处理指定范围，显式max_episodes可缩小范围。一次单季共享搜索后逐集匹配，仅对无明确候选的集在总耗时/请求预算内精确补查，无需因旧三集限制让用户继续。共享查询无匹配不代表精确检索穷尽；remaining_episodes列明未完成范围，站点失败如实保留。按偏好选可核验覆盖候选，保留整批统一全局编号和一个resource_candidates_ref，随后一次ingest.submit预检整批；未知映射/未播Fin/不同作品不推荐，不自动下载。",
             risk=RiskLevel.READ,
             domains=("resource_search", "library"),
             source_kind="resource_index",
@@ -276,7 +278,7 @@ def register_specs(
                         "type": "object", "required": ["query", "season"], "additionalProperties": False,
                         "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 120},
                                        "season": {"type": "integer", "minimum": 1, "maximum": 100},
-                                       "episodes": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": True,
+                                       "episodes": {"type": "array", "minItems": 1, "maxItems": MAX_MISSING_SEASON_EPISODES, "uniqueItems": True,
                                                     "items": {"type": "integer", "minimum": 1, "maximum": 1000}},
                                        "tmdb_id": {"type": "string", "pattern": "^[0-9]{1,10}$"},
                                        "library_name": {"type": "string", "maxLength": 80}}}},
@@ -290,7 +292,7 @@ def register_specs(
                     "tmdb_id": {"type": "string", "pattern": "^[0-9]{1,10}$"},
                     "library_name": {"type": "string", "minLength": 1, "maxLength": 80},
                     "season": {"type": "integer", "minimum": 1, "maximum": 100},
-                    "episodes": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": True,
+                    "episodes": {"type": "array", "minItems": 1, "maxItems": MAX_MISSING_SEASON_EPISODES, "uniqueItems": True,
                                  "items": {"type": "integer", "minimum": 1, "maximum": 1000}},
                     "as_of": {"type": "string", "format": "date"},
                     "sites": {
@@ -298,7 +300,8 @@ def register_specs(
                         "maxItems": 16,
                         "items": {"type": "string", "pattern": "^[a-z0-9_-]{1,32}$"},
                     },
-                    "max_episodes": {"type": "integer", "minimum": 1, "maximum": 3},
+                    "max_episodes": {"type": "integer", "minimum": 1, "maximum": MAX_MISSING_SEASON_EPISODES,
+                                     "description": f"默认覆盖{DEFAULT_MISSING_SEASON_EPISODES}个缺集；指定episodes时默认覆盖指定范围，显式设置可缩小。"},
                     "limit_per_episode": {
                         "type": "integer",
                         "minimum": 1,

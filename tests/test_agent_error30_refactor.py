@@ -1,4 +1,4 @@
-"""Explicit server-issued repair through the real Session and pipeline."""
+"""READ 直接修参；WRITE/DANGER 仍由真实 Session/Pipeline 校验修复证据。"""
 import asyncio
 import json
 
@@ -6,28 +6,106 @@ import pytest
 
 from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput
 from tests.test_agent_invalid_argument_progress import scenario, store, X  # noqa: F401
 
 
-def test_unrelated_success_keeps_failure(store):  # noqa: F811 - imported pytest fixture
+@pytest.mark.parametrize("stage", ["schema", "validator", "admission", "handler"])
+def test_read_invalid_arguments_returns_schema_without_ticket_or_field_locks(stage):
+    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
+    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+
+    async def run():
+        invoked = []
+        schema = {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string"}, "limit": {"type": "integer"}}}
+
+        def check(arguments):
+            if arguments["query"] == "old":
+                raise ToolPipelineError("query 形状无效", code="invalid_arguments", invalid_fields=("query",))
+            return arguments
+
+        def read(arguments, _context):
+            if stage == "handler":
+                check(arguments)
+            invoked.append(arguments)
+            return {"ok": True, "status": "found"}
+
+        class Authorization:
+            async def authorize(self, _tool, arguments, _context):
+                if stage == "admission":
+                    check(arguments)
+
+        tool = KernelToolSpec(name="library.lookup", domain="library", description="READ retry",
+            input_schema=schema, effect=ToolEffect.READ,
+            validator=check if stage == "validator" else dict, read=read)
+        state = InMemorySessionStateStore()
+        lease, _ = await state.begin_turn(owner="owner", session_id="direct", request_id="r")
+        ctx = ToolCallContext(owner=lease.owner, session_id=lease.session_id,
+            request_id=lease.request_id, turn_id=lease.turn_id, lease=lease,
+            cancellation=CancellationToken(), report_progress=lambda _: asyncio.sleep(0))
+        pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=state, authorization=Authorization())
+        bad = {"query": "old", "limit": "bad" if stage == "schema" else 1}
+        with pytest.raises(ToolPipelineError) as caught:
+            await pipeline.execute(tool.name, bad, context=ctx)
+        assert caught.value.code == "invalid_arguments"
+        assert caught.value.repair_ticket == "" and ctx.schema_replacements == {}
+        feedback = json.loads(AgentSession._tool_error_message(
+            ModelToolCall("bad", tool.name, bad), caught.value, input_schema=schema).content)
+        assert feedback["expected_input_schema"] == schema
+        assert "repair" not in feedback
+        # READ requests are not write approvals: changing a valid selector or
+        # dropping an optional field still uses the registered schema and gates.
+        result = await pipeline.execute(tool.name, {"query": "new"}, context=ctx)
+        assert invoked == [{"query": "new"}]
+        assert not result.recovered_failures and result.effect_plan is None
+        assert ctx.schema_replacements == {}
+
+    asyncio.run(run())
+
+
+def test_unparsed_read_does_not_create_server_repair_authority():
+    from app.agent.kernel import error_repair
+    from app.agent.kernel.pipeline import ToolCallContext
+    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+
+    async def run():
+        state = InMemorySessionStateStore()
+        lease, _ = await state.begin_turn(owner="owner", session_id="unparsed-read", request_id="r")
+        context = ToolCallContext(owner=lease.owner, session_id=lease.session_id,
+            request_id=lease.request_id, turn_id=lease.turn_id, lease=lease,
+            cancellation=CancellationToken(), report_progress=lambda _: asyncio.sleep(0))
+        tool = KernelToolSpec(name="library.lookup", domain="library", description="READ",
+            input_schema={"type": "object"}, effect=ToolEffect.READ, read=lambda *_: {"ok": True})
+        assert error_repair.issue(tool, None, context) == ""
+        assert context.schema_replacements == {}
+
+    asyncio.run(run())
+
+
+def test_successful_read_retry_settles_syntax_not_object_evidence(store):  # noqa: F811 - imported pytest fixture
     final, _ = asyncio.run(scenario(store, {**X, "ref": "object-y", "limit": 1}, mixed=False))
-    assert final["status"] == "partial"
+    assert final["status"] == "success"
 
 
 @pytest.mark.parametrize("mode", ["repair", "unrelated", "forged", "conflict", "incomplete"])
-def test_explicit_repair_real_session(store, mode):  # noqa: F811 - imported pytest fixture
+@pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_explicit_write_repair_real_session(store, mode, effect):  # noqa: F811 - imported pytest fixture
     async def run():
         calls = []
         schema = {"type": "object", "required": ["target", "limit"], "properties": {
             "target": {"type": "string"}, "limit": {"type": "integer"}}, "additionalProperties": False}
-        def read(arguments, context):
+        def prepare(arguments, context):
             calls.append(arguments)
-            return {"ok": True, "status": "submitted" if mode == "incomplete" else "success", "summary": "checked target"}
+            if mode == "incomplete":
+                return PreparedEffect(preview={"summary": "需确认"}, snapshot_fingerprint="snapshot")
+            return ToolOutcome(model_content="无需变更", public_content={"ok": True, "status": "no_changes", "summary": "checked target"})
         tool = KernelToolSpec(name="library.check", domain="library", description="check", input_schema=schema,
-                              effect=ToolEffect.READ, read=read)
+            effect=effect, prepare=prepare, execute_confirmed=lambda *_: pytest.fail("repair is not write authorization"))
         class Model:
             def __init__(self):
                 self.requests = []
@@ -64,7 +142,8 @@ def test_explicit_repair_real_session(store, mode):  # noqa: F811 - imported pyt
         if mode in {"forged", "conflict"}:
             assert events[-1].type.value == "turn.failed"
         else:
-            assert final["status"] == ("success" if mode == "repair" else "partial"), final
+            expected = "approval_required" if mode == "incomplete" else "success" if mode == "repair" else "partial"
+            assert final["status"] == expected, final
         assert len(calls) == (0 if mode in {"forged", "conflict"} else 1)
         from app.agent.kernel.persistence import SQLiteKernelStore
         cold = SQLiteKernelStore(secret_provider=lambda: "offline-invalid-progress")
@@ -77,7 +156,8 @@ def test_explicit_repair_real_session(store, mode):  # noqa: F811 - imported pyt
 
 
 @pytest.mark.parametrize("field", ["owner", "session_id", "generation", "turn_id"])
-def test_repair_ticket_scope_and_single_consumption(field):
+@pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_write_repair_ticket_scope_and_single_consumption(field, effect):
     from dataclasses import replace
     from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
     from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
@@ -86,7 +166,10 @@ def test_repair_ticket_scope_and_single_consumption(field):
         invoked = []
         tool = KernelToolSpec(name="library.lookup", domain="library", description="lookup",
             input_schema={"type": "object", "required": ["target"], "properties": {"target": {"type": "string"}}},
-            effect=ToolEffect.READ, read=lambda args, ctx: invoked.append(args) or {"ok": True, "status": "success"})
+            effect=effect,
+            prepare=lambda args, ctx: invoked.append(args) or ToolOutcome(model_content="无需变更",
+                public_content={"ok": True, "status": "no_changes"}),
+            execute_confirmed=lambda *_: pytest.fail("repair cannot execute a write"))
         state = InMemorySessionStateStore()
         pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=state)
         lease, _ = await state.begin_turn(owner="owner", session_id="scope", request_id="r")
@@ -109,7 +192,8 @@ def test_repair_ticket_scope_and_single_consumption(field):
     asyncio.run(run())
 
 
-def test_repair_chain_keeps_provenance_and_actual_authorization():
+@pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_repair_chain_keeps_provenance_and_actual_authorization(effect):
     from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
     from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
     from app.agent.kernel.effects import PreparedEffect
@@ -120,7 +204,7 @@ def test_repair_chain_keeps_provenance_and_actual_authorization():
         tool = KernelToolSpec(name="cloud.change", domain="cloud", description="change",
             input_schema={"type": "object", "required": ["target", "count"], "properties": {
                 "target": {"type": "string"}, "count": {"type": "integer"}}},
-            effect=ToolEffect.WRITE, authorize=lambda _: allowed[0],
+            effect=effect, authorize=lambda _: allowed[0],
             prepare=lambda args, ctx: PreparedEffect(preview={"summary": "待确认"}, snapshot_fingerprint="observed"),
             execute_confirmed=lambda args, snapshot, ctx: writes.append(args))
         state = InMemorySessionStateStore()
@@ -150,9 +234,8 @@ def test_repair_chain_keeps_provenance_and_actual_authorization():
     asyncio.run(run())
 
 
-def test_repair_chain_success_recovers_all_ancestor_failures(store):  # noqa: F811
+def test_read_direct_retry_needs_no_ancestor_tickets(store):  # noqa: F811
     from tests.test_agent_kernel_core import ScriptedModel
-    from tests.error30_model_inputs import ExplicitRepairModel
     calls = []
     spec = KernelToolSpec(name="library.check", domain="library", description="check",
         input_schema={"type": "object", "required": ["target", "count"], "properties": {
@@ -162,7 +245,7 @@ def test_repair_chain_success_recovers_all_ancestor_failures(store):  # noqa: F8
                ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")]
               for cid, args in [("first", {}), ("second", {"target": "x"}), ("third", {"target": "x", "count": 1})]]
     rounds.append([ModelEvent(ModelEventType.TEXT_DELTA, text="核验完成"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")])
-    model = ExplicitRepairModel(ScriptedModel(rounds), {"second", "third"})
+    model = ScriptedModel(rounds)
     catalog = ToolCatalog([spec])
     session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(minimum=1, maximum=1),
         pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
@@ -173,7 +256,8 @@ def test_repair_chain_success_recovers_all_ancestor_failures(store):  # noqa: F8
     assert calls == [{"target": "x", "count": 1}]
 
 
-def test_domain_validation_only_offers_actionable_field_repairs():
+@pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_write_domain_validation_only_offers_actionable_field_repairs(effect):
     from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
     from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
 
@@ -190,9 +274,12 @@ def test_domain_validation_only_offers_actionable_field_repairs():
                                             invalid_fields=("path",) if annotated else ())
                 return args
             tool = KernelToolSpec(name="library.read", domain="library", description="read",
-                effect=ToolEffect.READ, input_schema={"type": "object", "required": ["path", "target"],
+                effect=effect, input_schema={"type": "object", "required": ["path", "target"],
                     "properties": {"path": {"type": "string"}, "target": {"type": "string"}}},
-                validator=validator, read=lambda args, ctx: invoked.append(args) or {"ok": True})
+                validator=validator,
+                prepare=lambda args, ctx: invoked.append(args) or ToolOutcome(model_content="无需变更",
+                    public_content={"ok": True, "status": "no_changes"}),
+                execute_confirmed=lambda *_: pytest.fail("repair cannot execute a write"))
             pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=state)
             with pytest.raises(ToolPipelineError) as error:
                 await pipeline.execute(tool.name, {"path": "/other", "target": "x"}, context=ctx)
@@ -211,7 +298,7 @@ def test_domain_validation_only_offers_actionable_field_repairs():
     asyncio.run(run())
 
 
-def test_actual_reference_reader_can_repair_path_without_changing_handle():
+def test_actual_reference_reader_directly_retries_path_with_scope_checks():
     from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
     from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
     from app.agent.kernel import telegram_reference
@@ -228,21 +315,24 @@ def test_actual_reference_reader_can_repair_path_without_changing_handle():
         args = {"handle": reply["reference_handle"], "path": "/other"}
         with pytest.raises(ToolPipelineError) as error:
             await pipeline.execute("agent.read_result", args, context=ctx)
-        ticket = error.value.repair_ticket
-        assert ticket, (error.value.code, str(error.value), error.value.invalid_fields)
-        result = await pipeline.execute("agent.repair", {"ticket": ticket,
-            "arguments": {**args, "path": "/text"}}, context=ctx)
-        assert result.recovered_failures == (ticket,)
+        assert error.value.code == "invalid_arguments" and not error.value.repair_ticket
+        assert not ctx.schema_replacements
+        result = await pipeline.execute("agent.read_result", {**args, "path": "/text"}, context=ctx)
+        assert not result.recovered_failures
         assert json.loads(result.outcome.model_content)["data"]["items"] == "keep this reference"
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("repair_both", [False, True])
-def test_two_unparsed_calls_keep_independent_failure_identities(store, repair_both):  # noqa: F811
+@pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_two_unparsed_writes_keep_independent_failure_identities(store, repair_both, effect):  # noqa: F811
     calls = []
     spec = KernelToolSpec(name="library.check", domain="library", description="check",
         input_schema={"type": "object", "required": ["target"], "properties": {"target": {"type": "string"}}},
-        effect=ToolEffect.READ, read=lambda args, ctx: calls.append(args) or {"ok": True, "summary": "checked"})
+        effect=effect,
+        prepare=lambda args, ctx: calls.append(args) or ToolOutcome(model_content="无需变更",
+            public_content={"ok": True, "status": "no_changes", "summary": "checked"}),
+        execute_confirmed=lambda *_: pytest.fail("repair cannot execute a write"))
     class Model:
         def __init__(self):
             self.round = 0

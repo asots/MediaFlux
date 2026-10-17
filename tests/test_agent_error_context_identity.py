@@ -1,7 +1,4 @@
-"""Existing no-argument context fences also constrain invalid-argument recovery.
-
-This does not infer a trusted repair relation between explicit object arguments.
-"""
+"""同工具 READ 成功仅结清语法阻塞；业务失败和原始事实仍按上下文保留。"""
 from __future__ import annotations
 
 import asyncio
@@ -29,10 +26,10 @@ from tests.test_agent_tool_argument_ingress import PROTOCOLS, Wire, encode
 A, B, C = "library.lookup", "library.health", "library.inspect"
 X = {"ref": "object-x"}
 FINAL = "按已取得的证据完成核验。"
-ERRORS = {"schema", "invalid_arguments", "provider_timeout"}
+ERRORS = {"schema", "invalid_arguments", "provider_timeout", "rate_limited"}
 
 
-async def observe(store, steps, *, protocol="chat_completions", schema=False, ending="answer", explicit_repair=False):
+async def observe(store, steps, *, protocol="chat_completions", schema=False, ending="answer"):
     """Real validation/session/wire/storage; replace only read-side business I/O."""
     entered, business, returned = [], [], []
     pending = [step for step in steps if step[2] != "schema" and step[0] != DISCOVERY_TOOL]
@@ -71,19 +68,7 @@ async def observe(store, steps, *, protocol="chat_completions", schema=False, en
         limits = SessionLimits(max_model_rounds=len(steps) + 1)
     elif ending == "tool-empty":
         limits = SessionLimits(max_tool_calls=len(steps))
-    class RepairWire(Wire):
-        async def handler(self, request):
-            # Model fixture explicitly chooses a server repair, before the real
-            # protocol decoder sees it. Native private state stays unchanged.
-            if explicit_repair and len(self.requests) == len(steps) - 1:
-                from tests.error30_model_inputs import repair_entries
-                entries = repair_entries(json.loads(request.content))
-                assert entries, "actual request must advertise the scoped repair"
-                self.replies[0] = reply(protocol, name="agent__repair", arguments={
-                    "ticket": entries[-1]["ticket"], "arguments": steps[-1][1],
-                }, index=len(steps) - 1, private=True)
-            return await super().handler(request)
-    wire = RepairWire(protocol, replies)
+    wire = Wire(protocol, replies)
     session = AgentSession(
         model=wire.adapter, catalog=catalog, retriever=CapabilityRetriever(minimum=len(catalog), maximum=len(catalog)),
         pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store, journal=store, limits=limits,
@@ -112,6 +97,7 @@ async def observe(store, steps, *, protocol="chat_completions", schema=False, en
         if outcome in ERRORS:
             assert result["code"] == ("invalid_arguments" if outcome == "schema" else outcome)
             assert not result.get("data", {}).get("items")
+            assert "repair" not in result
         elif name != DISCOVERY_TOOL:
             assert result["data"]["items"][0]["title"] == outcome
 
@@ -154,17 +140,21 @@ def assert_partial(final, answers, *, reason="invalid_arguments", titles=()):
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
-def test_empty_request_cannot_recover_across_business_context(store, protocol):
-    steps = [(A, {}, "invalid_arguments"), (B, {}, "健康检查独有资料"), (A, {}, "切换后对象独有资料")]
+@pytest.mark.parametrize("code", ["invalid_arguments", "provider_timeout", "rate_limited"])
+def test_read_retry_settles_only_syntax_across_business_context(store, protocol, code):
+    steps = [(A, {}, code), (B, {}, "健康检查独有资料"), (A, {}, "切换后对象独有资料")]
     final, answers = asyncio.run(observe(store, steps, protocol=protocol))
-    assert_partial(final, answers, titles=("健康检查独有资料", "切换后对象独有资料"))
+    if code == "invalid_arguments":
+        assert final["status"] == "success" and final["answer"] == FINAL
+    else:
+        assert_partial(final, answers, reason=code, titles=("健康检查独有资料", "切换后对象独有资料"))
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 @pytest.mark.parametrize("schema", [False, True], ids=["handler", "schema"])
-def test_immediate_empty_to_explicit_repair_keeps_success(store, protocol, schema):
+def test_immediate_empty_read_to_direct_retry_keeps_success(store, protocol, schema):
     steps = [(A, {}, "schema" if schema else "invalid_arguments"), (A, X, "原对象修参独有资料")]
-    final, _ = asyncio.run(observe(store, steps, protocol=protocol, schema=schema, explicit_repair=True))
+    final, _ = asyncio.run(observe(store, steps, protocol=protocol, schema=schema))
     assert final["status"] == "success"
     assert final["answer"] == FINAL
     assert final["finish_reason"] == ("end_turn" if protocol == "anthropic_messages" else "stop")
@@ -172,11 +162,11 @@ def test_immediate_empty_to_explicit_repair_keeps_success(store, protocol, schem
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 @pytest.mark.parametrize("schema", [False, True], ids=["handler", "schema"])
-def test_explicit_repair_cannot_clear_old_empty_context(store, protocol, schema):
+def test_direct_read_retry_settles_old_syntax_after_context_switch(store, protocol, schema):
     steps = [(A, {}, "schema" if schema else "invalid_arguments"),
              (B, {}, "中间健康检查资料"), (A, X, "新上下文显式对象资料")]
-    final, answers = asyncio.run(observe(store, steps, protocol=protocol, schema=schema))
-    assert_partial(final, answers, titles=("中间健康检查资料", "新上下文显式对象资料"))
+    final, _ = asyncio.run(observe(store, steps, protocol=protocol, schema=schema))
+    assert final["status"] == "success" and final["answer"] == FINAL
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
@@ -196,7 +186,7 @@ def test_existing_context_and_explicit_identity_controls(store, protocol, case):
 
 @pytest.mark.parametrize("schema", [False, True], ids=["handler", "schema"])
 @pytest.mark.parametrize("case", ["new-failure-after-switch", "discovery", "repeated-failure"])
-def test_empty_to_explicit_repair_uses_current_business_context(store, schema, case):
+def test_direct_read_retry_uses_current_business_context(store, schema, case):
     bad = (A, {}, "schema" if schema else "invalid_arguments")
     steps = [bad, (A, X, "立即修参对象资料")]
     if case == "new-failure-after-switch":
@@ -205,19 +195,20 @@ def test_empty_to_explicit_repair_uses_current_business_context(store, schema, c
         steps.insert(1, (DISCOVERY_TOOL, {}, "discovery"))
     else:
         steps.insert(1, bad)
-    final, _ = asyncio.run(observe(store, steps, schema=schema, explicit_repair=True))
+    final, _ = asyncio.run(observe(store, steps, schema=schema))
     assert final["status"] == "success"
     assert final["answer"] == FINAL
 
 
 @pytest.mark.parametrize("case", ["old-and-current-failures", "two-failed-tools", "multiple-switches"])
-def test_multiple_empty_failures_do_not_lose_old_context(store, case):
-    steps = [(A, {}, "invalid_arguments"), (B, {}, "独立健康检查资料")]
+@pytest.mark.parametrize("code", ["invalid_arguments", "provider_timeout"])
+def test_multiple_read_failures_preserve_business_not_syntax_blockers(store, case, code):
+    steps = [(A, {}, code), (B, {}, "独立健康检查资料")]
     titles = ("独立健康检查资料", "最近对象资料")
     if case == "old-and-current-failures":
-        steps.append((A, {}, "invalid_arguments"))
+        steps.append((A, {}, code))
     elif case == "two-failed-tools":
-        steps = [(A, {}, "invalid_arguments"), (B, {}, "invalid_arguments"), (C, {}, "第三项独有资料")]
+        steps = [(A, {}, code), (B, {}, code), (C, {}, "第三项独有资料")]
         titles = ("第三项独有资料", "最近对象资料", "后来健康资料")
     else:
         steps += [(C, {}, "第三项核验资料"), (B, {}, "再次健康资料")]
@@ -226,7 +217,10 @@ def test_multiple_empty_failures_do_not_lose_old_context(store, case):
     if case == "two-failed-tools":
         steps.append((B, {}, "后来健康资料"))
     final, answers = asyncio.run(observe(store, steps))
-    assert_partial(final, answers, titles=titles)
+    if code == "invalid_arguments":
+        assert final["status"] == "success" and final["answer"] == FINAL
+    else:
+        assert_partial(final, answers, reason=code, titles=titles)
 
 
 @pytest.mark.parametrize("ending,reason", [
@@ -240,11 +234,13 @@ def test_context_failure_and_independent_success_survive_terminal_paths(store, e
         steps.append((C, {"ref": "object-z"}, "provider_timeout"))
     steps += [(B, {}, "独立健康结果"), (A, X, "切换后显式成功结果")]
     final, answers = asyncio.run(observe(store, steps, ending=ending))
-    # Both failures remain; operational timeout is the primary blocker rather
-    # than an earlier validation issue. Neither disappears from the evidence.
+    # 原语法失败仍在历史；只有未解决的网络错误继续阻断终态。
+    if not mixed and ending == "answer":
+        assert final["status"] == "success" and final["answer"] == FINAL
+        return
     if mixed and ending == "answer":
         reason = "provider_timeout"
     assert_partial(final, answers, reason=reason, titles=("独立健康结果", "切换后显式成功结果"))
     for answer in answers:
-        assert "缺少当前对象参数" in answer
+        assert "缺少当前对象参数" not in answer
         assert ("对象z仍未完成" in answer) is mixed

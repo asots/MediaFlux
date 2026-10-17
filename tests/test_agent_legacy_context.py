@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from hashlib import sha256
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ from app.agent.kernel.state import (
     StateUpdate,
     historical_user_sources,
     history_memory,
+    preserve_history,
 )
 from app.agent.kernel.task_state import classify_public_task, task_tool
 from tests.support import isolated_test_database
@@ -224,6 +226,54 @@ def _session(
 
 def _run(coroutine):
     return asyncio.run(coroutine)
+
+
+def test_repeated_user_choices_keep_event_order_and_checkpoint_idempotence(commit_store):
+    async def exercise():
+        lease, _ = await commit_store.begin_turn(owner=OWNER, session_id=SESSION, request_id="choices")
+        choices = [{"role": "user", "content": text} for text in ("只要前5项", "改成10项", "只要前5项")]
+        state = await commit_store.commit(lease, conversation=choices + large_dialogue())
+        requests = history_memory(state)["requests"]
+        assert [row["text"] for row in requests[:3]] == [row["content"] for row in choices]
+        assert len({row["history_id"] for row in requests[:3]}) == 3
+        restored = AgentSession._restore_messages(state)
+        persisted = AgentSession._persisted_conversation(
+            restored, current_user_index=None, original_message="", prior_conversation=state.conversation,
+        )
+        unchanged = await commit_store.commit(lease, conversation=persisted)
+        assert history_memory(unchanged) == history_memory(state)
+        # 再次缩小窗口不能把同一事件重复计入；相同正文的最后一次仍是新事件。
+        memory = preserve_history(unchanged, persisted, [])
+        replay = unchanged.clone()
+        replay.summary = json.dumps(memory, ensure_ascii=False)
+        assert preserve_history(replay, persisted, []) == memory
+
+    _run(exercise())
+
+
+def test_same_text_retained_user_does_not_hide_an_earlier_dropped_event(commit_store):
+    async def exercise():
+        lease, _ = await commit_store.begin_turn(owner=OWNER, session_id=SESSION, request_id="repeat")
+        state = await commit_store.commit(lease, conversation=[
+            {"role": "user", "content": text} for text in ("前5项", "前10项", "前5项")
+        ])
+        memory = preserve_history(state, state.conversation, state.conversation[-1:])
+        assert [row["text"] for row in memory["requests"]] == ["前5项", "前10项"]
+
+    _run(exercise())
+
+
+def test_old_memory_keeps_unknown_order_without_merging_new_same_text_event():
+    old = {"text": "前5项", "sha256": sha256("前5项".encode()).hexdigest()}
+    state = SessionState(owner=OWNER, session_id=SESSION,
+                         summary=json.dumps({"requests": [old], "observations": []}),
+                         metadata={"history_memory_version": 1})
+    current = [{"role": "user", "content": "前5项", "history_id": "new-choice"}]
+    memory = preserve_history(state, current, [])
+    assert memory["requests"][0] == old
+    assert "history_id" not in memory["requests"][0]
+    assert memory["requests"][1]["history_id"] == "new-choice"
+    assert historical_user_sources(state) == ("前5项",)
 
 
 def test_commit_migrates_cropped_user_conditions_and_never_forges_task(commit_store):
@@ -429,6 +479,9 @@ def test_low_model_window_injects_early_user_history_without_storage_trimming():
         dialogue = [
             {"role": "user", "content": EARLY_USER_REQUEST},
             {"role": "assistant", "content": "已记录最早的用户约束。"},
+            {"role": "assistant", "content": "", "tool_calls": [{"call_id": "old-evidence", "name": "library.inspect", "arguments": {}}]},
+            {"role": "tool", "tool_call_id": "old-evidence", "tool_name": "library.inspect",
+             "content": json.dumps({"status": "success", "summary": "旧观察", "result_handle": "old-result-handle"})},
         ]
         for index in range(14):
             dialogue.extend(
@@ -477,6 +530,7 @@ def test_low_model_window_injects_early_user_history_without_storage_trimming():
         assert events[-1].payload["status"] == "success"
         request = model.requests[0]
         assert EARLY_USER_REQUEST in request.system_prompt
+        assert "old-result-handle" in request.system_prompt
         assert all(EARLY_USER_REQUEST not in message.content for message in request.messages)
         assert any(
             message.role == "user" and CURRENT_USER_REQUEST in message.content
@@ -707,7 +761,7 @@ def test_long_old_request_is_readable_without_freezing_unrelated_turn_or_repair(
         if not schema_error:
             assert events[-1].payload["status"] == "success"
         else:
-            assert "agent__repair" in {tool["name"] for tool in model.requests[-1].tools}
+            assert "agent__repair" not in {tool["name"] for tool in model.requests[-1].tools}
         prompt = model.requests[0].system_prompt
         view = next(json.loads(line) for line in prompt.splitlines() if line.startswith('{"requests"'))
         assert view["truncated"] and view["truncation"]

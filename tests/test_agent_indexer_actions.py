@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import replace
 
 import unittest
+from copy import deepcopy
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -311,7 +312,7 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
                 self.assertTrue(output.ok)
                 self.assertEqual(output.status, "success")
                 self.assertTrue(output.data["truncated"])
-                self.assertIn("不代表已穷尽", output.summary)
+                self.assertIn("未覆盖部分仍未知", output.summary)
 
     def test_search_resources_returns_only_public_projection(self):
         service = FakeIndexerService()
@@ -445,9 +446,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         self.assertNotIn(_SECRET_MAGNET, serialized)
         self.assertNotIn(_SECRET_TORRENT_URL, serialized)
 
-    def test_present_candidates_rejects_invalid_or_missing_positions(self):
+    def test_present_candidates_rejects_invalid_positions(self):
         reference = "ref_" + "a" * 16
-        for positions in ([0], [51], [1, 1]):
+        for positions in ([0], [51], [1, 1], None, "all"):
             with self.subTest(positions=positions), self.assertRaises(AgentToolError):
                 present_candidates_arguments(
                     {"resource_candidates_ref": reference, "positions": positions}
@@ -1000,3 +1001,207 @@ class IndexerReceivingSourceTests(unittest.TestCase):
             self.assertTrue(repeated["duplicate"])
             self.assertEqual(repeated["request_id"], row["id"])
             backend.assert_called_once()
+
+
+def test_explicit_quality_filters_before_limit_without_treating_unknown_as_sdr():
+    items = [_resource_item(title='Demo.S03E01.1080p.H264', result_id='unknown-result-1234'),
+             _resource_item(title='Demo.S03E01.1080p.HDR10', result_id='hdr-result-id-1234'),
+             _resource_item(title='Demo.S03E01.2160p.SDR', result_id='fourk-result-1234'),
+             _resource_item(title='Demo.S03E01.1080p.SDR', result_id='matched-result-1234')]
+    service = FakeIndexerService(items=items, partial=False)
+    with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
+          patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+        args = search_arguments({'title': 'Demo', 'resolution': '1080p', 'dynamic_range': 'SDR', 'limit': 1})
+        result = search_resources(args)
+        assert [row['result_id'] for row in result.data['items']] == ['matched-result-1234']
+        assert not result.data['truncated']
+        assert result.data['technical_filter']['unknown_excluded'] == 1
+        assert result.data['technical_filter']['mismatched_excluded'] == 2
+        assert result.references[0].value['candidates'][0]['result_id'] == 'matched-result-1234'
+        service.items = items[:3]
+        result = search_resources(args)
+        assert result.data['items'] == [] and result.status == 'empty'
+        assert result.references[0].value['candidates'] == []
+        assert result.references[0].value['_query_arguments'] == args
+        # 未指定规格的旧调用仍返回原候选；不改变源查询条件和默认行为。
+        result = search_resources(search_arguments({'title': 'Demo'}))
+        assert len(result.data['items']) == 3
+        assert all(call[0].title == 'Demo' for call in service.search_calls)
+
+
+def test_search_quality_enums_reject_invalid_types():
+    for field, value in [('resolution', ['1080p']), ('dynamic_range', True), ('dynamic_range', 'guessed SDR')]:
+        for validator, base in (
+            (search_arguments, {'title': 'Demo'}),
+            (present_candidates_arguments, {'resource_candidates_ref': 'ref_' + 'a' * 24, 'positions': [1]}),
+        ):
+            try:
+                validator({**base, field: value})
+            except AgentToolError:
+                continue
+            raise AssertionError(f'{field} accepted invalid value')
+
+
+def test_quality_filter_keeps_combined_hdr_evidence_and_public_title_boundary():
+    for title, desired, matched in [
+        ('Demo.2160p.DoVi.HDR10', 'HDR10', True),
+        ('Demo.2160p.DoVi.HDR10', 'HDR', True),
+        ('Demo.2160p.HLG', 'HDR', True),
+        ('Demo.1080p.SDR.HDR10', 'SDR', False),
+        ('Demo.' + 'a' * 350 + '.1080p.SDR', 'SDR', False),
+    ]:
+        service = FakeIndexerService(item=_resource_item(title=title), partial=False)
+        with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
+              patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+            result = search_resources(search_arguments({'title': 'Demo', 'dynamic_range': desired}))
+            assert bool(result.data['items']) is matched, (title, desired)
+
+
+def test_refining_existing_candidates_reuses_search_evidence_without_network_or_renumbering():
+    items = [_resource_item(title=title, result_id=f'candidate-{number:016d}') for number, title in enumerate([
+        'Demo.1080p.H264', 'Demo.1080p.HDR10', 'Demo.2160p.SDR',
+        'Demo.1080p.SDR', 'Demo.1080p.SDR.HDR10', 'Demo.2160p.DoVi.HDR10',
+    ])]
+    service = FakeIndexerService(items=items, partial=False)
+    with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
+          patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+        original = search_resources(search_arguments({'title': 'Demo'})).references[0].value
+        before = deepcopy(original)
+        for quality, expected in [
+            ({'resolution': '1080p', 'dynamic_range': 'SDR'}, [4]),
+            ({'dynamic_range': 'SDR'}, [3, 4]),
+            ({'dynamic_range': 'HDR10'}, [2, 5, 6]),
+            ({'dynamic_range': 'HDR'}, [2, 5, 6]),
+            ({'resolution': '720p', 'dynamic_range': 'SDR'}, []),
+            ({'resolution': '', 'dynamic_range': ''}, [1, 2, 3, 4, 5, 6]),
+        ]:
+            fresh = search_resources(search_arguments({'title': 'Demo', **quality}))
+            with patch('app.agent.indexer_actions.get_indexer_service', side_effect=AssertionError('refinement must be offline')):
+                presented = present_candidates({'resource_candidates': original, 'positions': list(range(1, 7)), **quality})
+            assert presented.data['positions'] == expected
+            assert {k: v for k, v in presented.references[0].value.items() if k != '_query_arguments'} == {k: v for k, v in before.items() if k != '_query_arguments'}
+            assert presented.data['effective_query'] == {**before['_query_arguments'], **quality}
+            assert [row['result_id'] for row in fresh.data['items']] == [original['candidates'][pos - 1]['result_id'] for pos in expected]
+            if any(quality.values()):
+                assert presented.data['technical_filter'] == fresh.data['technical_filter']
+            assert presented.status == ('found' if expected else 'empty')
+        # 有限筛选保留请求顺序；没有隐式继承上一轮的 SDR 条件。
+        assert present_candidates({'resource_candidates': original, 'positions': [6, 2, 4], 'dynamic_range': 'HDR'}).data['positions'] == [6, 2]
+        assert present_candidates({'resource_candidates': original, 'positions': [1]}).data == {'positions': [1], 'effective_query': before['_query_arguments']}
+        assert original == before
+
+
+def test_candidate_refinement_reports_scope_without_confusing_subset_with_complete_snapshot():
+    snapshot = _candidate_snapshot(count=50)
+    for item in snapshot['candidates']:
+        item['title'] = f"Demo.1080p.{'SDR' if item['position'] == 50 else 'H264'}"
+    args = present_candidates_arguments({'resource_candidates_ref': 'ref_' + 'a' * 24,
+                                        'positions': list(range(1, 51)), 'dynamic_range': 'SDR'})
+    result = present_candidates({**args, 'resource_candidates': snapshot})
+    assert result.data['positions'] == [50]
+    assert result.data['scope'] == {'candidate_count': 50, 'considered_count': 50, 'complete': True}
+    assert result.data['technical_filter']['unknown_excluded'] == 49
+    partial = present_candidates({**args, 'resource_candidates': snapshot, 'positions': list(range(1, 13))})
+    assert partial.data['positions'] == []
+    assert partial.data['scope'] == {'candidate_count': 50, 'considered_count': 12, 'complete': False}
+    cleared = present_candidates({**args, 'resource_candidates': snapshot, 'positions': []})
+    assert cleared.data['positions'] == []
+    assert cleared.data['scope']['considered_count'] == 0
+
+
+def test_query_refinement_normalizes_only_explicit_patch_and_rejects_invalid_values():
+    ref = 'ref_' + 'q' * 24
+    assert search_arguments({'resource_candidates_ref': ref, 'season': 2}) == {
+        'resource_candidates_ref': ref, 'season': 2,
+    }
+    assert search_arguments({'resource_candidates_ref': ref, 'resolution': '', 'season': None}) == {
+        'resource_candidates_ref': ref, 'resolution': '', 'season': None,
+    }
+    for patch_args in ({'season': True}, {'episode': 0}, {'resolution': None}, {'title': ''},
+                       {'aliases': 'Alias'}, {'sites': None}, {'page': None}, {'resource_candidates_ref': None}):
+        with unittest.TestCase().assertRaises(AgentToolError):
+            search_arguments({'resource_candidates_ref': ref, **patch_args})
+
+
+def test_empty_search_can_refine_filters_without_cross_query_state_or_snapshot_mutation():
+    service = FakeIndexerService(items=[], partial=False)
+    with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
+          patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+        first = search_resources(search_arguments({
+            'title': 'Black Mirror', 'original_title': '黑镜', 'year': 2011, 'media_type': 'tv',
+            'season': 1, 'episode': 1, 'resolution': '1080p', 'sites': ['nyaa'], 'page': 3,
+        }))
+        snapshot = first.references[0].value
+        before = deepcopy(snapshot)
+        assert snapshot['candidates'] == []
+        next_result = search_resources({'resource_candidates': snapshot, 'season': 2})
+        effective = next_result.data['effective_query']
+        assert effective == {**first.data['effective_query'], 'season': 2, 'page': 1}
+        narrowed = present_candidates({'resource_candidates': next_result.references[0].value,
+                                       'positions': [], 'dynamic_range': 'SDR'})
+        assert narrowed.data['effective_query'] == {**effective, 'dynamic_range': 'SDR'}
+        continued = search_resources({'resource_candidates': narrowed.references[0].value,
+                                      'resolution': '2160p', 'page': 2})
+        assert continued.data['effective_query'] == {**effective, 'dynamic_range': 'SDR', 'resolution': '2160p', 'page': 2}
+        cleared = search_resources({'resource_candidates': continued.references[0].value,
+                                    'resolution': '', 'dynamic_range': '', 'season': None,
+                                    'episode': None, 'year': None, 'sites': [], 'original_title': ''})
+        assert cleared.data['effective_query'] == {
+            **effective, 'resolution': '', 'dynamic_range': '', 'season': None, 'episode': None,
+            'year': None, 'sites': [], 'original_title': '',
+        }
+        independent = search_resources(search_arguments({'title': 'Another Film', 'media_type': 'movie'}))
+        assert independent.data['effective_query'] == search_arguments({'title': 'Another Film', 'media_type': 'movie'})
+        assert snapshot == before
+        assert service.search_calls[1][0].season == 2 and service.search_calls[1][1] == ['nyaa']
+        assert service.search_calls[-1][0].season is None and service.search_calls[-1][1] is None
+
+
+def test_present_inherits_only_the_selected_reference_and_updates_query_for_next_search():
+    original = _candidate_snapshot(count=3)
+    original['candidates'][0]['title'] = 'Demo.S03E01.1080p.H264'
+    original['candidates'][1]['title'] = 'Demo.S03E01.2160p.SDR'
+    original['candidates'][2]['title'] = 'Demo.S03E01.1080p.SDR'
+    original['_query_arguments'] = search_arguments({'title': 'Demo', 'season': 3, 'episode': 1, 'resolution': '1080p'})
+    before = deepcopy(original)
+    with patch('app.agent.indexer_actions.get_indexer_service', side_effect=AssertionError('offline refinement')):
+        first = present_candidates({'resource_candidates': original, 'positions': [1, 2, 3], 'dynamic_range': 'SDR'})
+        assert first.data['positions'] == [3]
+        second = present_candidates({'resource_candidates': first.references[0].value, 'positions': [1, 2, 3]})
+        assert second.data['positions'] == [3]  # 不重抄规格，也不会放回未知或其它画质。
+        relaxed = present_candidates({'resource_candidates': second.references[0].value, 'positions': [1, 2, 3], 'resolution': ''})
+        assert relaxed.data['positions'] == [2, 3]
+        assert relaxed.data['effective_query']['dynamic_range'] == 'SDR'
+        assert present_candidates({'resource_candidates': original, 'positions': [1, 2, 3]}).data['positions'] == [1, 3]
+        assert original == before
+        assert first.references[0].value['candidates'] == original['candidates']
+
+
+def test_legacy_and_combined_candidate_snapshots_cannot_guess_a_query_for_refinement():
+    from app.agent.recent_resource_candidates import restore_resource_candidate_reference
+
+    legacy = {key: value for key, value in _candidate_snapshot().items() if not key.startswith('_private')}
+    for snapshot in (legacy, {**legacy, '_query_arguments': []}):
+        with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
+              patch('app.agent.indexer_actions.get_indexer_service', side_effect=AssertionError('no implicit search')),
+              unittest.TestCase().assertRaises(AgentToolError)):
+            search_resources({'resource_candidates': snapshot, 'resolution': '2160p'})
+    # 历史候选正常展示/恢复；新查询元数据不能变成下载身份或权限。
+    assert present_candidates({'resource_candidates': legacy, 'positions': [1]}).data == {'positions': [1]}
+    assert restore_resource_candidate_reference({**legacy, '_query_arguments': {'title': 'Demo'}}) == legacy
+    assert restore_resource_candidate_reference({**legacy, '_query_arguments': {'title': 'Demo'}, '_extra': True}) is None
+
+
+def test_excluding_hdr_keeps_unknown_distinct_from_explicit_sdr():
+    from app.agent.indexer_actions import filter_technical_candidates
+
+    items = [{'title': f'Demo.1080p.{suffix}'} for suffix in ('H264', 'SDR', 'HDR10', 'DoVi', 'HLG', 'SDR.HDR10')]
+    selected, stats = filter_technical_candidates(items, {'exclude_hdr': True})
+    assert selected == items[:2] and stats['mismatched_excluded'] == 4
+    assert stats['requested'] == {'exclude_hdr': True} and not stats['stream_verified']
+    selected, stats = filter_technical_candidates(items, {'exclude_hdr': True, 'dynamic_range': 'SDR'})
+    assert selected == items[1:2] and stats['unknown_excluded'] == 1
+    assert filter_technical_candidates(items, {'exclude_hdr': False})[0] == items
+    for value in ('false', 'true', 0, 1, None, []):
+        with unittest.TestCase().assertRaises(AgentToolError):
+            search_arguments({'title': 'Demo', 'exclude_hdr': value})

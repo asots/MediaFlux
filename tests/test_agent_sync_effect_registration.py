@@ -156,7 +156,9 @@ def test_real_confirmation_persists_failure_receipt_and_cold_effect_without_task
             assert caught.value.code == code
             if mode == "execute_error":
                 assert caught.value is case.failure
-            expected = {"ok": False, "status": code, "summary": str(caught.value)}
+            assert caught.value.execution_started is (mode != "ref_stale")
+            expected = {"ok": False, "status": code, "summary": str(caught.value),
+                        "data": {"execution_started": mode != "ref_stale"}}
         else:
             result = await case.confirm()
             expected = dict(result.outcome.public_content)

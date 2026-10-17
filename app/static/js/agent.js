@@ -10,7 +10,7 @@
     const composer = document.getElementById('agentComposer');
     const promptInput = document.getElementById('agentPrompt');
     const sendButton = document.getElementById('agentSend');
-    const stopButton = document.getElementById('agentStop');
+    const sessionStopButton = document.getElementById('agentStopSession');
     const newSessionButton = document.getElementById('agentNewSession');
     const resumeButton = document.getElementById('agentResumeLatestSession');
     const historyButton = document.getElementById('toggleAgentRail');
@@ -28,6 +28,8 @@
     const DRAFT_PREFIX = 'mediaflux.agent.drafts.v1.';
     const DRAFT_TTL_MS = 6 * 60 * 60 * 1000;
     const MAX_DRAFTS = 20;
+    let scopedTrustBar = null;
+    let scopedTrustExpiryTimer = null;
 
     const SESSION_KEY = 'mediaflux.agent.kernel.session.v1';
     const LAYOUT_KEY = 'mediaflux.agent.kernel.layout.v1';
@@ -46,6 +48,16 @@
     const MAX_MARKDOWN_DEPTH = 4;
     const STREAM_INTERRUPTED_NOTICE = '连接中断，后续结果尚未确认；可刷新会话核对状态，不要重复提交。';
     const CONFIRMATION_STOP_NOTICE = '已停止等待；已提交操作可能继续执行，请核对任务状态。';
+    const SESSION_STOP_MESSAGES = {
+        stopped: '会话任务已停止，等待中的后台续行已取消。',
+        already_stopped: '当前会话没有可停止的活动任务。',
+        stopping: '停止请求已受理，仍在等待任务收尾。',
+        partially_stopping: '已请求停止可取消的会话任务；部分后台任务不可取消，可能继续运行，请核对任务状态。',
+        partial: '已停止可取消的会话任务；部分外部任务不可取消，可能继续运行，请核对任务状态。',
+        critical_pending: '已记录停止请求；任务仍在不可中断阶段，请等待收尾并核对状态。',
+        superseded: '会话状态已变化，无法确认当前任务已停止，请核对任务状态。',
+        stop_unconfirmed: '会话停止尚未确认，任务可能仍在运行；请核对状态或重试停止。',
+    };
     const TOOL_LABELS = {
         cloud: '读取光鸭云盘',
         guangya: '读取光鸭云盘',
@@ -81,6 +93,7 @@
     let historyController = null;
     let sessionLoadGeneration = 0;
     let busy = false;
+    let sessionStopPending = false;
     let initialRestore = consoleNode?.dataset.initialRestore === 'true';
     let startupAttempt = 0;
     let startupController = null;
@@ -108,6 +121,7 @@
     }
 
     function rememberSession(value) {
+        if (sessionId !== value) renderScopedTrust(null);
         sessionId = value;
         try {
             localStorage.setItem(SESSION_KEY, value);
@@ -330,6 +344,7 @@
                 ? (promptInput.dataset.emptyPlaceholder || '询问 MediaFlux')
                 : (promptInput.dataset.activePlaceholder || '继续描述或调整任务');
         }
+        resizePrompt();
     }
 
     function transcriptNearBottom() {
@@ -1077,15 +1092,21 @@
         if (resources.length) {
             scope.append(element('h4', '', '将处理'));
             const list = element('ul', 'agent-confirmation-list');
-            for (const item of resources.slice(0, 8)) {
+            const remaining = element('ul', 'agent-confirmation-list');
+            for (const item of resources) {
                 if (!item || typeof item !== 'object') continue;
                 const title = approvalListItem(item) || '未命名资源';
                 const site = String(item.site_name || '').trim();
                 const position = Number.isInteger(item.position) ? `#${item.position} · ` : '';
-                list.append(element('li', '', `${position}${title}${site ? ` · ${site}` : ''}`));
+                const destination = list.childElementCount < 8 ? list : remaining;
+                destination.append(element('li', '', `${position}${title}${site ? ` · ${site}` : ''}`));
             }
-            if (resources.length > 8) list.append(element('li', 'is-muted', `另有 ${resources.length - 8} 项`));
             if (list.childElementCount) scope.append(list);
+            if (remaining.childElementCount) {
+                const more = element('details', 'agent-confirmation-editor');
+                more.append(element('summary', '', `另有 ${remaining.childElementCount} 项，展开核对`), remaining);
+                scope.append(more);
+            }
         }
         if (effects.length) {
             scope.append(element('h4', '', '执行内容'));
@@ -1124,6 +1145,235 @@
             const detail = summary ? `服务端摘要：${summary}` : unconfirmedEffectMessage;
             return `⚠️ 执行状态未知。${detail}`;
         }).join('\n\n');
+    }
+
+    function buildConfirmationEditor(approval, card, confirm) {
+        const properties = approval.editing?.schema?.properties || {};
+        if (!Object.keys(properties).length) return null;
+        const original = approval.editing.values || {};
+        const details = element('details', 'agent-confirmation-editor');
+        details.append(element('summary', '', '修改参数'));
+        const form = element('form', 'agent-confirmation-form');
+        const feedback = element('p', 'agent-confirmation-feedback', '修改后需重新预检，新卡仍需确认；有效期不延长。');
+        feedback.setAttribute('role', 'status');
+        const controls = new Map();
+        const labels = {enabled: '启用', notify_enabled: '发送通知', name: '名称', title: '标题', label: '标签',
+            policy: '设置项', value: '设置值', target: '目标', positions: '选择序号', max_series: '检查上限', interval_hours: '间隔（小时）'};
+        for (const [key, schema] of Object.entries(properties)) {
+            const label = element('label', 'agent-confirmation-field');
+            label.append(element('span', '', schema.title || labels[key] || key));
+            const value = original[key];
+            const choices = schema.enum || (schema.type === 'boolean' ? [true, false] : null);
+            let input;
+            if (choices) {
+                input = element('select');
+                if (!(key in original)) input.append(new Option('保持未设置', ''));
+                choices.forEach(choice => input.append(new Option(typeof choice === 'boolean' ? (choice ? '是' : '否') : String(choice), JSON.stringify(choice))));
+                input.value = key in original ? JSON.stringify(value) : '';
+            } else {
+                input = element(schema.type === 'array' || schema.oneOf ? 'textarea' : 'input');
+                if (input.tagName === 'INPUT') input.type = ['integer', 'number'].includes(schema.type) ? 'number' : 'text';
+                input.value = value === undefined ? '' : input.tagName === 'TEXTAREA' ? JSON.stringify(value) : String(value);
+                if (schema.minimum !== undefined) input.min = schema.minimum;
+                if (schema.maximum !== undefined) input.max = schema.maximum;
+                if (schema.maxLength !== undefined) input.maxLength = schema.maxLength;
+                if (schema.minLength !== undefined) input.minLength = schema.minLength;
+                if (schema.type === 'integer') input.step = '1';
+                if (schema.type === 'number') input.step = 'any';
+                if (input.tagName === 'TEXTAREA') label.append(element('small', '', schema.type === 'array' ? '使用 JSON 列表，例如 [1,2]' : '使用 JSON 值，例如 10 或 "默认"'));
+            }
+            input.dataset.confirmationField = key;
+            label.append(input);
+            form.append(label);
+            controls.set(key, {input, schema, initial: input.value});
+        }
+        const submit = element('button', 'agent-confirmation-explain', '重新预检');
+        submit.type = 'submit';
+        const discard = element('button', 'agent-confirmation-cancel', '放弃修改');
+        discard.type = 'button';
+        form.append(feedback, submit, discard);
+        const changed = () => [...controls.values()].some(({input, initial}) => input.value !== initial);
+        const reset = () => {
+            if (busy || card.classList.contains('is-expired')) return;
+            controls.forEach(({input, initial}) => { input.value = initial; });
+            confirm.disabled = false;
+            card.querySelectorAll('[data-trust-grant]').forEach(button => { button.disabled = false; });
+            feedback.textContent = '修改后需重新预检，新卡仍需确认；有效期不延长。';
+            details.open = false;
+            details.querySelector('summary').focus({preventScroll: true});
+        };
+        discard.addEventListener('click', reset);
+        details.addEventListener('keydown', event => {
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); reset(); }
+        });
+        form.addEventListener('input', () => {
+            confirm.disabled = changed();
+            card.querySelectorAll('[data-trust-grant]').forEach(button => { button.disabled = changed(); });
+            feedback.textContent = changed() ? '参数已修改，请重新预检后确认。' : '修改后需重新预检，新卡仍需确认；有效期不延长。';
+        });
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (busy || !changed()) return;
+            const patch = {};
+            try {
+                for (const [key, {input, schema, initial}] of controls) {
+                    if (input.value === initial) continue;
+                    if (['integer', 'number'].includes(schema.type) && (!input.value.trim() || !Number.isFinite(Number(input.value)))) throw new Error('invalid number');
+                    patch[key] = input.tagName === 'SELECT' || input.tagName === 'TEXTAREA'
+                        ? JSON.parse(input.value) : ['integer', 'number'].includes(schema.type) ? Number(input.value) : input.value;
+                }
+            } catch (_) {
+                feedback.textContent = '请输入有效的 JSON 值，原卡尚未变更。';
+                return;
+            }
+            const target = sessionId, generation = sessionLoadGeneration;
+            card.querySelectorAll('button, input, select, textarea').forEach(control => { control.disabled = true; });
+            form.setAttribute('aria-busy', 'true');
+            setBusy(true);
+            feedback.style.minHeight = `${feedback.getBoundingClientRect().height}px`;
+            feedback.textContent = '正在重新预检，尚未执行变更。';
+            try {
+                const payload = await fetchJSON('/api/agent/actions/confirm/edit', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: target, plan_id: approval.plan_id, arguments: patch, request_id: createId('edit')}),
+                });
+                if (sessionId !== target || sessionLoadGeneration !== generation) return;
+                if (payload.plan) {
+                    showApproval(approvalTurnForCard(card), payload.plan);
+                    transcript.querySelector(`[data-effect-confirm="${CSS.escape(payload.plan.plan_id)}"]`)?.focus({preventScroll: true});
+                } else {
+                    card.classList.add('is-expired');
+                    feedback.textContent = '预检完成，无需变更。旧卡已失效，未执行写入。';
+                }
+            } catch (error) {
+                if (sessionId !== target || sessionLoadGeneration !== generation) return;
+                card.classList.add('is-expired');
+                feedback.textContent = error.payload?.old_plan_invalidated
+                    ? `修改失败，旧卡已失效，未执行变更。${error.message}`
+                    : `修改状态待核对，请刷新会话；不会自动执行。${error.message}`;
+            } finally {
+                form.removeAttribute('aria-busy');
+                setBusy(false);
+            }
+        });
+        details.append(form);
+        return details;
+    }
+
+    function renderScopedTrust(grant) {
+        if (scopedTrustExpiryTimer) clearTimeout(scopedTrustExpiryTimer);
+        if (!scopedTrustBar) {
+            scopedTrustBar = element('div', 'agent-scoped-trust-bar');
+            scopedTrustBar.hidden = true;
+            composer?.before(scopedTrustBar);
+        }
+        scopedTrustBar.hidden = !grant?.active;
+        if (!grant?.active) return;
+        const scopeLabel = `本地探索收藏 · TMDB ${grant.scope?.media_type === 'movie' ? '电影' : '剧集'}`;
+        const text = element('span', '', `${scopeLabel} · 剩余 ${grant.remaining} 次 · 至 ${new Date(grant.expires_at * 1000).toLocaleTimeString()}`);
+        const revoke = element('button', 'agent-action-btn', '撤销预授权');
+        revoke.type = 'button';
+        const target = sessionId;
+        revoke.addEventListener('click', async () => {
+            revoke.disabled = true;
+            try {
+                await fetchJSON('/api/agent/actions/trust', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: target, operation: 'revoke', request_id: createId('revoke')})});
+                if (sessionId === target) {
+                    renderScopedTrust(null);
+                    announce(responseStatus, '本会话预授权已撤销，后续变更需逐次确认。');
+                }
+            } catch (error) {
+                if (sessionId === target) announce(responseStatus, error.message || '撤销状态待核对，请重试。');
+            } finally { revoke.disabled = false; }
+        });
+        scopedTrustBar.replaceChildren(text, revoke);
+        scopedTrustExpiryTimer = setTimeout(() => {
+            if (sessionId === target) renderScopedTrust(null);
+        }, Math.max(0, grant.expires_at * 1000 - Date.now()));
+    }
+
+    function buildScopedTrust(approval, card) {
+        if (!approval.trust_eligible) return null;
+        const details = element('details', 'agent-confirmation-editor');
+        details.append(element('summary', '', '限定低风险预授权（默认关闭）'));
+        const form = element('form', 'agent-confirmation-form');
+        const tool = element('label', 'agent-confirmation-trust-check');
+        const toolCheck = element('input');
+        toolCheck.type = 'checkbox';
+        toolCheck.required = true;
+        tool.append(toolCheck, element('span', '', `允许动作：${approval.confirmation?.action || approval.tool_name}`));
+        const scope = element('label', 'agent-confirmation-trust-check');
+        const scopeCheck = element('input');
+        scopeCheck.type = 'checkbox';
+        scopeCheck.required = true;
+        const scopeLabel = `本地探索收藏 · TMDB ${approval.trust_scope?.media_type === 'movie' ? '电影' : '剧集'}`;
+        scope.append(scopeCheck, element('span', '', `范围：仅当前会话，${scopeLabel}，允许添加不同条目`));
+        const count = element('label', 'agent-confirmation-field');
+        count.append(element('span', '', '最多自动执行次数'));
+        const maxActions = element('select');
+        maxActions.required = true;
+        maxActions.append(new Option('请选择次数上限', ''), new Option('5 次', '5'), new Option('10 次', '10'), new Option('20 次', '20'));
+        count.append(maxActions);
+        const duration = element('label', 'agent-confirmation-field');
+        duration.append(element('span', '', '有效期'));
+        const select = element('select');
+        select.required = true;
+        select.append(new Option('请选择有效期', ''), new Option('5 分钟', '300'), new Option('15 分钟', '900'), new Option('30 分钟', '1800'));
+        duration.append(select);
+        const feedback = element('p', 'agent-confirmation-feedback');
+        feedback.setAttribute('role', 'status');
+        const showStatus = grant => {
+            feedback.textContent = grant?.active
+                ? `本会话预授权剩余 ${grant.remaining} 次，有效至 ${new Date(grant.expires_at * 1000).toLocaleTimeString()}。可随时撤销；取消卡片不会撤销预授权。`
+                : '默认关闭。启用后仅所选来源和类型的收藏添加可自动执行；删除、其他来源或类型仍需新确认。本卡仍需点击确认执行。';
+        };
+        showStatus(approval.scoped_trust);
+        const grant = element('button', 'agent-confirmation-explain', '启用所选预授权');
+        grant.type = 'submit';
+        grant.dataset.trustGrant = '';
+        const revoke = element('button', 'agent-confirmation-cancel', '撤销本会话预授权');
+        revoke.type = 'button';
+        form.append(tool, scope, count, duration, feedback, grant, revoke);
+        const change = async operation => {
+            if (busy) return;
+            const target = sessionId, generation = sessionLoadGeneration;
+            const controls = [...card.querySelectorAll('button, input, select, textarea')];
+            const disabled = controls.map(control => control.disabled);
+            controls.forEach(control => { control.disabled = true; });
+            form.setAttribute('aria-busy', 'true');
+            setBusy(true);
+            feedback.style.minHeight = `${feedback.getBoundingClientRect().height}px`;
+            feedback.textContent = operation === 'grant' ? '正在保存所选预授权，尚未执行本卡。' : '正在撤销预授权。';
+            try {
+                const payload = await fetchJSON('/api/agent/actions/trust', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: target, request_id: createId('trust'), operation,
+                        ...(operation === 'grant' ? {plan_id: approval.plan_id, tool_name: approval.tool_name, scope: approval.trust_scope,
+                            max_actions: Number(maxActions.value), ttl_seconds: Number(select.value)} : {})}),
+                });
+                if (sessionId === target && sessionLoadGeneration === generation) {
+                    showStatus(payload);
+                    renderScopedTrust(payload);
+                }
+            } catch (error) {
+                if (sessionId === target && sessionLoadGeneration === generation) feedback.textContent = error.message || '保存失败，请核对后重试。';
+            } finally {
+                controls.forEach((control, index) => { control.disabled = disabled[index]; });
+                form.removeAttribute('aria-busy');
+                setBusy(false);
+            }
+        };
+        form.addEventListener('submit', event => { event.preventDefault(); change('grant'); });
+        revoke.addEventListener('click', () => change('revoke'));
+        details.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && !busy) {
+                event.preventDefault(); event.stopPropagation(); form.reset(); details.open = false;
+                details.querySelector('summary').focus({preventScroll: true});
+            }
+        });
+        details.append(form);
+        return details;
     }
 
     function buildApproval(approval) {
@@ -1188,6 +1438,10 @@
         if (facts.childElementCount) card.append(facts);
         if (scope) card.append(scope);
         if (details.childElementCount) card.append(details);
+        const editor = buildConfirmationEditor(approval, card, confirm);
+        if (editor) card.append(editor);
+        const trust = buildScopedTrust(approval, card);
+        if (trust) card.append(trust);
         card.append(status, actions);
         renderIcons(card);
         return card;
@@ -1254,6 +1508,8 @@
     }
 
     function showExecutingApproval(card, detail = '执行完成前不会接受另一项写操作。') {
+        card.querySelectorAll('.agent-confirmation-editor').forEach(details => { details.open = false; });
+        card.querySelectorAll('input, select, textarea').forEach(control => { control.disabled = true; });
         const preflight = card.querySelector('.agent-confirmation-preflight span');
         if (preflight) preflight.textContent = '已确认，正在等待实际执行结果。';
         const actions = card.querySelector('.agent-confirmation-actions');
@@ -1319,7 +1575,8 @@
         transcript?.querySelectorAll('.agent-confirmation-card[data-plan-id]').forEach((card) => {
             if (card.dataset.planId === keepPlanId || card.classList.contains('is-expired')) return;
             card.classList.add('is-expired');
-            card.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+            card.querySelectorAll('.agent-confirmation-editor').forEach(details => { details.open = false; });
+            card.querySelectorAll('button, input, select, textarea').forEach((button) => { button.disabled = true; });
             const status = card.querySelector('.agent-confirmation-preflight span');
             if (status) status.textContent = keepPlanId
                 ? '已由新的计划替代，本计划不会执行。'
@@ -1415,10 +1672,14 @@
                     result: payload.result || {},
                     confirmation: payload.plan.confirmation || {},
                     expires_at: payload.plan.expires_at || '',
+                    editing: payload.plan.editing,
+                    trust_eligible: payload.plan.trust_eligible,
+                    trust_scope: payload.plan.trust_scope,
                 });
             }
             break;
         case 'effect.completed': {
+            if (payload.scoped_trust) renderScopedTrust(payload.scoped_trust);
             const planId = String(payload.plan_id || turn.activePlanId || '');
             const record = rememberEffectReceipt(turn, planId, payload);
             if (planId) {
@@ -1520,7 +1781,11 @@
         if (text) {
             try { payload = JSON.parse(text); } catch (_) { payload = {}; }
         }
-        if (!response.ok) throw new Error(payload.error || `请求失败（HTTP ${response.status}）`);
+        if (!response.ok) {
+            const error = new Error(payload.error || (typeof payload.detail === 'string' ? payload.detail : '') || `请求失败（HTTP ${response.status}）`);
+            error.payload = payload;
+            throw error;
+        }
         return payload;
     }
 
@@ -1634,7 +1899,7 @@
         active.protected = turn.protected === true;
         const detail = activeProgressText(turn, active);
         prepareActiveStatus(active, detail);
-        setBusy(true, {stoppable: !active.protected && !active.cancelAccepted});
+        setBusy(true);
     }
 
     function scheduleActiveObservation(active, delay = SESSION_POLL_INTERVAL_MS) {
@@ -1646,7 +1911,7 @@
     }
 
     function receiptSnapshotKey(payload) {
-        return JSON.stringify([payload.messages, payload.pending_approval, payload.candidate_view]);
+        return JSON.stringify([payload.messages, payload.pending_approval, payload.candidate_view, payload.scoped_trust]);
     }
 
     function finishReceiptObservation(active, {completed = false} = {}) {
@@ -1868,24 +2133,26 @@
         return STREAM_INTERRUPTED_NOTICE;
     }
 
-    function setBusy(value, {stoppable = false} = {}) {
+    function setBusy(value) {
         busy = Boolean(value);
         if (promptInput) promptInput.disabled = false;
-        if (sendButton) {
-            sendButton.hidden = busy && stoppable;
-            sendButton.disabled = busy || !promptInput?.value.trim();
-            sendButton.setAttribute('aria-busy', String(busy));
-        }
-        if (stopButton) {
-            stopButton.hidden = !(busy && stoppable);
-            stopButton.disabled = !(busy && stoppable);
-        }
+        sendButton?.setAttribute('aria-busy', String(busy));
+        syncSend();
         syncCandidateButtons();
         resumeButton && (resumeButton.disabled = busy || !latestSessionId);
     }
 
     function syncSend() {
-        if (sendButton && !busy) sendButton.disabled = initialRestore || !promptInput?.value.trim();
+        const showStop = busy || sessionStopPending;
+        if (sendButton) {
+            sendButton.hidden = showStop;
+            sendButton.disabled = showStop || initialRestore || !promptInput?.value.trim();
+        }
+        if (sessionStopButton) {
+            sessionStopButton.hidden = !showStop;
+            sessionStopButton.disabled = initialRestore || sessionStopPending;
+        }
+        nextActions?.querySelectorAll('[data-agent-action-key]').forEach(button => { button.disabled = busy || initialRestore; });
     }
 
     function resizePrompt() {
@@ -1896,16 +2163,17 @@
         syncViewportHeight();
     }
 
-    function queryRequest(message, requestId, signal, selection = null, targetSessionId = sessionId) {
+    function queryRequest(message, requestId, signal, selection = null, targetSessionId = sessionId, actionKey = '') {
         return fetch('/api/agent/query', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({message, session_id: targetSessionId, request_id: requestId, stream: true, ...(selection ? {selection} : {})}),
+            body: JSON.stringify({session_id: targetSessionId, request_id: requestId, stream: true,
+                ...(actionKey ? {action_key: actionKey} : {message, ...(selection ? {selection} : {})})}),
             signal,
         });
     }
 
-    async function sendQuery(text) {
-        if (busy || initialRestore || !text.trim()) return;
+    async function sendQuery(text, actionKey = '') {
+        if (busy || sessionStopPending || initialRestore || !text.trim()) return;
         clearReceiptObserverForNewRequest();
         const message = text.trim();
         ++sessionLoadGeneration;
@@ -1913,9 +2181,11 @@
         appendUser(message);
         const turn = createAssistantTurn();
         turn.requestMessage = message;
-        turn.boundSelection = false;
-        promptInput.value = '';
-        saveDraft();
+        turn.boundSelection = Boolean(actionKey);
+        if (!actionKey) {
+            promptInput.value = '';
+            saveDraft();
+        }
         scrollToBottom(true);
         resizePrompt();
         rememberSession(sessionId);
@@ -1929,10 +2199,10 @@
             protected: false, cancelAccepted: false,
         };
         activeRequest = active;
-        setBusy(true, {stoppable: true});
+        setBusy(true);
         announce(responseStatus, 'Media Agent 正在处理请求');
         try {
-            const response = await queryRequest(message, requestId, controller.signal, null, targetSessionId);
+            const response = await queryRequest(message, requestId, controller.signal, null, targetSessionId, actionKey);
             if (!isCurrentActiveRequest(active)) return;
             const terminalEvent = await readEventStream(response, (event) => {
                 if (!isCurrentActiveRequest(active)) return;
@@ -1956,6 +2226,7 @@
             if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus < 500) {
                 finalizeError(turn, streamFailureMessage(turn, error));
                 announce(responseStatus, '请求未执行，请核对状态');
+                if (actionKey && error.httpStatus === 409) refreshNextActions();
             } else startActiveObservation(active);
         } finally {
             if (activeRequest === active && !active.observing) {
@@ -1968,49 +2239,39 @@
         }
     }
 
-    async function stopActiveRequest() {
-        const active = activeRequest;
-        if (!isCurrentActiveRequest(active) || active.protected || active.cancelAccepted || active.cancelPending) return;
-        active.cancelPending = true;
-        if (stopButton) stopButton.disabled = true;
-        announce(responseStatus, '正在请求停止当前任务');
+    async function stopSessionTasks() {
+        if (initialRestore || sessionStopPending) return;
+        const targetSessionId = sessionId;
+        const generation = sessionLoadGeneration;
+        sessionStopPending = true;
+        sessionStopButton?.setAttribute('aria-busy', 'true');
+        syncSend();
         try {
-            const payload = await fetchJSON('/api/agent/query/cancel', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({session_id: active.sessionId, request_id: active.requestId}),
+            const payload = await fetchJSON('/api/agent/session/stop', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({session_id: targetSessionId}),
             });
-            if (!isCurrentActiveRequest(active)) return;
-            if (payload.cancelled === true) {
+            if (sessionId !== targetSessionId || generation !== sessionLoadGeneration) return;
+            const message = SESSION_STOP_MESSAGES[payload.status] || SESSION_STOP_MESSAGES.stop_unconfirmed;
+            announce(responseStatus, message);
+            window.showToast?.(message, payload.stopped === true ? 'success' : 'warning', 6500);
+            const active = activeRequest;
+            if (isCurrentActiveRequest(active)) active.cancelNotice = message;
+            if (isCurrentActiveRequest(active) && !active.receiptOnly
+                && ['stop_requested', 'already_cancelling'].includes(payload.model_turn)) {
                 active.cancelAccepted = true;
-                active.cancelNotice = '';
-                prepareActiveStatus(active, '正在停止');
-                if (active.statusNode?.isConnected) active.statusNode.textContent = '正在停止';
-                setBusy(true, {stoppable: false});
-                announce(responseStatus, '停止请求已受理，正在等待任务收尾');
-            } else {
-                active.cancelNotice = '停止请求未被接受，仍在观察任务状态';
-                announce(responseStatus, active.cancelNotice);
-                setBusy(true, {stoppable: !active.protected});
+                setBusy(true);
             }
+            await loadSession(targetSessionId, {closeHistory: false, preserveScroll: true});
+            if (isCurrentActiveRequest(active) && !active.receiptOnly && !active.observing) startActiveObservation(active);
         } catch (_) {
-            if (!isCurrentActiveRequest(active)) return;
-            active.cancelNotice = '取消状态尚未确认，仍在观察任务状态';
-            announce(responseStatus, active.cancelNotice);
-            setBusy(true, {stoppable: !active.protected});
+            if (sessionId !== targetSessionId || generation !== sessionLoadGeneration) return;
+            announce(responseStatus, SESSION_STOP_MESSAGES.stop_unconfirmed);
+            window.showToast?.(SESSION_STOP_MESSAGES.stop_unconfirmed, 'warning', 6500);
         } finally {
-            active.cancelPending = false;
-            if (isCurrentActiveRequest(active)) {
-                if (active.observing) {
-                    if (active.cancelAccepted) {
-                        if (active.pollTimer) clearTimeout(active.pollTimer);
-                        active.pollTimer = null;
-                        active.observerController?.abort();
-                        observeActiveSession(active);
-                    }
-                } else startActiveObservation(active);
-                if (stopButton && !active.cancelAccepted && !active.protected) stopButton.disabled = false;
-            }
+            sessionStopPending = false;
+            sessionStopButton?.setAttribute('aria-busy', 'false');
+            syncSend();
         }
     }
 
@@ -2045,7 +2306,7 @@
             card.querySelectorAll('button').forEach(item => { item.disabled = true; });
             stop.hidden = false;
             stop.disabled = false;
-            setBusy(true, {stoppable: false});
+            setBusy(true);
             stop.onclick = async () => {
                 stop.disabled = true;
                 await fetchJSON('/api/agent/query/cancel', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2089,7 +2350,7 @@
             protected: false, cancelAccepted: false,
         };
         activeRequest = active;
-        setBusy(true, {stoppable: true});
+        setBusy(true);
         announce(responseStatus, 'Media Agent 正在执行已确认计划');
         try {
             const response = await fetch('/api/agent/actions/confirm', {
@@ -2313,16 +2574,29 @@
                 typeof item?.title === 'string' && typeof item.prompt === 'string' && item.prompt.trim()).slice(0, 3);
             const nodes = [];
             for (const action of actions) {
+                const group = element('div', 'agent-composer-actions');
+                group.setAttribute('role', 'group');
+                group.setAttribute('aria-label', action.title.slice(0, 80));
                 const button = element('button', 'agent-start-action');
                 button.type = 'button';
-                button.dataset.agentDraft = clipText(action.prompt, 1000);
+                button.dataset.agentActionKey = String(action.id || '');
+                button.dataset.agentActionTitle = action.title.slice(0, 80);
+                button.setAttribute('aria-label', `只读检查：${action.title.slice(0, 80)}`);
+                button.disabled = busy || initialRestore || !button.dataset.agentActionKey;
                 button.title = String(action.description || action.title).slice(0, 300);
                 button.append(element('span', '', action.title.slice(0, 80)), icon('arrow-up-right'));
-                nodes.push(button);
+                const draft = element('button', 'agent-retry-draft');
+                draft.type = 'button';
+                draft.dataset.agentDraft = clipText(action.prompt, 1000);
+                draft.setAttribute('aria-label', `填入草稿：${action.title.slice(0, 80)}`);
+                draft.title = '填入草稿后修改，不立即执行';
+                draft.append(icon('square-pen'));
+                group.append(button, draft);
+                nodes.push(group);
             }
             nextActions.replaceChildren(...nodes);
             if (nextActionsStatus) nextActionsStatus.textContent = actions.length
-                ? '可以从这里开始 · 仅查看，不自动处理'
+                ? '点击仅做只读检查 · 也可填入草稿修改'
                 : (payload.snapshot_status === 'unavailable' ? '待办暂时不可用，仍可直接提问' : '暂时没有待处理事项，也可以直接提问');
             renderIcons(nextActions);
         } catch (_) {
@@ -2369,6 +2643,7 @@
     }
 
     function renderSessionSnapshot(payload, {active = null, terminalTurn = null, preserveScroll = false} = {}) {
+        renderScopedTrust(payload.scoped_trust);
         renderTaskSnapshot(payload.task);
         const previousFollow = followOutput;
         const previousScrollTop = transcript?.scrollTop || 0;
@@ -2396,6 +2671,7 @@
 
         let pendingCard = null;
         if (payload.pending_approval) {
+            payload.pending_approval = {...payload.pending_approval, scoped_trust: payload.scoped_trust};
             const data = payload.pending_approval.preview?.data;
             if (candidateGroup && data?.source_type === 'resource_candidates') {
                 pendingCard = buildApproval(payload.pending_approval);
@@ -2471,7 +2747,7 @@
             invalidateActiveRequest();
             rememberSession(targetId);
             restoreDraft();
-            setBusy(true, {stoppable: false});
+            setBusy(true);
         } else if (activeRequest?.receiptOnly && activeRequest.sessionId === targetId) {
             invalidateActiveRequest();
         }
@@ -2805,7 +3081,7 @@
         };
         activeRequest = active;
         group.dataset.previewing = 'true';
-        setBusy(true, {stoppable: false});
+        setBusy(true);
         saveCandidateDraft(group);
         announce(responseStatus, '正在生成整批资源预览，尚未下载');
         try {
@@ -2821,7 +3097,7 @@
                 if (event.type === 'effect.approval_required' && payload.plan) {
                     const plan = payload.plan;
                     if (plan.plan_id) expireVisibleApprovals(String(plan.plan_id));
-                    const card = buildApproval({plan_id: plan.plan_id, effect: plan.effect, preview: plan.preview, confirmation: plan.confirmation, expires_at: plan.expires_at, result: payload.result});
+                    const card = buildApproval({...plan, result: payload.result});
                     card._candidateSelection = selection;
                     state.output.replaceChildren(card);
                     active.pendingCard = card;
@@ -2975,7 +3251,7 @@
             composer?.requestSubmit();
         }
     });
-    stopButton?.addEventListener('click', stopActiveRequest);
+    sessionStopButton?.addEventListener('click', stopSessionTasks);
     newSessionButton?.addEventListener('click', startNewSession);
     document.getElementById('agentRestoreRetry')?.addEventListener('click', restoreInitialSession);
     document.getElementById('agentRestoreNew')?.addEventListener('click', startNewSession);
@@ -3013,6 +3289,8 @@
         if (cancel) cancelEffect(cancel);
     });
     page.addEventListener('click', (event) => {
+        const action = event.target.closest('[data-agent-action-key]');
+        if (action && !action.disabled) sendQuery(action.dataset.agentActionTitle, action.dataset.agentActionKey);
         const draft = event.target.closest('[data-agent-draft]');
         if (draft) fillDraft(draft.dataset.agentDraft);
     });
@@ -3020,7 +3298,6 @@
     window.addEventListener('resize', syncViewportHeight, {passive: true});
 
     syncViewportHeight();
-    resizePrompt();
     setConsoleEmpty(!initialRestore);
     refreshNextActions();
     renderIcons(page);

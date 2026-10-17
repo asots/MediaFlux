@@ -202,6 +202,7 @@ class Case:
         self.domain = FileDomain(root)
         self.store = self.cold_store()
         self.events = []
+        self.source_users = []
         self.script = None
         self.pipeline = None
 
@@ -235,7 +236,11 @@ class Case:
         assert plan.snapshot_fingerprint == digest(OLD_BYTES)
         assert "access_code" not in WRITE_SCHEMA["properties"]
         self.assert_counts(reads=1, prepares=1, attempts=0, mutations=0, models=2)
-        self.assert_source(await self.state())
+        state = await self.state()
+        self.source_users = [deepcopy(row) for row in state.conversation if row.get("role") == "user"]
+        assert len(self.source_users) == 1 and self.source_users[0]["history_id"]
+        assert self.source_users == [{"role": "user", "content": GOAL, "history_id": self.source_users[0]["history_id"]}]
+        self.assert_source(state)
         return plan
 
     async def invalidate(self, plan, mode):
@@ -247,12 +252,14 @@ class Case:
             with pytest.raises(ReferenceError):
                 await self.cold_store().resolve(plan.arguments["observation_ref"], owner=self.owner,
                                                session_id=self.sid, expected_kind="observation")
+            assert self.clock[0] >= plan.expires_at
+            assert await self.pipeline.get_pending_plan(owner=self.owner, session_id=self.sid) is None
         else:
             original = await self.cold_store().resolve(plan.arguments["observation_ref"], owner=self.owner,
                                                      session_id=self.sid, expected_kind="observation")
             assert original["digest"] == digest(OLD_BYTES)
-        assert self.clock[0] < plan.expires_at
-        assert (await self.pipeline.get_pending_plan(owner=self.owner, session_id=self.sid)).plan_id == plan.plan_id
+            assert self.clock[0] < plan.expires_at
+            assert (await self.pipeline.get_pending_plan(owner=self.owner, session_id=self.sid)).plan_id == plan.plan_id
 
     async def confirm(self, plan, *, owner=None):
         events = [event async for event in self.session.confirm(owner=owner or self.owner,
@@ -262,7 +269,7 @@ class Case:
 
     def assert_source(self, state, *, present=True):
         assert [row for row in state.conversation if row.get("role") == "user"] == (
-            [{"role": "user", "content": GOAL}] if present else []
+            self.source_users if present else []
         ), f"{OFFLINE}：不得从确认按钮、模型或工具回执制造新 user goal"
         self.script.assert_user_inputs([GOAL])
 

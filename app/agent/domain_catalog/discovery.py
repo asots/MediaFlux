@@ -498,8 +498,7 @@ def register_specs(
                 "从已配置的 Jellyfin / Emby 本地媒体库中推荐可以立即观看的作品。"
                 "一次读取候选的 Genres、Tags、评分与观看状态，结合最近播放题材信号排序，"
                 "默认排除已播放或已开始的作品。适合‘今晚看什么’、情绪/题材偏好和"
-                "‘从我的库里推荐’；不是互联网新片榜单。must_match 中每一项都必须命中，"
-                "同一概念的同义词必须放在同一项并用 | 连接；prefer 只用于排序。"
+                "‘从我的库里推荐’；不是互联网新片榜单。"
                 "结果在可用时会返回已校验的 open_url，可直接作为媒体库打开链接。"
             ),
             risk=RiskLevel.READ,
@@ -534,7 +533,7 @@ def register_specs(
                     },
                     "prefer": {
                         "type": "array",
-                        "description": "用于加权排序的软偏好，不要求每项都命中。",
+                        "description": "只用于排序的软偏好，不要求每项都命中。",
                         "maxItems": 12,
                         "items": {
                             "type": "string",
@@ -583,10 +582,11 @@ def register_specs(
         ToolSpec(
             name="discovery.recommend",
             description=(
-                "读取已启用的 TMDB 或豆瓣推荐列表；按年份或年份范围、地区和题材筛选。"
-                "用户要求排除媒体库已有作品时设置 exclude_library=true，服务端批量核对真实 TMDB 身份后仅返回已确认不在库的条目，"
-                "无需逐部调用 library.search/provider.query。候选不足且has_more时继续下一页；"
-                "未映射或媒体库不可达不代表不在库。优先TMDB以获得可核验身份。不返回配置值。"
+                "读取已启用的 TMDB 或豆瓣推荐列表；按年份或年份范围、地区和题材筛选，服务有界续页补足目标数量。"
+                "返回覆盖范围 scope（coverage），含 requested/returned/shortfall/pages_read/stop_reason 和 scope.next_page；"
+                "scope.complete=true 或 scope.returned>=scope.requested 即本次数量已完成；"
+                "has_more 仅表示来源仍有候选，不代表任务未完成，不自动追加调用；用户明确要求更多时可从 scope.next_page 续取。"
+                "只说明实际结果与缺口，不把上限停止当作来源穷尽。不返回配置值。"
             ),
             risk=RiskLevel.READ,
             parameters={
@@ -596,6 +596,7 @@ def register_specs(
                         "type": "string",
                         "enum": ["tmdb", "douban"],
                         "default": "tmdb",
+                        "description": "优先 TMDB 以获得可核验的作品身份。",
                     },
                     "media_type": {
                         "type": "string",
@@ -607,12 +608,14 @@ def register_specs(
                         "minimum": 1,
                         "maximum": 100,
                         "default": 1,
+                        "description": "候选来源的起始页；工具自动有界续页，不是最终推荐结果的页码。",
                     },
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 20,
                         "default": 10,
+                        "description": "筛选、去重和可选排库后的最终推荐目标数，不是单页条数；实际数量和缺口见 scope。",
                     },
                     "year": {
                         "type": "string",
@@ -629,7 +632,7 @@ def register_specs(
                     },
                     "exclude_library": {
                         "type": "boolean", "default": False,
-                        "description": "排除已配置媒体库已有内容；只推荐通过完整身份核验确认未入库的作品。",
+                        "description": "排除已配置媒体库已有内容；服务批量核验真实 TMDB 身份，仅推荐确认未入库的作品。未映射或媒体库不可达不代表不在库。",
                     },
                     "region": {
                         "type": "string",
@@ -646,7 +649,7 @@ def register_specs(
                 },
                 "additionalProperties": False,
             },
-            handler=recommend_discovery,
+            context_handler=recommend_discovery,
             validator=discovery_recommend_arguments,
             examples=(
                 "最近想看点科幻",

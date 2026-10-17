@@ -14,7 +14,10 @@ import pytest
 
 from app.agent.domain_catalog import build_tool_specs
 from app.agent.errors import AgentToolError
-from app.agent.indexer_candidate_actions import present_candidates, present_candidates_arguments
+from app.agent.indexer_candidate_actions import (
+    present_candidates,
+    present_candidates_arguments,
+)
 from app.agent.ingest_actions import (
     AgentIngestSessionStore,
     IngestActions,
@@ -24,7 +27,11 @@ from app.agent.ingest_actions import (
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError, _validate_json_schema
+from app.agent.kernel.pipeline import (
+    ToolCallContext,
+    ToolPipelineError,
+    _validate_json_schema,
+)
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.state import AgentInput, CancellationToken
 from app.agent.kernel.transports import QueryEnvelope
@@ -107,7 +114,7 @@ def test_private_snapshot_restores_every_handle_after_restart_and_rejects_tamper
             download_state="ready", download_kinds=("magnet",),
             magnet=f"magnet:?xt=urn:btih:{position:040x}",
         ))
-    attach_resource_candidate_reference(result, result_store=original)
+    attach_resource_candidate_reference(result, result_store=original, query_arguments={"title": "Example", "resolution": "2160p"})
     private = result.references[0].value
     ids = [item["result_id"] for item in result.data["items"]]
     assert [item["result_id"] for item in private["_private_items"]] == ids
@@ -118,6 +125,7 @@ def test_private_snapshot_restores_every_handle_after_restart_and_rejects_tamper
         return await reloaded.resolve(reference.ref, owner=ux.OWNER, session_id=ux.SESSION, expected_kind="resource_candidates")
 
     private = asyncio.run(reload_reference())
+    assert private["_query_arguments"] == {"title": "Example", "resolution": "2160p"}
     restarted = IndexerResultStore()
     with patch("app.indexers.runtime.get_indexer_service", return_value=SimpleNamespace(result_store=restarted)):
         restored = restore_resource_candidate_reference(private)
@@ -287,7 +295,10 @@ def test_lifecycle_failure_returns_full_aligned_empty_slots():
 
 
 def test_multi_work_search_keeps_all_thirty_six_candidates_and_private_handles():
-    from app.agent.episode_resource_actions import missing_season_resource_arguments, search_missing_season_resources
+    from app.agent.episode_resource_actions import (
+        missing_season_resource_arguments,
+        search_missing_season_resources,
+    )
     from tests.test_agent_missing_episode_resources import _audit_result, _search_result
 
     names = [f"CapacityShow{index:02d}" for index in range(12)]
@@ -302,23 +313,51 @@ def test_multi_work_search_keeps_all_thirty_six_candidates_and_private_handles()
         return result
 
     def search(arguments, **_kwargs):
-        name = next(name for name in names if arguments["title"].startswith(name))
-        title = f"{name}.S01E{arguments['episode']:02d}.1080p.WEB-DL"
-        result_id = provider.result_store.put(IndexerItem(
-            "demo", "Demo", title, download_state="ready", download_kinds=("magnet",),
-            magnet=f"magnet:?xt=urn:btih:{names.index(name) * 3 + arguments['episode']:040x}",
-        ))
-        return _search_result(items=[{"result_id": result_id, "title": title, "site_id": "demo", "site_name": "Demo",
-                                     "download_state": "ready", "download_kinds": ["magnet"]}])
+        name = arguments["title"]
+        assert name in names
+        assert arguments["season"] == 1 and arguments["episode"] is None
+        assert arguments["limit"] == 50
+        # 单季共享查询返回完整候选池，不能继续按旧逐集协议格式化 episode=None。
+        titles = [f"{name}.S01E{episode:02d}.1080p.WEB-DL" for episode in (1, 2, 3)]
+        titles += ["UnrelatedShow.S01E01.1080p.WEB-DL",
+                   f"{name}.S02E01.1080p.WEB-DL", f"{name}.S01E04.1080p.WEB-DL"]
+        items = []
+        for offset, title in enumerate(titles, 1):
+            item = IndexerItem(
+                "demo", "Demo", title, download_state="ready", download_kinds=("magnet",),
+                magnet=f"magnet:?xt=urn:btih:{names.index(name) * len(titles) + offset:040x}",
+            )
+            items.append({**item.to_public_dict(), "result_id": provider.result_store.put(item)})
+        return _search_result(query=f"{name} S01", items=items)
 
-    with patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit), \
-         patch("app.agent.episode_resource_actions.search_resources", side_effect=search), \
+    with patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit) as audits, \
+         patch("app.agent.episode_resource_actions.search_resources", side_effect=search) as searches, \
          patch("app.agent.episode_resource_actions.get_indexer_service", return_value=provider):
         result = search_missing_season_resources(arguments)
+    assert audits.call_count == searches.call_count == len(names)
+    assert {call.args[0]["query"] for call in audits.call_args_list} == set(names)
+    assert all(call.kwargs == {"refresh": True} for call in audits.call_args_list)
+    assert {call.args[0]["title"] for call in searches.call_args_list} == set(names)
+    assert result.ok and result.status == "success"
     assert result.data["recommended_positions"] == list(range(1, 37))
-    assert len(result.references[0].value["candidates"]) == 36
-    assert len(result.references[0].value["_private_items"]) == 36
+    assert result.data["review_positions"] == []
+    assert len(result.references) == 1
+    snapshot = result.references[0].value
+    assert len(snapshot["candidates"]) == len(snapshot["_private_items"]) == 36
+    assert [item["position"] for item in snapshot["candidates"]] == list(range(1, 37))
+    assert [item["result_id"] for item in snapshot["_private_items"]] == [
+        item["result_id"] for item in snapshot["candidates"]
+    ]
+    expected = [(name, episode) for name in names for episode in (1, 2, 3)]
+    for candidate, (name, episode) in zip(snapshot["candidates"], expected, strict=True):
+        assert candidate["title"] == f"{name}.S01E{episode:02d}.1080p.WEB-DL"
+        assert candidate["match"] == "exact_episode"
+        assert candidate["_verification_context"]["tmdb_id"] == str(1000 + names.index(name))
+        assert candidate["_verification_context"]["episode"] == episode
+        assert candidate["_verification_context"]["season"] == 1
+        assert provider.result_store.get(candidate["result_id"]).title == candidate["title"]
     assert all(len(group["positions"]) == 3 and not group["uncovered_episodes"] for group in result.data["groups"])
+    assert [group["positions"] for group in result.data["groups"]] == [list(range(start, start + 3)) for start in range(1, 37, 3)]
 
 
 def test_web_candidate_data_filter_keeps_tail_without_any_visual_changes():

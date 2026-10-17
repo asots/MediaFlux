@@ -69,6 +69,14 @@ class ConfirmationTicket:
     confirmation_contract: dict[str, Any] = field(default_factory=dict)
 
 
+class ConfirmationExpiredError(AgentToolError):
+    """过期请求已一次性注销；ticket 仅供失败诊断，绝非执行授权。"""
+
+    def __init__(self, ticket: ConfirmationTicket) -> None:
+        super().__init__("确认请求已过期", code="confirmation_invalid")
+        self.ticket = ticket
+
+
 _CONFIRMATION_REPLY_PHRASES = frozenset(
     {
         "确认",
@@ -226,6 +234,15 @@ class ConfirmationStore:
         self._tickets: dict[str, ConfirmationTicket] = {}
         self._owner_generations: dict[str, tuple[int, float]] = {}
 
+    def _expires_at(self, now: float, deadline: float | None) -> float:
+        """deadline 仅为进程内 monotonic 预算；持久化仍使用存储自身时钟。"""
+        if deadline is None:
+            return now + self.ttl_seconds
+        remaining = deadline - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0:
+            raise AgentToolError("输入引用已过期，本次未执行；请重新观察并预检", code="reference_invalid")
+        return now + min(self.ttl_seconds, remaining)
+
     def issue(
         self,
         *,
@@ -237,6 +254,7 @@ class ConfirmationStore:
         confirmation_contract: dict[str, Any] | None = None,
         expected_owner_generation: int | None = None,
         replace_active_ticket: bool = False,
+        deadline: float | None = None,
     ) -> ConfirmationTicket:
         owner_key = str(owner or "").strip()
         if not owner_key:
@@ -259,8 +277,11 @@ class ConfirmationStore:
         expected_generation = _normalize_expected_owner_generation(
             expected_owner_generation
         )
-        now = self._clock()
         with self._lock:
+            now = self._clock()
+            expires_at = self._expires_at(now, deadline)
+            if deadline is not None:
+                normalized_contract["reference_recovery_until"] = now + self.ttl_seconds
             self._prune_locked(now)
             owner_generation = self._owner_generation_locked(
                 owner_key, now=now, touch=True
@@ -276,6 +297,8 @@ class ConfirmationStore:
             # 先生成唯一 ID，再执行容量淘汰；令牌源异常时必须原样保留
             # 已存在票据，不能让一次失败的签发产生旁路状态变化。
             confirmation_id = self._new_unique_id_locked()
+            # 令牌源可能阻塞；再次验证原截止，不能重新起算有效期。
+            self._expires_at(now, deadline)
             active_ticket_ids = [
                 key
                 for key, ticket in self._tickets.items()
@@ -310,7 +333,7 @@ class ConfirmationStore:
                 tool_name=normalized_tool_name,
                 arguments=normalized_arguments,
                 context_fingerprint=str(context_fingerprint or ""),
-                expires_at=now + self.ttl_seconds,
+                expires_at=expires_at,
                 owner_generation=owner_generation,
                 followup_context=normalized_followup,
                 confirmation_contract=normalized_contract,
@@ -324,16 +347,29 @@ class ConfirmationStore:
         ticket_id = normalize_action_plan_id(confirmation_id)
         if not owner_key or not ticket_id:
             return None
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             self._prune_locked(now)
             ticket = self._tickets.get(ticket_id)
-            if ticket is None:
+            if ticket is None or ticket.expires_at <= now:
                 return None
             current = self._owner_generations.get(ticket.owner)
             if current is None or ticket.owner_generation != current[0]:
                 return None
             return secrets.compare_digest(ticket.owner, owner_key)
+
+    def inspect_ticket(self, *, owner: str, confirmation_id: str) -> ConfirmationTicket | None:
+        """读取未消费/撤销的原票据证据；过期证据不出现在有效卡列表中。"""
+        owner_key = str(owner or "").strip()
+        ticket_id = normalize_action_plan_id(confirmation_id)
+        with self._lock:
+            self._prune_locked(self._clock())
+            ticket = self._tickets.get(ticket_id)
+            current = self._owner_generations.get(owner_key)
+            if (ticket is None or current is None or ticket.owner_generation != current[0]
+                    or not secrets.compare_digest(ticket.owner, owner_key)):
+                return None
+            return _copy_ticket(ticket)
 
     def claim_and_rotate_owner(
         self,
@@ -347,8 +383,8 @@ class ConfirmationStore:
         """原子领取一张票据并推进 owner epoch，撤销同会话其余票据。"""
         owner_key = str(owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             self._prune_locked(now)
             ticket = self._tickets.get(ticket_id)
             if (
@@ -361,6 +397,9 @@ class ConfirmationStore:
                 raise AgentToolError(
                     "确认请求无效或已过期", code="confirmation_invalid"
                 )
+            if ticket.expires_at <= now:
+                self._tickets.pop(ticket_id, None)
+                raise ConfirmationExpiredError(_copy_ticket(ticket))
             # 先确保 epoch 能推进，再写入执行审计；否则随机源异常会留下
             # “已领取”记录，但票据仍可重试。
             generation = self._new_owner_generation_locked()
@@ -459,9 +498,10 @@ class ConfirmationStore:
             ]
             if preserve_active:
                 for key in ticket_ids:
-                    self._tickets[key] = _copy_ticket(
-                        self._tickets[key], owner_generation=generation
-                    )
+                    if self._tickets[key].expires_at > now:
+                        self._tickets[key] = _copy_ticket(self._tickets[key], owner_generation=generation)
+                    else:
+                        self._tickets.pop(key, None)
                 return 0, generation
             for key in ticket_ids:
                 self._tickets.pop(key, None)
@@ -492,8 +532,10 @@ class ConfirmationStore:
             self._owner_generations.clear()
 
     def _prune_locked(self, now: float) -> None:
+        # 到期即失去写权限；原行额外保留一个既有 TTL 窗口，仅供一次性失败诊断。
+        # 不续期，仍受 max_entries、owner epoch、替换/取消约束。
         expired = [
-            key for key, ticket in self._tickets.items() if ticket.expires_at <= now
+            key for key, ticket in self._tickets.items() if ticket.expires_at + self.ttl_seconds <= now
         ]
         for key in expired:
             self._tickets.pop(key, None)
@@ -663,6 +705,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
         confirmation_contract: dict[str, Any] | None = None,
         expected_owner_generation: int | None = None,
         replace_active_ticket: bool = False,
+        deadline: float | None = None,
     ) -> ConfirmationTicket:
         import sqlite3
 
@@ -690,10 +733,14 @@ class SQLiteConfirmationStore(ConfirmationStore):
             expected_owner_generation
         )
         owner_digest = self._owner_digest(owner_key)
-        now = self._clock()
-        expires_at = now + self.ttl_seconds
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = self._clock()
+            expires_at = self._expires_at(now, deadline)
+            if deadline is not None:
+                normalized_contract, contract_json = _snapshot_json_object({
+                    **normalized_contract, "reference_recovery_until": now + self.ttl_seconds,
+                })
             self._prune(conn, now)
             owner_generation = self._owner_generation(
                 conn, owner_digest, now=now, touch=True
@@ -742,6 +789,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
                 candidate = normalize_action_plan_id(self._token_factory())
                 if not candidate:
                     continue
+                self._expires_at(now, deadline)
                 try:
                     conn.execute(
                         "INSERT INTO agent_confirmations("
@@ -829,6 +877,31 @@ class SQLiteConfirmationStore(ConfirmationStore):
                 return None
             return secrets.compare_digest(ticket_digest, requested_digest)
 
+    def inspect_ticket(self, *, owner: str, confirmation_id: str) -> ConfirmationTicket | None:
+        """跨 Worker 读取原票据证据；保留原截止，不恢复写权限。"""
+        from app import database as db
+
+        owner_key = str(owner or "").strip()
+        ticket_id = normalize_action_plan_id(confirmation_id)
+        if not owner_key or not ticket_id:
+            return None
+        owner_digest = self._owner_digest(owner_key)
+        with db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._prune(conn, self._clock())
+            row = conn.execute(
+                "SELECT c.* FROM agent_confirmations c JOIN agent_confirmation_epochs e "
+                "ON c.owner_digest=e.owner_digest AND c.owner_generation=e.generation "
+                "WHERE c.confirmation_id=? AND c.owner_digest=?",
+                (ticket_id, owner_digest),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                return self._ticket_from_row(row, owner=owner_key)
+            except AgentToolError:
+                return None
+
     def claim_and_rotate_owner(
         self,
         *,
@@ -846,11 +919,11 @@ class SQLiteConfirmationStore(ConfirmationStore):
         if not owner_key or not ticket_id:
             raise AgentToolError("确认请求无效或已过期", code="confirmation_invalid")
         owner_digest = self._owner_digest(owner_key)
-        now = self._clock()
         claimed_ticket: ConfirmationTicket | None = None
         invalid_payload = False
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = self._clock()
             self._prune(conn, now)
             row = conn.execute(
                 "SELECT confirmation_id,tool_name,arguments_json,context_fingerprint,"
@@ -875,15 +948,13 @@ class SQLiteConfirmationStore(ConfirmationStore):
             if (
                 not invalid_payload
                 and claimed_ticket is not None
-                and (
-                    claimed_ticket.expires_at <= now
-                    or claimed_ticket.owner_generation != epoch_generation
-                )
+                and claimed_ticket.owner_generation != epoch_generation
             ):
                 raise AgentToolError(
                     "确认请求无效或已过期", code="confirmation_invalid"
                 )
-            if record_execution and claimed_ticket is not None and not invalid_payload:
+            expired = claimed_ticket is not None and claimed_ticket.expires_at <= now
+            if record_execution and claimed_ticket is not None and not invalid_payload and not expired:
                 from app.agent.action_history import record_confirmation_claimed
                 from app.agent.models import RiskLevel
 
@@ -914,17 +985,23 @@ class SQLiteConfirmationStore(ConfirmationStore):
                     action_arguments=claimed_ticket.arguments,
                     connection=conn,
                 )
-            self._rotate_owner_state(
-                conn,
-                owner_digest=owner_digest,
-                now=now,
-                preserve_active=False,
-            )
+            if expired and not invalid_payload:
+                # 过期点击只注销原证据，不能撤销同 owner 后来的有效票据。
+                conn.execute("DELETE FROM agent_confirmations WHERE confirmation_id=? AND owner_digest=?", (ticket_id, owner_digest))
+            else:
+                self._rotate_owner_state(
+                    conn,
+                    owner_digest=owner_digest,
+                    now=now,
+                    preserve_active=False,
+                )
         if invalid_payload or claimed_ticket is None:
             raise AgentToolError(
                 "确认请求内容无效，请重新生成确认请求",
                 code="confirmation_invalid",
             )
+        if expired:
+            raise ConfirmationExpiredError(claimed_ticket)
         return claimed_ticket
 
     def list_active_tickets(self, *, owner: str) -> list[ConfirmationTicket]:
@@ -1058,7 +1135,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
             conn.execute("DELETE FROM agent_confirmation_epochs")
 
     def _prune(self, conn: Any, now: float) -> None:
-        conn.execute("DELETE FROM agent_confirmations WHERE expires_at<=?", (now,))
+        conn.execute("DELETE FROM agent_confirmations WHERE expires_at<=?", (now - self.ttl_seconds,))
         cutoff = now - (self.ttl_seconds * 2)
         conn.execute(
             "DELETE FROM agent_confirmation_epochs WHERE touched_at<=? AND "

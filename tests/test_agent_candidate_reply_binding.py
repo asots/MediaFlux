@@ -75,3 +75,52 @@ def test_signed_candidate_binding_reaches_current_model_message(store, monkeypat
         assert reply['reference_handle'] in last_user
     else:
         assert not row.get('reply_context')
+
+
+@pytest.mark.parametrize('change', ['query_only', 'search_id', 'candidates', 'private_items'])
+def test_reply_bound_batch_allows_refinement_token_but_not_rebinding(store, change):
+    from copy import deepcopy
+    from dataclasses import replace
+    from app.agent.kernel.pipeline import ToolPipelineError
+    from tests.test_agent_resource_batch import _prepare_batch
+
+    async def exercise():
+        _, pipeline, states = ux._runtime(store)
+        view, context = await ux._publish_candidates(pipeline, states)
+        original = await store.resolve(view['ref'], owner=ux.OWNER, session_id=ux.SESSION, expected_kind='resource_candidates')
+        original['_query_arguments'] = {'title': 'Example', 'resolution': '2160p'}
+        bound = await store.put(owner=ux.OWNER, session_id=ux.SESSION, kind='resource_candidates', value=original, ttl_seconds=900)
+        context = replace(context, resource_candidate_ref=bound.ref)
+        refined = await pipeline.execute('indexer.present_candidates', {
+            'resource_candidates_ref': bound.ref, 'positions': [1, 2], 'exclude_hdr': True,
+        }, context=context)
+        new_ref = refined.outcome.public_content['reference_arguments']['resource_candidates_ref']
+        assert new_ref != bound.ref
+        value = await store.resolve(new_ref, owner=ux.OWNER, session_id=ux.SESSION, expected_kind='resource_candidates')
+        assert value['_query_arguments']['exclude_hdr'] is True
+        assert value['candidates'] == original['candidates'] and value['search_id'] == original['search_id']
+        if change != 'query_only':
+            value = deepcopy(value)
+            if change == 'search_id':
+                value['search_id'] = 'rs_' + 'z' * 16
+            elif change == 'candidates':
+                value['candidates'][0]['title'] = 'Different resource'
+            else:
+                value['_private_items'] = []
+            changed = await store.put(owner=ux.OWNER, session_id=ux.SESSION, kind='resource_candidates', value=value, ttl_seconds=900)
+            new_ref = changed.ref
+        intent = {'source_type': 'resource_candidates', 'resource_candidates_ref': new_ref, 'positions': [1, 2], 'target': 'guangya'}
+        with patch('app.agent.indexer_candidate_actions.prepare_submit_resource_batch', side_effect=_prepare_batch) as prepare:
+            if change == 'query_only':
+                # 只预检真实业务链，未确认前不执行下载；冻结的仍是原批次两个真实ID。
+                result = await pipeline.execute('ingest.submit', intent, context=context)
+                assert result.effect_plan is not None
+                assert prepare.call_args.args[0]['result_ids'] == [item['result_id'] for item in original['candidates']]
+                assert result.effect_plan.arguments['resource_candidates_ref'] == new_ref
+            else:
+                with pytest.raises(ToolPipelineError) as error:
+                    await pipeline.execute('ingest.submit', intent, context=context)
+                assert error.value.code == 'candidate_scope_mismatch'
+                prepare.assert_not_called()
+        assert (await store.resolve(bound.ref, owner=ux.OWNER, session_id=ux.SESSION, expected_kind='resource_candidates')) == original
+    asyncio.run(exercise())

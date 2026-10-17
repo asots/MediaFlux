@@ -10,11 +10,11 @@ from typing import Any
 
 from app import config
 from app.agent.errors import AgentToolError
-from app.agent.models import Evidence, ToolResult
+from app.agent.models import Evidence, ToolContext, ToolResult
 from app.discovery.models import DiscoveryPage, MediaCard, ProviderError
 from app.discovery.search import DiscoverySearchResult, get_discovery_search_service
 from app.discovery.service import get_discovery_service
-from app.services import inspect_media_identity_batch, summarize_media_identity_batch
+from app.services import collect_discovery_recommendations
 
 _ALLOWED_PROVIDERS = ("tmdb", "douban", "bangumi")
 _ALLOWED_ARGUMENTS = {
@@ -88,27 +88,12 @@ _TMDB_TV_GENRE_IDS = {
     "战争": "10768",
     "历史": "10768",
 }
-_REGION_LANGUAGE_ALIASES = {
-    "欧美": "en",
-    "美国": "en",
-    "英国": "en",
-    "美剧": "en",
-    "英剧": "en",
-    "中国": "zh",
-    "中国大陆": "zh",
-    "国产": "zh",
-    "国产剧": "zh",
-    "中国香港": "zh",
-    "中国台湾": "zh",
-    "香港": "zh",
-    "台湾": "zh",
-    "日本": "ja",
-    "日剧": "ja",
-    "韩国": "ko",
-    "韩剧": "ko",
-    "法国": "fr",
-    "德国": "de",
-    "印度": "hi",
+_REGION_COUNTRY_ALIASES = {
+    "美国": "US", "美剧": "US", "英国": "GB", "英剧": "GB",
+    "中国": "CN", "中国大陆": "CN", "国产": "CN", "国产剧": "CN",
+    "中国香港": "HK", "香港": "HK", "中国台湾": "TW", "台湾": "TW",
+    "日本": "JP", "日剧": "JP", "韩国": "KR", "韩剧": "KR",
+    "法国": "FR", "德国": "DE", "印度": "IN",
 }
 _DOUBAN_TV_REGION_TAGS = {
     "欧美": "美剧",
@@ -354,9 +339,11 @@ def _recommend_provider_filters(normalized: dict[str, Any]) -> dict[str, str]:
                 if media_type == "movie"
                 else "first_air_date_year"
             ] = year
-        language = _REGION_LANGUAGE_ALIASES.get(region, "")
-        if language:
-            filters["with_original_language"] = language
+        country = _REGION_COUNTRY_ALIASES.get(region, "")
+        if country:
+            filters["with_origin_country"] = country
+        elif region == "欧美":
+            filters["with_original_language"] = "en"
         genre_ids = (
             _TMDB_MOVIE_GENRE_IDS if media_type == "movie" else _TMDB_TV_GENRE_IDS
         )
@@ -587,74 +574,17 @@ def search_discovery(arguments: dict[str, Any]) -> ToolResult:
     )
 
 
-def _recommend_payload(
-    normalized: dict[str, Any], page: DiscoveryPage
-) -> dict[str, Any]:
-    requested_year = str(normalized.get("year") or "")
-    cards = [
-        card
-        for card in tuple(page.items or ())
-        if isinstance(card, MediaCard)
-        and (not requested_year or str(card.year or "").strip() == requested_year)
-        and (not (normalized.get("year_from") or normalized.get("year_to"))
-             or re.fullmatch(r"(?:19|20)[0-9]{2}", str(card.year or "")))
-        and (not normalized.get("year_from") or str(card.year or "") >= normalized["year_from"])
-        and (not normalized.get("year_to") or bool(card.year) and str(card.year) <= normalized["year_to"])
-    ]
-    limit = normalized["limit"]
-    items = [_public_card(card) for card in cards]
-    library_check = None
-    if normalized.get("exclude_library"):
-        identities = [{key: item[key] for key in ("tmdb_id", "media_type", "title", "year")}
-                      for item in items if re.fullmatch(r"[1-9][0-9]{0,9}", item["tmdb_id"])]
-        sources = inspect_media_identity_batch(identities) if identities else []
-        library_check = summarize_media_identity_batch(identities, sources)
-        library_check["unmapped_candidates"] = len(items) - len(identities)
-        missing = {(item["media_type"], item["tmdb_id"]) for item in library_check["items"]
-                   if item["library_status"] == "missing"}
-        items = [{**item, "library_status": "missing"} for item in items
-                 if (item["media_type"], item["tmdb_id"]) in missing]
-    health = getattr(page, "provider", None)
-    health_status = _public_identifier(getattr(health, "status", ""), limit=40)
-    if health_status not in _PROVIDER_STATUSES:
-        health_status = "unavailable"
-    retry_after = _safe_retry_after(getattr(health, "retry_after", 0))
-    return {
-        **({"library_check": library_check} if library_check is not None else {}),
-        "provider": normalized["provider"],
-        "category": "discover" if normalized["provider"] == "tmdb" else "recommend",
-        "media_type": normalized["media_type"],
-        "page": normalized["page"],
-        "total": len(items),
-        "returned": min(len(items), limit),
-        "has_more": bool(page.has_more or len(items) > limit),
-        "cached": bool(page.cached),
-        "stale": bool(page.stale),
-        "provider_status": health_status,
-        "retry_after": retry_after,
-        "filters": {
-            key: normalized[key]
-            for key in ("year", "year_from", "year_to", "region", "genre", "exclude_library")
-            if normalized.get(key)
-        },
-        "items": items[:limit],
-    }
-
-
-def recommend_discovery(arguments: dict[str, Any]) -> ToolResult:
+def recommend_discovery(
+    arguments: dict[str, Any], context: ToolContext | None = None,
+) -> ToolResult:
     normalized = recommend_arguments(arguments)
-    empty_payload = {
+    payload = {
         "provider": normalized["provider"],
         "category": "discover" if normalized["provider"] == "tmdb" else "recommend",
         "media_type": normalized["media_type"],
         "page": normalized["page"],
-        "total": 0,
-        "returned": 0,
-        "has_more": False,
-        "cached": False,
-        "stale": False,
-        "provider_status": "disabled",
-        "retry_after": 0,
+        "total": 0, "returned": 0, "has_more": False,
+        "cached": False, "stale": False, "provider_status": "disabled", "retry_after": 0,
         "filters": {
             key: normalized[key]
             for key in ("year", "year_from", "year_to", "region", "genre", "exclude_library")
@@ -664,95 +594,78 @@ def recommend_discovery(arguments: dict[str, Any]) -> ToolResult:
     }
     if not config.get_bool("DISCOVERY_ENABLED"):
         return ToolResult(
-            ok=False,
-            status="disabled",
-            summary="影视探索功能当前已关闭",
-            data=empty_payload,
+            ok=False, status="disabled", summary="影视探索功能当前已关闭", data=payload,
             evidence=[Evidence("discovery_config", "检查影视探索总开关。", _now())],
             suggestions=["请由管理员在设置中启用影视探索后重试。"],
             error="影视探索功能未启用。",
         )
 
-    category = empty_payload["category"]
     try:
-        page = get_discovery_service().list_items(
-            normalized["provider"],
-            category,
-            normalized["media_type"],
-            normalized["page"],
-            _recommend_provider_filters(normalized),
-        )
+        payload.update(collect_discovery_recommendations(
+            get_discovery_service, provider=normalized["provider"],
+            media_type=normalized["media_type"], page=normalized["page"], limit=normalized["limit"],
+            filters=_recommend_provider_filters(normalized),
+            year_from=normalized.get("year") or normalized.get("year_from", ""),
+            year_to=normalized.get("year") or normalized.get("year_to", ""),
+            exclude_library=normalized.get("exclude_library", False),
+            cancelled=context.cancelled if context is not None else None,
+        ))
     except ValueError as exc:
         raise AgentToolError(str(exc)) from exc
-    except ProviderError as exc:
-        code = exc.code if exc.code in _ERROR_MESSAGES else "unavailable"
-        payload = dict(empty_payload)
-        provider_status = (
-            "not_configured" if code == "not_configured" else "unavailable"
-        )
-        payload.update(
-            {
-                "provider_status": provider_status,
-                "retry_after": _safe_retry_after(exc.retry_after),
-            }
-        )
-        return ToolResult(
-            ok=False,
-            status="unavailable",
-            summary="外部影视推荐源暂时不可用",
-            data=payload,
-            evidence=[
-                Evidence("discovery_recommend", "调用受控的外部影视榜单服务。", _now())
-            ],
-            suggestions=["请稍后重试，或切换另一个推荐来源。"],
-            error=_ERROR_MESSAGES[code] + "。",
-        )
-    except Exception:
-        payload = dict(empty_payload)
-        payload["provider_status"] = "unavailable"
-        return ToolResult(
-            ok=False,
-            status="unavailable",
-            summary="外部影视推荐源暂时不可用",
-            data=payload,
-            evidence=[
-                Evidence("discovery_recommend", "调用受控的外部影视榜单服务。", _now())
-            ],
-            suggestions=["请稍后重试，或切换另一个推荐来源。"],
-            error="外部影视推荐源暂时不可用。",
-        )
-
-    payload = _recommend_payload(normalized, page)
-    if payload["returned"]:
-        status = "success"
-        summary = f"推荐列表返回 {payload['returned']} 项内容"
-        suggestions: list[str] = []
-    else:
-        status = "empty"
-        summary = "当前推荐列表暂无内容"
-        suggestions = ["可切换电影或电视剧，也可以尝试另一个推荐来源。"]
+    error_code = payload.pop("error_code")
+    payload["retry_after"] = _safe_retry_after(payload["retry_after"])
+    payload["items"] = [
+        {**_public_card(card), **({"library_status": "missing"} if normalized.get("exclude_library") else {})}
+        for card in payload["items"]
+    ]
+    scope = payload["scope"]
     check = payload.get("library_check")
     if check is not None:
-        counts = check["counts"]
-        unresolved = counts["possible"] + counts["indeterminate"] + check["unmapped_candidates"]
-        summary = f"推荐列表已排除在库 {counts['present']} 项，返回 {payload['returned']} 项已核验未入库内容"
-        suggestions = ["本页候选不足且 has_more 为 true 时，可继续下一页；不得把未核验条目当作不在库。"]
-        if unresolved:
-            status = "partial"
-            summary += f"；另有 {unresolved} 项在库状态未能确认，未列入推荐"
+        for item in check["items"]:
+            item["title"] = _visible_text(item.get("title"), limit=240)
+            item["year"] = _visible_text(item.get("year"), limit=16)
+    unresolved = (check["counts"]["possible"] + check["counts"]["indeterminate"]
+                  + check["unmapped_candidates"]) if check is not None else 0
+    reason = scope["stop_reason"]
+    status = "success" if payload["returned"] else "empty"
+    ok, error, suggestions = True, "", []
+    summary = f"请求推荐 {scope['requested']} 项，返回 {payload['returned']} 项"
+    if check is not None:
+        summary += f"已核验未入库内容；排除在库 {check['counts']['present']} 项"
+    if scope["shortfall"]:
+        summary += f"，还差 {scope['shortfall']} 项"
+    if unresolved:
+        summary += f"；另有 {unresolved} 项在库状态未能确认，未列入推荐"
+    if reason == "cancelled":
+        ok, status = False, "cancelled"
+        summary += "；任务已取消，未继续读取"
+    elif error_code and not scope["pages_read"]:
+        ok, status = False, "unavailable"
+        summary = "外部影视推荐源暂时不可用"
+        error = _ERROR_MESSAGES.get(error_code, _ERROR_MESSAGES["unavailable"]) + "。"
+        suggestions = ["请稍后重试，或切换另一个推荐来源。"]
+    elif unresolved or (scope["shortfall"] and (payload["returned"] or reason != "source_exhausted")):
+        status = "partial"
+    if scope["shortfall"] and reason != "cancelled":
+        summary += "；" + {
+            "source_exhausted": "当前来源已到末页",
+            "page_limit": "已到本次读取页数上限，未穷尽来源",
+            "timeout": "已到读取期限，未完成全部范围",
+            "provider_error": "后续来源读取失败，未完成全部范围",
+        }.get(reason, "未完成全部范围")
     return ToolResult(
-        ok=True,
-        status=status,
-        summary=summary,
-        data=payload,
-        evidence=[
-            Evidence(
-                "discovery_recommend",
-                f"读取 {normalized['provider']} 的受控推荐列表；结果可能来自本地缓存。",
-                _now(),
-            )
-        ],
-        suggestions=suggestions,
+        ok=ok, status=status, summary=summary, data=payload,
+        # 库存核对覆盖所有扫描候选，不是第二份推荐清单。完整明细留在公开回执；
+        # 模型用最终 items 作答，仍可见核对范围、状态统计和来源完整性。
+        model_data={**payload, "library_check": {
+            key: value for key, value in check.items() if key != "items"
+        }} if check is not None else None,
+        evidence=[Evidence(
+            "discovery_recommend",
+            f"读取 {normalized['provider']} 的受控推荐列表；实际页范围见 scope，结果可能来自本地缓存。",
+            _now(),
+        )],
+        suggestions=suggestions, error=error,
     )
 
 

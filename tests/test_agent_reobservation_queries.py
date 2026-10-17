@@ -474,6 +474,10 @@ def test_native_failed_confirmation_passes_actual_private_prepare_source_to_reob
             session_id=case.context.session_id, message=GOAL, request_id="original-user"))]
         case.events.extend(first)
         assert first[-1].payload["status"] == "approval_required"
+        initial = await case.store.load(owner=case.context.owner, session_id=case.context.session_id)
+        source_users = [deepcopy(row) for row in initial.conversation if row.get("role") == "user"]
+        assert len(source_users) == 1 and source_users[0]["history_id"]
+        assert source_users == [{"role": "user", "content": GOAL, "history_id": source_users[0]["history_id"]}]
         old = await case.pipeline.get_pending_plan(owner=case.context.owner, session_id=case.context.session_id)
         source = deepcopy(old.metadata["reobservation_source"])
         case.record("native_original_source", source)
@@ -502,7 +506,7 @@ def test_native_failed_confirmation_passes_actual_private_prepare_source_to_reob
         assert not workspace._plan_path(workspace.observation_plan_id(original_ref)).exists()
         cold = SQLiteKernelStore(secret_provider=lambda: "offline-query-source-only")
         state = await cold.load(owner=case.context.owner, session_id=case.context.session_id)
-        assert [row for row in state.conversation if row.get("role") == "user"] == [{"role": "user", "content": GOAL}]
+        assert [row for row in state.conversation if row.get("role") == "user"] == source_users
         assert len([row for row in state.conversation if row.get("completion_receipt_id") == old.plan_id]) == 1
         view = TurnViewBuilder()
         for event in events:

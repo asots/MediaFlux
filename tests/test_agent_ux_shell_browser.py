@@ -111,3 +111,194 @@ class AgentUXShellBrowserTests(AgentShellBrowserCase):
                     self.assertEqual(page.locator('#agentSessionCount').inner_text(), f'{1 if history else 0} 条')
                     self.assertEqual(unexpected, [])
                     self.assertEqual(errors, [])
+
+
+class AgentSessionStopBrowserTests(AgentShellBrowserCase):
+    def session_stop_shell(self, viewport, snapshot=None):
+        page, unexpected, errors = self.make_shell(viewport, history=True)
+        page.evaluate("""snapshot => {
+            const id = 'session_shell_0000000001';
+            window.__kernelConfig.sessionDetails = {[id]: {
+                messages: [{role: 'assistant', content: '已保存的任务结果。'}],
+                active_turn: {request_id: 'shell-request', turn_id: 'shell-turn', generation: 1, status: 'running', protected: false},
+                ...snapshot,
+            }};
+            window.__sessionStopCalls = [];
+            window.__stopResult = {ok: true, status: 'stopped', stopped: true, model_turn: 'not_running'};
+            window.__stopHttpStatus = 200;
+            const original = window.fetch;
+            window.fetch = async (url, options = {}) => {
+                if (new URL(String(url), location.href).pathname !== '/api/agent/session/stop') return original(url, options);
+                const body = JSON.parse(options.body);
+                window.__sessionStopCalls.push(body);
+                return new Promise(resolve => {
+                    window.__completeSessionStop = () => {
+                        Object.assign(window.__kernelConfig.sessionDetails[body.session_id], window.__stopSnapshot || {});
+                        resolve(new Response(JSON.stringify(window.__stopResult), {
+                            status: window.__stopHttpStatus, headers: {'Content-Type': 'application/json'},
+                        }));
+                    };
+                });
+            };
+        }""", snapshot or {})
+        page.locator('#agentResumeLatestSession').click()
+        page.locator('.agent-message-assistant').first.wait_for()
+        page.evaluate('async () => { await document.fonts.ready; }')
+        self.assertEqual(page.locator('#agentStopSession').count(), 1)
+        self.assertEqual(page.locator('#agentStop').count(), 0)
+        return page, unexpected, errors
+
+    def test_send_stop_share_rightmost_slot_without_layout_shift(self):
+        for width, height in ((320, 667), (390, 844), (1280, 800)):
+            with self.subTest(width=width):
+                page, unexpected, errors = self.session_stop_shell({'width': width, 'height': height})
+                stop = page.locator('#agentStopSession')
+                send = page.locator('#agentSend')
+                self.assertTrue(stop.is_visible())
+                self.assertTrue(send.is_hidden())
+                self.assertEqual(page.locator('.agent-composer-actions-right > button').count(), 2)
+                self.assertEqual(stop.locator('..').get_attribute('class'), 'agent-submit-slot')
+                self.assertEqual(stop.locator('svg').get_attribute('data-lucide'), 'square')
+                expected_color = stop.evaluate("node => { const probe = document.createElement('span'); probe.style.color = 'var(--danger)'; node.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; }")
+                self.assertEqual(stop.evaluate('(node) => getComputedStyle(node).color'), expected_color)
+                if output := os.getenv('MEDIAFLUX_UI_SCREENSHOTS'):
+                    page.locator('#agentComposer').screenshot(path=str(Path(output) / f'stop-{width}.png'))
+                page.locator('#agentPrompt').fill('未发送的草稿')
+                page.mouse.move(0, 0)
+                bounds = [page.locator(selector).bounding_box() for selector in ('#agentComposer', '.agent-submit-slot')]
+                stop.focus()
+                page.keyboard.press('Enter')
+                page.wait_for_function("document.querySelector('#agentStopSession').disabled")
+                stop.evaluate("node => node.dispatchEvent(new MouseEvent('click', {bubbles: true}))")
+                page.locator('#agentPrompt').press('Enter')
+                self.assertEqual(page.evaluate('window.__sessionStopCalls'), [{'session_id': 'session_shell_0000000001'}])
+                page.evaluate("""() => {
+                    window.__stopSnapshot = {active_turn: null, pending_effect_count: 0,
+                        last_turn: {request_id: 'shell-request', turn_id: 'shell-turn', status: 'cancelled', message: '已停止'}};
+                    window.__completeSessionStop();
+                }""")
+                stop.wait_for(state='hidden')
+                self.assertTrue(send.is_visible())
+                self.assertTrue(send.is_enabled())
+                self.assertEqual(page.locator('#agentPrompt').input_value(), '未发送的草稿')
+                page.mouse.move(0, 0)
+                page.evaluate('() => Promise.all(document.getAnimations().map(a => a.finished.catch(() => {})))')
+                for selector, before in zip(('#agentComposer', '.agent-submit-slot'), bounds):
+                    after = page.locator(selector).bounding_box()
+                    for key in ('x', 'y', 'width', 'height'):
+                        self.assertAlmostEqual(before[key], after[key], delta=0.5)
+                self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), width)
+                self.assertNotIn('/api/agent/query', [call['url'] for call in page.evaluate('window.__kernelCalls')])
+                self.assertEqual(unexpected, [])
+                self.assertEqual(errors, [])
+
+    def test_idle_background_wait_keeps_send_and_hides_stop(self):
+        page, unexpected, errors = self.session_stop_shell({'width': 390, 'height': 844}, {
+            'active_turn': None, 'pending_effect_count': 1,
+            'last_turn': {'request_id': 'background', 'turn_id': 'background-turn', 'status': 'waiting'},
+        })
+        self.assertTrue(page.locator('#agentStopSession').is_hidden())
+        self.assertTrue(page.locator('#agentSend').is_visible())
+        page.locator('#agentPrompt').fill('继续问一个问题')
+        self.assertTrue(page.locator('#agentSend').is_enabled())
+        self.assertEqual(unexpected, [])
+        self.assertEqual(errors, [])
+
+    def test_session_stop_reports_running_uncancellable_and_unconfirmed_results(self):
+        page, unexpected, errors = self.session_stop_shell({'width': 390, 'height': 844})
+        original_messages = page.locator('.agent-message-assistant').count()
+        self.assertEqual(original_messages, 2)  # 已保存回复 + 正在运行的回复
+        for status, expected in (
+            ('stopping', '仍在'), ('partially_stopping', '不可取消'),
+            ('partial', '不可取消'), ('critical_pending', '不可中断'),
+            ('superseded', '无法确认'), ('stop_unconfirmed', '尚未确认'),
+            ('unexpected_status', '尚未确认'),
+        ):
+            with self.subTest(status=status):
+                page.evaluate("status => { window.__stopResult = {ok: true, status, stopped: false, uncancellable: []}; }", status)
+                page.get_by_role('button', name='停止任务', exact=True).click()
+                page.evaluate('window.__completeSessionStop()')
+                page.wait_for_function("document.querySelector('#agentStopSession').getAttribute('aria-busy') === 'false'")
+                text = page.locator('.app-toast-message').last.inner_text()
+                self.assertIn(expected, text)
+                self.assertNotIn('已撤回', text)
+                self.assertNotIn('全部已停止', text)
+                self.assertEqual(page.locator('.agent-message-assistant').count(), original_messages)
+        self.assertEqual(unexpected, [])
+        self.assertEqual(errors, [])
+
+    def test_session_stop_error_allows_retry_and_ignores_response_after_session_switch(self):
+        page, unexpected, errors = self.session_stop_shell({'width': 1280, 'height': 800})
+        button = page.get_by_role('button', name='停止任务', exact=True)
+        page.evaluate("() => { window.__stopHttpStatus = 503; window.__stopResult = {error: '本地停止入口暂不可用'}; }")
+        button.click()
+        page.evaluate('window.__completeSessionStop()')
+        page.wait_for_function("document.querySelector('#agentStopSession').getAttribute('aria-busy') === 'false'")
+        self.assertTrue(button.is_enabled())
+        self.assertIn('尚未确认', page.locator('.app-toast-message').last.inner_text())
+        page.evaluate("() => { window.__stopHttpStatus = 200; window.__stopResult = {ok: true, status: 'stopped', stopped: true}; }")
+        button.click()
+        page.locator('#agentNewSession').click()
+        page.locator('#agentPrompt').fill('新会话草稿')
+        page.evaluate('window.__completeSessionStop()')
+        page.wait_for_function("document.querySelector('#agentStopSession').getAttribute('aria-busy') === 'false'")
+        self.assertEqual(page.locator('#agentPrompt').input_value(), '新会话草稿')
+        self.assertEqual(page.locator('.agent-message').count(), 0)
+        self.assertNotIn('会话任务已停止', page.locator('#appToastContainer').inner_text())
+        self.assertEqual(len(page.evaluate('window.__sessionStopCalls')), 2)
+        self.assertEqual(unexpected, [])
+        self.assertEqual(errors, [])
+
+    def test_session_stop_remains_reachable_during_protected_turn(self):
+        active = {'request_id': 'protected-request', 'turn_id': 'protected-turn',
+                  'generation': 3, 'status': 'running', 'protected': True}
+        page, unexpected, errors = self.session_stop_shell({'width': 390, 'height': 844}, {'active_turn': active})
+        self.assertTrue(page.locator('#agentSend').is_disabled())
+        page.evaluate("() => { window.__stopResult = {ok: true, status: 'critical_pending', stopped: false, model_turn: 'critical_pending'}; }")
+        page.get_by_role('button', name='停止任务', exact=True).click()
+        page.evaluate('window.__completeSessionStop()')
+        page.wait_for_function("document.querySelector('#agentStopSession').getAttribute('aria-busy') === 'false'")
+        self.assertIn('不可中断', page.locator('.app-toast-message').last.inner_text())
+        self.assertTrue(page.locator('#agentSend').is_disabled())
+        self.assertEqual(page.evaluate('window.__sessionStopCalls'), [{'session_id': 'session_shell_0000000001'}])
+        self.assertEqual(unexpected, [])
+        self.assertEqual(errors, [])
+
+    def test_session_stop_waits_for_foreground_terminal_without_wildcard_query_cancel(self):
+        page, unexpected, errors = self.session_stop_shell({'width': 390, 'height': 844}, {'active_turn': None})
+        page.evaluate("() => { window.__kernelConfig.queryEvents = []; window.__kernelConfig.holdQueryOpen = true; }")
+        page.locator('#agentPrompt').fill('继续只读检查')
+        page.locator('#agentSend').click()
+        page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'true'")
+        page.evaluate("""() => {
+            const call = window.__kernelCalls.findLast(call => call.url === '/api/agent/query');
+            const request = JSON.parse(call.body);
+            window.__foregroundRequest = request;
+            window.__kernelConfig.sessionDetails[request.session_id] = {
+                messages: [{role: 'assistant', content: '已保存的任务结果。'}, {role: 'user', content: request.message}],
+                active_turn: {request_id: request.request_id, turn_id: `turn-${request.request_id}`,
+                    generation: 2, status: 'cancelling', protected: false},
+            };
+            window.__stopResult = {ok: true, status: 'stopping', stopped: false, model_turn: 'stop_requested'};
+        }""")
+        page.get_by_role('button', name='停止任务', exact=True).click()
+        page.evaluate('window.__completeSessionStop()')
+        page.wait_for_function("document.querySelector('#agentStopSession').getAttribute('aria-busy') === 'false'")
+        self.assertIn('仍在', page.locator('.app-toast-message').last.inner_text())
+        self.assertEqual(page.locator('.agent-cancelled').count(), 0)
+        self.assertTrue(page.locator('#agentSend').is_disabled())
+        page.evaluate("""() => {
+            const request = window.__foregroundRequest;
+            Object.assign(window.__kernelConfig.sessionDetails[request.session_id], {
+                active_turn: null,
+                last_turn: {request_id: request.request_id, turn_id: `turn-${request.request_id}`,
+                    status: 'cancelled', message: '本轮已取消'},
+            });
+        }""")
+        page.locator('.agent-cancelled').wait_for()
+        self.assertEqual(page.locator('.agent-message-user').count(), 1)
+        self.assertEqual(page.locator('.agent-message-assistant').count(), 2)
+        paths = [call['url'] for call in page.evaluate('window.__kernelCalls')]
+        self.assertNotIn('/api/agent/query/cancel', paths)
+        self.assertEqual(unexpected, [])
+        self.assertEqual(errors, [])

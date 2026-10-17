@@ -217,12 +217,17 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await web.activity(owner="other", session_id="session"))
         self.assertFalse(cancelled.is_set())
         self.assertTrue(session._detached_tasks)
+        self.assertEqual(session.metrics.snapshot()["turns"], 0)
         release.set()
         await self.wait_idle(session)
         state = await session.state_store.load(owner="owner", session_id="session")
         self.assertEqual(state.conversation[-1]["content"], "离开页面后仍完成")
         self.assertEqual(len(calls), 1)
         self.assertEqual(sum(row["role"] == "user" for row in state.conversation), 1)
+        metrics = session.metrics.snapshot()
+        self.assertEqual(metrics["statuses"], {"success": 1})
+        self.assertEqual(metrics["recent"][0]["model_calls"], 1)
+        self.assertEqual(metrics["recent"][0]["request_id"], "request")
 
     async def test_explicit_stop_interrupts_wait_for_first_token_and_matches_request(self):
         session, entered, release, cancelled, calls = self.paused_session()
@@ -240,6 +245,7 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(release.is_set())
         self.assertEqual(len(calls), 1)
         self.assertFalse(await web.cancel(owner="owner", session_id="session", request_id="current"))
+        self.assertEqual(session.metrics.snapshot()["statuses"], {"cancelled": 1})
 
     async def test_non_web_consumer_close_keeps_original_cancellation_semantics(self):
         from app.agent.kernel.state import AgentInput
@@ -251,6 +257,54 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(cancelled.wait(), 1)
         await self.wait_idle(session)
         self.assertFalse(session._detached_tasks)
+
+    async def test_cancel_during_admission_records_request_without_publishing_a_turn(self):
+        from app.agent.kernel.state import AgentInput
+
+        entered = asyncio.Event()
+
+        class PendingAdmission:
+            async def begin(self, agent_input):
+                entered.set()
+                await asyncio.Event().wait()
+
+        session = make_session()
+        session.turn_admission = PendingAdmission()
+        stream = session.run(AgentInput(
+            owner="owner", session_id="session", request_id="admission-request",
+            message="尚未准入", channel="api",
+        ))
+        observer = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(entered.wait(), 1)
+        observer.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await observer
+        await stream.aclose()
+        metrics = session.metrics.snapshot()
+        self.assertEqual(metrics["statuses"], {"cancelled": 1})
+        self.assertEqual(metrics["recent"][0]["request_id"], "admission-request")
+        self.assertEqual(metrics["recent"][0]["model_calls"], 0)
+        self.assertEqual(metrics["task_statuses_by_turn"], {})
+        state = await session.state_store.load(owner="owner", session_id="session")
+        self.assertFalse(state.conversation)
+
+    async def test_revoked_admission_is_counted_as_cancelled_not_failed(self):
+        from app.agent.kernel.state import AgentInput, StalePublicationError
+
+        class RevokedAdmission:
+            async def begin(self, agent_input):
+                raise StalePublicationError("revoked")
+
+        session = make_session()
+        session.turn_admission = RevokedAdmission()
+        events = [event async for event in session.run(AgentInput(
+            owner="owner", session_id="session", request_id="revoked-request",
+            message="已被撤销", channel="api",
+        ))]
+        self.assertEqual(events, [])
+        snapshot = session.metrics.snapshot()
+        self.assertEqual(snapshot["statuses"], {"cancelled": 1})
+        self.assertEqual(snapshot["recent"][0]["request_id"], "revoked-request")
 
     async def test_web_new_turn_still_blocks_old_turn_late_publication(self):
         session, entered, release, cancelled, calls = self.paused_session()

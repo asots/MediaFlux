@@ -70,11 +70,16 @@ def test_one_business_call_after_cached_discovery_reaches_native_final(attempts)
     assert "alpha__inspect" in {t["function"]["name"] for t in seen[1]["tools"]}
     assert not seen[2].get("tools")
     prompt = seen[1]["messages"][0]["content"]
-    assert "业务工具调用已使用 0/1" in prompt
-    assert f"能力发现尝试 {attempts}/16" in prompt
+    assert "实际剩余工具调用 1 次" in prompt
+    assert "业务工具调用已使用" not in prompt
+    assert "能力发现尝试" not in prompt
     # First snapshot exposes read_result, changing the authorized-visible cache key.
     # The third identical attempt reuses the second selection, not a free raw call.
-    assert f"不同选择 {1 if attempts == 1 else 2}/8" in prompt
+    discoveries = [json.loads(message["content"])["data"]
+                   for message in seen[1]["messages"] if message["role"] == "tool"]
+    assert len(discoveries) == attempts
+    assert discoveries[-1]["discovery_cost"] == {"distinct_requests": min(attempts, 2), "limit": 8}
+    assert discoveries[-1]["cache_hit"] is (attempts == 3)
     assert events[-1].type is AgentEventType.TURN_COMPLETED
     assert events[-1].payload["status"] == "success"
     assert events[-1].payload["tool_calls"] == attempts + 1

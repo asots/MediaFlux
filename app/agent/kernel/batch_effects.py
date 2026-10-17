@@ -190,7 +190,8 @@ def batch_tool(pipeline: ToolPipeline) -> KernelToolSpec | None:
             unknown = {"ok": False, "status": "outcome_unknown", "summary": "前次已进入本项写入，结果待核验；不会自动重放"}
             await _checkpoint(pipeline, context, start, unknown)
             return batch_result(arguments, [*results, {"tool": frozen[start]["tool"], "result": unknown}])
-        # tracked预检会替换冻结计划，不能再次prepare。它只由原执行器校验并受理；先核对全部同步后项。
+        # 全单预复验只查引用、权限和同步快照；子项在_run_effect重新授权并领取一次执行额度。
+        # tracked再次prepare会替换冻结计划，只由原执行器校验并受理。
         try:
             for step in frozen[start:]:
                 tool = selected(step["tool"])

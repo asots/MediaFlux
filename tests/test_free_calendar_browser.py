@@ -1631,11 +1631,15 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                     network.hold = True
                     network.status = status
                 button.focus()
-                page.keyboard.press('Enter')
-                page.wait_for_timeout(40)
+                with page.expect_request(lambda request: (
+                    urlsplit(request.url).path.startswith('/api/discovery/watchlist') if watch
+                    else urlsplit(request.url).path == PATH + '/refresh'
+                )):
+                    page.keyboard.press('Enter')
                 platform = page.locator('#calendar-platform')
                 platform.focus()
                 platform.select_option('iqiyi')
+                self.assertEqual(len(network.watch_pending if watch else network.pending), 1)
                 if watch:
                     network.release_watch()
                 else:

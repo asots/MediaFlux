@@ -121,7 +121,7 @@ def validate_filters(provider: str, category: str, media_type: str,
     allowed: set[str] = set()
     if provider == "tmdb" and category == "discover":
         allowed = {
-            "with_genres", "with_original_language", "sort_by",
+            "with_genres", "with_original_language", "with_origin_country", "sort_by",
             "primary_release_year", "first_air_date_year",
         }
         date_field = "release_date" if media_type == "movie" else "first_air_date"
@@ -162,6 +162,10 @@ def validate_filters(provider: str, category: str, media_type: str,
         raise ValueError("TMDB 年份筛选与媒体类型不匹配")
     if media_type == "tv" and "primary_release_year" in result:
         raise ValueError("TMDB 年份筛选与媒体类型不匹配")
+    if "with_origin_country" in result:
+        result["with_origin_country"] = result["with_origin_country"].upper()
+        if not re.fullmatch(r"[A-Z]{2}", result["with_origin_country"]):
+            raise ValueError("TMDB 产地筛选无效")
     if "with_original_language" in result:
         result["with_original_language"] = result["with_original_language"].lower()
     if "with_original_language" in result and result["with_original_language"] not in _LANGUAGES:

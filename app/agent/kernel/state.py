@@ -98,6 +98,7 @@ class AgentInput:
     reply_context: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     delivery_route: Mapping[str, Any] = field(default_factory=dict)
+    initial_read_tool: str = ""  # 服务端固定接力；整个回合仅允许 READ，不是 quota 恢复。
 
     def __post_init__(self) -> None:
         message = str(self.message or "").strip()
@@ -113,6 +114,10 @@ class AgentInput:
             raise ValueError("session_id cannot be empty")
         if len(message) > 12_000:
             raise ValueError("message is too long")
+        if not isinstance(self.initial_read_tool, str):
+            raise ValueError("initial_read_tool must be a string")
+        if self.initial_read_tool.strip() and "selection" in self.metadata:
+            raise ValueError("read handoff cannot include selection")
         object.__setattr__(self, "message", message)
         object.__setattr__(self, "owner", owner)
         object.__setattr__(self, "session_id", session_id)
@@ -121,6 +126,7 @@ class AgentInput:
         object.__setattr__(self, "reply_context", deepcopy(dict(self.reply_context)))
         object.__setattr__(self, "metadata", deepcopy(dict(self.metadata)))
         object.__setattr__(self, "delivery_route", deepcopy(dict(self.delivery_route)))
+        object.__setattr__(self, "initial_read_tool", self.initial_read_tool.strip())
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +191,8 @@ def publication_commit_matches(
         and updates[0].mode == "clear_if_equals"
         and (type(updates[0]) is _PendingEffectTransition or "pending_effect_binding" not in state.metadata)
     )
-    confirmed = None if handoff or pending_clear or candidate_metadata_only(
+    trust_change = conversation is None and len(updates) == 1 and type(updates[0]) is _ScopedTrustTransition
+    confirmed = None if handoff or pending_clear or trust_change or candidate_metadata_only(
         conversation, updates
     ) else state.metadata.get("confirmed_publication")
     return publication_matches(
@@ -214,6 +221,11 @@ class _PendingEffectTransition(StateUpdate):
     plan_generation: int = 0
     cancelled: bool = False
     goal: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ScopedTrustTransition(StateUpdate):
+    """仅显式用户入口可更改的会话预授权，不能从工具 JSON 重建。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +320,14 @@ class SessionState:
 
     def apply(self, updates: Sequence[StateUpdate]) -> None:
         for update in updates:
+            if type(update) is _ScopedTrustTransition:
+                if update.key != "metadata.scoped_trust" or update.mode != "set":
+                    raise ValueError("invalid scoped trust transition")
+                if update.value is None:
+                    self.metadata.pop("scoped_trust", None)
+                else:
+                    self.metadata["scoped_trust"] = deepcopy(update.value)
+                continue
             if type(update) is _PublicationFinished:
                 marker = self.metadata.get("active_publication")
                 wait = self.metadata.get("read_wait") or {}
@@ -341,7 +361,7 @@ class SessionState:
                 continue
             key = str(update.key or "").strip()
             if any(key == "metadata." + field or key.startswith("metadata." + field + ".")
-                   for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "history_memory_version")):
+                   for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "history_memory_version", "scoped_trust")):
                 raise ValueError("pending binding requires a typed transition")
             if key == "metadata" or key == "metadata.task" or key.startswith("metadata.task."):
                 raise ValueError("task namespace requires a typed patch")
@@ -507,16 +527,17 @@ def preserve_history(
 ) -> dict[str, Any]:
     """落盘与模型窗口共用的来源收敛：不生成目标、授权或完成结论。"""
     memory = history_memory(state)
-    texts = {row["text"] for row in memory["requests"]}
-    kept_users = {row.get("content") for row in retained if row.get("role") == "user"}
+    known_events = {row.get("history_id") for row in memory["requests"]}
+    kept_users = {row.get("history_id") for row in retained if row.get("role") == "user"}
     kept_tools = {json_text(row) for row in retained if row.get("role") == "tool"}
     observations = memory.setdefault("observations", [])
     seen = {row["sha256"] for row in observations}
     for row in original:
         content = row.get("content")
-        if row.get("role") == "user" and isinstance(content, str) and content not in kept_users and content not in texts:
-            memory["requests"].append({"text": content, "sha256": sha256(content.encode()).hexdigest()})
-            texts.add(content)
+        event_id = row.get("history_id")
+        if row.get("role") == "user" and isinstance(content, str) and event_id not in kept_users and event_id not in known_events:
+            memory["requests"].append({"text": content, "sha256": sha256(content.encode()).hexdigest(), "history_id": event_id})
+            known_events.add(event_id)
         elif row.get("role") == "tool" and json_text(row) not in kept_tools:
             digest = sha256(json_text(row).encode()).hexdigest()
             if digest in seen:
@@ -550,6 +571,9 @@ def commit_conversation(
     # Resolve the executor's positional boundary, not equal call IDs in old turns.
     start = next((u.current_start for u in updates if type(u) is _ExecutionCapacity), None)
     merged = merge_effect_receipts(conversation, state.metadata if receipt_metadata is None else receipt_metadata)
+    for row in merged:
+        if row.get("role") == "user" and not row.get("history_id"):
+            row["history_id"] = secrets.token_hex(8)
     # 取消按钮可在同一generation的只读期间到达；迟到检查点不能复活旧预览。
     cancelled = {(row.get("effect_plan_id"), row.get("tool_call_id")): row["content"]
                  for row in state.conversation if row.get("role") == "tool" and row.get("effect_cancelled") is True}
@@ -686,7 +710,7 @@ def _apply_effect_state_change(
     updated = state.clone()
     result = change(updated)
     from .continuation import _DeliveryAcknowledged
-    reserved_fields = ("pending_effect_binding", "pending_effect_goal", "confirmed_publication", "active_publication")
+    reserved_fields = ("pending_effect_binding", "pending_effect_goal", "confirmed_publication", "active_publication", "scoped_trust")
     for reserved in reserved_fields + (() if type(change) is _DeliveryAcknowledged else ("read_wait",)):
         if (reserved in updated.metadata) != (reserved in state.metadata) or updated.metadata.get(reserved) != state.metadata.get(reserved):
             raise ValueError("effect callback cannot change publication binding")
@@ -1097,7 +1121,12 @@ class CancellationToken:
         self._event.set()
         if self.interruptible and task is not None and not task.done() and not self._task_cancel_requested:
             self._task_cancel_requested = True  # 重复取消不能打断状态/回执收尾。
-            task.get_loop().call_soon_threadsafe(task.cancel)
+            task.get_loop().call_soon_threadsafe(self._interrupt, task)
+
+    def _interrupt(self, task: asyncio.Task[Any]) -> None:
+        # 在交付时再检查阶段：模型可能已观察取消并进入终态持久化。
+        if self.interruptible and not task.done():
+            task.cancel()
 
     async def wait(self) -> None:
         while not self._event.is_set():
@@ -1154,6 +1183,13 @@ class TurnCoordinator:
         async with self._lock:
             if current := self._owned_turn(lease, token):
                 self._active[(lease.owner, lease.session_id)] = (lease, token, False, current[3])
+
+    async def protect(self, lease: PublicationLease, token: CancellationToken) -> None:
+        async with self._lock:
+            current = self._owned_turn(lease, token)
+            if current is None:
+                raise StalePublicationError("turn lost execution authority")
+            self._active[(lease.owner, lease.session_id)] = (lease, token, True, current[3])
 
     async def describe(self, *, owner: str, session_id: str) -> dict[str, Any] | None:
         """只读观察现有轮次；不取得发布权或启动执行。"""

@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.agent.model_context_budget import estimated_tokens
 from .capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog
 from .pipeline import ToolPipelineError
 
@@ -33,6 +34,28 @@ class CapabilityDiscovery:
         self._pending: tuple[KernelToolSpec, ...] = ()
         self._current: tuple[KernelToolSpec, ...] = ()
         self._retained: tuple[str, ...] = ()
+
+    def model_index(self, *, maximum_tokens: int) -> str:
+        """让词法漏召回不再等于能力不存在；目录不授予执行权限。"""
+        visible = sorted(self._visible(), key=lambda tool: (tool.domain, tool.name))
+        loaded = {tool.name for tool in self._current}
+        if not any(tool.name == DISCOVERY_TOOL for tool in visible) or all(tool.name in loaded for tool in visible):
+            # 无发现入口时不能建议不存在的调用；已全载入也不重复占用历史预算。
+            return ""
+        header = ("\n可发现能力索引（不是已加载Schema或健康检查，不授予写权限）：\n"
+                  "缺少工具时用agent.capabilities的tool_names加载，不要让用户重新提问。\n")
+        for describe in (True, False):
+            index = header + "\n".join(
+                tool.name + ("：" + tool.description.split("。")[0][:30] if describe else "")
+                for tool in visible
+            )
+            if estimated_tokens(index) <= maximum_tokens:
+                return index
+        # 小上下文保留完整领域入口，不截断Schema或半个工具名称。
+        index = "\n能力领域（用agent.capabilities的catalog按domains读取目录）：" + ", ".join(
+            f"{domain}({count})" for domain, count in sorted(Counter(t.domain for t in visible).items())
+        )
+        return index if estimated_tokens(index) <= maximum_tokens else ""
 
     def _visible(self) -> tuple[KernelToolSpec, ...]:
         result = []

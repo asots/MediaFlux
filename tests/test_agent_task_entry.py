@@ -322,7 +322,7 @@ def test_query_create_typed_evidence_prune_cold_resume(isolated_db, tmp_path):
             "pending",
         ]
         retained = retain_conversation(
-            cold.conversation + [{"role": "user", "content": "保留的新回合"}],
+            cold.conversation + [{"role": "user", "content": "保留的新回合", "history_id": "retained-user"}],
             maximum_bytes=100,
         )
         assert GOAL not in json.dumps(retained, ensure_ascii=False)

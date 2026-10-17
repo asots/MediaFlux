@@ -38,6 +38,7 @@ from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
 from app.agent.models import ToolContext
+from app.agent.model_context_budget import estimated_tokens
 from tests.test_agent_kernel_core import ScriptedModel, collect, read_tool
 
 
@@ -102,6 +103,44 @@ def request():
 
 
 class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_prompt_can_identify_a_tool_missed_by_lexical_retrieval(self):
+        session, model = session_for([read_tool("metadata.cast", description="查询演职员")], [final()])
+        await collect(session.run(request()))
+        self.assertIn("metadata.cast", model.requests[0].system_prompt)
+        self.assertNotIn("metadata__cast", [t["name"] for t in model.requests[0].tools])
+
+    def test_model_index_is_authorized_bounded_and_not_a_health_probe(self):
+        denied = replace(read_tool("private.secret"), authorize=lambda _context: False)
+        hidden = replace(read_tool("hidden.secret"), availability=lambda _context: False)
+        probes = []
+        allowed = replace(read_tool("library.count", description="按库和演员统计作品数量"),
+                          runtime_status=lambda: probes.append(True) or {"status": "configured"})
+        catalog = ToolCatalog([capability_tool(), denied, hidden, allowed])
+        discovery = CapabilityDiscovery(catalog, context={})
+        index = discovery.model_index(maximum_tokens=400)
+        self.assertIn("library.count", index)
+        self.assertNotIn("private.secret", index)
+        self.assertNotIn("hidden.secret", index)
+        self.assertFalse(probes)
+        self.assertLessEqual(estimated_tokens(index), 400)
+        self.assertEqual(discovery.requests, 0)
+
+    def test_small_index_budget_uses_domains_not_a_truncated_tool_name(self):
+        tools = [read_tool(f"library.item_{i}", description="读取作品详情") for i in range(80)]
+        discovery = CapabilityDiscovery(ToolCatalog([capability_tool(), *tools]), context={})
+        index = discovery.model_index(maximum_tokens=200)
+        self.assertIn("library", index)
+        self.assertIn("catalog", index)
+        self.assertNotIn("item_", index)
+        self.assertLessEqual(estimated_tokens(index), 200)
+
+    def test_index_does_not_advertise_missing_discovery_or_duplicate_a_full_window(self):
+        tool = read_tool("library.inspect")
+        self.assertEqual(CapabilityDiscovery(ToolCatalog([tool]), context={}).model_index(maximum_tokens=400), "")
+        discovery = CapabilityDiscovery(ToolCatalog([capability_tool(), tool]), context={})
+        discovery.window([tool])
+        self.assertEqual(discovery.model_index(maximum_tokens=400), "")
+
     async def test_missed_read_capability_is_discovered_and_called_in_same_loop(self):
         invoked = []
         target = read_tool(

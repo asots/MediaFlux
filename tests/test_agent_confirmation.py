@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
+from dataclasses import replace
+from datetime import datetime
 from unittest.mock import Mock, patch
 
-from app.agent.confirmation import ConfirmationStore, SQLiteConfirmationStore, confirmation_reply_intent
+from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.references import InMemoryReferenceStore, ReferenceError
+from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore, StateUpdate
+from app.agent.confirmation import ConfirmationExpiredError, ConfirmationStore, SQLiteConfirmationStore, confirmation_reply_intent
 from app.agent.confirmation_contract import (
     build_confirmation_contract,
     sanitize_confirmation_contract,
@@ -17,6 +26,91 @@ from tests.support import isolated_test_database
 
 
 class ConfirmationStoreTests(unittest.TestCase):
+    def test_expired_evidence_is_once_only_private_and_cannot_revoke_other_live_ticket(self):
+        for store_type in (ConfirmationStore, SQLiteConfirmationStore):
+            with self.subTest(store=store_type.__name__), isolated_test_database():
+                now = [1000.0]
+                store = store_type(ttl_seconds=10, clock=lambda: now[0])
+                old = store.issue(owner="owner", tool_name="write.test", arguments={"private": "original"})
+                now[0] += 5
+                new = store.issue(owner="owner", tool_name="write.test", arguments={"private": "new"})
+                now[0] += 6
+                self.assertEqual(store.list_active_tickets(owner="owner"), [new])
+                self.assertIsNone(store.ticket_owner_match(owner="owner", confirmation_id=old.confirmation_id))
+                self.assertIsNone(store.inspect_ticket(owner="foreign", confirmation_id=old.confirmation_id))
+                self.assertEqual(store.inspect_ticket(owner="owner", confirmation_id=old.confirmation_id), old)
+                with patch("app.agent.action_history.record_confirmation_claimed") as audit:
+                    with self.assertRaises(ConfirmationExpiredError) as expired:
+                        store.claim_and_rotate_owner(owner="owner", confirmation_id=old.confirmation_id, record_execution=True)
+                audit.assert_not_called()
+                self.assertEqual(expired.exception.ticket, old)
+                self.assertIsNone(store.inspect_ticket(owner="owner", confirmation_id=old.confirmation_id))
+                with self.assertRaises(AgentToolError) as repeated:
+                    store.claim_and_rotate_owner(owner="owner", confirmation_id=old.confirmation_id)
+                self.assertNotIsInstance(repeated.exception, ConfirmationExpiredError)
+                self.assertEqual(store.claim_and_rotate_owner(owner="owner", confirmation_id=new.confirmation_id), new)
+
+    def test_expired_evidence_retention_does_not_slide_or_survive_owner_rotation(self):
+        for store_type in (ConfirmationStore, SQLiteConfirmationStore):
+            for boundary in ("retention", "revoke", "preserve_active", "replacement", "reset", "capacity"):
+                with self.subTest(store=store_type.__name__, boundary=boundary), isolated_test_database():
+                    now = [1000.0]
+                    store = store_type(ttl_seconds=10, max_entries=1, clock=lambda: now[0])
+                    old = store.issue(owner="owner", tool_name="write.test", arguments={})
+                    now[0] += 11
+                    self.assertEqual(store.inspect_ticket(owner="owner", confirmation_id=old.confirmation_id), old)
+                    if boundary == "retention":
+                        now[0] += 9
+                    elif boundary == "replacement":
+                        store.issue(owner="owner", tool_name="write.test", arguments={}, replace_active_ticket=True)
+                    elif boundary == "capacity":
+                        store.issue(owner="another", tool_name="write.test", arguments={})
+                    elif boundary == "reset":
+                        store.reset()
+                    else:
+                        store.rotate_owner(owner="owner", preserve_active=boundary == "preserve_active")
+                    self.assertIsNone(store.inspect_ticket(owner="owner", confirmation_id=old.confirmation_id))
+                    with self.assertRaises(AgentToolError) as invalid:
+                        store.claim_and_rotate_owner(owner="owner", confirmation_id=old.confirmation_id)
+                    self.assertNotIsInstance(invalid.exception, ConfirmationExpiredError)
+
+    def test_token_generation_delay_does_not_renew_ref_or_replace_existing_card(self):
+        for store_type in (ConfirmationStore, SQLiteConfirmationStore):
+            with self.subTest(store=store_type.__name__), isolated_test_database():
+                monotonic_now = [100.0]
+                store = store_type(clock=lambda now=monotonic_now: 2_000_000_000.0 + now[0])
+                original = store.issue(owner="owner", tool_name="write.test", arguments={})
+
+                def delayed_token(now=monotonic_now):
+                    now[0] += 60
+                    return "ticket-reference-expired-while-generating-token"
+
+                store._token_factory = delayed_token
+                with patch("app.agent.confirmation.time.monotonic", side_effect=lambda now=monotonic_now: now[0]), \
+                        self.assertRaises(AgentToolError):
+                    store.issue(owner="owner", tool_name="write.test", arguments={},
+                                deadline=150.0, replace_active_ticket=True)
+                self.assertEqual([t.confirmation_id for t in store.list_active_tickets(owner="owner")],
+                                 [original.confirmation_id])
+
+    def test_reference_deadline_caps_ticket_without_replacing_on_expired_budget(self):
+        for store_type in (ConfirmationStore, SQLiteConfirmationStore):
+            with self.subTest(store=store_type.__name__), isolated_test_database():
+                clock = [2_000_000_000.0]
+                store = store_type(clock=lambda now=clock: now[0])
+                deadline = time.monotonic() + 0.25
+                capped = store.issue(owner="owner", tool_name="write.test", arguments={}, deadline=deadline)
+                self.assertGreater(capped.expires_at, clock[0])
+                self.assertLessEqual(capped.expires_at, clock[0] + 0.25)
+                with self.assertRaises(AgentToolError):
+                    store.issue(owner="owner", tool_name="write.test", arguments={},
+                                deadline=time.monotonic() - 1, replace_active_ticket=True)
+                self.assertEqual([t.confirmation_id for t in store.list_active_tickets(owner="owner")],
+                                 [capped.confirmation_id])
+                ordinary = store.issue(owner="other", tool_name="write.test", arguments={},
+                                       deadline=time.monotonic() + 900)
+                self.assertEqual(ordinary.expires_at, clock[0] + 600)
+
     def test_default_confirmation_window_allows_review_but_still_expires(self):
         for store_type in (ConfirmationStore, SQLiteConfirmationStore):
             with self.subTest(store=store_type.__name__), isolated_test_database():
@@ -702,3 +796,327 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.validator.assert_not_called()
         self.confirmed.assert_called_once()
         self.assertEqual(self.confirmed.call_args.args[:2], ({}, "persisted-fs-fingerprint"))
+
+
+class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.enterContext(isolated_test_database("reference-bound-confirmation.db"))
+
+    async def runtime(self, *, sqlite_refs=False, sqlite_tickets=True):
+        self.ref_time, self.ticket_time = 0.0, 2_000_000_000.0
+        self.writes, self.prepares = [], []
+        self.denied, self.handler_failure, self.verify_failure = False, False, False
+        self.on_prepare, self.frozen_arguments = None, None
+        self.refs = (SQLiteKernelStore(clock=lambda: self.ref_time) if sqlite_refs else
+                     InMemoryReferenceStore(clock=lambda: self.ref_time))
+        store_type = SQLiteConfirmationStore if sqlite_tickets else ConfirmationStore
+        self.tickets = store_type(clock=lambda: self.ticket_time)
+        self.state = InMemorySessionStateStore()
+
+        def prepare(arguments, _context):
+            self.prepares.append(arguments)
+            if self.on_prepare:
+                self.on_prepare()
+            return PreparedEffect(preview={"ok": True, "summary": "引用写入预览"},
+                                  arguments=self.frozen_arguments, snapshot_fingerprint="frozen")
+
+        def execute(arguments, expected, _context):
+            self.assertEqual(expected, "frozen")
+            if self.handler_failure:
+                raise ToolPipelineError("领域 handler 返回限流错误", code="rate_limited")
+            self.writes.append(arguments)
+            return {"ok": True, "status": "completed", "summary": "已写入"}
+
+        tool = KernelToolSpec(name="test.ref_write", domain="test", description="引用写入",
+            input_schema={"type": "object"}, effect=ToolEffect.WRITE,
+            prepare=prepare, execute_confirmed=execute,
+            verify=lambda _a, _r, _c: not self.verify_failure,
+            authorize=lambda _context: not self.denied, metadata={"batch_mode": "sync"})
+        self.pipeline = ToolPipeline(catalog=ToolCatalog([tool, replace(tool, name="test.ref_tail", model_name="")]),
+            state_store=self.state, reference_store=self.refs,
+            effect_store=ConfirmationEffectPlanStore(self.tickets))
+        lease, _ = await self.state.begin_turn(owner="ref-owner", session_id="ref-session", request_id="ref-request")
+
+        async def progress(_payload):
+            pass
+
+        self.context = ToolCallContext(owner=lease.owner, session_id=lease.session_id,
+            request_id=lease.request_id, turn_id=lease.turn_id, lease=lease,
+            cancellation=CancellationToken(), report_progress=progress)
+
+    def advance(self, seconds):
+        self.ref_time += seconds
+        self.ticket_time += seconds
+
+    async def reference(self, *, kind="payload", ttl=900):
+        return await self.refs.put(owner="ref-owner", session_id="ref-session", kind=kind,
+                                   value={"id": kind}, ttl_seconds=ttl)
+
+    async def pending(self):
+        return await self.pipeline.get_pending_plan(owner="ref-owner", session_id="ref-session")
+
+    async def test_remaining_ref_ttl_caps_both_stores_across_different_clock_origins(self):
+        for sqlite_refs in (False, True):
+            for sqlite_tickets in (False, True):
+                with self.subTest(sqlite_refs=sqlite_refs, sqlite_tickets=sqlite_tickets):
+                    await self.runtime(sqlite_refs=sqlite_refs, sqlite_tickets=sqlite_tickets)
+                    reference = await self.reference()
+                    self.advance(850)
+                    result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                    plan = result.effect_plan
+                    self.assertAlmostEqual(plan.expires_at, 2_000_000_900.0, delta=0.02)
+                    self.assertAlmostEqual(datetime.fromisoformat(plan.public_dict()["expires_at"]).timestamp(),
+                                           plan.expires_at, delta=1)
+                    pending = await self.pending()
+                    self.assertLessEqual(pending.expires_at, plan.expires_at)
+                    if sqlite_tickets:
+                        self.pipeline.effect_store = ConfirmationEffectPlanStore(
+                            SQLiteConfirmationStore(clock=lambda: self.ticket_time))
+                        self.assertAlmostEqual((await self.pending()).expires_at, plan.expires_at, delta=0.02)
+                    self.assertFalse(self.writes)
+
+    async def test_wall_clock_ref_bounds_monotonic_ticket_with_fractional_remaining_ttl(self):
+        await self.runtime(sqlite_refs=True, sqlite_tickets=False)
+        self.ref_time, self.ticket_time = 2_000_000_000.0, 1000.0
+        reference = await self.reference()
+        self.advance(849.5)
+        result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+        self.assertAlmostEqual(result.effect_plan.expires_at, 1900.0, delta=0.02)
+        self.assertEqual(result.effect_plan.public_dict()["expires_at"], "")
+        self.advance(50.5)
+        self.assertIsNone(await self.pending())
+        self.assertFalse(self.writes)
+
+    async def test_expired_input_ref_retires_card_and_never_executes_or_renews(self):
+        for sqlite_refs in (False, True):
+            with self.subTest(sqlite_refs=sqlite_refs):
+                await self.runtime(sqlite_refs=sqlite_refs)
+                reference = await self.reference()
+                self.advance(850)
+                result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                self.advance(51)
+                self.assertIsNone(await self.pending())
+                with self.assertRaises(ToolPipelineError) as refused:
+                    await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+                self.assertEqual(refused.exception.code, "confirmation_stale")
+                self.assertIs(refused.exception.execution_started, False)
+                with self.assertRaises(ToolPipelineError) as repeated:
+                    await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+                self.assertEqual(repeated.exception.code, "confirmation_invalid")
+                self.assertFalse(self.writes)
+                with self.assertRaises(ReferenceError):
+                    await self.refs.resolve(reference.ref, owner="ref-owner", session_id="ref-session", expected_kind="payload")
+
+    async def test_expired_evidence_survives_card_poll_and_cold_store_but_not_cancellation(self):
+        for sqlite_tickets in (False, True):
+            with self.subTest(sqlite_tickets=sqlite_tickets):
+                await self.runtime(sqlite_refs=True, sqlite_tickets=sqlite_tickets)
+                reference = await self.reference(ttl=5)
+                preview = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                plan = preview.effect_plan
+                self.advance(6)
+                self.assertIsNone(await self.pending())
+                if sqlite_tickets:
+                    self.pipeline.effect_store = ConfirmationEffectPlanStore(SQLiteConfirmationStore(clock=lambda: self.ticket_time))
+                evidence = await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session")
+                self.assertEqual(evidence, plan)
+                self.assertIsNone(await self.pipeline.get_confirmation_evidence(owner="other-owner", session_id="ref-session"))
+                # 注销失效证据不能伪造“成功取消了一张有效卡”的历史。
+                self.assertFalse(await self.pipeline.cancel_effect(plan.plan_id, lease=self.context.lease))
+                self.assertIsNone(await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session"))
+                with self.assertRaises(ToolPipelineError) as repeated:
+                    await self.pipeline.execute_confirmed(plan.plan_id, context=self.context)
+                self.assertEqual(repeated.exception.code, "confirmation_invalid")
+                self.assertFalse(self.writes)
+
+    async def test_reference_recovery_ends_at_original_confirmation_window(self):
+        for sqlite_tickets in (False, True):
+            with self.subTest(sqlite_tickets=sqlite_tickets):
+                await self.runtime(sqlite_refs=True, sqlite_tickets=sqlite_tickets)
+                started = self.ticket_time
+                reference = await self.reference(ttl=5)
+                preview = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                plan = preview.effect_plan
+                self.assertEqual(plan.confirmation_contract["reference_recovery_until"], started + self.tickets.ttl_seconds)
+                self.advance(6)
+                self.assertEqual(await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session"), plan)
+                self.advance(self.tickets.ttl_seconds - 6)
+                # 原行尚在诊断保留期内，但原确认窗口已结束，不能继续启动 Agent。
+                self.assertIsNotNone(self.tickets.inspect_ticket(owner="kernel:ref-owner\x1fref-session", confirmation_id=plan.plan_id))
+                self.assertIsNone(await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session"))
+                with self.assertRaises(ToolPipelineError) as expired:
+                    await self.pipeline.execute_confirmed(plan.plan_id, context=self.context)
+                self.assertEqual(expired.exception.code, "confirmation_invalid")
+                self.assertFalse(self.writes)
+
+    async def test_copied_arguments_expire_without_entering_handler_or_authorizing_replay(self):
+        for sqlite_tickets in (False, True):
+            with self.subTest(sqlite_tickets=sqlite_tickets):
+                await self.runtime(sqlite_tickets=sqlite_tickets)
+                reference = await self.reference(ttl=5)
+                self.frozen_arguments = {"copied": "frozen-value"}
+                preview = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                self.advance(6)
+                self.assertIsNone(await self.pending())
+                with self.assertRaises(ToolPipelineError) as stale:
+                    await self.pipeline.execute_confirmed(preview.effect_plan.plan_id, context=self.context)
+                self.assertEqual(stale.exception.code, "confirmation_stale")
+                self.assertIs(stale.exception.execution_started, False)
+                self.assertFalse(self.writes)
+                self.assertIsNone(await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session"))
+
+    async def test_last_valid_second_executes_once_and_consumed_card_stays_dead(self):
+        await self.runtime()
+        reference = await self.reference()
+        self.advance(850)
+        result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+        self.advance(49)
+        completed = await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+        self.assertTrue(completed.outcome.public_content["ok"])
+        with self.assertRaises(ToolPipelineError):
+            await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+        self.assertEqual(self.writes, [{"payload": {"id": "payload"}}])
+
+    async def test_nested_refs_still_limit_prepared_arguments_that_copy_the_values(self):
+        await self.runtime()
+        first, second = await self.reference(), await self.reference(kind="target", ttl=875)
+        self.advance(850)
+        self.frozen_arguments = {"copied": "frozen-value"}
+        args = {"groups": [{"payload_ref": first.ref}], "target": {"target_ref": second.ref}}
+        result = await self.pipeline.execute("test.ref_write", args, context=self.context)
+        self.assertEqual(result.effect_plan.arguments, self.frozen_arguments)
+        self.assertAlmostEqual(result.effect_plan.expires_at, 2_000_000_875.0, delta=0.02)
+
+    async def test_batch_uses_earliest_input_ref_without_reissuing_it(self):
+        await self.runtime()
+        first, second = await self.reference(), await self.reference(ttl=875)
+        self.advance(850)
+        args = {"steps": [{"tool": "test.ref_write", "arguments": {"payload_ref": first.ref}},
+                          {"tool": "test.ref_tail", "arguments": {"payload_ref": second.ref}}]}
+        result = await self.pipeline.execute("agent.batch", args, context=self.context)
+        self.assertAlmostEqual(result.effect_plan.expires_at, 2_000_000_875.0, delta=0.02)
+        self.assertFalse(self.writes)
+        self.advance(26)
+        self.assertIsNone(await self.pending())
+
+    async def test_input_expiring_during_prepare_cannot_issue_a_card(self):
+        await self.runtime()
+        reference = await self.reference()
+        self.advance(850)
+        self.on_prepare = lambda: self.advance(51)
+        with self.assertRaises(ToolPipelineError):
+            await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+        self.assertIsNone(await self.pending())
+        self.assertEqual(self.tickets.list_active_tickets(owner="kernel:ref-owner\x1fref-session"), [])
+        self.assertFalse(self.writes)
+
+    async def test_expiry_while_issuing_is_a_kernel_rejection_without_a_card(self):
+        for sqlite_tickets in (False, True):
+            with self.subTest(sqlite_tickets=sqlite_tickets):
+                await self.runtime(sqlite_tickets=sqlite_tickets)
+                reference = await self.reference()
+                self.advance(899.9)
+
+                def delayed_token():
+                    time.sleep(0.15)
+                    return "ticket-input-expired-during-issue"
+
+                self.tickets._token_factory = delayed_token
+                with self.assertRaises(ToolPipelineError) as expired:
+                    await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                self.assertEqual(expired.exception.code, "reference_invalid")
+                self.assertIsNone(await self.pending())
+                self.assertEqual(self.tickets.list_active_tickets(owner="kernel:ref-owner\x1fref-session"), [])
+                self.assertFalse(self.writes)
+
+    async def test_legacy_plan_without_new_fields_gets_real_ref_cutoff_on_restore(self):
+        await self.runtime(sqlite_refs=True)
+        reference = await self.reference()
+        self.advance(850)
+        legacy = self.pipeline.effect_store.freeze(owner="ref-owner", session_id="ref-session",
+            generation=self.context.lease.generation, tool_name="test.ref_write", effect=ToolEffect.WRITE,
+            arguments={"payload_ref": reference.ref},
+            prepared=PreparedEffect(preview={"ok": True}, snapshot_fingerprint="frozen"))
+        await self.state.commit(self.context.lease, updates=(StateUpdate("pending_effect_plan_id", legacy.plan_id),))
+        self.assertEqual(legacy.expires_at, self.ticket_time + 600)
+        self.assertAlmostEqual((await self.pending()).expires_at, 2_000_000_900.0, delta=0.02)
+        self.advance(51)
+        self.assertIsNone(await self.pending())
+        self.assertFalse(self.writes)
+
+    async def test_admission_rejection_is_not_started_and_never_reactivates_the_ticket(self):
+        for cause in ("authorization", "rate_limit", "reference"):
+            with self.subTest(cause=cause):
+                await self.runtime()
+                reference = await self.reference()
+                self.advance(850)
+                result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                if cause == "authorization":
+                    self.denied = True
+                elif cause == "rate_limit":
+                    async def refuse(**_kwargs):
+                        raise ToolPipelineError("执行额度不足", code="rate_limited")
+                    self.pipeline.rate_limiter.acquire = refuse
+                else:
+                    claim = self.pipeline.effect_store.claim
+                    def expire_after_claim(_claim=claim, **scope):
+                        plan = _claim(**scope)
+                        self.advance(51)
+                        return plan
+                    self.pipeline.effect_store.claim = expire_after_claim
+                with self.assertRaises(ToolPipelineError) as rejected:
+                    await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+                self.assertIs(getattr(rejected.exception, "execution_started", None), False)
+                self.assertIn("本次未执行", str(rejected.exception))
+                self.assertIn("重新预检", str(rejected.exception))
+                self.assertFalse(self.writes)
+                self.assertIsNone(await self.pending())
+                with self.assertRaises(ToolPipelineError):
+                    await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+                self.assertFalse(self.writes)
+
+    async def test_batch_keeps_written_first_step_when_second_admission_is_rejected(self):
+        await self.runtime()
+        reference = await self.reference()
+        result = await self.pipeline.execute("agent.batch", {"steps": [
+            {"tool": "test.ref_write", "arguments": {"payload_ref": reference.ref}},
+            {"tool": "test.ref_tail", "arguments": {"payload_ref": reference.ref}},
+        ]}, context=self.context)
+
+        async def refuse_tail(**scope):
+            if scope["tool_name"] == "confirm:test.ref_tail":
+                raise ToolPipelineError("后项执行额度不足", code="rate_limited")
+
+        self.pipeline.rate_limiter.acquire = refuse_tail
+        completed = await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+        public = completed.outcome.public_content
+        first, second = public["data"]["steps"]
+        self.assertEqual(public["status"], "partial")
+        self.assertEqual(public["data"]["completed"], 1)
+        self.assertTrue(first["result"]["ok"])
+        self.assertNotIn("本次未执行", first["result"]["summary"])
+        self.assertFalse(second["result"]["ok"])
+        self.assertIn("本次未执行", second["result"]["summary"])
+        self.assertIn("组合变更：1/2 项完成", public["summary"])
+        self.assertEqual(self.writes, [{"payload": {"id": "payload"}}])
+        self.assertIsNone(await self.pending())
+        with self.assertRaises(ToolPipelineError):
+            await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+        self.assertEqual(len(self.writes), 1)
+
+    async def test_handler_and_verify_failure_are_not_mislabeled_as_not_started(self):
+        for phase in ("handler", "verify"):
+            with self.subTest(phase=phase):
+                await self.runtime()
+                reference = await self.reference()
+                self.advance(850)
+                result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+                self.handler_failure, self.verify_failure = phase == "handler", phase == "verify"
+                with self.assertRaises(ToolPipelineError) as failed:
+                    await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+                self.assertIs(getattr(failed.exception, "execution_started", None), True)
+                self.assertNotIn("本次未执行", str(failed.exception))
+                self.assertEqual(len(self.writes), int(phase == "verify"))
+                with self.assertRaises(ToolPipelineError):
+                    await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
+                self.assertEqual(len(self.writes), int(phase == "verify"))

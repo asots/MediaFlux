@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Any
 
 from app.agent.errors import AgentToolError
 from app.agent.indexer_actions import (
+    TECHNICAL_FILTER_CHOICES,
+    filter_technical_candidates,
     prepare_submit_resource,
     prepare_submit_resource_batch,
     submit_resource_batch_confirmed,
     submit_resource_confirmed,
+    technical_filter_arguments,
 )
 from app.agent.models import ToolContext, ToolReference, ToolResult
 from app.agent.public_safety import sanitize_resource_title
@@ -30,8 +34,8 @@ def present_candidates_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     """校验显式候选展示请求；引用解析由 Kernel 在 handler 前完成。"""
     if not isinstance(arguments, dict):
         raise AgentToolError("资源候选筛选参数必须是对象")
-    if set(arguments) != {"resource_candidates_ref", "positions"}:
-        raise AgentToolError("资源候选筛选只接受 resource_candidates_ref 和 positions")
+    if set(arguments) - {"resource_candidates_ref", "positions", *TECHNICAL_FILTER_CHOICES}:
+        raise AgentToolError("资源候选筛选只接受 resource_candidates_ref、positions 和规格条件")
     reference = arguments.get("resource_candidates_ref")
     if (
         not isinstance(reference, str)
@@ -49,6 +53,7 @@ def present_candidates_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         "resource_candidates_ref": reference.strip(),
         "positions": list(positions),
+        **technical_filter_arguments(arguments),
     }
 
 
@@ -71,6 +76,23 @@ def present_candidates(arguments: dict[str, Any]) -> ToolResult:
             "positions 中包含当前候选快照不存在的序号",
             code="precondition_failed",
         )
+    query = value.get("_query_arguments")
+    if query is not None and not isinstance(query, dict):
+        raise AgentToolError("资源候选查询条件无效", code="confirmation_stale")
+    quality = {**technical_filter_arguments(query or {}), **technical_filter_arguments(arguments)}
+    selected, technical_filter = filter_technical_candidates(
+        [snapshot["candidates"][position - 1] for position in positions], quality,
+    )
+    data: dict[str, Any] = {"positions": [item["position"] for item in selected]}
+    reference_value = value
+    if query is not None:
+        data["effective_query"] = {**query, **quality}
+        reference_value = {**value, "_query_arguments": deepcopy(data["effective_query"])}
+    if technical_filter["requested"]:
+        data["technical_filter"] = technical_filter
+        data["scope"] = {"candidate_count": candidate_count, "considered_count": len(positions),
+                         "complete": len(positions) == candidate_count}
+    positions = data["positions"]
     return ToolResult(
         True,
         "found" if positions else "empty",
@@ -79,8 +101,8 @@ def present_candidates(arguments: dict[str, Any]) -> ToolResult:
             if positions
             else "本轮不展示资源候选"
         ),
-        data={"positions": positions},
-        references=[ToolReference("resource_candidates", value)],
+        data=data,
+        references=[ToolReference("resource_candidates", reference_value)],
     )
 
 
@@ -92,7 +114,7 @@ def select_resource_candidates(candidates: list[dict[str, Any]], positions: list
         if type(position) is not int or not 1 <= position <= len(candidates):
             raise AgentToolError(
                 f"该快照只有 {len(candidates)} 项可提交候选，序号 {position} 不存在；"
-                "请使用 candidate_numbers 的 position，集号和排序名次不是提交序号。",
+                "请使用返回候选的 position，集号和排序名次不是提交序号。",
                 code="precondition_failed",
             )
         candidate = candidates[position - 1]
@@ -242,12 +264,8 @@ class IndexerCandidateActions:
         candidates = snapshot.get("candidates")
         if not isinstance(candidates, list) or not candidates:
             raise AgentToolError(
-                "最近资源候选不存在或已过期，请重新搜索",
-                code=(
-                    "confirmation_stale"
-                    if normalize_resource_search_id(arguments.get("search_id"))
-                    else "precondition_failed"
-                ),
+                "此查询没有可提交候选；可调整查询条件后重搜",
+                code="confirmation_stale" if require_search_id else "precondition_failed",
             )
         return [item for item in candidates if isinstance(item, dict)]
 

@@ -197,7 +197,6 @@ def _build_agent_kernel_runtime(
         model_selector=select_channel_model,
         stream_display=lambda: config.get_bool("AGENT_STREAM_DISPLAY_ENABLED"),
     )
-    metrics = KernelMetrics()
     session.continuation_binding = creation_binding
     lifecycle = AgentSessionLifecycle(
         session=session,
@@ -209,9 +208,9 @@ def _build_agent_kernel_runtime(
         session=session,
         store=kernel_store,
         lifecycle=lifecycle,
-        metrics=metrics,
-        web=WebKernelTransport(session, metrics=metrics),
-        telegram=TelegramKernelTransport(session, metrics=metrics),
+        metrics=session.metrics,
+        web=WebKernelTransport(session),
+        telegram=TelegramKernelTransport(session),
         creation_binding=creation_binding,
     )
 

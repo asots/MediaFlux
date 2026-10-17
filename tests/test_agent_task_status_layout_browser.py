@@ -10,8 +10,39 @@ from tests.test_agent_ux_shell_browser import AgentShellBrowserCase
 
 
 class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
+    def test_narrow_toolbar_keeps_touch_targets_and_restore_error_reachable(self):
+        from tests.test_agent_restore_browser import AgentRestoreBrowserTests
+
+        for width in (320, 360, 390):
+            with self.subTest(width=width):
+                page, _, errors, unexpected = AgentRestoreBrowserTests.restore_page(
+                    self, viewport={"width": width, "height": 300}, fail=True
+                )
+                page.locator("#agentRestoreNew").wait_for(state="visible")
+                notice = page.locator("#agentRestoreNotice").bounding_box()
+                composer = page.locator("#agentComposer").bounding_box()
+                self.assertLessEqual(notice["y"] + notice["height"] + 4, composer["y"])
+                page.locator("#agentRestoreNew").focus()
+                button = page.locator("#agentRestoreNew").bounding_box()
+                self.assertLessEqual(button["y"] + button["height"], notice["y"] + notice["height"] + 0.5)
+                controls = page.locator(".agent-composer-header :is(a, button):visible")
+                self.assertEqual(controls.count(), 5)
+                self.assertTrue(page.locator("#agentSend").is_visible())
+                self.assertFalse(page.locator("#agentStopSession").is_visible())
+                boxes = [control.bounding_box() for control in controls.all()]
+                for box in boxes:
+                    self.assertGreaterEqual(box["width"], 44)
+                    self.assertGreaterEqual(box["height"], 44)
+                    self.assertAlmostEqual(box["y"], boxes[0]["y"], delta=0.5)
+                self.assertEqual(page.locator("#agentResumeLatestSession").get_attribute("aria-label"), "继续上次会话")
+                page.locator("#agentPrompt").click(position={"x": 20, "y": 8})
+                self.assertEqual(page.evaluate("document.activeElement.id"), "agentPrompt")
+                self.assertEqual(page.locator(".agent-console").evaluate("n=>n.scrollLeft"), 0)
+                self.assertEqual(errors, [])
+                self.assertEqual(unexpected, [])
+
     def test_task_summary_alignment_keyboard_and_repeated_updates(self):
-        for width, height in ((360, 667), (768, 900), (1440, 900), (667, 360)):
+        for width, height in ((320, 667), (360, 667), (768, 900), (1440, 900), (667, 360)):
             with self.subTest(width=width, height=height):
                 page, unexpected, errors = self.make_shell(
                     {"width": width, "height": height}, history=False
@@ -41,6 +72,9 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                 bounds = panel.bounding_box()
                 self.assertAlmostEqual(bounds["x"], before["x"], delta=0.5)
                 self.assertAlmostEqual(bounds["width"], before["width"], delta=0.5)
+                self.assertTrue(page.locator(".agent-composer-header").evaluate(
+                    "n=>n.scrollWidth<=n.clientWidth"
+                ))
                 self.assertFalse(panel.evaluate("n=>n.open"))
                 self.assertEqual(panel.inner_text().strip(), "1 项待核验")
                 summary.focus()
@@ -63,15 +97,17 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                     ])
                     page.locator("#agentPrompt").fill("核对进度")
                     page.locator("#agentSend").click()
-                    page.wait_for_function("document.querySelector('#agentStop').hidden")
+                    page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
                     self.assertTrue(page.evaluate("""() => {
                         const p=document.querySelector('#agentTaskSnapshot');
                         return p===window.__panel && p.firstElementChild===window.__summary && p.open;
                     }"""))
                     self.assertEqual(panel.locator(".agent-task-details").evaluate("n=>n.scrollTop"), 50)
                     after = page.locator("#agentComposer").bounding_box()
+                    self.assertEqual(page.locator(".agent-console").evaluate("n=>n.scrollLeft"), 0)
                     for key in ("x", "y", "width", "height"):
-                        self.assertAlmostEqual(before[key], after[key], delta=0.5)
+                        self.assertAlmostEqual(before[key], after[key], delta=0.5,
+                                               msg={"dimension": key, "before": before, "after": after})
                 summary.focus()
                 page.keyboard.press("Space")
                 self.assertFalse(panel.evaluate("n=>n.open"))
@@ -91,7 +127,7 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                 ])
                 page.locator("#agentPrompt").fill("你是谁")
                 page.locator("#agentSend").click()
-                page.wait_for_function("document.querySelector('#agentStop').hidden")
+                page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
                 self.assertEqual(panel.count(), 0)
                 self.assertNotIn("任务验收", page.locator(".agent-console").inner_text())
                 self.assertEqual(unexpected, [])
@@ -110,7 +146,7 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                 ])
                 page.locator("#agentPrompt").fill("查看媒体记录")
                 page.locator("#agentSend").click()
-                page.wait_for_function("document.querySelector('#agentStop').hidden")
+                page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
                 for collapsed in ((False, True, False) if width > 900 else (False,)):
                     sidebar = "collapsed" if collapsed else "expanded"
                     if page.evaluate("document.documentElement.dataset.sidebar") != sidebar:

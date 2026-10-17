@@ -12,9 +12,10 @@ from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
 from app.agent.kernel.session import AgentSession, SessionLimits
 from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
 from tests.test_agent_kernel_core import read_tool
+from tests.test_agent_task_read_observations import control, declared
 
 
-def run_pages(*, pages=13, mode="pages", limits=None, status="success"):
+def run_pages(*, pages=13, mode="pages", limits=None, status="success", tracked=False):
     requests, attempted, read = [], [], []
 
     def handler(arguments, _context):
@@ -29,7 +30,7 @@ def run_pages(*, pages=13, mode="pages", limits=None, status="success"):
     tool = replace(read_tool("records.page", handler=handler), input_schema={
         "type": "object", "properties": {"page": {"type": "integer", "minimum": 1}},
         "required": ["page"], "additionalProperties": False,
-    })
+    }, metadata={"kernel_utility": mode == "utility"})
 
     class Model:
         async def stream(self, request, *, cancellation):
@@ -54,6 +55,9 @@ def run_pages(*, pages=13, mode="pages", limits=None, status="success"):
                            pipeline=ToolPipeline(catalog=catalog, state_store=state), limits=limits)
 
     async def run():
+        if tracked:
+            lease, _ = await state.begin_turn(owner="test-owner", session_id="read-pages", request_id="seed")
+            await state.commit(lease, task_patch=control(declared()))
         return [event async for event in session.run(AgentInput(
             owner="test-owner", session_id="read-pages", message="读取全部记录后统计数量"))]
 
@@ -61,22 +65,25 @@ def run_pages(*, pages=13, mode="pages", limits=None, status="success"):
 
 
 @pytest.mark.parametrize("pages", [13, 16])
-def test_distinct_successful_reads_can_finish_beyond_twelve_rounds(pages):
-    events, requests, attempted, read = run_pages(pages=pages)
+@pytest.mark.parametrize("tracked", [False, True])
+def test_distinct_successful_reads_can_finish_beyond_twelve_rounds(pages, tracked):
+    events, requests, attempted, read = run_pages(pages=pages, tracked=tracked)
     assert attempted == read == list(range(1, pages + 1))
     assert len(requests) == pages + 1
     assert events[-1].payload["status"] == "success"
 
 
-def test_explicit_small_hard_round_limit_is_not_extended():
-    _events, requests, attempted, _read = run_pages(limits=SessionLimits(max_model_rounds=2))
+@pytest.mark.parametrize("tracked", [False, True])
+def test_explicit_small_hard_round_limit_is_not_extended(tracked):
+    _events, requests, attempted, _read = run_pages(limits=SessionLimits(max_model_rounds=2), tracked=tracked)
     assert len(requests) == 2
     assert attempted == [1]
     assert not requests[-1].tools
 
 
-def test_progress_does_not_increase_the_business_tool_budget():
-    _events, requests, attempted, _read = run_pages(pages=17)
+@pytest.mark.parametrize("tracked", [False, True])
+def test_progress_does_not_increase_the_business_tool_budget(tracked):
+    _events, requests, attempted, _read = run_pages(pages=17, tracked=tracked)
     assert len(attempted) == SessionLimits().max_tool_calls == 16
     assert len(requests) == 17
     assert not requests[-1].tools
@@ -91,9 +98,11 @@ def test_progress_does_not_increase_the_business_tool_budget():
     ("pages", "submitted", 12),
     ("pages", "running", 12),
     ("discovery", "success", 12),
+    ("utility", "success", 12),
 ])
-def test_repeats_failures_and_discovery_do_not_earn_more_observation_rounds(mode, status, ceiling):
-    _events, requests, _attempted, _read = run_pages(pages=99, mode=mode, status=status)
+@pytest.mark.parametrize("tracked", [False, True])
+def test_repeats_failures_and_discovery_do_not_earn_more_observation_rounds(mode, status, ceiling, tracked):
+    _events, requests, _attempted, _read = run_pages(pages=99, mode=mode, status=status, tracked=tracked)
     assert len(requests) <= ceiling
     assert not requests[-1].tools
 
@@ -102,9 +111,19 @@ def test_repeats_failures_and_discovery_do_not_earn_more_observation_rounds(mode
     ("pages", "success", 3), ("repeat", "success", 1),
     ("alias_repeat", "success", 1), ("exception", "success", 0),
     ("pages", "failed", 0), ("pages", "partial", 0), ("discovery", "success", 0),
+    ("utility", "success", 0),
 ])
-def test_model_sees_observation_progress_separate_from_attempt_budget(mode, status, expected):
-    _events, requests, _attempted, _read = run_pages(pages=3, mode=mode, status=status)
-    assert f"已完整取得并落盘 {expected} 个不同的成功业务只读观察" in requests[-1].system_prompt
-    assert "调用尝试次数不是成功查询数、已读页数或记录总数" in requests[-1].system_prompt
-    assert "不含历史回合" in requests[-1].system_prompt
+@pytest.mark.parametrize("tracked", [False, True])
+def test_observation_progress_is_measured_without_broadcasting_a_countdown(mode, status, expected, tracked):
+    events, requests, _attempted, _read = run_pages(pages=3, mode=mode, status=status, tracked=tracked)
+    terminal = next(e for e in reversed(events) if "successful_read_queries" in e.payload)
+    assert terminal.payload["successful_read_queries"] == expected
+    assert "实际剩余工具调用" not in requests[0].system_prompt
+    assert "只有已完成的新业务只读观察可扩展规划额度" not in requests[0].system_prompt
+
+
+def test_budget_warning_is_only_exposed_near_the_real_limit():
+    _events, requests, _attempted, _read = run_pages(pages=16)
+    assert all("实际剩余工具调用" not in request.system_prompt for request in requests[:10])
+    assert "实际剩余工具调用 2 次" in requests[-3].system_prompt
+    assert "实际剩余工具调用 0 次" in requests[-1].system_prompt

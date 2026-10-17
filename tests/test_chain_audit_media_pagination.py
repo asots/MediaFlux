@@ -177,18 +177,19 @@ class MediaInventoryCompletenessTests(unittest.TestCase):
                     self.assertEqual(request.call_count, 1)
 
     def test_batch_identity_check_finds_existing_media_beyond_unknown_first_page(self):
-        from app.services import _media_identity_batch_source_payload
+        from app.services import inspect_media_identity_batch
 
         client = self.client(JellyfinClient)
         pages = [
             {"Items": [self.item(n) for n in range(1, 201)]},
             {"Items": [self.item(201)]},
         ]
-        with patch.object(client, "_request", side_effect=pages):
-            result = _media_identity_batch_source_payload(
-                "jellyfin", "Synthetic", client,
+        with patch.object(client, "_request", side_effect=pages), patch(
+            "app.services._configured_media_sources", return_value=[("jellyfin", "Synthetic", "", client)],
+        ):
+            result = inspect_media_identity_batch(
                 [{"tmdb_id": "201", "media_type": "tv", "title": "Show 201"}],
-            )
+            )[0]
         self.assertEqual(result["items"][0]["status"], "present")
 
     def test_unknown_short_search_page_keeps_filtered_candidate_incomplete(self):

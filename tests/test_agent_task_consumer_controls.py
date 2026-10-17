@@ -205,25 +205,40 @@ def test_metrics_exhaustion_exceptions_close_and_last_terminal():
             if error:
                 raise error
 
-        for error in (RuntimeError("upstream"), asyncio.CancelledError()):
+        for error, status in (
+            (RuntimeError("upstream"), "failed"),
+            (asyncio.CancelledError(), "cancelled"),
+        ):
             metrics = KernelMetrics()
-            with pytest.raises(type(error)):
-                _ = [
-                    e
-                    async for e in metrics.track(
-                        stream([terminal], error), channel="web"
-                    )
-                ]
-            assert metrics.snapshot()["turns"] == 0
-            assert metrics.snapshot()["task_statuses_by_turn"] == {}
+            tracked = metrics.track(stream([terminal], error), channel="web")
+            with pytest.raises(type(error)) as raised:
+                _ = [e async for e in tracked]
+            assert raised.value is error
+            result = metrics.snapshot()
+            assert result["turns"] == 1
+            assert result["statuses"] == {status: 1}
+            assert result["recent"][-1]["task_status"] == "unknown"
+            assert result["task_statuses_by_turn"] == {}
+            await tracked.aclose()
+            await tracked.aclose()
+            assert metrics.snapshot() == result
         metrics = KernelMetrics()
-        tracked = metrics.track(stream([terminal]), channel="web")
+        source = stream([terminal])
+        tracked = metrics.track(source, channel="web")
         assert await anext(tracked) is terminal
         await tracked.aclose()
-        assert metrics.snapshot()["turns"] == 0
+        result = metrics.snapshot()
+        assert result["turns"] == 1
+        assert result["statuses"] == {"interrupted": 1}
+        assert result["recent"][-1]["task_status"] == "unknown"
+        assert result["task_statuses_by_turn"] == {}
+        await tracked.aclose()
+        await tracked.aclose()
+        assert metrics.snapshot() == result
+        await source.aclose()
         _ = [e async for e in metrics.track(stream([]), channel="web")]
         assert metrics.snapshot()["recent"][-1]["task_status"] == "unknown"
-        assert metrics.snapshot()["statuses"] == {"interrupted": 1}
+        assert metrics.snapshot()["statuses"] == {"interrupted": 2}
         assert metrics.snapshot()["task_statuses_by_turn"] == {}
         last = factory.create(AgentEventType.TURN_COMPLETED, {"status": "partial"})
         for _ in range(25):
@@ -231,7 +246,8 @@ def test_metrics_exhaustion_exceptions_close_and_last_terminal():
                 e async for e in metrics.track(stream([terminal, last]), channel="web")
             ]
         result = metrics.snapshot()
-        assert result["turns"] == 26
+        assert result["turns"] == 27
+        assert result["statuses"] == {"interrupted": 2, "partial": 25}
         assert result["task_statuses_by_turn"] == {"untracked": 25}
         assert len(result["recent"]) == 20
         assert all(

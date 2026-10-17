@@ -284,13 +284,20 @@ class SQLiteKernelStore:
         session_id: str,
         expected_kind: str = "",
     ) -> Any:
-        return await session_io(
+        value, _ = await session_io(
             self._resolve_ref_sync,
             ref,
             owner,
             session_id,
             expected_kind,
         )
+        return value
+
+    async def deadline(
+        self, ref: str, *, owner: str, session_id: str, expected_kind: str = "",
+    ) -> float:
+        _, deadline = await session_io(self._resolve_ref_sync, ref, owner, session_id, expected_kind)
+        return deadline
 
     async def append(self, event: AgentEvent, *, owner: str) -> None:
         await session_io(self._append_event_sync, event, owner)
@@ -914,11 +921,12 @@ class SQLiteKernelStore:
         owner: str,
         session_id: str,
         expected_kind: str,
-    ) -> Any:
+    ) -> tuple[Any, float]:
         ref_id = str(ref or "").strip()
         if not ref_id.startswith("ref_") or len(ref_id) > 200:
             raise ReferenceError("reference is invalid")
         owner_digest, session_digest = self._scope(owner, session_id)
+        observed_at = time.monotonic()
         now = self._clock()
         with db.get_conn() as conn:
             row = conn.execute(
@@ -938,13 +946,14 @@ class SQLiteKernelStore:
             raise ReferenceError("reference type mismatch")
         expires_at = float(row["expires_at"])
         try:
-            return self._decode_reference(
+            value = self._decode_reference(
                 row["value_json"],
                 row["value_hmac"],
                 domain=f"ref:v1:{ref_id}:{owner_digest}:{session_digest}:{kind}:{expires_at}".encode(),
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ReferenceError("reference payload is invalid") from exc
+        return value, observed_at + (expires_at - now)
 
     def _append_event_sync(self, event: AgentEvent, owner: str, lease: PublicationLease | None = None) -> None:
         owner_digest, session_digest = self._scope(owner, event.session_id)

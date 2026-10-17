@@ -19,7 +19,6 @@ from app.agent.kernel.state import AgentInput
 from app.agent.provider_gateway import ProviderGateway
 from app.agent.provider_models import ProviderGatewayError, ProviderPayload, ProviderProfileView
 from app.agent.provider_operations import build_provider_catalog
-from tests.error30_model_inputs import explicit_repair_wire
 from tests.test_agent_recovered_progress import reply
 from tests.test_agent_tool_argument_ingress import Wire, offline as offline, store as store
 
@@ -97,11 +96,10 @@ def _session(model, catalog, store):
     )
 
 
-async def _run_queries(catalog, store, calls, *, protocol=_PROTOCOL, repair=False):
+async def _run_queries(catalog, store, calls, *, protocol=_PROTOCOL):
     replies = [reply(protocol, name=catalog.get('provider.query').model_name, arguments=arguments, index=index)
                for index, arguments in enumerate(calls)] + [reply(protocol, text=_FINAL)]
-    transport = (explicit_repair_wire(protocol, replies, index=1, arguments=calls[1])
-                 if repair else Wire(protocol, replies))
+    transport = Wire(protocol, replies)
     events = [event async for event in _session(transport.adapter, catalog, store).run(
         AgentInput(message='核验 Jellyfin 媒体库', owner=_OWNER, session_id=_SESSION))]
     transport.verify(len(calls) + 1)
@@ -149,7 +147,7 @@ def test_provider_deleting_extra_keeps_original_valid_nested_values(provider_cha
 
 @pytest.mark.parametrize('case', ['different-profile', 'different-operation', 'changed-query',
                                   'extra-and-missing', 'extra-and-bad-value'])
-def test_provider_non_equivalent_direct_retry_keeps_old_failure(case, provider_chain, store):
+def test_provider_direct_retry_settles_syntax_without_old_field_locks(case, provider_chain, store):
     async def run():
         _, media, catalog = provider_chain
         bad, corrected = _query({'reason': '获取媒体库'}), _query({})
@@ -176,12 +174,13 @@ def test_provider_non_equivalent_direct_retry_keeps_old_failure(case, provider_c
         assert media.reads == [expected]
         assert feedback[0]['code'] == 'invalid_arguments'
         assert feedback[1]['ok'] is True and feedback[1]['status'] == 'success'
-        assert events[-1].payload['status'] == 'partial', 'another query or a non-unique correction cannot clear the old obligation'
+        assert 'repair' not in feedback[0]
+        assert events[-1].payload['status'] == 'success'
     asyncio.run(run())
 
 
 @pytest.mark.parametrize('case', ['extra-only', 'extra-and-missing'])
-def test_provider_explicit_agent_repair_uses_real_domain_success(case, provider_chain, store):
+def test_provider_direct_retry_uses_real_domain_success(case, provider_chain, store):
     async def run():
         _, media, catalog = provider_chain
         bad, corrected = _query({'reason': '获取媒体库'}), _query({})
@@ -190,29 +189,29 @@ def test_provider_explicit_agent_repair_uses_real_domain_success(case, provider_
             bad = _query({'reason': '查询目标', 'limit': 3}, operation='media.items.search')
             corrected = _query({'query': '明确补充目标', 'limit': 3}, operation='media.items.search')
             expected = (_PROFILE, 'media.items.search', {'query': '明确补充目标', 'limit': 3})
-        events, feedback, saved, _ = await _run_queries(catalog, store, [bad, corrected], repair=True)
+        events, feedback, saved, _ = await _run_queries(catalog, store, [bad, corrected])
         assert media.reads == [expected]
-        assert feedback[0]['code'] == 'invalid_arguments' and feedback[0]['repair']['tool'] == 'agent.repair'
+        assert feedback[0]['code'] == 'invalid_arguments' and 'repair' not in feedback[0]
         assert feedback[1]['ok'] is True and feedback[1]['status'] == 'success'
         assert events[-1].payload['status'] == 'success'
         assert sum(event.type is AgentEventType.TOOL_FAILED for event in events) == 1
         calls = [call for row in saved.conversation for call in row.get('tool_calls', [])]
         assert calls[0]['arguments'] == bad
-        assert calls[1]['name'] == catalog.get('agent.repair').model_name
-        assert calls[1]['arguments']['arguments'] == corrected
+        assert calls[1]['name'] == catalog.get('provider.query').model_name
+        assert calls[1]['arguments'] == corrected
     asyncio.run(run())
 
 
-def test_provider_explicit_repair_cannot_change_original_valid_nested_field(provider_chain, store):
+def test_provider_read_retry_can_change_original_valid_nested_field(provider_chain, store):
     async def run():
         _, media, catalog = provider_chain
         bad = _query({'query': '原目标', 'limit': 3, 'reason': '额外解释'}, operation='media.items.search')
         changed = _query({'query': '另一个目标', 'limit': 3}, operation='media.items.search')
-        events, feedback, _, _ = await _run_queries(catalog, store, [bad, changed], repair=True)
-        assert media.reads == []
+        events, feedback, _, _ = await _run_queries(catalog, store, [bad, changed])
+        assert media.reads == [(_PROFILE, 'media.items.search', {'query': '另一个目标', 'limit': 3})]
         assert feedback[0]['code'] == 'invalid_arguments'
-        assert feedback[1]['code'] == 'repair_conflict'
-        assert events[-1].payload.get('status') != 'success'
+        assert 'repair' not in feedback[0] and feedback[1]['ok'] is True
+        assert events[-1].payload['status'] == 'success'
     asyncio.run(run())
 
 
@@ -236,7 +235,7 @@ def test_provider_without_actual_success_does_not_clear_old_failure(outcome, pro
 
 
 @pytest.mark.parametrize('case', ['unknown-operation', 'domain-error-without-schema'])
-def test_provider_schema_proof_controls_repair_and_unrelated_success_never_clears_failure(case, provider_chain, store):
+def test_provider_read_retry_keeps_schema_feedback_without_repair_authority(case, provider_chain, store):
     async def run():
         _, media, catalog = provider_chain
         if case == 'unknown-operation':
@@ -250,17 +249,16 @@ def test_provider_schema_proof_controls_repair_and_unrelated_success_never_clear
         assert media.reads == expected
         if case == 'unknown-operation':
             assert feedback[0]['code'] == 'invalid_arguments'
-            assert feedback[0]['repair']['tool'] == 'agent.repair'
+            assert 'repair' not in feedback[0]
             assert 'enum' in feedback[0]['expected_input_schema']['properties']['operation']
         else:
             assert 'repair' not in feedback[0], 'no registered schema evidence means no speculative repair ticket'
         assert feedback[1]['ok'] is True and feedback[1]['status'] == 'success'
-        assert events[-1].payload['status'] == 'partial'
+        assert events[-1].payload['status'] == 'success'
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('repair', [False, True], ids=['direct', 'explicit'])
-def test_provider_corrected_write_preview_is_not_execution_success(repair, provider_chain, store):
+def test_provider_corrected_write_preview_is_not_execution_success(provider_chain, store):
     async def run():
         _, media, catalog = provider_chain
         _, seed, _, _ = await _run_queries(catalog, store, [_query({'query': '示例影片'}, operation='media.items.search')])
@@ -271,8 +269,7 @@ def test_provider_corrected_write_preview_is_not_execution_success(repair, provi
         name = catalog.get('provider.change.preview').model_name
         replies = [reply(_PROTOCOL, name=name, arguments=arguments, index=index + 10)
                    for index, arguments in enumerate([bad, corrected])] + [reply(_PROTOCOL, text='只有预览，尚未写入。')]
-        wire = (explicit_repair_wire(_PROTOCOL, replies, index=1, arguments=corrected)
-                if repair else Wire(_PROTOCOL, replies))
+        wire = Wire(_PROTOCOL, replies)
         events = [event async for event in _session(wire.adapter, catalog, store).run(
             AgentInput(message='准备新媒体播放列表预览', owner=_OWNER, session_id=_SESSION))]
         wire.verify(3)
@@ -295,7 +292,7 @@ def test_provider_error_feedback_uses_the_registered_operation_schema(provider_c
         expected = feedback[0]['expected_input_schema']
         assert expected['properties']['arguments'] == gateway.catalog.get(_OPERATION).parameters
         assert expected['properties']['arguments']['additionalProperties'] is False
-        assert feedback[0]['repair']['ticket']
+        assert 'repair' not in feedback[0]
         assert media.reads == [(_PROFILE, _OPERATION, {})]
         assert events[-1].payload['status'] == 'success'
     asyncio.run(run())

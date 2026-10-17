@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 from copy import deepcopy
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import Mock, patch
 
 from app.agent.episode_resource_actions import (
@@ -126,7 +126,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertEqual(normalized["episode"], 3)
         self.assertEqual(normalized["sites"], ["nyaa"])
         self.assertEqual(normalized["limit"], 10)
-        self.assertEqual(normalized["as_of"], date.today().isoformat())
+        self.assertEqual(normalized["as_of"], datetime.now().astimezone().date().isoformat())
         invalid = (
             {},
             {"query": "x", "season": 1, "episode": 1, "url": "https://secret"},
@@ -139,7 +139,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 "query": "x",
                 "season": 1,
                 "episode": 1,
-                "as_of": (date.today() + timedelta(days=1)).isoformat(),
+                "as_of": (datetime.now().astimezone().date() + timedelta(days=1)).isoformat(),
             },
         )
         for arguments in invalid:
@@ -175,7 +175,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 "query": "示例劇",
                 "tmdb_id": "12345",
                 "season": 2,
-                "as_of": date.today().isoformat(),
+                "as_of": datetime.now().astimezone().date().isoformat(),
                 "sites": ["nyaa"],
                 "max_episodes": 3,
                 "limit_per_episode": 10,
@@ -185,7 +185,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             missing_season_resource_arguments({"query": "示例剧", "season": 2})[
                 "max_episodes"
             ],
-            3,
+            20,
         )
         invalid = (
             {},
@@ -195,12 +195,12 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             {"query": "x", "season": 1, "tmdb_id": ""},
             {"query": "x", "season": 1, "tmdb_id": "../1"},
             {"query": "x", "season": 1, "sites": ["bad/site"]},
-            {"query": "x", "season": 1, "max_episodes": 4},
+            {"query": "x", "season": 1, "max_episodes": 101},
             {"query": "x", "season": 1, "limit_per_episode": 11},
             {
                 "query": "x",
                 "season": 1,
-                "as_of": (date.today() + timedelta(days=1)).isoformat(),
+                "as_of": (datetime.now().astimezone().date() + timedelta(days=1)).isoformat(),
             },
         )
         for arguments in invalid:
@@ -287,7 +287,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 "tmdb_id": "",
                 "season": 2,
                 "target_episode": 3,
-                "as_of": date.today().isoformat(),
+                "as_of": datetime.now().astimezone().date().isoformat(),
             },
             refresh=True,
         )
@@ -339,13 +339,13 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             for searched in searches:
                 searched.data.update(page=4, cached=True, has_more=True, partial=True,
                                      sites_attempted=["nyaa", "broken"], errors=[{"site_id": "broken", "code": "timeout"}])
-            if mode != "season":
-                searches = [searches[1 if mode == "failed" else 0]]
+            searches = [searches[1 if mode == "failed" else 0]]
+            original_searches = deepcopy(searches)
             with (
                 self.subTest(mode=mode),
                 patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(
                     missing=[{"season": 2, "episode": number} for number in (3, 4, 5)], target_missing=True)),
-                patch("app.agent.episode_resource_actions.search_resources", side_effect=searches),
+                patch("app.agent.episode_resource_actions.search_resources", side_effect=searches) as search,
                 patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
             ):
                 result = (search_missing_season_resources(missing_season_resource_arguments(
@@ -357,10 +357,16 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                                    if mode == "season" else [result.data["search"]])
                 model_searches = ([entry["search"] for entry in expected["episodes"]]
                                   if mode == "season" else [expected["search"]])
-                for public_search, model_search, source in zip(public_searches, model_searches, searches):
+                search.assert_called_once()
+                self.assertEqual(searches, original_searches, "本地排名不能改写共享检索的原始证据")
+                for index, (public_search, model_search) in enumerate(zip(public_searches, model_searches)):
+                    source = searches[0]
                     self.assertCountEqual([row["result_id"] for row in public_search["items"]],
                                           [row["result_id"] for row in source.data["items"]])
-                    model_search["items"] = [row for row in model_search["items"] if row["result_id"] in matched_ids]
+                    for key in ("query", "page", "cached", "has_more", "partial", "errors"):
+                        self.assertEqual(public_search[key], source.data[key])
+                    target_ids = {rows[3]["result_id"]} if mode == "season" and index == 1 else matched_ids
+                    model_search["items"] = [row for row in model_search["items"] if row["result_id"] in target_ids]
                     model_search["recommendation"]["candidate_count"] = len(model_search["items"])
                     if not model_search["items"]:
                         model_search["recommendation"]["status"] = "empty"
@@ -371,8 +377,11 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 self.assertEqual(len(model_searches[0]["items"]), 0 if mode == "failed" else 2)
                 self.assertTrue(result.model_data["verification"]["verified_missing"])
                 if mode == "season":
-                    self.assertEqual((result.status, expected["failed"], expected["remaining"]), ("partial", 1, 1))
-                    self.assertFalse(expected["episodes"][1]["ok"])
+                    self.assertEqual((result.status, expected["failed"], expected["remaining"]), ("partial", 0, 1))
+                    self.assertEqual(expected["remaining_episodes"], [{"season": 2, "episode": 5}])
+                    self.assertTrue(expected["episodes"][1]["ok"])
+                    self.assertEqual(len(model_searches[1]["items"]), 1)
+                    self.assertIsNone(search.call_args.args[0]["episode"])
                 elif mode == "failed":
                     self.assertFalse(result.ok)
                     self.assertEqual((result.status, result.error), ("unavailable", "safe indexer error"))
@@ -545,7 +554,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 "tmdb_id": "",
                 "season": 1,
                 "target_episode": 150,
-                "as_of": date.today().isoformat(),
+                "as_of": datetime.now().astimezone().date().isoformat(),
                 "library_name": "美女库",
             },
             refresh=True,
@@ -673,11 +682,12 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 (call.args[0]["title"], call.args[0]["season"], call.args[0]["episode"])
                 for call in search.call_args_list
             ],
-            [("示例剧", 2, 3), ("示例剧", 2, 4), ("示例剧", 2, 5)],
+            [("示例剧", 2, None), ("示例剧", 2, 4), ("示例剧", 2, 5)],
         )
         self.assertTrue(
-            all(call.args[0]["limit"] == 7 for call in search.call_args_list)
+            all(call.args[0]["limit"] == 50 for call in search.call_args_list)
         )
+        self.assertTrue(all(len(row["search"]["items"]) <= 7 for row in result.data["episodes"]))
         serialized = repr(result.to_dict())
         self.assertNotIn("secret-server", serialized)
         self.assertNotIn("/private/media", serialized)
@@ -712,7 +722,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             self.assertFalse(result.data["verification"]["resource_search_attempted"])
 
     def test_season_search_preserves_partial_results_and_remaining_count(self):
-        arguments = missing_season_resource_arguments({"query": "示例剧", "season": 2})
+        arguments = missing_season_resource_arguments({"query": "示例剧", "season": 2, "max_episodes": 3})
         missing = [{"season": 2, "episode": episode} for episode in (1, 2, 3, 4)]
         searches = [
             _search_result(query="示例剧 S02E01"),
@@ -735,6 +745,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertEqual(search.call_count, 3)
         self.assertEqual(result.data["processed"], 3)
         self.assertEqual(result.data["failed"], 1)
+        self.assertEqual(result.data["failed_episodes"], [{"season": 2, "episode": 2}])
         self.assertEqual(result.data["remaining"], 1)
         self.assertEqual(result.data["remaining_episodes"], [{"season": 2, "episode": 4}])
         self.assertEqual(len(result.data["episodes"]), 3)
@@ -778,7 +789,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             ) as search,
             patch(
                 "app.agent.episode_resource_actions.time.monotonic",
-                side_effect=[0.0, 0.0, 91.0],
+                side_effect=[0.0, 0.0, 46.0],
             ),
         ):
             result = search_missing_season_resources(arguments)
@@ -792,43 +803,46 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertTrue(result.data["truncated"])
         self.assertTrue(any("耗时上限" in item for item in result.suggestions))
 
-    def test_season_budget_scales_with_targets_without_extending_single_search(self):
+    def test_season_budget_is_fixed_and_each_search_respects_remaining_time(self):
         missing = [{"season": 2, "episode": e} for e in (3, 4, 5)]
-        for durations, expected_budgets in (([30, 30, 27], [30, 30, 27]), ([1, 2, 4], [30, 30, 30])):
+        for durations, expected_budgets, remaining in (
+            ([30, 12], [30, 12], missing[2:]),
+            ([1, 2, 4], [30, 30, 30], []),
+        ):
             clock = [0.0]
             budgets = []
 
-            def audit(*_args, **_kwargs):
+            def audit(*_args, clock=clock, **_kwargs):
                 clock[0] += 3  # 审计也占用同一绝对截止，不能偷偷延长总耗时。
                 return _audit_result(missing=missing)
 
-            def search(arguments, *, timeout_seconds):
+            def search(arguments, *, timeout_seconds, clock=clock, durations=durations, budgets=budgets):
                 index = len(budgets)
                 budgets.append(timeout_seconds)
                 clock[0] += durations[index]
-                self.assertEqual(arguments["episode"], missing[index]["episode"])
-                return _search_result()
+                self.assertEqual(arguments["episode"], None if index == 0 else missing[index]["episode"])
+                return _search_result(query=f"示例剧 S02E{missing[index]['episode']:02d}")
 
             with (
                 self.subTest(durations=durations),
-                patch("app.agent.episode_resource_actions.time.monotonic", side_effect=lambda: clock[0]),
+                patch("app.agent.episode_resource_actions.time.monotonic", side_effect=lambda clock=clock: clock[0]),
                 patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit),
                 patch("app.agent.episode_resource_actions.search_resources", side_effect=search),
             ):
                 result = search_missing_season_resources(missing_season_resource_arguments({"query": "示例剧", "season": 2}))
             self.assertEqual(budgets, expected_budgets)
-            self.assertLessEqual(clock[0], 90)
-            self.assertEqual(result.data["processed"], 3)
-            self.assertEqual(result.data["remaining_episodes"], [])
-            self.assertFalse(any("耗时上限" in item for item in result.suggestions))
+            self.assertLessEqual(clock[0], 45)
+            self.assertEqual(result.data["processed"], 3 - len(remaining))
+            self.assertEqual(result.data["remaining_episodes"], remaining)
+            self.assertEqual(any("耗时上限" in item for item in result.suggestions), bool(remaining))
 
     def test_failed_attempt_is_not_counted_as_unsearched_when_deadline_expires(self):
         missing = [{"season": 2, "episode": e} for e in (1, 2, 3, 4)]
         with (
-            patch("app.agent.episode_resource_actions.time.monotonic", side_effect=[0, 0, 5, 90]),
+            patch("app.agent.episode_resource_actions.time.monotonic", side_effect=[0, 0, 5, 45]),
             patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(missing=missing)),
             patch("app.agent.episode_resource_actions.search_resources", side_effect=[
-                _search_result(), _search_result(ok=False, status="timeout"),
+                _search_result(query="示例剧 S02E01"), _search_result(ok=False, status="timeout"),
             ]),
         ):
             result = search_missing_season_resources(missing_season_resource_arguments({"query": "示例剧", "season": 2}))
@@ -843,11 +857,11 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         for after_search in (False, True):
             cancelled = [False]
 
-            def audit(*_args, **_kwargs):
+            def audit(*_args, cancelled=cancelled, after_search=after_search, **_kwargs):
                 cancelled[0] = not after_search
                 return _audit_result(missing=missing)
 
-            def search(*_args, **_kwargs):
+            def search(*_args, cancelled=cancelled, **_kwargs):
                 cancelled[0] = True
                 return _search_result()
 
@@ -858,7 +872,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             ):
                 result = search_missing_season_resources(
                     missing_season_resource_arguments({"query": "示例剧", "season": 2}),
-                    context=ToolContext(cancelled=lambda: cancelled[0]),
+                    context=ToolContext(cancelled=lambda cancelled=cancelled: cancelled[0]),
                 )
             self.assertEqual(searched.call_count, int(after_search))
             self.assertEqual(result.status, "partial")
@@ -885,12 +899,12 @@ class MultiWorkResourceTests(unittest.TestCase):
         for include_match in (False, True):
             names = ["未核验"] + (["合法"] if include_match else []) + ["失败"]
 
-            def audit(arguments, **_kwargs):
+            def audit(arguments, names=names, **_kwargs):
                 result = _audit_result(missing=[{"season": 2, "episode": 3}])
                 result.data.update(title=arguments["query"], tmdb_id=str(1000 + names.index(arguments["query"])))
                 return result
 
-            def search(arguments, **_kwargs):
+            def search(arguments, names=names, **_kwargs):
                 name = arguments["title"]
                 result = _search_result(ok=name != "失败", status="unavailable" if name == "失败" else "success")
                 if result.data["items"]:
@@ -968,9 +982,10 @@ class MultiWorkResourceTests(unittest.TestCase):
         self.assertEqual([r["episode"] for r in result.references[0].value["candidates"]], [4, 7])
 
     def test_explicit_episode_validation_and_already_present_target(self):
-        for episodes in ([], [0], [True], [1001], [1, 2, 3, 4], "7"):
+        for episodes in ([], [0], [True], [1001], list(range(1, 102)), "7"):
             with self.subTest(episodes=episodes), self.assertRaises(AgentToolError):
                 missing_season_resource_arguments({"query": "示例", "season": 1, "episodes": episodes})
+        self.assertEqual(missing_season_resource_arguments({"query": "示例", "season": 1, "episodes": [1, 2, 3, 4]})["episodes"], [1, 2, 3, 4])
         args = missing_season_resource_arguments({"query": "示例", "season": 1, "episodes": [7]})
         with patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(missing=[{"season": 1, "episode": 1}])), patch("app.agent.episode_resource_actions.search_resources") as search:
             result = search_missing_season_resources(args)
@@ -1337,7 +1352,9 @@ class MissingResourceInventoryFreshnessTests(unittest.TestCase):
                 self.inventory[:] = after
                 result = self._search(mode)
                 self.assertEqual(self.media.list_series_episode_inventory.call_count, 2)
-                self.assertEqual(self.search.call_count, 0 if after else (1 if mode == "single" else 3))
+                self.assertEqual(self.search.call_count, 0 if after else (1 if mode == "single" else 4))
+                if not after and mode != "single":
+                    self.assertEqual([call.args[0]["episode"] for call in self.search.call_args_list], [None, 1, 2, 3])
                 if mode == "batch":
                     self.assertEqual(len(result.data["groups"]), 1)
                     group = result.data["groups"][0]

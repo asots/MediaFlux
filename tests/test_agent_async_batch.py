@@ -13,6 +13,7 @@ import pytest
 
 from app import database as db
 from app.agent import effect_completion as effects
+from app.agent import rate_limit as rates
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.feature_gate import initialize_runtime_fence
 from app.agent.kernel import batch_effects
@@ -30,12 +31,14 @@ from app.agent.models import ToolContext, ToolResult
 from app.modules import organize_tasks
 from app.repositories import organize_operation_jobs as jobs
 from tests.support import isolated_test_database
-from tests.test_agent_batch_confirmation import capture
+from tests.test_agent_batch_confirmation import batch_quota as shared_batch_quota, capture
 from tests.test_agent_effect_continuation import (
     _OfflineClient, _domain_arguments, _offline_runtime, _paused_manager, _run_real_worker, _spec,
 )
+
 from tests.test_agent_task_first_slice import NativeScript
 
+batch_quota = shared_batch_quota
 OWNER, SID = "async-batch-owner", "async-batch-session"
 FIRST, TAIL = "guangya.fs.change.execute", "test.preference"
 GOAL = "组合变更：把 source 视频改名为 admitted.mp4，成功后保存偏好 4K，只确认一次。"
@@ -69,6 +72,7 @@ class AsyncBatchRig:
         self.client, self.stack = client, stack
         self.store, self.worker = SQLiteKernelStore(), None
         self.value, self.attempts, self.verified = "before", [], []
+        self.rate_limiter, self.denied = None, set()
         self.tail_effect = ToolEffect.WRITE
         self.client.rename = Mock(wraps=self.client.rename)
         spec = _spec("fs")
@@ -107,12 +111,14 @@ class AsyncBatchRig:
             effect=self.tail_effect, metadata={"batch_mode": "sync", "risk": self.tail_effect.value},
             input_schema={"type": "object", "required": ["quality"], "additionalProperties": False,
                           "properties": {"quality": {"type": "string"}}},
-            prepare=prepare, execute_confirmed=execute, verify=verify)
+            prepare=prepare, execute_confirmed=execute, verify=verify,
+            authorize=lambda _context: TAIL not in self.denied)
 
     def session(self, script, store=None, *, extra=()):
         store = self.store if store is None else store
         catalog = ToolCatalog([self.tracked, self.tail(), *extra])
         pipeline = ToolPipeline(catalog=catalog, state_store=store,
+            rate_limiter=self.rate_limiter,
             effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()))
         session = AgentSession(model=script.adapter, catalog=catalog, retriever=CapabilityRetriever(maximum=10),
                                pipeline=pipeline, state_store=store, journal=store)
@@ -205,6 +211,67 @@ def rig(tmp_path):
     with isolated_test_database(), _offline_runtime(tmp_path, client) as stack, _paused_manager():
         initialize_runtime_fence()
         yield AsyncBatchRig(client, stack)
+
+
+@pytest.mark.parametrize("foreground", [False, True])
+def test_tracked_and_tail_use_last_confirmed_permit_once_across_resume(rig, batch_quota, foreground):
+    rig.rate_limiter, debits = batch_quota
+    for name in (FIRST, TAIL):
+        _, limit, cost = rates.tool_rate_limit_policy(name)
+        assert cost == 1
+        for _ in range(limit - 1):
+            assert rates.consume_agent_tool(OWNER, name, scope_suffix="confirmed").allowed
+
+    async def run():
+        await rig.start(foreground=foreground)
+        final, _ = await rig.confirm(foreground=foreground)
+        if foreground:
+            assert final.status == "success"
+        else:
+            assert final.status == "waiting"
+            assert [name for name, stage, _ in debits if stage] == ["agent.batch", FIRST]
+            rig.complete_job()
+            assert await rig.poll() == 1
+            candidate, = await rig.store.due_continuations()
+            cold = rig.session(BatchScript(), SQLiteKernelStore())
+            assert await cold.resume_wait(candidate=candidate)
+            assert not await cold.resume_wait(candidate=candidate)
+        _, row = await rig.row()
+        assert row["batch_progress"]["done"] is True
+        assert row["final_result"]["data"]["completed"] == 2
+        confirmed = [(name, decision) for name, stage, decision in debits if stage == "confirmed"]
+        expected = ["agent.batch", FIRST, *([] if foreground else ["agent.batch"]), TAIL]
+        assert [name for name, _ in confirmed] == expected
+        assert all(d.allowed and d.remaining == 0 for name, d in confirmed if name in (FIRST, TAIL))
+        before_replay = list(debits)
+        replay, _ = await capture(rig.source.confirm(owner=OWNER, session_id=SID, plan_id=rig.plan.plan_id))
+        assert replay.status == "failed" and debits == before_replay
+        assert await rig.poll() == 0
+        await rig.assert_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["snapshot", "authorization"])
+def test_tail_preflight_failure_never_submits_tracked_first_or_consumes_child_permits(rig, batch_quota, change):
+    rig.rate_limiter, debits = batch_quota
+
+    async def run():
+        await rig.start()
+        if change == "snapshot":
+            rig.value = "external-change"
+        else:
+            rig.denied.add(TAIL)
+        _, events = await rig.confirm()
+        code = "confirmation_stale" if change == "snapshot" else "authorization_denied"
+        assert any(e.type is Event.EFFECT_FAILED and e.payload.get("code") == code for e in events)
+        assert not rig.submit.called and not rig.client.rename.called and not rig.job_rows() and not rig.attempts
+        assert [name for name, stage, _ in debits if stage] == ["agent.batch"]
+        before_replay = list(debits)
+        replay, _ = await capture(rig.source.confirm(owner=OWNER, session_id=SID, plan_id=rig.plan.plan_id))
+        assert replay.status == "failed" and debits == before_replay
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("risk", [ToolEffect.WRITE, ToolEffect.DANGER])

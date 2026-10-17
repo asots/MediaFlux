@@ -97,12 +97,16 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
                     self.assertGreaterEqual(geometry["panel"]["top"], geometry["composer"]["bottom"])
                     self.assertLessEqual(geometry["panel"]["bottom"], geometry["auxiliary"]["bottom"])
                 self.assertLessEqual(geometry["composer"]["bottom"], height)
-                action = page.locator(".agent-start-action").last
-                action.scroll_into_view_if_needed()
-                action.click()
+                self.assertEqual(page.locator("[data-agent-action-key]").count(), 3)
+                draft = page.get_by_role("button", name="填入草稿：查看待办 2", exact=True)
+                draft.scroll_into_view_if_needed()
+                draft.click()
                 self.assertEqual(page.locator("#agentPrompt").input_value(), "查看待办 2")
+                self.assertEqual(page.evaluate(
+                    "window.__kernelCalls.filter(call=>call.url==='/api/agent/query').length"
+                ), 0)
                 page.locator("#agentSend").click()
-                page.wait_for_function("document.querySelector('#agentStop').hidden")
+                page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
                 if status == "untracked":
                     self.assertEqual(panel.count(), 0)
                 else:
@@ -292,7 +296,7 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             )
             page.locator("#agentPrompt").fill("继续核对")
             page.locator("#agentSend").click()
-            page.wait_for_function("document.querySelector('#agentStop').hidden")
+            page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
             if label is None:
                 self.assertEqual(page.locator("#agentTaskSnapshot").count(), 0)
             else:
@@ -320,7 +324,7 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             page.locator("#agentPrompt").fill("观察 TMDB 和 qBittorrent")
             page.locator("#agentSend").click()
             page.wait_for_function(
-                "document.querySelector('#agentTranscript').textContent.includes('全部任务完成') && document.querySelector('#agentStop').hidden"
+                "document.querySelector('#agentTranscript').textContent.includes('全部任务完成') && document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'"
             )
             panel = page.locator("#agentTaskSnapshot")
             self.assertEqual(
@@ -392,7 +396,7 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
             page.locator("#agentPrompt").fill("一个无关问题")
             page.locator("#agentSend").click()
             self.assertIn("已核验全部检查项", panel.inner_text())
-            page.wait_for_function("document.querySelector('#agentStop').hidden")
+            page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'false'")
             self.assertIn("已核验全部检查项", panel.inner_text())
             self.assertNotIn(
                 "Media Agent 已完成", page.locator("#agentResponseStatus").inner_text()

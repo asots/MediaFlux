@@ -1,0 +1,6 @@
+{"id":"constraints_eight","version":1,"split":"holdout","messages":["搜索黑镜第一季第1集1080p资源，只读，不下载，不保存偏好。","改为第二季第1集，画质条件不变。","画质改为2160p，目标还是第二季第1集。","排除HDR。","目标换成第三季第1集。","只看SDR，保留排除HDR。","撤销2160p，恢复1080p，其它条件不变。","按最终条件给结果：黑镜第三季第1集1080p SDR，保留排除HDR，不下载，不保存偏好。"],"rubric":{"kind":"constraint_memory","title":"黑镜","season":3,"episode":1}}
+{"id":"read_missing_query","version":1,"split":"holdout","messages":["统计媒体库里周星驰参演的电影总数，说明统计口径和来源，只读。"],"rubric":{"kind":"read_recovery","actor":"周星驰","fault":"missing_query"}}
+{"id":"read_invalid_enum","version":1,"split":"holdout","messages":["统计媒体库里周星驰参演的电影总数，说明统计口径和来源，只读。"],"rubric":{"kind":"read_recovery","actor":"周星驰","fault":"invalid_enum"}}
+{"id":"hybrid_guoman_front_owned","version":1,"split":"holdout","messages":["推荐10部2016年起中国大陆动画剧集，排除媒体库已有，前页不足请自动继续，列出标题年份即可。只读。"],"rubric":{"kind":"recommendation","count":10,"min_year":2016}}
+{"id":"actor_count_over_fifty","version":1,"split":"holdout","messages":["按演员身份统计媒体库里成龙参演的电影服务端准确总数，使用actor/movie/count_only口径，说明来源；不要把返回上限50当总数。只读，不刷新、不下载。"],"rubric":{"kind":"actor_over_fifty","actor":"成龙"}}
+{"id":"dune_year","version":1,"split":"holdout","messages":["查我的媒体库有没有2021年电影《沙丘》（Dune），按库中实际实体的年份核对，不要把1984年同名版本算进来。可以读取同名版本对照，只读。"],"rubric":{"kind":"year_identity","title":"沙丘","year":"2021"}}

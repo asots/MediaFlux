@@ -1,4 +1,4 @@
-"""Schema-proven omission is limited to a conflicting key pair, never filters."""
+"""写侧修复仍锁合法字段；READ 重试只受当前 schema 与业务门禁约束。"""
 from __future__ import annotations
 
 import asyncio
@@ -6,13 +6,15 @@ import asyncio
 import pytest
 
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
 from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
 
 
 @pytest.mark.parametrize('composition', ['oneOf', 'anyOf'])
 @pytest.mark.parametrize('closed_branches', [True, False])
-def test_union_repair_can_remove_only_proven_unknown_fields(composition, closed_branches):
+@pytest.mark.parametrize('effect', [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_union_write_repair_can_remove_only_proven_unknown_fields(composition, closed_branches, effect):
     async def run():
         branches = [
             {'type': 'object', 'required': ['operation', 'arguments'],
@@ -25,8 +27,9 @@ def test_union_repair_can_remove_only_proven_unknown_fields(composition, closed_
             'steps': {'type': 'array', 'items': {composition: branches}}}}
         seen = []
         tool = KernelToolSpec(name='lookup', domain='library', description='union repair',
-            input_schema=schema, effect=ToolEffect.READ,
-            read=lambda args, _: seen.append(args) or {'ok': True})
+            input_schema=schema, effect=effect,
+            prepare=lambda args, _: seen.append(args) or PreparedEffect(preview={'summary': 'preview'}, snapshot_fingerprint='snapshot'),
+            execute_confirmed=lambda *_: pytest.fail('repair cannot authorize writes'))
         store = InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner='owner', session_id='union', request_id='r')
         async def progress(payload): pass
@@ -46,7 +49,7 @@ def test_union_repair_can_remove_only_proven_unknown_fields(composition, closed_
         fixed = {'steps': [{'operation': 'first', 'arguments': {'limit': 2}}]}
         if closed_branches:
             result = await pipeline.execute('agent.repair', {'ticket': ticket, 'arguments': fixed}, context=context)
-            assert ticket in result.recovered_failures
+            assert result.effect_plan and not result.recovered_failures
             assert seen == [fixed]
         else:
             # An open alternative prevents inferring that this key is unknown.
@@ -68,15 +71,17 @@ def test_union_repair_can_remove_only_proven_unknown_fields(composition, closed_
     ({"identity": "A", "left": 4, "filter": "narrow"}, False),
     ({"identity": "A", "left": "x", "right": "y", "filter": "narrow"}, False),
 ])
-def test_collision_repair_preserves_branch_and_unrelated_keys(composition, correction, allowed):
+@pytest.mark.parametrize('effect', [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_write_collision_repair_preserves_branch_and_unrelated_keys(composition, correction, allowed, effect):
     async def run():
         schema = {"type": "object", "required": ["identity"], "properties": {
             key: {"type": "string"} for key in ("identity", "left", "right", "filter")
         }, **composition}
         executed = []
         tool = KernelToolSpec(name="lookup", domain="library", description="offline",
-                              input_schema=schema, effect=ToolEffect.READ, validator=dict,
-                              read=lambda args, ctx: executed.append(args) or {"ok": True})
+                              input_schema=schema, effect=effect, validator=dict,
+                              prepare=lambda args, ctx: executed.append(args) or PreparedEffect(preview={"summary": "preview"}, snapshot_fingerprint="snapshot"),
+                              execute_confirmed=lambda *_: pytest.fail("repair cannot authorize writes"))
         store = InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="owner", session_id="repair", request_id="r")
 
@@ -116,13 +121,15 @@ def test_collision_repair_preserves_branch_and_unrelated_keys(composition, corre
     ({"oneOf": [{"required": ["left"], "properties": {"left": {"enum": ["x"]}}},
                 {"required": ["right"]}]}, {"left": "x", "right": "y"}),
 ])
-def test_value_errors_and_complex_branches_do_not_unlock_omission(composition, first):
+@pytest.mark.parametrize('effect', [ToolEffect.WRITE, ToolEffect.DANGER])
+def test_write_value_errors_and_complex_branches_do_not_unlock_omission(composition, first, effect):
     async def run():
         schema = {"type": "object", "properties": {
             "left": {"type": "string"}, "right": {"type": "string"}}, **composition}
         tool = KernelToolSpec(name="lookup", domain="library", description="offline",
-                              input_schema=schema, effect=ToolEffect.READ, validator=dict,
-                              read=lambda args, ctx: pytest.fail("rejected arguments executed"))
+                              input_schema=schema, effect=effect, validator=dict,
+                              prepare=lambda args, ctx: pytest.fail("rejected arguments prepared"),
+                              execute_confirmed=lambda *_: pytest.fail("repair cannot authorize writes"))
         store = InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="owner", session_id="closed", request_id="r")
 
@@ -143,14 +150,14 @@ def test_value_errors_and_complex_branches_do_not_unlock_omission(composition, f
 @pytest.mark.parametrize("correction,allowed", [
     ({"operation": "list", "paths": ["/a", "/b"], "identity": "A", "page_size": 5}, True),
     ({"operation": "stat", "path": "/a", "identity": "A", "page_size": 5}, True),
-    ({"operation": "list", "paths": ["/a", "/b"], "identity": "B", "page_size": 5}, False),
-    ({"operation": "stat", "path": "/a", "identity": "A"}, False),
+    ({"operation": "list", "paths": ["/a", "/b"], "identity": "B", "page_size": 5}, True),
+    ({"operation": "stat", "path": "/a", "identity": "A"}, True),
     ({"operation": "stat", "paths": ["/a", "/b"], "identity": "A", "page_size": 5}, False),
     ({"identity": "A", "page_size": 5}, False),
 ])
 @pytest.mark.parametrize("effect", [ToolEffect.READ, ToolEffect.WRITE, ToolEffect.DANGER])
 @pytest.mark.parametrize("read_status", ["success", "found", "empty"])
-def test_conditional_not_repairs_only_involved_read_fields(correction, allowed, effect, read_status):
+def test_conditional_read_retry_uses_schema_while_writes_keep_locks(correction, allowed, effect, read_status):
     from tests.test_agent_schema_composition import catalog_schema
     from app.agent.kernel.effects import PreparedEffect
 
@@ -181,12 +188,16 @@ def test_conditional_not_repairs_only_involved_read_fields(correction, allowed, 
         assert not executed
         repair = {"ticket": caught.value.repair_ticket, "arguments": correction}
         if allowed and effect is ToolEffect.READ:
-            result = await pipeline.execute("agent.repair", repair, context=context)
+            assert not caught.value.repair_ticket and not context.schema_replacements
+            result = await pipeline.execute("lookup", correction, context=context)
             assert result.arguments == correction
-            assert result.recovered_failures
+            assert not result.recovered_failures
             assert executed == [correction]
         else:
             with pytest.raises(ToolPipelineError):
-                await pipeline.execute("agent.repair", repair, context=context)
+                if effect is ToolEffect.READ:
+                    await pipeline.execute("lookup", correction, context=context)
+                else:
+                    await pipeline.execute("agent.repair", repair, context=context)
             assert not executed
     asyncio.run(run())

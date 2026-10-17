@@ -26,7 +26,7 @@ from app.agent.kernel.state import (
     CancellationToken,
     InMemorySessionStateStore,
 )
-from tests.test_agent_tool_argument_ingress import encode, wire
+from tests.test_agent_tool_argument_ingress import Wire, encode, wire
 
 
 def array_schema():
@@ -131,7 +131,7 @@ def test_existing_item_error_order_and_fitting_capacity_are_unchanged():
 
 
 @pytest.mark.parametrize("domain_only", [False, True])
-def test_native_invalid_array_is_repairable_and_success_keeps_parameters(domain_only):
+def test_native_invalid_array_direct_retry_keeps_valid_parameters(domain_only):
     async def run():
         executed = []
         tool = KernelToolSpec(name="lookup", domain="library", description="offline schema contract",
@@ -141,9 +141,8 @@ def test_native_invalid_array_is_repairable_and_success_keeps_parameters(domain_
         invalid = {"tool_names": ["library.status"], "query": "status"} if domain_only else {"tool_names": []}
         valid = {"tool_names": ["library.status"]}
         final = {"choices": [{"message": {"content": "已核验"}, "finish_reason": "stop"}]}
-        from tests.error30_model_inputs import explicit_repair_wire
-        transport = explicit_repair_wire("chat_completions", [wire("chat_completions", "json", encode(invalid)),
-                         wire("chat_completions", "json", encode(valid)), (encode(final).encode(), "application/json")], index=1, arguments=valid)
+        transport = Wire("chat_completions", [wire("chat_completions", "json", encode(invalid)),
+                         wire("chat_completions", "json", encode(valid)), (encode(final).encode(), "application/json")])
         catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
         session = AgentSession(model=transport.adapter, catalog=catalog, state_store=state,
                                retriever=CapabilityRetriever(minimum=1, maximum=1),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from app.clients.guangya import GuangYaFile
 
 
@@ -60,7 +62,13 @@ def restore_guangya_file(client, expected: GuangYaFile) -> GuangYaFile:
         raise GuangYaCompensationError(
             "云端补偿请求失败，必须人工核验", latest
         ) from exc
-    verified = read() if changed else remote
-    if verified.name != expected.name or verified.parent_id != expected.parent_id:
-        raise GuangYaCompensationError("云端补偿结果不一致，必须人工核验", verified)
-    return verified
+    if not changed:
+        return remote
+    # 写 ACK 不代表详情立即可见；只等待同一对象状态收敛，绝不重发写操作。
+    for delay in (0, 0.25, 0.5, 1, 2):
+        if delay:
+            time.sleep(delay)
+        verified = read()
+        if verified.name == expected.name and verified.parent_id == expected.parent_id:
+            return verified
+    raise GuangYaCompensationError("云端补偿结果不一致，必须人工核验", verified)

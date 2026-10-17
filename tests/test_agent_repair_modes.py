@@ -1,4 +1,4 @@
-"""修参状态只约束同一对象/模式，不得阻塞独立 READ 或授予写权限。"""
+"""READ 按 schema 直接重试；写侧修参仍不能扩大授权或跳过确认。"""
 from __future__ import annotations
 
 import asyncio
@@ -118,23 +118,24 @@ def test_ordinary_read_max_properties_modes_are_independent_without_name_excepti
         wire.verify(3)
         assert executed == [independent], 'schema modes must work for ordinary READ, not a capabilities-name exemption'
         assert feedback[0]['code'] == 'invalid_arguments' and feedback[1]['status'] == 'success'
-        assert events[-1].payload['status'] == 'partial', 'an independent mode is not proof that the old failed query recovered'
+        assert events[-1].payload['status'] == 'success'
+        assert 'repair' not in feedback[0]
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('repair', [False, True], ids=['direct', 'explicit'])
-def test_same_identity_cannot_drop_original_valid_filter_as_repair(repair, store):
+def test_read_can_drop_optional_filter_and_directly_retry(store):
     async def run():
         executed = []
         catalog = _read_catalog(_IDENTITY_SCHEMA, executed)
         bad = {'id': 'A', 'filter': 'unwatched-only', 'limit': 'invalid'}
         dropped = {'id': 'A', 'limit': 3}
-        events, feedback, saved, wire = await _run(catalog, store, 'library.lookup', [bad, dropped], repair=repair)
+        events, feedback, saved, wire = await _run(catalog, store, 'library.lookup', [bad, dropped])
         wire.verify(3)
-        assert executed == []
+        assert executed == [dropped]
         assert feedback[0]['code'] == 'invalid_arguments'
-        assert feedback[1]['ok'] is False and feedback[1]['code'] in {'invalid_arguments', 'repair_conflict'}
-        assert events[-1].payload.get('status') != 'success'
+        assert 'repair' not in feedback[0]
+        assert feedback[1]['ok'] is True
+        assert events[-1].payload['status'] == 'success'
         calls = [call for row in saved.conversation for call in row.get('tool_calls', [])]
         assert calls[0]['arguments'] == bad
     asyncio.run(run())
@@ -150,7 +151,8 @@ def test_other_required_identity_is_an_independent_read(store):
         wire.verify(3)
         assert executed == [independent]
         assert feedback[0]['code'] == 'invalid_arguments' and feedback[1]['status'] == 'success'
-        assert events[-1].payload['status'] == 'partial'
+        assert events[-1].payload['status'] == 'success'
+        assert 'repair' not in feedback[0]
     asyncio.run(run())
 
 
@@ -240,7 +242,7 @@ def test_explicit_repair_does_not_bypass_revoked_write_permission(store):
 
 
 @pytest.mark.parametrize('shape', ['multiple-modes', 'single-filter-property'])
-def test_empty_read_is_not_an_independent_mode_or_permission_to_drop_filter(shape, store):
+def test_empty_read_retry_uses_current_schema_not_old_fields(shape, store):
     async def run():
         executed = []
         if shape == 'multiple-modes':
@@ -254,10 +256,11 @@ def test_empty_read_is_not_an_independent_mode_or_permission_to_drop_filter(shap
         catalog = _read_catalog(schema, executed)
         events, feedback, saved, wire = await _run(catalog, store, 'library.lookup', [bad, {}])
         wire.verify(3)
-        assert executed == [], '{} cannot turn a pending field obligation into default-scope execution'
+        assert executed == [{}], 'the current schema permits an empty READ request'
         assert feedback[0]['code'] == 'invalid_arguments'
-        assert feedback[1]['ok'] is False and feedback[1]['code'] == 'invalid_arguments'
-        assert events[-1].payload.get('status') != 'success'
+        assert 'repair' not in feedback[0]
+        assert feedback[1]['ok'] is True
+        assert events[-1].payload['status'] == 'success'
         calls = [call for row in saved.conversation for call in row.get('tool_calls', [])]
         assert [call['arguments'] for call in calls] == [bad, {}]
     asyncio.run(run())

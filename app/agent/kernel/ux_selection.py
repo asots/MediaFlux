@@ -16,6 +16,7 @@ from app.agent.recent_resource_candidates import (
     MAX_RESOURCE_CANDIDATES,
     validate_safe_resource_snapshot,
 )
+from app.modules.media_probe import infer_dynamic_ranges, infer_media_profile
 from app.sensitive_data import is_sensitive_key, redact_sensitive_text
 
 from .projection import DefaultProjector, _model_safe
@@ -155,6 +156,8 @@ def candidate_item(value: Mapping[str, Any], position: int) -> dict[str, Any]:
     quality = quality if isinstance(quality, dict) else value
     tags = quality.get("tags")
     match = quality.get("match")
+    if not match and "episode_conflict" in (value.get("match_reasons") or []):
+        match = "conflict"
     return {
         "position": position,
         "title": title,
@@ -211,15 +214,46 @@ def resource_candidate_items(value: Any, public: Mapping[str, Any]) -> list[dict
             for candidate in snapshot["candidates"]]
 
 
-def model_candidate_numbers(items: list[dict[str, Any]], *, selected_positions: list[int] | None = None) -> list[dict[str, Any]]:
-    """默认只附带匹配的缺集候选；原快照可主动检查/选择，普通搜索不变。"""
-    result = []
+def annotate_resource_candidates(payload: dict[str, Any], items: list[dict[str, Any]], *, selected_positions: list[int] | None = None) -> None:
+    """规格并入同编号、同标题的已有事实；仅无对应明细的展示结果需要附录。"""
+    numbers = {}
     for item in items:
-        if (item["requested_episode"] and item["match"] not in {"exact_episode", "episode_pack"}
+        if ((item["match"] == "conflict" or item["requested_episode"] and item["match"] not in {"exact_episode", "episode_pack"})
                 and item["position"] not in (selected_positions or [])):
             continue
-        result.append({key: item[key] for key in ("position", "media_title", "requested_episode", "match", "title", "coverage")})
-    return result
+        candidate = {key: item[key] for key in ("position", "media_title", "requested_episode", "match", "title", "coverage") if item[key] is not None and item[key] != ""}
+        profile = infer_media_profile(item["title"])
+        candidate["technical_evidence"] = {
+            "basis": "release_title_only", "stream_verified": False,
+            "resolution": profile.resolution or None,
+            "dynamic_range": profile.dynamic_range or None,
+            "dynamic_ranges": list(infer_dynamic_ranges(item["title"])),
+            "video_codec": profile.video_codec or None,
+            "bit_depth": profile.bit_depth or None,
+            "source": profile.source or None,
+        }
+        numbers[item["position"]] = candidate
+
+    observed = set()
+
+    def annotate(value):
+        if isinstance(value, dict):
+            position = value.get("position")
+            candidate = numbers.get(position) if type(position) is int else None
+            if candidate and value.get("title") == candidate["title"]:
+                for key, fact in candidate.items():
+                    value.setdefault(key, fact)
+                observed.add(position)
+            for child in value.values():
+                annotate(child)
+        elif isinstance(value, list):
+            for child in value:
+                annotate(child)
+
+    annotate(payload)
+    remaining = [candidate for position, candidate in numbers.items() if position not in observed]
+    if remaining or not numbers:
+        payload["candidate_numbers"] = remaining
 
 
 def _candidate_summary(items: list[dict[str, Any]], *, explicit_selection: bool = False) -> dict[str, Any] | None:

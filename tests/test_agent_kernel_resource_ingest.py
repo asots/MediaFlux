@@ -304,6 +304,11 @@ def _model_json_field(request: ModelRequest, field: str) -> Any:
         if message.role != "tool":
             continue
         payload = json.loads(content)
+        if field == "candidate_numbers":
+            from tests.test_agent_ux_model_context import model_resource_candidates
+            candidates = model_resource_candidates(payload)
+            if candidates:
+                return candidates
         if field in payload:
             return payload[field]
     raise AssertionError(f"{field} missing from model history")

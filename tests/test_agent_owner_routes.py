@@ -3,13 +3,48 @@
 from __future__ import annotations
 
 import unittest
+import re
 from unittest.mock import patch
+
+from fastapi.testclient import TestClient
 
 from app.agent.owner_routes import (
     telegram_owner_route_is_currently_authorized,
     web_kernel_owner,
 )
 from app.routes import agent_api
+from tests.support import InitializedWebTestCase
+
+
+class RetiredSessionBridgeTests(InitializedWebTestCase):
+    def test_mounted_app_no_longer_serves_tg_exchange_status_or_revocation(self):
+        from app import config
+        from app.main import create_app
+
+        with patch("app.routes.auth.get_login_wallpaper", return_value=None):
+            client = TestClient(create_app(start_background=False))
+            self.addCleanup(client.close)
+
+            def csrf(path):
+                response = client.get(path)
+                match = re.search(r'name="csrf_token" (?:content|value)="([^"]+)"', response.text)
+                self.assertIsNotNone(match, response.text[:100])
+                return match.group(1)
+
+            username, password = config.web_credentials()
+            login = client.post("/login", follow_redirects=False, data={
+                "username": username, "password": password, "csrf_token": csrf("/login"),
+            })
+            self.assertEqual(login.status_code, 302, login.text)
+            headers = {"X-CSRF-Token": csrf("/settings")}
+            for method, path, body in (
+                ("POST", "/api/agent/handoffs/redeem", {"code": "expired-code"}),
+                ("GET", "/api/agent/handoffs/" + "f" * 64, None),
+                ("DELETE", "/api/agent/handoffs/" + "f" * 64, None),
+            ):
+                with self.subTest(method=method):
+                    response = client.request(method, path, headers=headers, json=body)
+                    self.assertEqual(response.status_code, 404, response.text)
 
 
 class AgentOwnerRouteTests(unittest.TestCase):
@@ -39,8 +74,8 @@ class AgentOwnerRouteTests(unittest.TestCase):
             "web_credentials",
             return_value=("admin", "ignored-password"),
         ):
-            first = agent_api._owner(object())
-            second = agent_api._owner(object())
+            first = agent_api._owner()
+            second = agent_api._owner()
 
         self.assertEqual(first, second)
         self.assertEqual(first, web_kernel_owner("admin"))

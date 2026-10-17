@@ -1,4 +1,4 @@
-"""Schema rejection history is not proof of recovery when another object succeeds."""
+"""READ语法可直接修正；真实服务错误仍阻止把不完整查询当成完成。"""
 from __future__ import annotations
 
 import asyncio
@@ -56,7 +56,7 @@ def reply(*, name="", arguments=None, index=0, text=FINAL):
     return encode({"choices": [{"message": message, "finish_reason": "tool_calls" if name else "stop"}]}).encode(), "application/json"
 
 
-async def scenario(store, good, *, ending="answer", mixed=True, explicit_repair=False):
+async def scenario(store, good, *, ending="answer", mixed=True):
     bad = {**X, "limit": "bad"}
     steps = [(A, bad)]
     if mixed:
@@ -93,15 +93,7 @@ async def scenario(store, good, *, ending="answer", mixed=True, explicit_repair=
         limits = SessionLimits(max_model_rounds=len(steps) + 1)
     elif ending == "tool-empty":
         limits = SessionLimits(max_tool_calls=len(steps))
-    class RepairWire(Wire):
-        async def handler(self, request):
-            if explicit_repair and len(self.requests) == len(steps) - 1:
-                body = json.loads(request.content)
-                rejection = next(json.loads(m["content"]) for m in body["messages"] if m.get("role") == "tool")
-                entry = rejection["repair"]
-                self.replies[0] = reply(name="agent__repair", arguments={"ticket": entry["ticket"], "arguments": good}, index=len(steps) - 1)
-            return await super().handler(request)
-    wire = RepairWire("chat_completions", replies)
+    wire = Wire("chat_completions", replies)
     session = AgentSession(
         model=wire.adapter, catalog=catalog, retriever=CapabilityRetriever(minimum=len(catalog), maximum=len(catalog)),
         pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store, journal=store, limits=limits,
@@ -124,6 +116,8 @@ async def scenario(store, good, *, ending="answer", mixed=True, explicit_repair=
     assert [row["tool_call_id"] for row in tool_rows] == [f"call-{i}" for i in range(len(steps))]
     rejection = json.loads(tool_rows[0]["content"])
     assert rejection["code"] == "invalid_arguments"
+    assert "repair" not in rejection
+    assert "expected_input_schema" in rejection
     assert "类型无效" in rejection["error"]
     assert json.loads(tool_rows[-1]["content"])["status"] == "success"
     failed = [event for event in events if event.type.value == "tool.failed"]
@@ -147,7 +141,7 @@ async def scenario(store, good, *, ending="answer", mixed=True, explicit_repair=
     ("answer", "provider_timeout"), ("model-fault", "model_provider_error"),
     ("round-empty", "model_round_budget_exceeded"), ("tool-empty", "tool_budget_exceeded"),
 ])
-def test_invalid_object_remains_disclosed_after_other_object_success(store, other, ending, reason):
+def test_operational_failure_remains_disclosed_after_read_schema_correction(store, other, ending, reason):
     final, answers = asyncio.run(scenario(store, other, ending=ending))
     assert final["status"] == "partial"
     assert final["finish_reason"] == reason
@@ -157,13 +151,12 @@ def test_invalid_object_remains_disclosed_after_other_object_success(store, othe
         assert "未完成的查询不能据此判断没有内容" in answer, projection
         unfinished = next(line for line in answer.splitlines() if line.startswith("未完成的查询："))
         assert "对象z超时" in unfinished, projection
-        assert "类型无效" in unfinished, (projection, "unrecovered schema rejection must remain disclosed", answer)
+        assert "类型无效" not in unfinished, (projection, "syntax feedback must not remain a terminal blocker", answer)
 
 
 @pytest.mark.parametrize("mixed", [False, True])
-def test_same_object_argument_repair_still_executes_without_state_or_call_changes(store, mixed):
-    # Mixed-partial suppression of the old parameter error belongs to #30, not this repair.
-    final, answers = asyncio.run(scenario(store, {**X, "limit": 1}, mixed=mixed, explicit_repair=True))
+def test_direct_read_correction_retains_wire_history_and_does_not_hide_operational_failures(store, mixed):
+    final, answers = asyncio.run(scenario(store, {**X, "limit": 1}, mixed=mixed))
     assert final["status"] == ("partial" if mixed else "success")
     if mixed:
         assert final["finish_reason"] == "provider_timeout"

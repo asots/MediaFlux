@@ -298,6 +298,7 @@ class TMDBProviderTests(unittest.TestCase):
                 "primary_release_year": "2026",
                 "vote_average.gte": "7.5",
                 "region": "CN",
+                "with_origin_country": "CN",
                 "language": "evil-language",
                 "api_key": "attacker-key",
                 "unknown": "drop-me",
@@ -311,6 +312,7 @@ class TMDBProviderTests(unittest.TestCase):
         self.assertEqual(params["primary_release_year"], "2026")
         self.assertEqual(params["vote_average.gte"], "7.5")
         self.assertEqual(params["region"], "CN")
+        self.assertEqual(params["with_origin_country"], "CN")
         self.assertEqual(params["language"], "zh-CN")
         self.assertEqual(params["api_key"], "test-key")
         self.assertNotIn("unknown", params)

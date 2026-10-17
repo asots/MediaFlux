@@ -117,22 +117,23 @@ def test_shared_quota_is_admitted_in_call_order_not_handler_completion_order():
 
 
 @pytest.mark.parametrize("first_fails_fast", [False, True])
-def test_one_read_failure_is_not_resolved_by_the_other_parallel_success(first_fails_fast):
+@pytest.mark.parametrize("code", ["invalid_arguments", "provider_timeout", "rate_limited"])
+def test_parallel_success_settles_syntax_but_not_operational_read_failure(first_fails_fast, code):
     async def scenario():
         async def read(arguments, _context):
             if arguments["query"] == "bad":
                 if not first_fails_fast:
                     await asyncio.sleep(.02)
-                raise ToolPipelineError("bad对象参数无效", code="invalid_arguments", invalid_fields=("query",))
+                raise ToolPipelineError("bad对象参数无效", code=code, invalid_fields=("query",))
             if first_fails_fast:
                 await asyncio.sleep(.02)
             return {"ok": True, "summary": "good对象已核验", "data": {"query": "good"}}
         tool = query_tool(read)
         events, model, _ = await execute([tool], [ModelToolCall(q, tool.name, {"query": q}) for q in ("bad", "good")])
-        assert events[-1].payload["status"] == "partial"
+        assert events[-1].payload["status"] == ("success" if code == "invalid_arguments" else "partial")
         outputs = [json.loads(m.content) for m in model.requests[-1].messages if m.role == "tool"]
-        assert outputs[0]["code"] == "invalid_arguments"
-        assert outputs[0]["repair"]["ticket"]
+        assert outputs[0]["code"] == code
+        assert "repair" not in outputs[0]
         assert outputs[1]["data"]["query"] == "good"
     asyncio.run(scenario())
 

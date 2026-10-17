@@ -435,7 +435,7 @@ class IngestActions:
             candidates = snapshot.get("candidates")
             if not isinstance(candidates, list) or not candidates:
                 raise AgentToolError(
-                    "最近资源候选不存在或已过期，请重新搜索",
+                    "此查询没有可提交候选；可调整查询条件后重搜",
                     code="precondition_failed",
                 )
             selected = select_resource_candidates(candidates, arguments.get("positions"))

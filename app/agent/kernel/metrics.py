@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import AsyncIterable, AsyncIterator
-from dataclasses import asdict, dataclass
+from collections.abc import AsyncIterable, AsyncIterator, Iterator
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .events import TERMINAL_EVENT_TYPES, AgentEvent, AgentEventType
@@ -29,6 +31,31 @@ class TurnMeasurement:
         return {**asdict(self), "turn_status": self.status}
 
 
+@dataclass(slots=True)
+class _TurnObservation:
+    started: float = field(default_factory=lambda: time.monotonic())
+    first_event_at: float | None = None
+    first_text_at: float | None = None
+    model_calls: int = 0
+    tool_calls: int = 0
+    request_id: str = ""
+    last_terminal: AgentEvent | None = None
+
+    def observe(self, event: AgentEvent) -> None:
+        now = time.monotonic()
+        self.request_id = self.request_id or event.request_id
+        if self.first_event_at is None:
+            self.first_event_at = now
+        if event.type is AgentEventType.MODEL_DELTA and self.first_text_at is None:
+            self.first_text_at = now
+        elif event.type is AgentEventType.MODEL_STARTED:
+            self.model_calls += 1
+        elif event.type is AgentEventType.TOOL_STARTED:
+            self.tool_calls += 1
+        if event.type in TERMINAL_EVENT_TYPES:
+            self.last_terminal = event
+
+
 class KernelMetrics:
     """有界、线程安全且不记录用户正文或工具参数。"""
 
@@ -44,52 +71,53 @@ class KernelMetrics:
         *,
         channel: str,
     ) -> AsyncIterator[AgentEvent]:
-        started = time.monotonic()
-        first_event_at: float | None = None
-        first_text_at: float | None = None
-        model_calls = 0
-        tool_calls = 0
-        request_id = ""
+        with self.measure(channel=channel) as measurement:
+            async for event in events:
+                measurement.observe(event)
+                yield event
+
+    @contextmanager
+    def measure(self, *, channel: str, request_id: str = "") -> Iterator[_TurnObservation]:
+        """由执行器持有直到真正结束；页面断流不代表执行取消。"""
+        observation = _TurnObservation(request_id=request_id)
         status = "interrupted"
         task_status = "unknown"
-        saw_terminal = False
-        async for event in events:
-            now = time.monotonic()
-            request_id = request_id or event.request_id
-            if first_event_at is None:
-                first_event_at = now
-            if event.type is AgentEventType.MODEL_DELTA and first_text_at is None:
-                first_text_at = now
-            elif event.type is AgentEventType.MODEL_STARTED:
-                model_calls += 1
-            elif event.type is AgentEventType.TOOL_STARTED:
-                tool_calls += 1
-            if event.type in TERMINAL_EVENT_TYPES:
-                status = _terminal_status(event)
-                task_status = classify_public_task(event.payload.get("task"))
-                saw_terminal = True
-            yield event
-        ended = time.monotonic()
-        measurement = TurnMeasurement(
-            request_id=request_id,
-            channel=str(channel or "api")[:20],
-            status=status,
-            ttfe_ms=max(0, int(((first_event_at or ended) - started) * 1000)),
-            ttft_ms=(
-                max(0, int((first_text_at - started) * 1000))
-                if first_text_at is not None
-                else None
-            ),
-            total_ms=max(0, int((ended - started) * 1000)),
-            model_calls=model_calls,
-            tool_calls=tool_calls,
-            task_status=task_status,
-        )
-        with self._lock:
-            self._history.append(measurement)
-            self._status_counts[status] += 1
-            if saw_terminal:
-                self._task_status_counts[task_status] += 1
+        exhausted = False
+        try:
+            yield observation
+            # 只在执行正常结束后采信最后终态，异常收尾不能计为成功。
+            if observation.last_terminal is not None:
+                status = _terminal_status(observation.last_terminal)
+                task_status = classify_public_task(observation.last_terminal.payload.get("task"))
+            exhausted = True
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        except Exception:
+            status = "failed"
+            raise
+        finally:
+            ended = time.monotonic()
+            measurement = TurnMeasurement(
+                request_id=observation.request_id,
+                channel=str(channel or "api")[:20],
+                status=status,
+                ttfe_ms=max(0, int(((observation.first_event_at or ended) - observation.started) * 1000)),
+                ttft_ms=(
+                    max(0, int((observation.first_text_at - observation.started) * 1000))
+                    if observation.first_text_at is not None
+                    else None
+                ),
+                total_ms=max(0, int((ended - observation.started) * 1000)),
+                model_calls=observation.model_calls,
+                tool_calls=observation.tool_calls,
+                task_status=task_status,
+            )
+            with self._lock:
+                self._history.append(measurement)
+                self._status_counts[status] += 1
+                if exhausted and observation.last_terminal is not None:
+                    self._task_status_counts[task_status] += 1
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
