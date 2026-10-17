@@ -570,10 +570,10 @@ def _init() -> None:
         _chat_id = get("TG_CHAT_ID").strip() or None
         if token:
             try:
-                import telebot
+                from app.bot.client import TopicRoutingBot
 
                 configure_telebot_logging()
-                _bot = telebot.TeleBot(token, parse_mode="HTML")
+                _bot = TopicRoutingBot(token, parse_mode="HTML")
                 logger.info("Telegram Bot 客户端已初始化")
             except Exception as exc:
                 logger.error("Telegram Bot 初始化失败 type=%s", type(exc).__name__)

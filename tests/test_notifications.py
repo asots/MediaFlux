@@ -239,7 +239,7 @@ class NotificationSendingTests(unittest.TestCase):
             clear=False,
         ), patch.object(
             notifier, "get", side_effect=lambda key, default="": config.get(key, default)
-        ), patch("telebot.TeleBot", return_value=bot) as constructor:
+        ), patch("app.bot.client.TopicRoutingBot", return_value=bot) as constructor:
             self.assertTrue(notifier.send_result("opt-in").ok)
 
         constructor.assert_called_once_with(
