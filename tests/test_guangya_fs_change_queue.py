@@ -213,7 +213,7 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
             with self.subTest(object_type="directory" if source_id == "trash" else "file"):
                 client = FakeGatewayClient()
                 with mock.patch.object(workspace, "_directory", return_value=Path(self.temp.name) / "observations"):
-                    observation = workspace.create_directory_observation(cast(GuangYaClient, client), owner="queue-owner", path="/", recursive=True)
+                    observation = workspace.create_directory_observation(cast(GuangYaClient, client), owner="queue-owner", session_id="session", path="/", recursive=True)
                     refs = {row["file_id"]: row["handle"] for row in observation["entries"]}
                     plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="queue-owner", observation=observation,
                         operations=[{"op": "copy", "object_ref": refs[source_id], "target_path": "/target"},

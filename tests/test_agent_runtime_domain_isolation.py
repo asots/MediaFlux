@@ -62,7 +62,7 @@ def test_existing_runtime_keeps_its_repository_after_another_build(
         runtime.domain_actions.local_media._context_store._scope_key("same-owner", "same-session")
         if context_type == "local_media_tasks" else
         hashlib.sha256(json.dumps([context.owner, context.session_id]).encode()).hexdigest()
-        if context_type in {"discovery_mapping", "guangya_rename", "directory_scrape", "guangya_cleanup"} else "same-owner"
+        if context_type in {"discovery_mapping", "guangya_rename", "directory_scrape", "guangya_cleanup", "guangya_fs_change"} else "same-owner"
     )
     assert first.reads == [(expected_owner, context_type)]
     assert second.reads == []
@@ -76,8 +76,8 @@ def test_workspace_cursor_uses_the_original_runtime_repository():
     ):
         runtime = build_agent_kernel_runtime(model=cast(ModelAdapter | None, object()), store=cast(SQLiteKernelStore | None, InMemorySessionStateStore()))
         build_agent_kernel_runtime(model=cast(ModelAdapter | None, object()), store=cast(SQLiteKernelStore | None, InMemorySessionStateStore()))
-    assert runtime.domain_actions.workspace.latest_guangya_observation_ref("same-owner") == ""
-    assert first.reads == [("same-owner", "guangya_workspace")]
+    assert runtime.domain_actions.workspace.latest_guangya_observation_ref("same-owner", "session") == ""
+    assert first.reads == [(hashlib.sha256(json.dumps(["same-owner", "session"]).encode()).hexdigest(), "guangya_workspace")]
     assert second.reads == []
 
 
@@ -99,7 +99,7 @@ def test_file_change_uses_its_runtime_workspace_for_latest_selection():
     ):
         with pytest.raises(AgentToolError):
             first.fs_change.prepare_guangya_fs_change_confirmation(
-                {"operation": "rename", "operations": []}, ToolContext(owner="same-owner"),
+                {"operation": "rename", "operations": []}, ToolContext(owner="same-owner", session_id="session"),
             )
-    original.assert_called_once_with("same-owner")
+    original.assert_called_once_with("same-owner", "session")
     other.assert_not_called()

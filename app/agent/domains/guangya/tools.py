@@ -309,7 +309,7 @@ def register_specs(registry, *, cleanup_actions, directory_scrape_actions, fs_ch
                 "scope_objects 返回查询目录本身的可操作引用；entries 只含目录内的匹配子项（stat 为精确对象）。"
                 "复制、移动或改名整个目录应选目录本身，不要选目录里的文件；账户根目录没有可操作引用。"
                 "查看目录、列出第一层子目录或回答具体文件夹名称时必须使用本工具。"
-                "只要提供 query，list/tree 会等价归一化为 search；继续分页只传 observation_ref、page 和 page_size。"
+                "只要提供 query，list/tree 会等价归一化为 search；继续分页只传当前会话的 observation_ref、page 和 page_size。"
             ),
             risk=RiskLevel.READ,
             parameters={
@@ -584,7 +584,7 @@ def register_specs(registry, *, cleanup_actions, directory_scrape_actions, fs_ch
             batch_mode="tracked",
             description=(
                 "传入完整operations，一次编译冻结计划并直接生成可点击确认卡；确认前不写云盘，无需另调预览或再次请求建卡。observation_ref只指定主快照，"
-                "同一 owner 与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。支持 rename、move、copy（可选 new_name，在同一计划内复制并对副本改名，源对象不变；省略时沿用源名称，冲突必须拒绝）、"
+                "同一会话与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。支持 rename、move、copy（可选 new_name，在同一计划内复制并对副本改名，源对象不变；省略时沿用源名称，冲突必须拒绝）、"
                 "relocate（一次计划内移动并改名，自动选择无名称冲突的执行顺序）、batch_relocate（用 object_ref+集号批量生成规范文件名）、"
                 "trash（Provider 回收站）和 create_directory。子项复制备份、改名或搬出，以及后续空中间目录trash和父目录move/relocate可放在同一计划，系统按依赖执行；父目录清理前必须验证实际为空，任一前置失败会阻止后续父目录操作；这是有序执行而非全局回滚事务；"
                 "多层 create_directory 与指向新目录的移动可放在同一计划，父目录先于子目录创建，无需分次确认；"

@@ -140,7 +140,7 @@ class QueryCase:
             assert not path.exists()
         else:
             # 只构造真实签名 OBS 的过期条件；不修改 effect 回执或 prepare 来源。
-            payload = workspace.load_directory_observation(observation_ref, owner=self.context.owner)
+            payload = workspace.load_directory_observation(observation_ref, owner=self.context.owner, session_id=self.context.session_id)
             payload["expires_at_epoch"] = time.time() - 1
             workspace._atomic_write(payload)
             assert path.exists()
@@ -242,11 +242,11 @@ def test_actual_prepare_source_reobserves_renamed_identity_after_old_obs_is_gone
     match = mapping["items"][0]
     assert match["previous_ref"] == old_obj and match["object_ref"] != old_obj
     assert match["state"] == "same_identity" and "name" in match["changed_fields"]
-    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert workspace.observation_entry_map(saved)[match["object_ref"]]["file_id"] == MOVIE
     assert not old_path.exists(), f"{OFFLINE}：新观察不能复活旧 OBS"
     with pytest.raises(workspace.GuangYaWorkspaceError):
-        workspace.load_directory_observation(old_ref, owner=case.context.owner)
+        workspace.load_directory_observation(old_ref, owner=case.context.owner, session_id=case.context.session_id)
     new_source, new_fingerprint = case.file_prepare(result, refs=[match["object_ref"]], source=source)
     assert new_fingerprint != fingerprint and new_source["baseline"]["observation_ref"] == result.data["observation_ref"]
     assert source == frozen and case.provider.writes == []
@@ -334,7 +334,7 @@ def test_same_basename_roots_keep_query_filter_depth_and_count_bounds(case):
     case.provider.live_file(MOVIE).name = "Movie-Changed.mkv"
     case.provider.trace.clear()
     result = case.file_read({"operation": "reobserve"}, source=source)
-    loaded = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
+    loaded = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert [{k: root[k] for k in FILMS} for root in loaded["roots"]] == [FILMS, SHOWS]
     assert loaded["scope_names"] == ["目录 1 · Shared", "目录 2 · Shared"]
     assert (loaded["operation"], loaded["query"], loaded["kinds"], loaded["max_items"], loaded["max_depth"]) == (

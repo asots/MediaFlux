@@ -189,7 +189,7 @@ def register_specs(registry, *, workspace_actions) -> None:
         ToolSpec(
             name="guangya.share.create",
             description=(
-                "为 guangya.fs.query 最近观察中的 1–100 个 object_ref 创建分享。可设置标题、有效天数、"
+                "为当前会话 guangya.fs.query 最近观察中的 1–100 个 object_ref 创建分享。可设置标题、有效天数、"
                 "自动或自定义访问码、最大转存次数和下载权限；模型调用只生成冻结预览，确认后创建。"
             ),
             risk=RiskLevel.WRITE,

@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -17,7 +16,6 @@ from app.agent.public_safety import sanitize_untrusted_filename
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
-    PersistedAgentContext,
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.guangya_workspace import (
@@ -27,7 +25,7 @@ from app.modules.guangya_workspace import (
     create_multi_directory_observation,
     create_path_observation,
     discard_observation,
-    discard_owner_observations,
+    discard_session_observations,
     load_directory_observation,
     locate_observed_object,
     merge_directory_observations,
@@ -36,6 +34,7 @@ from app.modules.guangya_workspace import (
     observation_query_arguments,
     observation_sources,
     valid_observation_ref,
+    workspace_session_scope,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +46,7 @@ _MAX_PAGE_SIZE = 50
 @dataclass
 class _Flow:
     owner: str
+    session_id: str
     observation_ref: str
     page: int = 1
     page_size: int = _MAX_PAGE_SIZE
@@ -54,6 +54,10 @@ class _Flow:
     generation: int = 0
     revision: int = 0
     updated_at: float = 0.0
+
+    @property
+    def scope_key(self) -> str:
+        return workspace_session_scope(self.owner, self.session_id)
 
 
 def _now() -> str:
@@ -307,21 +311,22 @@ def _reobserved_query_arguments(client: GuangYaClient, source: dict[str, Any], *
     return guangya_fs_query_arguments(arguments), current_roots
 
 
-def _create_observation(client: GuangYaClient, arguments: dict[str, Any], *, owner: str,
+def _create_observation(client: GuangYaClient, arguments: dict[str, Any], *, owner: str, session_id: str,
                         expected_roots=None) -> dict[str, Any]:
     if arguments["operation"] == "stat":
-        return create_path_observation(client, owner=owner, path=arguments["path"], expected_roots=expected_roots)
+        return create_path_observation(client, owner=owner, session_id=session_id,
+                                       path=arguments["path"], expected_roots=expected_roots)
     operation = str(arguments["operation"])
     paths = tuple(arguments.get("paths") or (arguments["path"],))
     if len(paths) > 1:
         return create_multi_directory_observation(
-            client=client, owner=owner, paths=paths, recursive=operation in {"tree", "search"},
+            client=client, owner=owner, session_id=session_id, paths=paths, recursive=operation in {"tree", "search"},
             max_items=int(arguments["max_items"]), query=str(arguments.get("query") or ""),
             kinds=arguments.get("kinds") or (), max_depth=int(arguments.get("max_depth") or 0),
             operation=operation, expected_roots=expected_roots,
         )
     return create_directory_observation(
-        client=client, owner=owner, path=paths[0], recursive=operation in {"tree", "search"},
+        client=client, owner=owner, session_id=session_id, path=paths[0], recursive=operation in {"tree", "search"},
         max_items=int(arguments["max_items"]), query=str(arguments.get("query") or ""),
         kinds=arguments.get("kinds") or (), max_depth=int(arguments.get("max_depth") or 0),
         operation=operation, expected_roots=expected_roots,
@@ -346,7 +351,7 @@ def _reobserve_files(client: GuangYaClient, source: dict[str, Any], *, context: 
             try:
                 arguments, roots = _reobserved_query_arguments(client, original, check_active=check_active)
                 observations[original["observation_ref"]] = _create_observation(
-                    client, arguments, owner=context.owner, expected_roots=roots)
+                    client, arguments, owner=context.owner, session_id=context.session_id, expected_roots=roots)
             except (AgentToolError, GuangYaWorkspaceError) as exc:
                 failures[original["observation_ref"]] = _public_error(exc)
         # 查询词、类型过滤和扫描深度不定义原选中对象的身份。未命中时只按已知 ID
@@ -369,7 +374,8 @@ def _reobserve_files(client: GuangYaClient, source: dict[str, Any], *, context: 
         check_active()
         if not observations:
             raise next(iter(failures.values())) if failures else AgentToolError("原观察没有可读取的范围", code="observation_source_unavailable")
-        result = merge_directory_observations(client, owner=context.owner, payloads=list(observations.values()),
+        result = merge_directory_observations(client, owner=context.owner, session_id=context.session_id,
+            payloads=list(observations.values()),
             force_new=supplemented, preferred_ids=frozenset(str(item["file_id"]) for item in source["baseline"]["selected"]))
         return result, [{"observation_ref": ref, "code": error.code, "summary": str(error)} for ref, error in failures.items()]
     finally:
@@ -415,172 +421,114 @@ class GuangyaWorkspaceActions:
         self._repository = repository
         self._lock = threading.RLock()
         self._flows: dict[str, _Flow] = {}
+        self._generation = 0
+        self._memory_guards: dict[str, tuple[AgentContextWriteGuard, float]] = {}
 
-
-    def clear_guangya_workspace_context(self, *, owner: str) -> int:
-        """清除 owner 的缓存与全部短期观察引用。"""
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return 0
+    def clear_session(self, *, owner: str, session_id: str) -> int:
+        scope = workspace_session_scope(owner, session_id)
         with self._lock:
-            self._flows.pop(owner_key, None)
-        return discard_owner_observations(owner_key)
+            if self._repository is not None:
+                self._repository.invalidate_context(owner=scope, context_type=_CONTEXT_TYPE)
+            self._flows.pop(scope, None)
+            self._memory_guards.pop(scope, None)
+            return discard_session_observations(owner=owner, session_id=session_id)
 
-    def _begin(self, owner: str) -> AgentContextWriteGuard:
-        if self._repository is None:
-            return AgentContextWriteGuard(0, 0)
-        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
-        if not callable(begin):
-            return AgentContextWriteGuard(0, 0)
-        return begin(owner=owner, context_type=_CONTEXT_TYPE)
+    def _prune_locked(self) -> None:
+        now = time.monotonic()
+        expired = {key for key, item in self._flows.items() if now - item.updated_at > _TTL_SECONDS}
+        expired.update(key for key, (_, expires_at) in self._memory_guards.items() if expires_at <= now)
+        for key in expired:
+            self._flows.pop(key, None)
+            self._memory_guards.pop(key, None)
 
-    def _begin_update(self, owner: str) -> tuple[str, AgentContextWriteGuard]:
-        if self._repository is not None:
-            begin_update: Callable[..., tuple[PersistedAgentContext | None, AgentContextWriteGuard]] | None = getattr(self._repository, "begin_context_update", None)
-            if callable(begin_update):
-                persisted, guard = begin_update(
-                    owner=owner,
-                    context_type=_CONTEXT_TYPE,
-                )
-                ref = ""
-                if persisted is not None:
-                    ref = (
-                        str(persisted.payload.get("observation_ref") or "").strip().upper()
-                    )
-                    if not valid_observation_ref(ref):
-                        ref = ""
-                if ref and persisted is not None:
-                    page = _safe_cursor_integer(
-                        persisted.payload.get("page"), default=1, maximum=200
-                    )
-                    page_size = _safe_cursor_integer(
-                        persisted.payload.get("page_size"),
-                        default=_MAX_PAGE_SIZE,
-                        maximum=_MAX_PAGE_SIZE,
-                    )
-                    raw_has_more = persisted.payload.get("has_more")
-                    with self._lock:
-                        self._flows[owner] = _Flow(
-                            owner=owner,
-                            observation_ref=ref,
-                            page=page,
-                            page_size=page_size,
-                            has_more=(
-                                raw_has_more if isinstance(raw_has_more, bool) else None
-                            ),
-                            generation=persisted.generation,
-                            revision=persisted.revision,
-                            updated_at=time.monotonic(),
-                        )
-                return ref, guard
-        return self.latest_guangya_observation_ref(owner), self._begin(owner)
+    def _begin_update(self, owner: str, session_id: str) -> AgentContextWriteGuard:
+        scope = workspace_session_scope(owner, session_id)
+        with self._lock:
+            self._prune_locked()
+            if self._repository is not None:
+                _previous, guard = self._repository.begin_context_update(owner=scope, context_type=_CONTEXT_TYPE)
+            else:
+                self._generation += 1
+                previous = self._flows.get(scope)
+                guard = AgentContextWriteGuard(self._generation, previous.revision if previous else 0)
+                self._memory_guards[scope] = guard, time.monotonic() + _TTL_SECONDS
+            return guard
 
     def _save(self, flow: _Flow) -> bool:
-        flow.updated_at = time.monotonic()
-        payload = {
-            "observation_ref": flow.observation_ref,
-            "page": flow.page,
-            "page_size": flow.page_size,
-            "has_more": flow.has_more,
-        }
-        if self._repository is not None:
-            try:
-                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
-                if callable(guarded):
-                    if flow.generation <= 0:
-                        return False
-                    persisted = guarded(
-                        owner=flow.owner,
-                        context_type=_CONTEXT_TYPE,
-                        payload=payload,
-                        expires_at=time.time() + _TTL_SECONDS,
-                        guard=AgentContextWriteGuard(flow.generation, flow.revision),
-                    )
-                    if persisted is None:
-                        return False
-                    flow.generation = persisted.generation
-                    flow.revision = persisted.revision
-                else:
-                    self._repository.replace_latest(
-                        owner=flow.owner,
-                        context_type=_CONTEXT_TYPE,
-                        payload=payload,
-                        expires_at=time.time() + _TTL_SECONDS,
-                    )
-            except Exception as exc:  # noqa: BLE001 - 上下文仓故障必须安全降级
-                logger.warning("Agent 光鸭观察上下文保存失败 type=%s", type(exc).__name__)
-                return False
         with self._lock:
-            self._flows[flow.owner] = flow
-        return True
+            self._prune_locked()
+            scope, guard = flow.scope_key, AgentContextWriteGuard(flow.generation, flow.revision)
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.replace_latest_guarded(
+                        owner=scope, context_type=_CONTEXT_TYPE,
+                        payload={"observation_ref": flow.observation_ref, "page": flow.page,
+                                 "page_size": flow.page_size, "has_more": flow.has_more},
+                        expires_at=time.time() + _TTL_SECONDS, guard=guard,
+                    )
+                except Exception as exc:
+                    logger.warning("Agent 光鸭观察上下文保存失败 type=%s", type(exc).__name__)
+                    return False
+                if persisted is None:
+                    return False
+                flow.generation, flow.revision = persisted.generation, persisted.revision
+            else:
+                current = self._memory_guards.get(scope)
+                if current is None or current[0] != guard:
+                    return False
+                flow.revision += 1
+                self._memory_guards[scope] = (AgentContextWriteGuard(flow.generation, flow.revision),
+                                             time.monotonic() + _TTL_SECONDS)
+                flow.updated_at = time.monotonic()
+                self._flows[scope] = replace(flow)
+            return True
 
-    def latest_guangya_observation_cursor(self, owner: str) -> dict[str, Any]:
-        """返回最近只读观察的分页游标；旧上下文缺字段时保持可兼容。"""
-        if not owner:
-            return {}
-        if self._repository is not None:
-            try:
-                persisted = self._repository.get_latest(
-                    owner=owner, context_type=_CONTEXT_TYPE, now=time.time()
-                )
-                if persisted is not None:
-                    ref = (
-                        str(persisted.payload.get("observation_ref") or "").strip().upper()
-                    )
-                    if valid_observation_ref(ref):
-                        raw_has_more = persisted.payload.get("has_more")
-                        return {
-                            "observation_ref": ref,
-                            "page": _safe_cursor_integer(
-                                persisted.payload.get("page"), default=1, maximum=200
-                            ),
-                            "page_size": _safe_cursor_integer(
-                                persisted.payload.get("page_size"),
-                                default=_MAX_PAGE_SIZE,
-                                maximum=_MAX_PAGE_SIZE,
-                            ),
-                            "has_more": (
-                                raw_has_more if isinstance(raw_has_more, bool) else None
-                            ),
-                        }
-            except Exception as exc:  # noqa: BLE001 - 上下文仓故障必须安全降级
-                logger.warning("Agent 光鸭观察上下文读取失败 type=%s", type(exc).__name__)
-            with self._lock:
-                self._flows.pop(owner, None)
-            return {}
+    def latest_guangya_observation_cursor(self, owner: str, session_id: str) -> dict[str, Any]:
+        """返回当前会话最近只读观察的分页游标。"""
+        scope = workspace_session_scope(owner, session_id)
         with self._lock:
-            flow = self._flows.get(owner)
-            if flow and time.monotonic() - flow.updated_at <= _TTL_SECONDS:
+            self._prune_locked()
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.get_latest(owner=scope, context_type=_CONTEXT_TYPE, now=time.time())
+                except Exception as exc:
+                    logger.warning("Agent 光鸭观察上下文读取失败 type=%s", type(exc).__name__)
+                    return {}
+                payload = persisted.payload if persisted is not None else {}
+                ref = str(payload.get("observation_ref") or "").strip().upper()
+                if not valid_observation_ref(ref):
+                    return {}
+                raw_has_more = payload.get("has_more")
                 return {
-                    "observation_ref": flow.observation_ref,
-                    "page": flow.page,
-                    "page_size": flow.page_size,
-                    "has_more": flow.has_more,
+                    "observation_ref": ref,
+                    "page": _safe_cursor_integer(payload.get("page"), default=1, maximum=200),
+                    "page_size": _safe_cursor_integer(payload.get("page_size"), default=_MAX_PAGE_SIZE, maximum=_MAX_PAGE_SIZE),
+                    "has_more": raw_has_more if isinstance(raw_has_more, bool) else None,
                 }
-            self._flows.pop(owner, None)
-        return {}
+            flow = self._flows.get(scope)
+            return ({"observation_ref": flow.observation_ref, "page": flow.page,
+                     "page_size": flow.page_size, "has_more": flow.has_more} if flow is not None else {})
 
-    def latest_guangya_observation_ref(self, owner: str) -> str:
-        return str(self.latest_guangya_observation_cursor(owner).get("observation_ref") or "")
+    def latest_guangya_observation_ref(self, owner: str, session_id: str) -> str:
+        return str(self.latest_guangya_observation_cursor(owner, session_id).get("observation_ref") or "")
 
     def _read_observation_page(
         self,
         arguments: dict[str, Any],
         context: ToolContext,
     ) -> dict[str, Any]:
-        if not context.owner:
+        if not context.owner.strip() or not context.session_id.strip():
             raise AgentToolError("光鸭目录观察需要已登录会话", code="precondition_failed")
         source = (validated_reobservation_source(context, kind="guangya_files", tool="guangya.fs.query")
                   if arguments.get("operation") == "reobserve" else None)
         client: GuangYaClient | None = None
         new_observation = False
         source_failures = []
-        _previous_ref, guard = self._begin_update(context.owner)
-        update_context = True
+        guard = self._begin_update(context.owner, context.session_id)
         requested_ref = str(arguments.get("observation_ref") or "").strip().upper()
         try:
             if requested_ref:
-                payload = load_directory_observation(requested_ref, owner=context.owner)
+                payload = load_directory_observation(requested_ref, owner=context.owner, session_id=context.session_id)
             else:
                 client = GuangYaClient()
                 if not client.logged_in:
@@ -588,7 +536,7 @@ class GuangyaWorkspaceActions:
                 if source is not None:
                     payload, source_failures = _reobserve_files(client, source, context=context)
                 else:
-                    payload = _create_observation(client, arguments, owner=context.owner)
+                    payload = _create_observation(client, arguments, owner=context.owner, session_id=context.session_id)
                 new_observation = True
             page = observation_page(
                 payload, page=int(arguments["page"]), page_size=int(arguments["page_size"])
@@ -610,26 +558,26 @@ class GuangyaWorkspaceActions:
             if client is not None:
                 client.close()
         ref = str(page["observation_ref"])
-        if update_context:
-            flow = _Flow(
-                owner=context.owner,
-                observation_ref=ref,
-                page=int(page["page"]),
-                page_size=int(page["page_size"]),
-                has_more=bool(page["has_more"]),
-                generation=guard.generation,
-                revision=guard.revision,
+        flow = _Flow(
+            owner=context.owner,
+            session_id=context.session_id,
+            observation_ref=ref,
+            page=int(page["page"]),
+            page_size=int(page["page_size"]),
+            has_more=bool(page["has_more"]),
+            generation=guard.generation,
+            revision=guard.revision,
+        )
+        if not self._save(flow):
+            if new_observation:
+                discard_observation(ref)
+            raise AgentToolError(
+                "目录观察已被更新请求取代，请重新读取",
+                code="precondition_failed",
             )
-            if not self._save(flow):
-                if new_observation:
-                    discard_observation(ref)
-                raise AgentToolError(
-                    "目录观察已被更新请求取代，请重新读取",
-                    code="precondition_failed",
-                )
-            # ReAct 可能先观察共同父目录，再建立批量快照，并对个别对象做 stat。
-            # 旧快照由模块容量/TTL 统一回收；这里若立即删除，模型后续使用先前
-            # observation_ref 生成冻结计划时会无故失效。
+        # ReAct 可能先观察共同父目录，再建立批量快照，并对个别对象做 stat。
+        # 旧快照由模块容量/TTL 统一回收；这里若立即删除，模型后续使用先前
+        # observation_ref 生成冻结计划时会无故失效。
         return page
 
     def query_guangya_filesystem(

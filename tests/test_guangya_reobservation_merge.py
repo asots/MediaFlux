@@ -22,7 +22,7 @@ def source_for_both(case, *, select_scope_roots=False, mode="deleted"):
     selection = "scope_objects" if select_scope_roots else "entries"
     handles = [first.data[selection][0]["object_ref"], second.data[selection][0]["object_ref"]]
     merged = workspace.load_directory_observation_set(second.data["observation_ref"],
-        owner=case.context.owner, object_refs=handles)
+        owner=case.context.owner, session_id=case.context.session_id, object_refs=handles)
     source = actions.bind_observation_source(workspace.capture_observation_source(merged, handles), case.context)
     for result in (first, second):
         case.invalidate(result.data["observation_ref"], mode)
@@ -50,7 +50,7 @@ def test_merged_reobservation_does_not_depend_on_expiring_intermediate_observati
     source = source_for_both(case)
     result = case.file_read({"operation": "reobserve"}, source=source)
     assert result.data["reobservation"]["complete"] is True
-    payload = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
+    payload = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     descriptors = workspace.observation_sources(payload)
     assert {(item["operation"], item["max_items"], item["max_depth"], item["query"]) for item in descriptors} == {
         ("tree", 7, 2, ""), ("search", 9, 1, "Episode"),
@@ -69,16 +69,16 @@ def test_merged_reobservation_does_not_depend_on_expiring_intermediate_observati
 @pytest.mark.parametrize("changed", [False, True])
 def test_overlapping_observations_deduplicate_only_consistent_object_versions(case, changed):
     first = case.file_read()
-    old = workspace.load_directory_observation(first.data["observation_ref"], owner=case.context.owner)
+    old = workspace.load_directory_observation(first.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     if changed:
         case.provider.live_file("private-provider-movie").size += 1
     second = case.file_read()
-    new = workspace.load_directory_observation(second.data["observation_ref"], owner=case.context.owner)
+    new = workspace.load_directory_observation(second.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     if changed:
         with pytest.raises(workspace.GuangYaWorkspaceStale, match="同一对象发生变化"):
-            workspace.merge_directory_observations(case.provider, owner=case.context.owner, payloads=[old, new])
+            workspace.merge_directory_observations(case.provider, owner=case.context.owner, session_id=case.context.session_id, payloads=[old, new])
     else:
-        merged = workspace.merge_directory_observations(case.provider, owner=case.context.owner, payloads=[old, new])
+        merged = workspace.merge_directory_observations(case.provider, owner=case.context.owner, session_id=case.context.session_id, payloads=[old, new])
         assert len(merged["entries"]) == len(old["entries"])
         assert len({item["handle"] for item in merged["entries"]}) == len(merged["entries"])
     assert not case.provider.writes
@@ -86,7 +86,7 @@ def test_overlapping_observations_deduplicate_only_consistent_object_versions(ca
 
 def test_malformed_partial_roots_do_not_become_a_smaller_claimed_complete_source(case):
     read = case.file_read()
-    payload = workspace.load_directory_observation(read.data["observation_ref"], owner=case.context.owner)
+    payload = workspace.load_directory_observation(read.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     payload["roots"] = [deepcopy(FILMS), "invalid"]
     source = workspace.capture_observation_source(payload, [read.data["entries"][0]["object_ref"]])
     assert source["available"] is False and source["read"] is None
@@ -99,7 +99,7 @@ def test_same_basename_directories_and_files_keep_distinct_public_locations(case
              for root in (FILMS, SHOWS)]
     handles = [read.data["entries"][0]["object_ref"] for read in reads]
     payload = workspace.load_directory_observation_set(reads[-1].data["observation_ref"],
-        owner=case.context.owner, object_refs=handles)
+        owner=case.context.owner, session_id=case.context.session_id, object_refs=handles)
     source = actions.bind_observation_source(workspace.capture_observation_source(payload, handles), case.context)
     result = case.file_read({"operation": "reobserve"}, source=source)
     assert result.data["reobservation"]["complete"]
@@ -144,7 +144,7 @@ def test_selected_identity_survives_the_combined_observation_capacity_limit(case
     assert result.data["reobservation"]["complete"] is True  # 但原选中对象已单独核验。
     match = result.data["reobservation"]["items"][0]
     assert match["observed_by"] == "identity"
-    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert len(saved["entries"]) == 2000
     assert workspace.observation_entry_map(saved)[match["object_ref"]]["file_id"] == target.file_id
     assert_private(result)
@@ -165,7 +165,7 @@ def test_selected_scope_root_reobserves_after_original_snapshot_is_unusable(case
     frozen = deepcopy(source)
     old_path = case.invalidate(initial.data["observation_ref"], mode)
     with pytest.raises(workspace.GuangYaWorkspaceError):
-        workspace.load_directory_observation(initial.data["observation_ref"], owner=case.context.owner)
+        workspace.load_directory_observation(initial.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     case.provider.live_file(FILMS["file_id"]).name = "Shared-Renamed"
     case.provider.trace.clear()
 
@@ -179,7 +179,7 @@ def test_selected_scope_root_reobserves_after_original_snapshot_is_unusable(case
     assert result.data["scope_objects"][0]["object_name"] == "Shared-Renamed"
     assert result.data["total"] == 1 and all(item["kind"] == "video" for item in result.data["entries"])
     assert new_ref not in {item["object_ref"] for item in result.data["entries"]}
-    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert workspace.observation_entry_map(saved)[new_ref]["file_id"] == FILMS["file_id"]
     assert len([row for row in case.provider.trace if row.get("method") == "file_info"
                 and row.get("id") == FILMS["file_id"]]) == 1, "查询根不应遗漏后再走父链补查"
@@ -209,7 +209,7 @@ def test_selected_scope_roots_merge_and_reobserve_again_without_intermediate_sna
     assert {item["object_ref"] for item in result.data["reobservation"]["items"]} == set(new_refs)
     assert not set(new_refs) & {item["object_ref"] for item in result.data["entries"]}
     assert set(new_refs).isdisjoint(item["old_object_ref"] for item in selected)
-    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert {workspace.observation_entry_map(saved)[ref]["file_id"] for ref in new_refs} == expected_ids
     descriptors = workspace.observation_sources(saved)
     assert {(item["operation"], item["max_items"], item["max_depth"], item["query"]) for item in descriptors} == {
@@ -246,7 +246,7 @@ def test_replaced_scope_root_is_unknown_without_losing_the_other_merged_scope(ca
     assert [item["state"] for item in comparison["items"]] == ["inconclusive", "same_identity"]
     assert "object_ref" not in comparison["items"][0]
     assert len(result.data["scope_objects"]) == 1 and result.data["total"] == 1
-    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     surviving_ref = comparison["items"][1]["object_ref"]
     assert result.data["scope_objects"][0]["object_ref"] == surviving_ref
     assert workspace.observation_entry_map(saved)[surviving_ref]["file_id"] == SHOWS["file_id"]
@@ -300,23 +300,23 @@ def test_same_name_replacement_cannot_reobserve_or_reuse_selected_scope_ref(case
 @pytest.mark.parametrize("field", ["size", "etag", "updated_at"])
 def test_scope_root_version_conflict_is_rejected_even_when_children_are_unchanged(case, field):
     first = case.file_read({"operation": "list", "path": FILMS["path"], "kinds": ["video"]})
-    old = workspace.load_directory_observation(first.data["observation_ref"], owner=case.context.owner)
+    old = workspace.load_directory_observation(first.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     root = case.provider.live_file(FILMS["file_id"])
     setattr(root, field, "changed-scope-etag" if field == "etag" else getattr(root, field) + 1)
     second = case.file_read({"operation": "list", "path": FILMS["path"], "kinds": ["video"]})
-    new = workspace.load_directory_observation(second.data["observation_ref"], owner=case.context.owner)
+    new = workspace.load_directory_observation(second.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert old["entries"][0]["file_id"] == new["entries"][0]["file_id"]
     with pytest.raises(workspace.GuangYaWorkspaceStale, match="同一对象发生变化"):
-        workspace.merge_directory_observations(case.provider, owner=case.context.owner, payloads=[old, new])
+        workspace.merge_directory_observations(case.provider, owner=case.context.owner, session_id=case.context.session_id, payloads=[old, new])
     assert not case.provider.writes
 
 
 def test_overlapping_scope_root_and_child_entry_share_one_handle_and_one_comparison(case):
     first = case.file_read({"operation": "list", "path": "/Films", "kinds": ["directory"]})
     second = case.file_read({"operation": "list", "path": FILMS["path"], "kinds": ["video"]})
-    payloads = [workspace.load_directory_observation(read.data["observation_ref"], owner=case.context.owner)
+    payloads = [workspace.load_directory_observation(read.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
                 for read in (first, second)]
-    merged = workspace.merge_directory_observations(case.provider, owner=case.context.owner, payloads=payloads)
+    merged = workspace.merge_directory_observations(case.provider, owner=case.context.owner, session_id=case.context.session_id, payloads=payloads)
     scope = next(item for item in merged["roots"] if item["file_id"] == FILMS["file_id"])
     child = next(item for item in merged["entries"] if item["file_id"] == FILMS["file_id"])
     assert scope["handle"] == child["handle"]

@@ -174,7 +174,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert source["baseline"]["selected"][0]["file_id"] == "move"
             old_observation = source["baseline"]["observation_ref"]
             old_object = script.calls[1]["arguments"]["operations"][0]["object_ref"]
-            flow = domain_actions.fs_change._flow(OWNER)
+            flow = domain_actions.fs_change._flow(OWNER, SESSION_ID)
             assert flow is not None
             frozen = plans._read(flow.plan_id)
             assert frozen["operations"][0]["source"]["name"] == "Move.mp4"
@@ -182,7 +182,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             plans._atomic_write(frozen)
             # 改变离线 Provider 事实，不调用待验证写入口，不伪造失败回执。
             next(row for row in provider.directories["source"] if row.file_id == "move").name = "External.mp4"
-            assert workspace.load_directory_observation(old_observation, owner=OWNER)["expires_at_epoch"] > time.time()
+            assert workspace.load_directory_observation(old_observation, owner=OWNER, session_id=SESSION_ID)["expires_at_epoch"] > time.time()
             assert old.expires_at > time.time()
             pending = await pipeline.get_pending_plan(owner=OWNER, session_id=SESSION_ID)
             assert pending is not None and pending.plan_id == old.plan_id
@@ -219,7 +219,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert new.plan_id != old.plan_id and new.snapshot_fingerprint != old.snapshot_fingerprint
             assert new.metadata["reobservation_source"]["baseline"]["observation_ref"] == current["observation_ref"]
             assert new.metadata["reobservation_source"]["baseline"]["selected"][0]["file_id"] == "move"
-            new_flow = domain_actions.fs_change._flow(OWNER)
+            new_flow = domain_actions.fs_change._flow(OWNER, SESSION_ID)
             assert new_flow is not None and new_flow.plan_id != frozen["plan_id"]
             new_frozen = plans._read(new_flow.plan_id)
             assert new_frozen["status"] == "previewed"

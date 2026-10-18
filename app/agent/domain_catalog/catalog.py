@@ -80,6 +80,8 @@ class DomainActions:
         self.rename.clear_session(owner=owner, session_id=session_id)
         self.directory_scrape.clear_session(owner=owner, session_id=session_id)
         self.cleanup.clear_session(owner=owner, session_id=session_id)
+        self.fs_change.clear_session(owner=owner, session_id=session_id)
+        self.workspace.clear_session(owner=owner, session_id=session_id)
 
 
 def build_tool_specs(

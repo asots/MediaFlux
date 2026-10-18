@@ -322,14 +322,16 @@ def guangya_share_create_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _workspace_selection(
-    arguments: dict[str, Any], *, owner: str, verify_live: bool, workspace_actions: GuangyaWorkspaceActions
+    arguments: dict[str, Any], *, owner: str, session_id: str, verify_live: bool, workspace_actions: GuangyaWorkspaceActions
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    if not owner.strip() or not session_id.strip():
+        raise AgentToolError("光鸭分享需要已登录会话", code="precondition_failed")
     observation_ref = str(arguments.get("observation_ref") or "").strip().upper()
     if not observation_ref:
-        observation_ref = workspace_actions.latest_guangya_observation_ref(owner)
+        observation_ref = workspace_actions.latest_guangya_observation_ref(owner, session_id)
     if not observation_ref:
         raise AgentToolError("请先读取要分享的光鸭目录", code="precondition_failed")
-    observation = load_directory_observation(observation_ref, owner=owner)
+    observation = load_directory_observation(observation_ref, owner=owner, session_id=session_id)
     entries = observation_entry_map(observation)
     selected: list[dict[str, Any]] = []
     for ref in arguments.get("object_refs") or ():
@@ -417,10 +419,10 @@ def _share_reobservation_source(
 
 
 def _create_snapshot(
-    arguments: dict[str, Any], *, owner: str, verify_live: bool, workspace_actions: GuangyaWorkspaceActions
+    arguments: dict[str, Any], *, owner: str, session_id: str, verify_live: bool, workspace_actions: GuangyaWorkspaceActions
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     observation, selected, identity = _workspace_selection(
-        arguments, owner=owner, verify_live=verify_live, workspace_actions=workspace_actions
+        arguments, owner=owner, session_id=session_id, verify_live=verify_live, workspace_actions=workspace_actions
     )
     title = str(arguments.get("title") or "").strip()
     if not title:
@@ -485,7 +487,7 @@ def prepare_create_guangya_share(
 ) -> tuple[ToolResult, str]:
     try:
         safe, fingerprint, selected, observation, identity = _create_snapshot(
-            arguments, owner=context.owner, verify_live=True, workspace_actions=workspace_actions
+            arguments, owner=context.owner, session_id=context.session_id, verify_live=True, workspace_actions=workspace_actions
         )
         note = reobserved_selection_note(context, kind="guangya_files", generation=identity["credential_generation"],
                                          selected=selected, arguments=arguments)
@@ -570,7 +572,7 @@ def execute_create_guangya_share(
 ) -> ToolResult:
     try:
         safe, fingerprint, selected, _observation, _identity = _create_snapshot(
-            arguments, owner=context.owner, verify_live=True, workspace_actions=workspace_actions
+            arguments, owner=context.owner, session_id=context.session_id, verify_live=True, workspace_actions=workspace_actions
         )
         if fingerprint != (expected_context or ""):
             raise AgentToolError("光鸭分享计划已变化，请重新预检", code="confirmation_stale")

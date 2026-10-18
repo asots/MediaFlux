@@ -141,12 +141,12 @@ def invalidate(case, observation_ref, mode):
         assert not path.exists()
     else:
         # 只令真实签名 OBS 过期；不改 plan、来源、预检或执行回执。
-        payload = workspace.load_directory_observation(observation_ref, owner=case.context.owner)
+        payload = workspace.load_directory_observation(observation_ref, owner=case.context.owner, session_id=case.context.session_id)
         payload["expires_at_epoch"] = time.time() - 1
         workspace._atomic_write(payload)
         assert path.exists()
     with pytest.raises(workspace.GuangYaWorkspaceError):
-        workspace.load_directory_observation(observation_ref, owner=case.context.owner)
+        workspace.load_directory_observation(observation_ref, owner=case.context.owner, session_id=case.context.session_id)
 
 
 def frozen_plan(case):
@@ -185,7 +185,8 @@ def test_single_directory_plan_reobserves_after_original_obs_is_unusable(case, o
     previous = restore_confirmation(case) if restored_at == "before_invalidation" else None
     invalidate(case, observed.data["observation_ref"], mode)
     # 丢弃进程内缓存，必须由真实 SQLite flow + 签名冻结计划恢复，不能重载旧 OBS。
-    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
+    case.domain_actions.fs_change = changes.GuangyaFsChangeActions(
+        SQLiteAgentSessionContextRepository(), workspace=case.domain_actions.workspace)
     stored = restore_confirmation(case)
     assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
     assert stored.metadata["reobservation_source"] == source
@@ -203,7 +204,7 @@ def test_single_directory_plan_reobserves_after_original_obs_is_unusable(case, o
     item = mapping["items"][0]
     assert item["previous_ref"] == old_ref and item["object_ref"] != old_ref
     assert item["state"] == "same_identity" and "name" in item["changed_fields"]
-    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert workspace.observation_entry_map(saved)[item["object_ref"]]["file_id"] == NESTED
     assert (saved["operation"], saved["query"], saved["kinds"], saved["max_depth"], saved["max_items"]) == (
         "list", "", [], 0, 17)
@@ -240,7 +241,8 @@ def test_mixed_objects_restore_each_observation_query_without_primary_scope_or_f
     assert {item["source"]["file_id"] for item in plan["operations"]} == {MOVIE, SUBTITLE}
     for observed in observations:
         invalidate(case, observed.data["observation_ref"], mode)
-    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
+    case.domain_actions.fs_change = changes.GuangyaFsChangeActions(
+        SQLiteAgentSessionContextRepository(), workspace=case.domain_actions.workspace)
     stored = restore_confirmation(case)
     assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
     assert stored.metadata["reobservation_source"] == source
@@ -267,7 +269,7 @@ def test_mixed_objects_restore_each_observation_query_without_primary_scope_or_f
     assert mapping["basis"] == "provider_identity" and mapping["complete"] is True
     assert {item["previous_ref"] for item in mapping["items"]} == set(refs)
     assert len(mapping["items"]) == 2 and all(item["state"] == "same_identity" for item in mapping["items"])
-    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     entries = workspace.observation_entry_map(saved)
     assert {entries[item["object_ref"]]["file_id"] for item in mapping["items"]} == {MOVIE, SUBTITLE}
     assert {item["object_name"] for item in renewed.data["entries"]} == {"Movie.mkv", "Episode.srt"}
@@ -294,7 +296,8 @@ def test_create_directory_only_retains_original_diagnostic_scope_without_object_
     plan = frozen_plan(case)
     assert all("object_ref" not in item for item in plan["operations"])
     invalidate(case, observed.data["observation_ref"], mode)
-    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
+    case.domain_actions.fs_change = changes.GuangyaFsChangeActions(
+        SQLiteAgentSessionContextRepository(), workspace=case.domain_actions.workspace)
     stored = restore_confirmation(case)
     assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
     assert stored.metadata["reobservation_source"] == source
@@ -302,7 +305,7 @@ def test_create_directory_only_retains_original_diagnostic_scope_without_object_
     frozen = deepcopy(source)
     case.provider.trace.clear()
     renewed = read(case, {"operation": "reobserve"}, source=source)
-    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert [{k: root[k] for k in FILMS} for root in saved["roots"]] == [FILMS]
     assert (saved["operation"], saved["query"], saved["kinds"], saved["max_depth"], saved["max_items"]) == (
         "search", "Movie", ["video"], 0, 7)
@@ -414,7 +417,7 @@ def test_missing_one_root_retains_other_observation_but_reports_failed_selection
     items = {item["previous_ref"]: item for item in comparison["items"]}
     assert items[refs[0]]["state"] == "same_identity" and items[refs[0]]["object_ref"] != refs[0]
     assert items[refs[1]]["state"] == "inconclusive" and "object_ref" not in items[refs[1]]
-    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner)
+    saved = workspace.load_directory_observation(renewed.data["observation_ref"], owner=case.context.owner, session_id=case.context.session_id)
     assert [{k: root[k] for k in FILMS} for root in saved["roots"]] == [FILMS]
     scanned = [row["id"] for row in case.provider.trace if row["method"] == "list_dir"]
     assert set(scanned) == {"0", FILMS["parent_id"], FILMS["file_id"]}
@@ -435,14 +438,13 @@ def test_hot_to_real_sqlite_cold_flow_preserves_confirmation_fingerprint_counts_
     plan = frozen_plan(case)
     assert fresh_prepared.data["observation_note"]
     # 单次准备已保存热 flow、SQLite flow 和确认卡；恢复不再调用 prepare。
-    hot = case.domain_actions.fs_change._flows.get(case.context.owner)
+    hot = case.domain_actions.fs_change._flow(case.context.owner, case.context.session_id)
     hot_card = case.confirmation_plan
     assert hot is not None
     hot_fingerprint = changes._confirmation_fingerprint(hot, plan)
     case.domain_actions.fs_change = changes.GuangyaFsChangeActions(
         SQLiteAgentSessionContextRepository(), workspace=case.domain_actions.workspace)
-    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
-    cold = case.domain_actions.fs_change._flow(case.context.owner)
+    cold = case.domain_actions.fs_change._flow(case.context.owner, case.context.session_id)
     cold_card = restore_confirmation(case)
     assert cold is not None
     cold_fingerprint = changes._confirmation_fingerprint(cold, plan)
@@ -474,7 +476,7 @@ def test_credentials_changed_before_prepare_cannot_issue_a_source_from_old_obser
     with pytest.raises(AgentToolError) as raised:
         case.domain_actions.fs_change.prepare_guangya_fs_change_confirmation(arguments, case.context)
     assert raised.value.code == "confirmation_stale"
-    assert case.domain_actions.fs_change._flow(case.context.owner) is None
+    assert case.domain_actions.fs_change._flow(case.context.owner, case.context.session_id) is None
     assert not list((case.root / "agent-guangya-fs-change").glob("*.json"))
 
 
@@ -606,7 +608,7 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
     assert comparison["basis"] == "provider_identity" and len(comparison["items"]) == 1
     item = comparison["items"][0]
     assert item["previous_ref"] == current.old_ref
-    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=current.context.owner)
+    saved = workspace.load_directory_observation(result.data["observation_ref"], owner=current.context.owner, session_id=current.context.session_id)
     entries = workspace.observation_entry_map(saved)
     selected = None
     if change in {"renamed", "deeper_inside"}:
@@ -652,7 +654,8 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
             "op": "rename", "object_ref": item["object_ref"], "new_name": "Planned.mkv"}], source=current.source)
         frozen_source = deepcopy(fresh_source)
         invalidate(current, result.data["observation_ref"], "deleted")
-        current.domain_actions.fs_change.clear_guangya_fs_change_context(owner=current.context.owner)
+        current.domain_actions.fs_change = changes.GuangyaFsChangeActions(
+            SQLiteAgentSessionContextRepository(), workspace=current.domain_actions.workspace)
         cold_card = restore_confirmation(current)
         assert cold_card.preview == fresh_prepared.to_dict()
         cold_source = cold_card.metadata["reobservation_source"]
@@ -669,7 +672,7 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
         assert continued_item["object_ref"] != item["object_ref"]
         assert continued_item["state"] == "same_identity" and continued_item["observed_by"] == "identity"
         continued_saved = workspace.load_directory_observation(
-            continued.data["observation_ref"], owner=current.context.owner)
+            continued.data["observation_ref"], owner=current.context.owner, session_id=current.context.session_id)
         continued_entries = workspace.observation_entry_map(continued_saved)
         assert {entry["file_id"] for entry in continued_saved["entries"]} == {MOVIE}
         assert {entry["file_id"] for entry in continued_entries.values()} == {MOVIE, FILMS["file_id"]}

@@ -65,7 +65,7 @@ def copy_queue(monkeypatch, tmp_path):
 
 def _enqueue_plan(client, operation="copy"):
     observation = guangya_workspace.create_directory_observation(
-        client, owner=_OWNER, path="/", recursive=True,
+        client, owner=_OWNER, session_id="session", path="/", recursive=True,
     )
     refs = {entry["file_id"]: entry["handle"] for entry in observation["entries"]}
     operations = (

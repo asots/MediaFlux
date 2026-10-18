@@ -315,7 +315,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(len(fingerprint), 64)
         self.assertEqual(len(list(self.plan_dir.glob("*.json"))), 1)
 
-        flow = self._domain_actions.fs_change._flow("owner")
+        flow = self._domain_actions.fs_change._flow("owner", "session")
         assert (flow) is not None
         plan = guangya_fs_change.load_fs_change_plan(
             flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint
@@ -346,7 +346,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(len(fingerprint), 64)
         self.assertEqual(len(list(self.plan_dir.glob("*.json"))), 1)
 
-        flow = self._domain_actions.fs_change._flow("owner")
+        flow = self._domain_actions.fs_change._flow("owner", "session")
         assert (flow) is not None
         plan = guangya_fs_change.load_fs_change_plan(
             flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint
@@ -361,7 +361,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         client = EpisodeNamingClient(episodes_per_group=101)
         payload = guangya_workspace.create_directory_observation(
             cast(GuangYaClient, client),
-            owner="owner",
+            owner="owner", session_id="session",
             path="/狐妖小红娘",
             recursive=True,
             max_items=500,
@@ -445,7 +445,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
                                      "source_episode_end": 1, "target_season": 2, "expected_count": 1}]}
             prepared = await pipeline.execute("guangya.episode_naming.plan", arguments, context=context)
             assert (prepared.effect_plan) is not None
-            flow = self._domain_actions.fs_change._flow("owner")
+            flow = self._domain_actions.fs_change._flow("owner", "session")
             assert flow is not None
             plan = guangya_fs_change.load_fs_change_plan(flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint)
             self.assertEqual({op["source"]["file_id"] for op in plan["operations"]}, {"b-1"})
@@ -465,7 +465,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         client = EpisodeNamingClient(episodes_per_group=3)
         payload = guangya_workspace.create_directory_observation(
             cast(GuangYaClient, client),
-            owner="owner",
+            owner="owner", session_id="session",
             path="/狐妖小红娘",
             recursive=True,
             max_items=100,
@@ -894,7 +894,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(mapping["selected_files"], 6)
         self.assertEqual(mapping["included_extra_count"], 0)
         self.assertEqual(mapping["groups"][0]["excluded_extra_count"], 1)
-        flow = self._domain_actions.fs_change._flow("owner")
+        flow = self._domain_actions.fs_change._flow("owner", "session")
         assert flow is not None
         plan = guangya_fs_change.load_fs_change_plan(flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint)
         self.assertEqual({op["source"]["file_id"] for op in plan["operations"]}, {f"{prefix}-{i}" for prefix in ("a", "b") for i in range(1, 4)})

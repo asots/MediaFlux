@@ -101,6 +101,13 @@ def valid_object_handle(value: object) -> bool:
     return bool(_SAFE_HANDLE.fullmatch(str(value or "").strip().upper()))
 
 
+def workspace_session_scope(owner: str, session_id: str) -> str:
+    owner_key, session_key = owner.strip(), session_id.strip()
+    if not owner_key or not session_key:
+        raise GuangYaWorkspaceError("光鸭观察需要已登录会话")
+    return hashlib.sha256(json.dumps([owner_key, session_key]).encode()).hexdigest()
+
+
 def _canonical(payload: dict[str, Any]) -> bytes:
     return json.dumps(
         {key: value for key, value in payload.items() if key != "auth"},
@@ -185,12 +192,9 @@ def discard_observation(value: object) -> None:
         return
 
 
-def discard_owner_observations(owner: str) -> int:
-    """删除指定 Agent owner 的全部短期观察，阻止旧引用在 reset 后复用。"""
-    owner_key = (owner or "").strip()
-    if not owner_key:
-        return 0
-    owner_digest = organize_operation_owner_digest(owner_key)
+def discard_session_observations(*, owner: str, session_id: str) -> int:
+    """删除当前会话的全部短期观察，保留同用户其它会话的快照。"""
+    scope = workspace_session_scope(owner, session_id)
     directory = _directory()
     if not directory.exists() or directory.is_symlink():
         return 0
@@ -201,7 +205,7 @@ def discard_owner_observations(owner: str) -> int:
                 continue
             payload = _read(path.stem)
             if hmac.compare_digest(
-                str(payload.get("owner_digest") or ""), owner_digest
+                str(payload.get("session_scope") or ""), scope
             ):
                 path.unlink()
                 removed += 1
@@ -456,6 +460,7 @@ def _store_observation(
     client: GuangYaClient,
     *,
     owner: str,
+    session_id: str,
     scope_path: str,
     scope_name: str,
     roots: Sequence[dict[str, Any]],
@@ -491,6 +496,7 @@ def _store_observation(
         "version": _OBSERVATION_VERSION,
         "plan_id": plan_id,
         "owner_digest": organize_operation_owner_digest(owner),
+        "session_scope": workspace_session_scope(owner, session_id),
         "credential_generation": client.credential_generation,
         "created_at": _now_iso(),
         "created_at_epoch": current,
@@ -540,6 +546,7 @@ def create_multi_directory_observation(
     client: GuangYaClient,
     *,
     owner: str,
+    session_id: str,
     paths: Sequence[str],
     recursive: bool = False,
     max_items: int = 500,
@@ -549,6 +556,7 @@ def create_multi_directory_observation(
     operation: str = "",
     expected_roots: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    workspace_session_scope(owner, session_id)
     normalized_paths = tuple(
         dict.fromkeys(_normalize_path(path, allow_root=True) for path in paths)
     )
@@ -661,6 +669,7 @@ def create_multi_directory_observation(
     return _store_observation(
         client,
         owner=owner,
+        session_id=session_id,
         scope_path=normalized_paths[0] if len(normalized_paths) == 1 else "/",
         scope_name=(
             scope_names[0] if len(scope_names) == 1 else f"{len(scope_names)} 个目录"
@@ -684,6 +693,7 @@ def create_directory_observation(
     client: GuangYaClient,
     *,
     owner: str,
+    session_id: str,
     path: str,
     recursive: bool = False,
     max_items: int = 500,
@@ -696,6 +706,7 @@ def create_directory_observation(
     return create_multi_directory_observation(
         client,
         owner=owner,
+        session_id=session_id,
         paths=(path,),
         recursive=recursive,
         max_items=max_items,
@@ -711,10 +722,12 @@ def create_path_observation(
     client: GuangYaClient,
     *,
     owner: str,
+    session_id: str,
     path: str,
     expected_roots: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """观察单个精确对象；根目录不会被包装成可写对象引用。"""
+    workspace_session_scope(owner, session_id)
     target_path = _normalize_path(path)
     target, parent_path = _resolve_path(client, target_path)
     if expected_roots is not None:
@@ -736,6 +749,7 @@ def create_path_observation(
     return _store_observation(
         client,
         owner=owner,
+        session_id=session_id,
         scope_path=target_path,
         scope_name=target.name,
         roots=[root],
@@ -755,13 +769,15 @@ def load_directory_observation(
     value: object,
     *,
     owner: str,
+    session_id: str,
     require_fresh: bool = True,
 ) -> dict[str, Any]:
     plan_id = observation_plan_id(value)
     payload = _read(plan_id)
-    if not hmac.compare_digest(
-        str(payload.get("owner_digest") or ""), organize_operation_owner_digest(owner)
-    ):
+    if (not hmac.compare_digest(
+            str(payload.get("owner_digest") or ""), organize_operation_owner_digest(owner))
+            or not hmac.compare_digest(
+                str(payload.get("session_scope") or ""), workspace_session_scope(owner, session_id))):
         raise GuangYaWorkspaceError("光鸭观察快照不属于当前会话")
     if require_fresh and float(payload.get("expires_at_epoch") or 0) <= time.time():
         discard_observation(plan_id)
@@ -773,10 +789,11 @@ def load_directory_observation_set(
     value: object,
     *,
     owner: str,
+    session_id: str,
     object_refs: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """加载主快照，并按 owner 合并近期快照中实际需要的不透明对象引用。"""
-    primary = load_directory_observation(value, owner=owner)
+    """加载主快照，仅合并当前会话近期快照中实际需要的不透明对象引用。"""
+    primary = load_directory_observation(value, owner=owner, session_id=session_id)
     required = {
         (item or "").strip().upper()
         for item in object_refs
@@ -811,7 +828,7 @@ def load_directory_observation_set(
     sources = {item["observation_ref"]: item for item in observation_sources(primary)}
     for _modified_at, candidate_ref in candidates:
         try:
-            candidate = load_directory_observation(candidate_ref, owner=owner)
+            candidate = load_directory_observation(candidate_ref, owner=owner, session_id=session_id)
         except GuangYaWorkspaceError:
             continue
         if candidate.get("credential_generation") != primary_generation:
@@ -876,12 +893,18 @@ def locate_observed_object(client: GuangYaClient, expected: dict[str, Any], root
     return None
 
 
-def merge_directory_observations(client: GuangYaClient, *, owner: str,
+def merge_directory_observations(client: GuangYaClient, *, owner: str, session_id: str,
                                  payloads: Sequence[dict[str, Any]], force_new: bool = False,
                                  preferred_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
     """新查询结果合并成自包含的签名快照，不依赖中间 OBS 的剩余 TTL。"""
     if not payloads:
         raise GuangYaWorkspaceStale("没有成功重新读取的观察")
+    scope = workspace_session_scope(owner, session_id)
+    for payload in payloads:
+        if (payload.get("owner_digest") != organize_operation_owner_digest(owner)
+                or payload.get("session_scope") != scope
+                or payload.get("credential_generation") != client.credential_generation):
+            raise GuangYaWorkspaceStale("合并观察的会话或账号已变化")
     if len(payloads) == 1 and not force_new:
         return payloads[0]
     entries = {}
@@ -890,9 +913,6 @@ def merge_directory_observations(client: GuangYaClient, *, owner: str,
     sources = {}
     scope_names = [f"来源 {index} · {payload.get('scope_name') or '当前目录'}" for index, payload in enumerate(payloads, 1)]
     for index, payload in enumerate(payloads):
-        if (payload.get("owner_digest") != organize_operation_owner_digest(owner)
-                or payload.get("credential_generation") != client.credential_generation):
-            raise GuangYaWorkspaceStale("合并观察的会话或账号已变化")
         contents = payload.get("entries") or []
         for position, item in enumerate([*contents, *(root for root in payload.get("roots") or () if root.get("media_kind") == "directory")]):
             key = (str(item["file_id"]), str(item.get("parent_id") or "0"), bool(item["is_dir"]))
@@ -911,7 +931,7 @@ def merge_directory_observations(client: GuangYaClient, *, owner: str,
                 **root, "relative_parent": scope_names[index] + " › " + str(root.get("relative_parent") or "查询目录本身")}
 
         sources.update({item["observation_ref"]: item for item in observation_sources(payload)})
-    return _store_observation(client, owner=owner, scope_path="/", scope_name="重新观察的范围",
+    return _store_observation(client, owner=owner, session_id=session_id, scope_path="/", scope_name="重新观察的范围",
         scope_names=scope_names,
         roots=list(roots.values()), max_items=_MAX_SCANNED_ITEMS, operation="reobserve", recursive=False, query="",
         truncated=len(entries) > _MAX_SCANNED_ITEMS or any(payload.get("truncated") for payload in payloads),

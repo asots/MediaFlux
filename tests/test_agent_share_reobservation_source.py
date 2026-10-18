@@ -58,6 +58,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
         self.observation = {
             "version": 1, "plan_id": "a" * 32,
             "owner_digest": workspace.organize_operation_owner_digest(self.context.owner),
+            "session_scope": workspace.workspace_session_scope(self.context.owner, self.context.session_id),
             "credential_generation": 7, "created_at": "2026-10-12T00:00:00+08:00",
             "created_at_epoch": now, "expires_at_epoch": now + 600,
             "scope_path": "/", "scope_name": "2 个目录", "scope_names": ["One", "Empty"],
@@ -181,7 +182,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
         args["observation_ref"] = ""
         with patch.object(self._domain_actions.workspace, "latest_guangya_observation_ref", return_value=self.ref) as latest:
             preview, _ = actions.prepare_create_guangya_share(args, self.context, workspace_actions=self._domain_actions.workspace)
-        latest.assert_called_once_with(self.context.owner)
+        latest.assert_called_once_with(self.context.owner, self.context.session_id)
         self.assertEqual(preview.effect_metadata["reobservation_source"]["baseline"]["observation_ref"], self.ref)
 
     def test_revoke_records_stable_share_id_and_original_page_index_not_whole_list(self):
@@ -251,6 +252,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
                     turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=progress)
                 reference = None
                 if operation == "create":
+                    workspace._atomic_write({**self.observation, "session_scope": workspace.workspace_session_scope(self.context.owner, session)})
                     args = {"observation_ref": self.ref, "object_refs": [self.handles[1]], "expires_days": 1, "access_code": "Ab12Cd34"}
                 else:
                     reference = await state_store.put(owner=self.context.owner, session_id=session, kind="guangya_shares", value=self.collection)

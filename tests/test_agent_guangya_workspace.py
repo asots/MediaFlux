@@ -130,7 +130,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def _create_observation(self, owner="owner"):
         payload = guangya_workspace.create_directory_observation(
             cast(GuangYaClient, FakeWorkspaceClient()),
-            owner=owner,
+            owner=owner, session_id="session",
             path="/a",
             recursive=False,
             max_items=10,
@@ -165,7 +165,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
         root = result.model_data["scope_objects"][0]
         self.assertEqual((root["name"], root["kind"]), ("a", "directory"))
         self.assertNotIn(root["ref"], [item["ref"] for item in result.model_data["entries"]])
-        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner", session_id="session")
         selected = guangya_workspace.observation_entry_map(payload)[root["ref"]]
         self.assertEqual((selected["file_id"], selected["parent_id"], selected["parent_path"]), ("a", "0", "/"))
         source = guangya_workspace.capture_observation_source(payload, [root["ref"]])
@@ -196,14 +196,14 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def test_account_root_and_legacy_roots_do_not_gain_writable_handles(self):
         result = self._query(FakeWorkspaceClient(), operation="list", path="/")
         self.assertEqual(result.data["scope_objects"], [])
-        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner", session_id="session")
         self.assertNotIn("0", [entry["file_id"] for entry in guangya_workspace.observation_entry_map(payload).values()])
         # 已保存的旧快照只有来源身份，不推测或拼凑可写对象。
         result = self._query(FakeWorkspaceClient(), operation="list")
-        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner", session_id="session")
         payload["roots"] = [{key: root[key] for key in ("file_id", "parent_id", "path", "is_dir")} for root in payload["roots"]]
         guangya_workspace._atomic_write(payload)
-        old = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        old = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner", session_id="session")
         self.assertEqual(guangya_workspace.observation_page(old)["scope_objects"], [])
         self.assertEqual(len(guangya_workspace.observation_entry_map(old)), len(old["entries"]))
 
@@ -218,7 +218,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
         self.assertEqual([root["name"] for root in roots], ["a", "spam.example.com"])
         child = next(entry for entry in result.model_data["entries"] if entry["name"] == "spam.example.com")
         self.assertEqual(roots[1]["ref"], child["ref"])
-        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner")
+        payload = guangya_workspace.load_directory_observation(result.data["observation_ref"], owner="owner", session_id="session")
         self.assertEqual(len(guangya_workspace.observation_entry_map(payload)), 5)
 
     def test_default_page_size_supports_large_model_observations(self):
@@ -331,7 +331,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def test_observation_can_continue_by_ref_and_is_owner_bound(self):
         first = self._query(FakeWorkspaceClient(), page_size=2)
         self.assertEqual(
-            self._domain_actions.workspace.latest_guangya_observation_cursor("owner"),
+            self._domain_actions.workspace.latest_guangya_observation_cursor("owner", "session"),
             {
                 "observation_ref": first.data["observation_ref"],
                 "page": 1,
@@ -352,12 +352,12 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
         self.assertEqual(second.data["page"], 2)
         self.assertEqual(len(second.data["entries"]), 2)
         self.assertEqual(
-            self._domain_actions.workspace.latest_guangya_observation_cursor("owner")["has_more"],
+            self._domain_actions.workspace.latest_guangya_observation_cursor("owner", "session")["has_more"],
             False,
         )
         with self.assertRaisesRegex(Exception, "不属于当前会话"):
             guangya_workspace.load_directory_observation(
-                first.data["observation_ref"], owner="other-owner"
+                first.data["observation_ref"], owner="other-owner", session_id="session"
             )
 
     def test_expired_observation_is_removed_by_maintenance(self):
@@ -374,7 +374,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             self.assertEqual(result["removed"], 0)
             for ref, path in observations:
                 payload = guangya_workspace.load_directory_observation(
-                    ref, owner="owner"
+                    ref, owner="owner", session_id="session"
                 )
                 self.assertEqual(payload["expires_at_epoch"], expiry)
                 self.assertEqual(path.read_bytes(), stored[path])
@@ -384,7 +384,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 guangya_workspace.GuangYaWorkspaceStale, "已过期"
             ):
-                guangya_workspace.load_directory_observation(ref, owner="owner")
+                guangya_workspace.load_directory_observation(ref, owner="owner", session_id="session")
             self.assertFalse(path.exists())
             # 保留标记只豁免容量淘汰，不能延长 TTL。
             result = guangya_workspace.maintain_workspace_observations(
@@ -425,14 +425,14 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 },
             )
             with self.assertRaises(guangya_workspace.GuangYaWorkspaceError):
-                guangya_workspace.load_directory_observation(old_a_ref, owner="owner-a")
+                guangya_workspace.load_directory_observation(old_a_ref, owner="owner-a", session_id="session")
             # owner-b 的观察更老，但仅 owner-a 超出字节预算，不能牵连其它 owner。
             for ref, path, owner in (
                 (owner_b_ref, owner_b_path, "owner-b"),
                 (new_a_ref, new_a_path, "owner-a"),
             ):
                 self.assertEqual(
-                    guangya_workspace.load_directory_observation(ref, owner=owner)[
+                    guangya_workspace.load_directory_observation(ref, owner=owner, session_id="session")[
                         "plan_id"
                     ],
                     path.stem,
@@ -468,10 +468,10 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             owner, ref, path = observations[0]
             self.assertFalse(path.exists())
             with self.assertRaises(guangya_workspace.GuangYaWorkspaceError):
-                guangya_workspace.load_directory_observation(ref, owner=owner)
+                guangya_workspace.load_directory_observation(ref, owner=owner, session_id="session")
             for owner, ref, path in observations[1:]:
                 self.assertEqual(
-                    guangya_workspace.load_directory_observation(ref, owner=owner)[
+                    guangya_workspace.load_directory_observation(ref, owner=owner, session_id="session")[
                         "plan_id"
                     ],
                     path.stem,
@@ -498,7 +498,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 self.assertEqual(list(new_path.parent.glob("*.json")), [new_path])
                 self.assertEqual(
                     guangya_workspace.load_directory_observation(
-                        new_ref, owner="owner"
+                        new_ref, owner="owner", session_id="session"
                     )["plan_id"],
                     new_path.stem,
                 )
@@ -518,7 +518,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 guangya_workspace.GuangYaWorkspaceError, "校验失败"
             ):
                 guangya_workspace.load_directory_observation(
-                    tampered_ref, owner="owner"
+                    tampered_ref, owner="owner", session_id="session"
                 )
             result = guangya_workspace.maintain_workspace_observations(
                 preserve_plan_id=tampered_path.stem
@@ -529,7 +529,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             self.assertFalse(tampered_path.exists())
             self.assertEqual(valid_path.read_bytes(), original)
             self.assertEqual(
-                guangya_workspace.load_directory_observation(valid_ref, owner="owner")[
+                guangya_workspace.load_directory_observation(valid_ref, owner="owner", session_id="session")[
                     "plan_id"
                 ],
                 valid_path.stem,
@@ -538,7 +538,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def test_stale_observation_save_discards_only_new_snapshot(self):
         client = FakeWorkspaceClient()
         previous = guangya_workspace.create_directory_observation(
-            cast(GuangYaClient, client), owner="owner", path="/a", recursive=False, max_items=10
+            cast(GuangYaClient, client), owner="owner", session_id="session", path="/a", recursive=False, max_items=10
         )
         previous_ref = guangya_workspace.observation_ref(previous["plan_id"])
 
@@ -608,7 +608,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             )
 
         preserved = guangya_workspace.load_directory_observation(
-            first.data["observation_ref"], owner="owner"
+            first.data["observation_ref"], owner="owner", session_id="session"
         )
         self.assertEqual(
             preserved["plan_id"], first.data["observation_ref"][3:].lower()

@@ -52,7 +52,7 @@ def guangya_episode_naming_inspect_arguments(arguments: dict[str, Any]) -> dict[
     return {"target_root": _path(arguments.get("target_root"), field="target_root")}
 
 
-def _fresh_observation(*, target_root: str, owner: str) -> dict[str, Any]:
+def _fresh_observation(*, target_root: str, owner: str, session_id: str) -> dict[str, Any]:
     client: GuangYaClient | None = None
     try:
         client = GuangYaClient()
@@ -61,6 +61,7 @@ def _fresh_observation(*, target_root: str, owner: str) -> dict[str, Any]:
         return create_directory_observation(
             client,
             owner=owner,
+            session_id=session_id,
             path=target_root,
             recursive=True,
             max_items=2000,
@@ -80,10 +81,10 @@ def inspect_guangya_episode_naming(
     arguments: dict[str, Any], context: ToolContext
 ) -> ToolResult:
     """一次扫描完整作品目录，只返回供季集映射使用的紧凑盘点。"""
-    if not context.owner:
+    if not context.owner.strip() or not context.session_id.strip():
         raise AgentToolError("光鸭剧集命名盘点需要已登录会话", code="precondition_failed")
     observation = _fresh_observation(
-        target_root=str(arguments["target_root"]), owner=context.owner
+        target_root=str(arguments["target_root"]), owner=context.owner, session_id=context.session_id
     )
     try:
         data = summarize_episode_naming_observation(
@@ -215,7 +216,7 @@ def guangya_episode_naming_plan_arguments(arguments: dict[str, Any]) -> dict[str
 
 
 def _compile(arguments: dict[str, Any], context: ToolContext) -> tuple[dict[str, Any], dict[str, Any]]:
-    if not context.owner:
+    if not context.owner.strip() or not context.session_id.strip():
         raise AgentToolError("光鸭剧集命名需要已登录会话", code="precondition_failed")
     scope = arguments["episode_naming_scope"]
     target_root = str(scope["target_root"])
@@ -227,7 +228,7 @@ def _compile(arguments: dict[str, Any], context: ToolContext) -> tuple[dict[str,
         groups.append({**{key: value for key, value in requested.items() if key != "source_group"},
                        "source_path": scope["source_paths"][index - 1]})
     # 引用只绑定范围；写前仍刷新真实目录，冻结最新文件而非重放旧快照。
-    observation = _fresh_observation(target_root=target_root, owner=context.owner)
+    observation = _fresh_observation(target_root=target_root, owner=context.owner, session_id=context.session_id)
     try:
         compiled = compile_episode_naming_operations(
             observation,

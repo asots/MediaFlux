@@ -63,7 +63,7 @@ def ref(payload):
 
 
 def persisted(payload):
-    loaded = workspace.load_directory_observation(ref(payload), owner=OWNER)
+    loaded = workspace.load_directory_observation(ref(payload), owner=OWNER, session_id="session")
     assert {key: value for key, value in loaded.items() if key != "auth"} == payload
     return loaded
 
@@ -91,7 +91,7 @@ def assert_public_unchanged(payload):
 
 @pytest.mark.parametrize("operation", ["list", "tree", "search"])
 def test_single_root_persists_resolved_identity_and_actual_query_limit(provider, operation):
-    payload = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared",
+    payload = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Films/Shared",
                 operation=operation, query="Movie" if operation == "search" else "", max_items=17, max_depth=2)
     loaded = persisted(payload)
     assert [{k: root[k] for k in FILMS} for root in loaded["roots"]] == [FILMS]
@@ -104,7 +104,7 @@ def test_single_root_persists_resolved_identity_and_actual_query_limit(provider,
 
 
 def test_same_basename_roots_and_recursive_entries_keep_distinct_origins(provider):
-    payload = workspace.create_multi_directory_observation(provider, owner=OWNER,
+    payload = workspace.create_multi_directory_observation(provider, owner=OWNER, session_id="session",
                 paths=["/Films/Shared", "/Shows/Shared", "/Films/Shared"], recursive=True, max_items=23)
     loaded = persisted(payload)
     assert loaded["scope_path"] == "/" and loaded["scope_names"] == ["目录 1 · Shared", "目录 2 · Shared"]
@@ -124,7 +124,7 @@ def test_same_basename_roots_and_recursive_entries_keep_distinct_origins(provide
     ("/Films/Shared", FILMS),
 ])
 def test_stat_uses_same_root_shape_and_one_item_limit(provider, path, expected):
-    loaded = persisted(workspace.create_path_observation(provider, owner=OWNER, path=path))
+    loaded = persisted(workspace.create_path_observation(provider, owner=OWNER, session_id="session", path=path))
     assert loaded["roots"] == [expected] and loaded["max_items"] == 1
     assert len(loaded["entries"]) == 1 and loaded["entries"][0]["source_root"] == expected
     assert loaded["operation"] == "stat" and loaded["recursive"] is False
@@ -133,28 +133,28 @@ def test_stat_uses_same_root_shape_and_one_item_limit(provider, path, expected):
 
 
 def test_explicit_filesystem_root_is_not_inferred_from_display_scope(provider):
-    payload = workspace.create_directory_observation(provider, owner=OWNER, path="/", max_items=9)
+    payload = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/", max_items=9)
     root = {"file_id": "0", "path": "/", "is_dir": True}
     assert persisted(payload)["roots"] == [root]
     assert all(entry["source_root"] == root for entry in payload["entries"])
     assert provider.calls == ["0"]
     assert_public_unchanged(payload)
     with pytest.raises(workspace.GuangYaWorkspaceError):
-        workspace.create_path_observation(provider, owner=OWNER, path="/")
+        workspace.create_path_observation(provider, owner=OWNER, session_id="session", path="/")
 
 
 @pytest.mark.parametrize("candidate_kind", ["directory", "stat"])
 def test_merge_preserves_each_entry_signed_source_not_primary_root(provider, candidate_kind):
-    primary = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared", max_items=1)
+    primary = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Films/Shared", max_items=1)
     if candidate_kind == "directory":
-        candidate = workspace.create_directory_observation(provider, owner=OWNER, path="/Shows/Shared", max_items=7)
+        candidate = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Shows/Shared", max_items=7)
     else:
-        candidate = workspace.create_path_observation(provider, owner=OWNER, path="/Shows/Shared/Episode.mkv")
+        candidate = workspace.create_path_observation(provider, owner=OWNER, session_id="session", path="/Shows/Shared/Episode.mkv")
     primary_bytes = workspace._plan_path(primary["plan_id"]).read_bytes()
     candidate_bytes = workspace._plan_path(candidate["plan_id"]).read_bytes()
     calls = list(provider.calls)
     wanted = candidate["entries"][0]
-    merged = workspace.load_directory_observation_set(ref(primary), owner=OWNER, object_refs=[wanted["handle"]])
+    merged = workspace.load_directory_observation_set(ref(primary), owner=OWNER, session_id="session", object_refs=[wanted["handle"]])
     entries = workspace.observation_entry_map(merged)
     assert len(merged["entries"]) == 2
     assert len(entries) == 3  # 两个内容对象 + 主观察的目录本身
@@ -172,7 +172,7 @@ def test_merge_preserves_each_entry_signed_source_not_primary_root(provider, can
 
 @pytest.mark.parametrize("field", ["roots", "max_items", "source_root"])
 def test_new_private_source_metadata_is_authenticated(provider, field):
-    payload = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared")
+    payload = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Films/Shared")
     assert [{k: root[k] for k in FILMS} for root in payload["roots"]] == [FILMS]
     path = workspace._plan_path(payload["plan_id"])
     tampered = json.loads(path.read_text())
@@ -184,23 +184,23 @@ def test_new_private_source_metadata_is_authenticated(provider, field):
         tampered["entries"][0]["source_root"] = SHOWS
     path.write_text(json.dumps(tampered))
     with pytest.raises(workspace.GuangYaWorkspaceError, match="校验失败"):
-        workspace.load_directory_observation(ref(payload), owner=OWNER)
+        workspace.load_directory_observation(ref(payload), owner=OWNER, session_id="session")
 
 
 @pytest.mark.parametrize("boundary", ["owner", "credential_generation", "expired"])
 def test_merge_does_not_bypass_existing_source_boundaries(provider, boundary):
-    primary = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared")
+    primary = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Films/Shared")
     owner = "other-owner" if boundary == "owner" else OWNER
     if boundary == "credential_generation":
         provider.credential_generation += 1
-    candidate = workspace.create_directory_observation(provider, owner=owner, path="/Shows/Shared")
+    candidate = workspace.create_directory_observation(provider, owner=owner, session_id="session", path="/Shows/Shared")
     if boundary == "expired":
         candidate["expires_at_epoch"] = candidate["created_at_epoch"] - 1
         workspace._atomic_write(candidate)
     if boundary == "owner":
         with pytest.raises(workspace.GuangYaWorkspaceError, match="不属于当前会话"):
-            workspace.load_directory_observation(ref(candidate), owner=OWNER)
-    merged = workspace.load_directory_observation_set(ref(primary), owner=OWNER,
+            workspace.load_directory_observation(ref(candidate), owner=OWNER, session_id="session")
+    merged = workspace.load_directory_observation_set(ref(primary), owner=OWNER, session_id="session",
                                                      object_refs=[candidate["entries"][0]["handle"]])
     assert merged["entries"] == primary["entries"]
     assert merged["expires_at_epoch"] == primary["expires_at_epoch"]
@@ -219,10 +219,10 @@ def make_legacy(payload):
 
 
 def test_legacy_multiroot_payload_remains_pageable_without_inferred_whole_disk_scope(provider):
-    original = workspace.create_multi_directory_observation(provider, owner=OWNER, paths=["/Films/Shared", "/Shows/Shared"])
+    original = workspace.create_multi_directory_observation(provider, owner=OWNER, session_id="session", paths=["/Films/Shared", "/Shows/Shared"])
     legacy = make_legacy(original)
     assert legacy["scope_path"] == "/"
-    loaded = workspace.load_directory_observation(ref(legacy), owner=OWNER)
+    loaded = workspace.load_directory_observation(ref(legacy), owner=OWNER, session_id="session")
     assert "roots" not in loaded and "max_items" not in loaded
     assert all("source_root" not in entry for entry in loaded["entries"])
     before = workspace._plan_path(legacy["plan_id"]).read_bytes()
@@ -239,14 +239,14 @@ def test_legacy_multiroot_payload_remains_pageable_without_inferred_whole_disk_s
 
 @pytest.mark.parametrize("legacy_primary", [False, True])
 def test_merge_with_legacy_keeps_missing_source_unknown(provider, legacy_primary):
-    primary = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared")
-    candidate = workspace.create_directory_observation(provider, owner=OWNER, path="/Shows/Shared")
+    primary = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Films/Shared")
+    candidate = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Shows/Shared")
     if legacy_primary:
         primary = make_legacy(primary)
     else:
         candidate = make_legacy(candidate)
     wanted = candidate["entries"][0]
-    merged = workspace.load_directory_observation_set(ref(primary), owner=OWNER, object_refs=[wanted["handle"]])
+    merged = workspace.load_directory_observation_set(ref(primary), owner=OWNER, session_id="session", object_refs=[wanted["handle"]])
     entries = workspace.observation_entry_map(merged)
     assert entries[wanted["handle"]] == wanted
     if legacy_primary:
@@ -265,7 +265,7 @@ def test_stored_max_items_matches_existing_clamp_and_scan_page_limits(provider, 
         GuangYaFile(f"private-provider-item-{index}", f"Movie-{index:04d}.mkv", False, parent_id=FILMS["file_id"])
         for index in range(2005)
     ]
-    payload = workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared", max_items=requested)
+    payload = workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Films/Shared", max_items=requested)
     loaded = persisted(payload)
     assert loaded["max_items"] == expected
     assert len(loaded["entries"]) == expected and loaded["truncated"] is True
@@ -278,7 +278,7 @@ def test_stored_max_items_matches_existing_clamp_and_scan_page_limits(provider, 
 
 @pytest.mark.parametrize("requested,expected,count", [(-3, 0, 2), (99, 12, 3)])
 def test_depth_clamp_keeps_recursive_entry_bound_to_original_root(provider, requested, expected, count):
-    loaded = persisted(workspace.create_directory_observation(provider, owner=OWNER, path="/Films/Shared",
+    loaded = persisted(workspace.create_directory_observation(provider, owner=OWNER, session_id="session", path="/Films/Shared",
                                                               recursive=True, max_depth=requested))
     assert loaded["max_depth"] == expected and loaded["truncated"] is False
     assert len(loaded["entries"]) == count

@@ -212,7 +212,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         if source_name:
             operation["object_ref"] = entries[source_name]["object_ref"]
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -285,7 +285,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
     def _recovery_plan(self, client, first=None):
         observation = guangya_workspace.create_directory_observation(
-            client, owner="owner", path="/source", recursive=True, max_items=100)
+            client, owner="owner", session_id="session", path="/source", recursive=True, max_items=100)
         refs = {item["file_id"]: item["handle"] for item in observation["entries"]}
         changes = [first or {"op": "rename", "object_ref": refs["rename"], "new_name": "A-done.mp4"},
                    {"op": "rename", "object_ref": refs["move"], "new_name": "B-done.mp4"}]
@@ -403,7 +403,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             with self.subTest(count=count):
                 client = FakeGatewayClient()
                 client.directories["source"] = [GuangYaFile(str(index), f"Old-{index}.mkv", False, parent_id="source", size=1, etag=str(index)) for index in range(count)]
-                obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=500)
+                obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", session_id="session", path="/source", recursive=True, max_items=500)
                 operations = [{"op": "rename", "object_ref": row["handle"], "new_name": f"Done-{row['file_id']}.mkv"} for row in obs["entries"]]
                 plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=obs, operations=operations, trigger_strm=False)
                 guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
@@ -650,7 +650,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         class WorkerExit(BaseException):
             pass
         client = FakeGatewayClient()
-        obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=100)
+        obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", session_id="session", path="/source", recursive=True, max_items=100)
         ref = next(item["handle"] for item in obs["entries"] if item["file_id"] == "move")
         plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=obs, trigger_strm=False,
             operations=[{"op": "create_directory", "parent_path": "/target", "name": "new"},
@@ -1069,7 +1069,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         observed = self._query(client, path="/", operation="tree", page_size=50)
         entries = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         operations = [
             {"op": "rename", "object_ref": entries["广告-ABC.mp4"], "new_name": "ABC.mp4"},
@@ -1351,7 +1351,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             if item["object_name"] == "广告-ABC.mp4"
         )
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
 
         plan = guangya_fs_change.build_fs_change_plan(
@@ -1379,7 +1379,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     client.directories["other"] = [GuangYaFile("incoming", "Shared.mp4", False, parent_id="other", size=123, etag="incoming")]
                     observed = self._query(client, operation="tree")
                     refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-                    observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                    observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                     first = {"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "Shared.mp4"}
                     if kind in {"rename", "rename_case"}:
                         second = {"op": "rename", "object_ref": refs["Move.mp4"], "new_name": "SHARED.MP4" if kind == "rename_case" else "Shared.mp4"}
@@ -1411,7 +1411,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         observed = self._query(client)
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
@@ -1438,7 +1438,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client.directories["other-target"] = []
         observed = self._query(client)
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
@@ -1476,7 +1476,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         observed = self._query(client)
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
@@ -1501,7 +1501,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         observed = self._query(client)
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         operations = [
             {"op": "batch_relocate", "items": [
@@ -1541,7 +1541,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         observed = self._query(client)
         reference = observed.data["entries"][0]["object_ref"]
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
@@ -1569,7 +1569,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 observed = self._query(client)
                 reference = next(item["object_ref"] for item in observed.data["entries"] if item["object_name"] == "Move.mp4")
                 observation = guangya_workspace.load_directory_observation(
-                    observed.data["observation_ref"], owner="owner"
+                    observed.data["observation_ref"], owner="owner", session_id="session"
                 )
                 plan = guangya_fs_change.build_fs_change_plan(
                     cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
@@ -1609,7 +1609,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         observed = self._query(client)
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
@@ -1632,7 +1632,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         observed = self._query(client)
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "重复名称"):
             guangya_fs_change.build_fs_change_plan(
@@ -1675,7 +1675,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             }
         )
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -1759,7 +1759,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             }), context)
         self.assertIn(f"改名 {count} 项", confirmation.summary)
         self.assertIn(f"移动 {count} 项", confirmation.summary)
-        flow_result = self._domain_actions.fs_change._flow("owner")
+        flow_result = self._domain_actions.fs_change._flow("owner", "session")
         assert flow_result is not None
         plan = guangya_fs_change._read(flow_result.plan_id)
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
@@ -1880,7 +1880,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         observed = self._query(client)
         target = next(item for item in observed.data["entries"] if item["object_name"] == "Move.mp4")
-        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[{"op": "relocate", "object_ref": target["object_ref"], "target_path": "/target", "new_name": "Move.mp4"}],
@@ -1921,7 +1921,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             }
         )
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -1962,7 +1962,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             item["object_name"]: item["object_ref"] for item in observed.data["entries"]
         }
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -2013,7 +2013,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     client = FakeGatewayClient()
                     observed = self._query(client)
                     observation = guangya_workspace.load_directory_observation(
-                        observed.data["observation_ref"], owner="owner"
+                        observed.data["observation_ref"], owner="owner", session_id="session"
                     )
                     refs = {row["object_name"]: row["object_ref"] for row in observed.data["entries"]}
                     operations = ([{"op": "create_directory", "parent_path": "/target", "name": "new"}]
@@ -2212,7 +2212,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     ))
                 observed = self._query(client)
                 observation = guangya_workspace.load_directory_observation(
-                    observed.data["observation_ref"], owner="owner"
+                    observed.data["observation_ref"], owner="owner", session_id="session"
                 )
                 refs = {row["object_name"]: row["object_ref"] for row in observed.data["entries"]}
                 operations = ([{"op": "create_directory", "parent_path": "/target", "name": "广告-ABC.mp4"}]
@@ -2253,7 +2253,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = FakeGatewayClient()
                 observed = self._query(client, operation="tree", path="/", page_size=50)
                 observation = guangya_workspace.load_directory_observation(
-                    observed.data["observation_ref"], owner="owner"
+                    observed.data["observation_ref"], owner="owner", session_id="session"
                 )
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
                 plan = guangya_fs_change.build_fs_change_plan(
@@ -2315,7 +2315,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         observed = self._query(client, operation="tree", path="/", page_size=50)
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "先移出内容"):
@@ -2462,7 +2462,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             for new_name in ("Final.mp4", "Move.mp4"):
                 with self.subTest(new_target=new_target, new_name=new_name):
                     client = FakeGatewayClient()
-                    obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/", recursive=True)
+                    obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", session_id="session", path="/", recursive=True)
                     refs = {row["file_id"]: row["handle"] for row in obs["entries"]}
                     operations = ([{"op": "create_directory", "parent_path": "/", "name": "archive"}] if new_target else [])
                     operations.append({"op": "copy", "object_ref": refs["move"], "target_path": "/archive" if new_target else "/target", "new_name": new_name})
@@ -2482,7 +2482,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         client.directories["0"].append(GuangYaFile("second", "second", True, parent_id="0", etag="s2"))
         client.directories["second"] = [GuangYaFile("other", "Move.mp4", False, parent_id="second", size=99, etag="other")]
-        obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/", recursive=True)
+        obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", session_id="session", path="/", recursive=True)
         refs = {row["file_id"]: row["handle"] for row in obs["entries"]}
         plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=obs, trigger_strm=False,
             operations=[{"op": "copy", "object_ref": refs[source], "target_path": "/target", "new_name": name}
@@ -2532,7 +2532,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client.directories["empty"] = []
         client.directories["0"].append(GuangYaFile("archive", "archive", True, parent_id="0", etag="archive"))
         client.directories["archive"] = []
-        obs = guangya_workspace.create_directory_observation(client, owner="owner", path="/", recursive=True, max_items=500)
+        obs = guangya_workspace.create_directory_observation(client, owner="owner", session_id="session", path="/", recursive=True, max_items=500)
         refs = {row["file_id"]: row["handle"] for row in obs["entries"]}
         plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=obs, trigger_strm=False,
             operations=[{"op": "move", "object_ref": refs["source"], "target_path": "/archive"},
@@ -2824,7 +2824,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             if item["object_name"] == "Move.mp4"
         )
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -2929,7 +2929,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             if item["object_name"] == "垃圾残余"
         )
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -3013,7 +3013,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             if item["object_name"] == "垃圾残余"
         )
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -3044,7 +3044,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             if item["object_name"] == "广告-ABC.mp4"
         )
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -3090,7 +3090,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             item["object_name"]: item["object_ref"] for item in observed.data["entries"]
         }
         observation = guangya_workspace.load_directory_observation(
-            observed.data["observation_ref"], owner="owner"
+            observed.data["observation_ref"], owner="owner", session_id="session"
         )
         plan = guangya_fs_change.build_fs_change_plan(
             cast(GuangYaClient, client),
@@ -3311,7 +3311,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             with self.subTest(stop=stop):
                 client = FakeGatewayClient()
                 observed = self._query(client)
-                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                 refs = {row["object_name"]: row["object_ref"] for row in observed.data["entries"]}
                 plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                     operations=[{"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "A.mp4"},
@@ -3359,7 +3359,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
     def test_creation_identity_survives_first_readback_error(self):
         client = FakeGatewayClient()
         observed = self._query(client)
-        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
         plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
             operations=[{"op": "create_directory", "parent_path": "/target", "name": "new"}], trigger_strm=False)
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
@@ -3549,14 +3549,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             other_result = self._domain_actions.workspace.query_guangya_filesystem(
                 arguments, ToolContext(owner="other", session_id="session")
             )
-        removed = self._domain_actions.workspace.clear_guangya_workspace_context(owner="owner")
+        removed = self._domain_actions.workspace.clear_session(owner="owner", session_id="session")
         self.assertEqual(removed, 1)
         with self.assertRaises(guangya_workspace.GuangYaWorkspaceError):
             guangya_workspace.load_directory_observation(
-                owner_result.data["observation_ref"], owner="owner"
+                owner_result.data["observation_ref"], owner="owner", session_id="session"
             )
         other = guangya_workspace.load_directory_observation(
-            other_result.data["observation_ref"], owner="other"
+            other_result.data["observation_ref"], owner="other", session_id="session"
         )
         self.assertEqual(other["owner_digest"], "digest:other")
 
@@ -3572,8 +3572,8 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self._domain_actions.fs_change._flows[owner] = cast(ChangeFlow, object())
         self._domain_actions.workspace = GuangyaWorkspaceActions(cast(AgentSessionContextRepository | None, EmptyRepository()))
         self._domain_actions.fs_change = GuangyaFsChangeActions(cast(AgentSessionContextRepository | None, EmptyRepository()), workspace=self._domain_actions.workspace)
-        self.assertEqual(self._domain_actions.workspace.latest_guangya_observation_ref(owner), "")
-        self.assertIsNone(self._domain_actions.fs_change._flow(owner))
+        self.assertEqual(self._domain_actions.workspace.latest_guangya_observation_ref(owner, "session"), "")
+        self.assertIsNone(self._domain_actions.fs_change._flow(owner, "session"))
         self.assertNotIn(owner, self._domain_actions.workspace._flows)
         self.assertNotIn(owner, self._domain_actions.fs_change._flows)
 
@@ -3624,7 +3624,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             {'op': 'trash', 'object_ref': entries['V']},
             {'op': 'move', 'object_ref': entries['movie.mp4'], 'target_path': '/target/Work-A' if future_target else '/source/Work-A'},
         ]
-        observation = guangya_workspace.load_directory_observation(observed.data['observation_ref'], owner='owner')
+        observation = guangya_workspace.load_directory_observation(observed.data['observation_ref'], owner='owner', session_id="session")
         plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation,
                                                     operations=operations, trigger_strm=False)
         guangya_fs_change.confirm_fs_change_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
@@ -3646,7 +3646,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     child = {"op": "move", "object_ref": refs["Move.mp4"], "target_path": destination}
                     raw = [parent, child] if parent_first else [child, parent]
                     original = deepcopy(raw)
-                    observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                    observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                     plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, operations=raw, trigger_strm=False)
                     self.assertEqual(raw, original, "不能改写模型原始参数")
                     self.assertEqual([item["source"]["file_id"] for item in plan["operations"]], ["move", "trash"])
@@ -3671,7 +3671,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client.rename("trash", "Dir")
                 observed = self._query(client, operation="tree", page_size=50)
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"] + observed.data["scope_objects"]}
-                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                 replacement = client._pop("trash")
                 replacement.file_id = "replacement"
                 client.directories["source"].append(replacement)
@@ -3690,7 +3690,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = FakeGatewayClient()
                 observed = self._query(client, operation="tree", path="/", page_size=50)
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                 parent = {"op": "rename", "object_ref": refs["target"], "new_name": "archive"}
                 child = {"op": "move", "object_ref": refs["Move.mp4"], "target_path": "/TARGET"}
                 plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
@@ -3721,7 +3721,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = Client()
                 observed = self._query(client)
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                 plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                     operations=[{"op": "rename", "object_ref": refs["垃圾残余"], "new_name": "archive"},
                                 {"op": "create_directory", "parent_path": "/source/archive", "name": "New"}], trigger_strm=False)
@@ -3755,7 +3755,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = FakeGatewayClient()
                 observed = self._query(client, operation="tree", page_size=50)
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"] + observed.data["scope_objects"]}
-                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                 operations = [
                     {"op": "move", "object_ref": refs["source"], "target_path": "/target"},
                     {"op": "rename", "object_ref": refs["垃圾残余"], "new_name": "New"},
@@ -3785,7 +3785,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = FakeGatewayClient()
                 observed = self._query(client, operation="tree", page_size=50)
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"] + observed.data["scope_objects"]}
-                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+                observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
                 with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
                     guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                         operations=[{"op": "rename", "object_ref": refs["垃圾残余"], "new_name": "New"},
@@ -3803,7 +3803,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client.directories.update(a=[], b=[])
         observed = self._query(client)
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "依赖"):
             guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                 operations=[{"op": "move", "object_ref": refs["A"], "target_path": "/source/B"},
@@ -3822,7 +3822,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client.directories["occupied"] = []
         observed = self._query(client)
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
-        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
+        observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner", session_id="session")
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "同名"):
             guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                 operations=[{"op": "move", "object_ref": refs["Move.mp4"], "target_path": "/target/垃圾残余"},
@@ -3897,7 +3897,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client.directories["0"].append(GuangYaFile("archive", "archive", True, parent_id="0", etag="a"))
                 client.directories["archive"] = []
                 client.directories["trash"] = [GuangYaFile("nested", "Old.mkv", False, parent_id="trash", size=10, etag="n")]
-                observation = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=100)
+                observation = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", session_id="session", path="/source", recursive=True, max_items=100)
                 refs = {item["file_id"]: ref for ref,item in guangya_workspace.observation_entry_map(observation).items()}
                 plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                     operations=[{"op": "copy", "object_ref": refs["trash"], "target_path": "/target"},
@@ -3926,7 +3926,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
     def test_parent_dependency_readback_lists_shared_directory_once(self):
         client = FakeGatewayClient()
         client.directories["source"] = [GuangYaFile(f"f{i}", f"Old-{i}.mkv", False, parent_id="source", size=10, etag=str(i)) for i in range(40)]
-        observation = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=100)
+        observation = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", session_id="session", path="/source", recursive=True, max_items=100)
         refs = {item["file_id"]: ref for ref,item in guangya_workspace.observation_entry_map(observation).items()}
         operations = [{"op": "rename", "object_ref": refs[f"f{i}"], "new_name": f"New-{i}.mkv"} for i in range(40)]
         operations.append({"op": "move", "object_ref": refs["source"], "target_path": "/target"})
@@ -4059,7 +4059,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = FakeGatewayClient()
                 result = self._query(client)
                 entry = next(e for e in result.data['entries'] if e['object_name'] == 'Move.mp4')
-                observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+                observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner', session_id="session")
                 operations = [{'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Move.mp4'},
                               {'op': 'move', 'object_ref': entry['object_ref'], 'target_path': '/target'}]
                 if reverse:
@@ -4081,7 +4081,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         result = self._query(client)
         entries = {e['object_name']: e['object_ref'] for e in result.data['entries']}
-        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner', session_id="session")
         plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation, trigger_strm=False, operations=[
             {'op': 'move', 'object_ref': entries['Move.mp4'], 'target_path': '/source'},
             {'op': 'relocate', 'object_ref': entries['广告-ABC.mp4'], 'target_path': '/source', 'new_name': 'ABC.mp4'},
@@ -4115,7 +4115,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Different.mp4'}], 'trigger_strm': False}
                 with mock.patch.object(change_actions, 'GuangYaClient', return_value=client):
                     previous, previous_fingerprint = self._domain_actions.fs_change.prepare_guangya_fs_change_confirmation(change_actions.guangya_fs_change_arguments(args), context)
-                    flow_result_2 = self._domain_actions.fs_change._flow('owner')
+                    flow_result_2 = self._domain_actions.fs_change._flow('owner', "session")
                     assert flow_result_2 is not None
                     old_plan = flow_result_2.plan_id
                     self.assertEqual(previous.status, 'confirmation_required')
@@ -4129,7 +4129,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     self.assertEqual(noops.status, 'no_changes')
                     self.assertEqual(noops.data['total'], 0)
                     self.assertEqual(noops.data['unchanged_count'], 3)
-                    self.assertIsNone(self._domain_actions.fs_change._flow('owner'))
+                    self.assertIsNone(self._domain_actions.fs_change._flow('owner', "session"))
                     self.assertFalse(set(self.plan_dir.glob('*.json')) - before)
                     with self.assertRaises(AgentToolError):
                         self._domain_actions.fs_change.execute_guangya_fs_change_confirmed({}, previous_fingerprint, context)
@@ -4146,14 +4146,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         result = self._query(client)
         entry = next(e for e in result.data['entries'] if e['object_name'] == 'Move.mp4')
-        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner', session_id="session")
         client.rename('move', 'Changed.mp4')
         with self.assertRaises(guangya_workspace.GuangYaWorkspaceStale):
             guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation, operations=[
                 {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Changed.mp4'}])
         result = self._query(client)
         refs = {e['object_name']: e['object_ref'] for e in result.data['entries']}
-        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
+        observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner', session_id="session")
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, '占用'):
             guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation, operations=[
                 {'op': 'rename', 'object_ref': refs['Changed.mp4'], 'new_name': 'Changed.mp4'},

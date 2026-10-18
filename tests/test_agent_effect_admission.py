@@ -166,7 +166,7 @@ async def _confirmed_scope(store, *, owner=_OWNER, session_id=_SESSION, plan_id=
 
 
 def _signed_fs_plan(client, *, owner=_OWNER, new_name="admitted.mp4"):
-    observation = workspace.create_directory_observation(client, owner=owner, path="/", recursive=True)
+    observation = workspace.create_directory_observation(client, owner=owner, session_id=_SESSION, path="/", recursive=True)
     source_ref = next(item["handle"] for item in observation["entries"] if item["file_id"] == "rename")
     plan = fs.build_fs_change_plan(
         client, owner=owner, observation=observation, trigger_strm=False,
@@ -211,7 +211,7 @@ def _spec(domain, *, actions, verifier=None):
 def _domain_arguments(domain, client, context, stack, *, new_name="admitted.mp4"):
     if domain == "fs":
         observation = workspace.create_directory_observation(
-            client, owner=context.owner, path="/", recursive=True,
+            client, owner=context.owner, session_id=context.session_id, path="/", recursive=True,
         )
         source_ref = next(item["handle"] for item in observation["entries"] if item["file_id"] == "rename")
         return fs_actions.guangya_fs_change_arguments({
@@ -511,7 +511,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_memory_kernel_rejects_durable_admission_and_cannot_fallback_to_accepted(self):
         memory = InMemorySessionStateStore()
         pipeline, context, plan, _ = await _kernel_plan("fs", memory, self.client, self.runtime)
-        flow = self.runtime.domain_actions.fs_change._flow(_OWNER)
+        flow = self.runtime.domain_actions.fs_change._flow(_OWNER, _SESSION)
         with patch.object(jobs, "_bind_fs_change_plan_to_job", wraps=jobs._bind_fs_change_plan_to_job) as bind:
             with self.assertRaises(ToolPipelineError) as raised:
                 await pipeline.execute_confirmed(plan.plan_id, context=context)
@@ -554,7 +554,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
             "fs", self.store, self.client, self.runtime,
             effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
         )
-        original_flow = self.runtime.domain_actions.fs_change._flow(_OWNER)
+        original_flow = self.runtime.domain_actions.fs_change._flow(_OWNER, _SESSION)
         assert (original_flow) is not None
         original = fs.load_fs_change_plan(original_flow.plan_id, owner=_OWNER)
         self.assertEqual(original["status"], "previewed")
@@ -599,7 +599,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending.arguments, {})
         self.assertEqual(pending.snapshot_fingerprint, current.snapshot_fingerprint)
         self.assertEqual(pending.metadata, current.metadata)
-        cold_flow = cold_actions.fs_change._flow(_OWNER)
+        cold_flow = cold_actions.fs_change._flow(_OWNER, _SESSION)
         assert cold_flow is not None
         self.assertEqual((cold_flow.plan_id, cold_flow.fingerprint),
                          (original_flow.plan_id, original_flow.fingerprint))
