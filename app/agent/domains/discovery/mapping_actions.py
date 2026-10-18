@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import threading
 import time
-from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -20,7 +22,6 @@ from app.agent.public_safety import sanitize_public_text
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
-    PersistedAgentContext,
 )
 from app.discovery.service import get_discovery_service
 
@@ -31,7 +32,7 @@ _PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,180}$")
 
 @dataclass
 class _MappingSnapshot:
-    owner: str
+    scope_key: str
     provider: str
     external_id: str
     media_type: str
@@ -46,6 +47,13 @@ class _MappingSnapshot:
 _TTL_SECONDS = 600.0
 _CONTEXT_TYPE = "discovery_mapping"
 logger = logging.getLogger(__name__)
+
+
+def _scope_key(owner: str, session_id: str) -> str:
+    owner_key, session_key = owner.strip(), session_id.strip()
+    if not owner_key or not session_key:
+        raise AgentToolError("映射候选需要已登录会话", code="precondition_failed")
+    return hashlib.sha256(json.dumps([owner_key, session_key]).encode()).hexdigest()
 
 
 def _now() -> str:
@@ -188,7 +196,7 @@ def _snapshot_payload(snapshot: _MappingSnapshot) -> dict[str, Any]:
 
 
 def _snapshot_from_payload(
-    owner: str,
+    scope_key: str,
     payload: dict[str, Any],
     *,
     generation: int = 0,
@@ -235,7 +243,7 @@ def _snapshot_from_payload(
                 }
             )
         return _MappingSnapshot(
-            owner=owner,
+            scope_key=scope_key,
             provider=provider,
             external_id=external_id,
             media_type=media_type,
@@ -298,180 +306,127 @@ class DiscoveryMappingActions:
         self._repository = repository
         self._lock = threading.RLock()
         self._recent: dict[str, _MappingSnapshot] = {}
+        self._generation = 0
+        self._memory_guards: dict[str, tuple[AgentContextWriteGuard, float]] = {}
 
-
-    def clear_discovery_mapping_context(
-        self,
-        *,
-        owner: str,
-        delete_persisted: bool = True,
-    ) -> bool:
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return False
+    def clear_session(self, *, owner: str, session_id: str) -> None:
+        scope_key = _scope_key(owner, session_id)
         with self._lock:
-            removed = self._recent.pop(owner_key, None) is not None
-        if delete_persisted and self._repository is not None:
-            try:
-                removed = (
-                    bool(
-                        self._repository.delete_latest(
-                            owner=owner_key,
-                            context_type=_CONTEXT_TYPE,
-                        )
-                    )
-                    or removed
+            self._recent.pop(scope_key, None)
+            self._memory_guards.pop(scope_key, None)
+            if self._repository is not None:
+                self._repository.invalidate_context(
+                    owner=scope_key, context_type=_CONTEXT_TYPE,
                 )
-            except Exception as exc:
-                logger.warning("Agent 发现映射上下文清理失败 type=%s", type(exc).__name__)
-        return removed
 
-    def _begin_snapshot(self, owner: str) -> AgentContextWriteGuard:
-        if self._repository is None:
-            return AgentContextWriteGuard(generation=0, revision=0)
-        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
-        if not callable(begin):
-            return AgentContextWriteGuard(generation=0, revision=0)
-        return begin(owner=owner, context_type=_CONTEXT_TYPE)
+    def _prune_locked(self) -> None:
+        now = time.monotonic()
+        expired = {key for key, snapshot in self._recent.items()
+                   if now - snapshot.created_at > _TTL_SECONDS}
+        expired.update(key for key, (_, expires_at) in self._memory_guards.items()
+                       if expires_at <= now)
+        for key in expired:
+            self._recent.pop(key, None)
+            self._memory_guards.pop(key, None)
+
+    def _begin_snapshot(self, scope_key: str) -> AgentContextWriteGuard:
+        with self._lock:
+            self._prune_locked()
+            self._recent.pop(scope_key, None)
+            if self._repository is not None:
+                return self._repository.begin_context(owner=scope_key, context_type=_CONTEXT_TYPE)
+            self._generation += 1
+            guard = AgentContextWriteGuard(generation=self._generation, revision=0)
+            self._memory_guards[scope_key] = guard, time.monotonic() + _TTL_SECONDS
+            return guard
 
     def _store_snapshot(self, snapshot: _MappingSnapshot) -> bool:
-        snapshot.created_at = time.monotonic()
-        if self._repository is not None:
-            try:
-                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
-                if callable(guarded):
-                    if snapshot.generation <= 0:
-                        with self._lock:
-                            self._recent.pop(snapshot.owner, None)
-                        return False
-                    persisted = guarded(
-                        owner=snapshot.owner,
-                        context_type=_CONTEXT_TYPE,
-                        payload=_snapshot_payload(snapshot),
-                        expires_at=time.time() + _TTL_SECONDS,
-                        guard=AgentContextWriteGuard(
-                            generation=snapshot.generation,
-                            revision=snapshot.revision,
-                        ),
-                    )
-                    if persisted is None:
-                        with self._lock:
-                            self._recent.pop(snapshot.owner, None)
-                        return False
-                    snapshot.generation = persisted.generation
-                    snapshot.revision = persisted.revision
-                else:
-                    self._repository.replace_latest(
-                        owner=snapshot.owner,
-                        context_type=_CONTEXT_TYPE,
-                        payload=_snapshot_payload(snapshot),
-                        expires_at=time.time() + _TTL_SECONDS,
-                    )
-            except Exception as exc:
-                logger.warning("Agent 发现映射上下文持久化失败 type=%s", type(exc).__name__)
-                with self._lock:
-                    self._recent.pop(snapshot.owner, None)
-                return False
         with self._lock:
-            expired = [
-                owner
-                for owner, item in self._recent.items()
-                if time.monotonic() - item.created_at > _TTL_SECONDS
-            ]
-            for owner in expired:
-                self._recent.pop(owner, None)
-            self._recent[snapshot.owner] = snapshot
-        return True
+            self._prune_locked()
+            guard = AgentContextWriteGuard(snapshot.generation, snapshot.revision)
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.replace_latest_guarded(
+                        owner=snapshot.scope_key,
+                        context_type=_CONTEXT_TYPE,
+                        payload=_snapshot_payload(snapshot),
+                        expires_at=time.time() + _TTL_SECONDS,
+                        guard=guard,
+                    )
+                except Exception as exc:
+                    logger.warning("Agent 发现映射上下文持久化失败 type=%s", type(exc).__name__)
+                    persisted = None
+                if persisted is None:
+                    self._recent.pop(snapshot.scope_key, None)
+                    return False
+                snapshot.generation, snapshot.revision = persisted.generation, persisted.revision
+            else:
+                current = self._memory_guards.get(snapshot.scope_key)
+                if current is None or current[0] != guard:
+                    return False
+                snapshot.revision += 1
+                self._memory_guards[snapshot.scope_key] = (
+                    AgentContextWriteGuard(snapshot.generation, snapshot.revision),
+                    time.monotonic() + _TTL_SECONDS,
+                )
+            snapshot.created_at = time.monotonic()
+            self._recent[snapshot.scope_key] = deepcopy(snapshot)
+            return True
 
     def _consume_snapshot(self, snapshot: _MappingSnapshot) -> bool:
-        if self._repository is not None:
-            consume = getattr(self._repository, "consume_latest_guarded", None)
-            try:
-                if callable(consume) and snapshot.generation > 0 and snapshot.revision > 0:
-                    consumed = bool(
-                        consume(
-                            owner=snapshot.owner,
-                            context_type=_CONTEXT_TYPE,
-                            guard=AgentContextWriteGuard(
-                                generation=snapshot.generation,
-                                revision=snapshot.revision,
-                            ),
-                        )
-                    )
-                elif not callable(consume):
-                    consumed = bool(
-                        self._repository.delete_latest(
-                            owner=snapshot.owner,
-                            context_type=_CONTEXT_TYPE,
-                        )
-                    )
-                else:
-                    consumed = False
-            except Exception as exc:
-                logger.warning("Agent 发现映射上下文消费失败 type=%s", type(exc).__name__)
-                return False
-            if not consumed:
-                return False
         with self._lock:
-            self._recent.pop(snapshot.owner, None)
-        return True
+            self._prune_locked()
+            guard = AgentContextWriteGuard(snapshot.generation, snapshot.revision)
+            if self._repository is not None:
+                try:
+                    consumed = self._repository.consume_latest_guarded(
+                        owner=snapshot.scope_key, context_type=_CONTEXT_TYPE, guard=guard,
+                    )
+                except Exception as exc:
+                    logger.warning("Agent 发现映射上下文消费失败 type=%s", type(exc).__name__)
+                    return False
+                if not consumed:
+                    return False
+            else:
+                current = self._memory_guards.get(snapshot.scope_key)
+                if current is None or current[0] != guard:
+                    return False
+                self._memory_guards.pop(snapshot.scope_key, None)
+            self._recent.pop(snapshot.scope_key, None)
+            return True
 
-    def _get_snapshot(self, owner: str) -> _MappingSnapshot | None:
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return None
-        if self._repository is not None:
-            try:
-                persisted = self._repository.get_latest(
-                    owner=owner_key,
-                    context_type=_CONTEXT_TYPE,
-                    now=time.time(),
-                )
-            except Exception as exc:
-                logger.warning("Agent 发现映射上下文恢复失败 type=%s", type(exc).__name__)
-                with self._lock:
-                    self._recent.pop(owner_key, None)
-                return None
-            if persisted is None:
-                with self._lock:
-                    self._recent.pop(owner_key, None)
-                return None
-            if callable(getattr(self._repository, "replace_latest_guarded", None)) and (
-                persisted.generation <= 0 or persisted.revision <= 0
-            ):
-                with self._lock:
-                    self._recent.pop(owner_key, None)
-                return None
-            restored = _snapshot_from_payload(
-                owner_key,
-                persisted.payload,
-                generation=persisted.generation,
-                revision=persisted.revision,
-            )
-            if restored is None:
-                with self._lock:
-                    self._recent.pop(owner_key, None)
-                return None
-            with self._lock:
-                self._recent[owner_key] = restored
-            return restored
+    def _get_snapshot(self, scope_key: str) -> _MappingSnapshot | None:
         with self._lock:
-            item = self._recent.get(owner_key)
-            if item is None or time.monotonic() - item.created_at > _TTL_SECONDS:
-                self._recent.pop(owner_key, None)
-                return None
-            return item
+            self._prune_locked()
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.get_latest(
+                        owner=scope_key, context_type=_CONTEXT_TYPE, now=time.time(),
+                    )
+                except Exception as exc:
+                    logger.warning("Agent 发现映射上下文恢复失败 type=%s", type(exc).__name__)
+                    persisted = None
+                restored = (
+                    _snapshot_from_payload(scope_key, persisted.payload,
+                        generation=persisted.generation, revision=persisted.revision)
+                    if persisted is not None and persisted.generation > 0 and persisted.revision > 0
+                    else None
+                )
+                if restored is None:
+                    self._recent.pop(scope_key, None)
+                    return None
+                self._recent[scope_key] = restored
+            return deepcopy(self._recent.get(scope_key))
 
     def get_discovery_mapping_candidates(
         self,
         arguments: dict[str, Any], context: ToolContext
     ) -> ToolResult:
-        if not context.owner:
-            raise AgentToolError("映射候选需要已登录会话", code="precondition_failed")
+        scope_key = _scope_key(context.owner, context.session_id)
         if not config.get_bool("DISCOVERY_ENABLED"):
             return _feature_disabled()
         try:
-            guard = self._begin_snapshot(context.owner)
+            guard = self._begin_snapshot(scope_key)
         except Exception as exc:
             logger.warning("Agent 发现映射上下文初始化失败 type=%s", type(exc).__name__)
             raise AgentToolError(
@@ -516,7 +471,7 @@ class DiscoveryMappingActions:
             )
         stored = self._store_snapshot(
             _MappingSnapshot(
-                owner=context.owner,
+                scope_key=scope_key,
                 provider=card.provider,
                 external_id=card.external_id,
                 media_type=card.media_type,
@@ -572,7 +527,7 @@ class DiscoveryMappingActions:
         self,
         arguments: dict[str, Any], context: ToolContext
     ) -> tuple[ToolResult, str]:
-        snapshot = self._get_snapshot(context.owner)
+        snapshot = self._get_snapshot(_scope_key(context.owner, context.session_id))
         if snapshot is None:
             raise AgentToolError(
                 "最近映射候选不存在或已过期，请重新查询", code="precondition_failed"
@@ -627,7 +582,7 @@ class DiscoveryMappingActions:
         self,
         arguments: dict[str, Any], expected_context: str, context: ToolContext
     ) -> ToolResult:
-        snapshot = self._get_snapshot(context.owner)
+        snapshot = self._get_snapshot(_scope_key(context.owner, context.session_id))
         if snapshot is None:
             raise AgentToolError("映射候选已过期，请重新查询", code="confirmation_stale")
         candidate = next(

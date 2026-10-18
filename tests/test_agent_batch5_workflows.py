@@ -351,7 +351,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             "tmdb_id": "278",
             "confirmed": True,
         }
-        context = ToolContext(owner="owner-a")
+        context = ToolContext(owner="owner-a", session_id="mapping-session")
         with (
             patch(
                 "app.agent.domains.discovery.mapping_actions.config.get_bool", return_value=True
@@ -442,7 +442,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             "tmdb_id": "909",
             "confirmed": True,
         }
-        context = ToolContext(owner="owner-persisted-mapping")
+        context = ToolContext(owner="owner-persisted-mapping", session_id="mapping-session")
         with (
             patch(
                 "app.agent.domains.discovery.mapping_actions.config.get_bool", return_value=True
@@ -463,6 +463,10 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             _preview, fingerprint = self._domain_actions.discovery_mapping.prepare_confirm_discovery_mapping(
                 {"candidate_number": 1}, context
             )
+            scope_key = hashlib.sha256(json.dumps([context.owner, context.session_id]).encode()).hexdigest()
+            self.assertIsNotNone(repository.get_latest(
+                owner=scope_key, context_type="discovery_mapping", now=time.time()
+            ))
             self._domain_actions.discovery_mapping._recent.clear()
             confirmed = self._domain_actions.discovery_mapping.confirm_discovery_mapping_confirmed(
                 {"candidate_number": 1}, fingerprint, context
@@ -470,7 +474,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         self.assertTrue(confirmed.ok)
         self.assertIsNone(
             repository.get_latest(
-                owner=context.owner, context_type="discovery_mapping", now=time.time()
+                owner=scope_key, context_type="discovery_mapping", now=time.time()
             )
         )
 
@@ -533,7 +537,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         }
         service.verify_tmdb_mapping_candidate.return_value = dict(candidate)
         service.confirm_tmdb_mapping_if_unchanged.return_value = None
-        context = ToolContext(owner="owner-mapping-race")
+        context = ToolContext(owner="owner-mapping-race", session_id="mapping-session")
         with (
             patch(
                 "app.agent.domains.discovery.mapping_actions.config.get_bool", return_value=True

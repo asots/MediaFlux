@@ -1,5 +1,7 @@
 """构建第二个 runtime 不能重定向第一个 runtime 的领域上下文。"""
 from __future__ import annotations
+import hashlib
+import json
 from app.agent.session_context import AgentSessionContextRepository
 from app.agent.kernel.model import ModelAdapter
 from app.agent.kernel.persistence import SQLiteKernelStore
@@ -58,7 +60,9 @@ def test_existing_runtime_keeps_its_repository_after_another_build(
             callback(arguments, context)
     expected_owner = (
         runtime.domain_actions.local_media._context_store._scope_key("same-owner", "same-session")
-        if context_type == "local_media_tasks" else "same-owner"
+        if context_type == "local_media_tasks" else
+        hashlib.sha256(json.dumps([context.owner, context.session_id]).encode()).hexdigest()
+        if context_type == "discovery_mapping" else "same-owner"
     )
     assert first.reads == [(expected_owner, context_type)]
     assert second.reads == []

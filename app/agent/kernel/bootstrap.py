@@ -198,7 +198,7 @@ def _build_agent_kernel_runtime(
         store=kernel_store,
         effect_store=effect_store,
         clear_provider_state=clear_provider_session_state,
-        clear_domain_state=domain_actions.local_media.clear_local_media_agent_context,
+        clear_domain_state=domain_actions.clear_session,
     )
     return AgentKernelRuntime(
         session=session,
