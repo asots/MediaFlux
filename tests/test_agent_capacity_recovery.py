@@ -647,6 +647,7 @@ def test_business_collision_cannot_authorize_expansion():
             "execution_capacity": 1,
             "active_publication": {
                 "generation": lease.generation,
+                "turn_id": lease.turn_id,
                 "request_id": "collision",
                 "status": "running",
             },

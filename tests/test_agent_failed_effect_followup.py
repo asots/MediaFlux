@@ -746,9 +746,11 @@ def test_new_user_supersedes_failed_diagnosis_and_preserves_publication_facts(ca
             current = await case.cold_store().load(owner=case.owner, session_id=case.sid)
             publication = dict(current.metadata["active_publication"])
             assert current.generation == before.generation + 1
-            assert publication == {"generation": current.generation, "request_id": "new-user-turn", "status": "running"}
-            assert current.metadata["confirmed_publication"] == before.metadata["confirmed_publication"]
             live = await case.session.coordinator.describe(owner=case.owner, session_id=case.sid)
+            assert live is not None
+            assert publication == {"generation": current.generation, "turn_id": live["turn_id"],
+                                   "request_id": "new-user-turn", "status": "running"}
+            assert current.metadata["confirmed_publication"] == before.metadata["confirmed_publication"]
             assert live["request_id"] == "new-user-turn" and live["generation"] == current.generation
             cancelled = None
             if cancel_new_publication:

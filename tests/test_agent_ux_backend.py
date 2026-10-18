@@ -274,7 +274,8 @@ def test_metadata_patch_keeps_inflight_pending_generation_and_concurrent_turn(st
         assert state.metadata == {
             "inflight": {"operation": "protected"}, "title": "用户标题", "pinned": True,
             "new_turn": True,
-            "active_publication": {"generation": lease.generation, "request_id": "seed", "status": "running"},
+            "active_publication": {"generation": lease.generation, "turn_id": lease.turn_id,
+                                   "request_id": "seed", "status": "running"},
         }
         assert state.generation == lease.generation and state.pending_effect_plan_id == "existing-plan"
     asyncio.run(exercise())
