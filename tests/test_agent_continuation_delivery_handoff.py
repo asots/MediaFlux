@@ -274,7 +274,7 @@ def test_interrupted_handoff_survives_new_task_and_cold_retry(tg_config, interru
     asyncio.run(run())
 
 
-def test_effect_and_read_handoffs_survive_receipt_consumption_and_next_task_seed(tmp_path):
+def test_effect_and_read_handoffs_survive_receipt_consumption_and_next_task_seed(tmp_path, tg_config):
     async def run():
         clock = [100]
         async with _completed_effect(tmp_path, clock) as (store, follow, effect_reads):
