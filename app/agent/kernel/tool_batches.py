@@ -337,7 +337,8 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
             return True
         record_result(turn, tool.name, arguments, result.outcome.audit_result(), recovered_failures=result.recovered_failures)
         await turn.publish_tool_result(canonical_call, result)
-        if (result.tool.effect is ToolEffect.READ and not result.tool.metadata.get("kernel_utility")
+        if (result.tool.effect is ToolEffect.READ and result.tool.name != DISCOVERY_TOOL
+                and not result.tool.metadata.get("kernel_utility")
                 and public_result_state(result.outcome.public_content) == "success"):
             turn.observed_reads.add((result.tool.name, json.dumps(dict(result.arguments), sort_keys=True, ensure_ascii=False)))
     if resuming_read:

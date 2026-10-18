@@ -8,11 +8,13 @@ import pytest
 
 from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
+from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession, SessionLimits
 from app.agent.kernel.state import InMemorySessionStateStore
 from app.agent.kernel.state_types import AgentInput
+from tests.test_agent_kernel_capability_discovery import capability_tool
 from tests.test_agent_kernel_core import read_tool
 from tests.test_agent_task_read_observations import control, declared
 
@@ -46,12 +48,13 @@ def run_pages(*, pages=13, mode="pages", limits=None, status="success", tracked=
             if mode == "alias_repeat" and len(requests) % 2:
                 name = tool.name
             if mode == "discovery":
-                name, arguments = "agent__capabilities", {"query": "读取记录"}
+                name, arguments = "agent__capabilities", {"query": f"读取记录 {len(requests)}"}
             yield ModelEvent(ModelEventType.TOOL_CALL_COMPLETED,
                              tool_call=ModelToolCall(f"call-{len(requests)}", name, arguments))
             yield ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")
 
-    catalog, state = ToolCatalog([tool]), InMemorySessionStateStore()
+    catalog = ToolCatalog([tool, capability_tool()] if mode == "discovery" else [tool])
+    state = InMemorySessionStateStore()
     session = AgentSession(model=Model(), catalog=catalog, state_store=state,
                            retriever=CapabilityRetriever(minimum=1, maximum=1),
                            pipeline=ToolPipeline(catalog=catalog, state_store=state), limits=limits)
@@ -63,7 +66,13 @@ def run_pages(*, pages=13, mode="pages", limits=None, status="success", tracked=
         return [event async for event in session.run(AgentInput(
             owner="test-owner", session_id="read-pages", message="读取全部记录后统计数量"))]
 
-    return asyncio.run(run()), requests, attempted, read
+    events = asyncio.run(run())
+    if mode == "discovery":
+        assert not attempted
+        assert any(event.type is AgentEventType.TOOL_COMPLETED
+                   and event.payload["tool"] == "agent.capabilities"
+                   and event.payload["result"]["ok"] for event in events)
+    return events, requests, attempted, read
 
 
 @pytest.mark.parametrize("pages", [13, 16])
