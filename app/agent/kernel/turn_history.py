@@ -31,6 +31,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 未取得查询结果的服务错误；not_found/loading/disabled等业务观察不是执行异常。
+_READ_FAILURE_STATUSES = frozenset({
+    "unavailable", "timeout", "authentication", "invalid_response", "unreadable",
+    "budget_exhausted", "configuration_missing", "provider_error", "provider_timeout",
+    "http_error", "security_error", "response_too_large", "indexer_error",
+    "validation_error", "query_rejected", "challenge_required", "result_expired", "result_not_found",
+    "provider_unavailable", "upstream_timeout", "provider_auth_failed", "provider_not_configured",
+    "provider_user_required", "provider_version_unsupported",
+})
+
 def record_result(turn: AgentTurn,
     name: str, arguments: Mapping[str, Any], result: Mapping[str, Any],
     *, error: ToolPipelineError | None = None, recovered_failures: tuple[str, ...] = (), rejected_call: str = "",
@@ -44,15 +54,22 @@ def record_result(turn: AgentTurn,
     turn.last_business_tool = name
     attempt = (name, 0 if arguments else turn.context_revision,
                "unparsed:" + rejected_call if rejected_call else json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, default=str))
+    tool = turn.session.catalog.get(name) if turn.session.catalog.has(name) else None
+    status = result.get("status")
+    if error is None and isinstance(status, str) and (
+        status == "rate_limited" or (result.get("ok") is False and tool is not None
+            and tool.effect is ToolEffect.READ and status in _READ_FAILURE_STATUSES)
+    ):
+        error = ToolPipelineError(
+            sanitize_public_text(result.get("error") or result.get("summary") or "工具查询未取得结果"), code=status,
+        )
     turn.has_tool_result = turn.has_tool_result or (error is None and result.get("ok") is not False)
-    if result.get("status") == "rate_limited" and error is None:
-        error = ToolPipelineError(sanitize_public_text(result.get("error") or result.get("summary") or "工具调用受到频率限制"), code="rate_limited")
     turn.progress_results.append((public_tool_label(name), {**result, "_recovery_tracked": error is not None}))
     if error is not None:
         turn.unresolved_errors[attempt] = error
     else:
-        turn.unresolved_errors.pop(attempt, None)
-        tool = turn.session.catalog.get(name) if turn.session.catalog.has(name) else None
+        if result.get("ok") is not False:
+            turn.unresolved_errors.pop(attempt, None)
         read_completed = tool is not None and tool.effect is ToolEffect.READ and error_repair.completed_result(tool, result)
         for previous, failure_error in list(turn.unresolved_errors.items()):
             if ((failure_error.repair_ticket and failure_error.repair_ticket in recovered_failures)
