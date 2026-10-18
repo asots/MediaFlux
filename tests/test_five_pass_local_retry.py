@@ -104,10 +104,10 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
 
     def test_agent_preflight_explains_interrupted_write_before_confirming(self):
         task = self._task(interrupted=True)
-        with patch.object(actions, "_require_owner", return_value="owner-a"), patch.object(
+        with patch.object(
             self._domain_actions.local_media, "_current_task", return_value=(None, task)
         ):
-            result, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, cast(ToolContext, None))
+            result, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, ToolContext(owner="owner-a", session_id="session-a"))
         self.assertTrue(fingerprint)
         self.assertTrue(result.data["interrupted_write"])
         self.assertIn("核验", " ".join(result.data["effects"]))
@@ -115,11 +115,12 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
 
     def test_agent_confirmed_interrupted_retry_uses_common_reset(self):
         task = self._task(interrupted=True)
-        with patch.object(actions, "_require_owner", return_value="owner-a"), patch.object(
+        with patch.object(
             self._domain_actions.local_media, "_current_task", return_value=(None, task)
         ), patch.object(actions, "get_local_media_scheduler") as scheduler:
-            _, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, cast(ToolContext, None))
-            result = self._domain_actions.local_media.retry_local_media_task_confirmed({"task_number": 1}, fingerprint, cast(ToolContext, None))
+            context = ToolContext(owner="owner-a", session_id="session-a")
+            _, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, context)
+            result = self._domain_actions.local_media.retry_local_media_task_confirmed({"task_number": 1}, fingerprint, context)
         self.assertTrue(result.ok)
         assert task is not None
         self.assertEqual(

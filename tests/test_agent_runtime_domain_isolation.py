@@ -56,7 +56,11 @@ def test_existing_runtime_keeps_its_repository_after_another_build(
             callback(arguments, "old-fingerprint", context)
         else:
             callback(arguments, context)
-    assert first.reads == [("same-owner", context_type)]
+    expected_owner = (
+        runtime.domain_actions.local_media._context_store._scope_key("same-owner", "same-session")
+        if context_type == "local_media_tasks" else "same-owner"
+    )
+    assert first.reads == [(expected_owner, context_type)]
     assert second.reads == []
 
 
@@ -76,11 +80,11 @@ def test_workspace_cursor_uses_the_original_runtime_repository():
 def test_independent_runtime_memory_does_not_share_local_task_numbers():
     first, second = DomainActions(), DomainActions()
     task = SimpleNamespace(id=41, version=1, status="failed", source_id=7)
-    first.local_media._context_store.capture_tasks(owner="same-owner", tasks=[task])
+    first.local_media._context_store.capture_tasks(owner="same-owner", session_id="same-session", tasks=[task])
     with patch("app.agent.domains.local_media.task_actions.db.get_local_media_task", return_value=task):
-        assert first.local_media._current_task("same-owner", 1)[1] is task
+        assert first.local_media._current_task("same-owner", "same-session", 1)[1] is task
         with pytest.raises(AgentToolError, match="任务序号不存在"):
-            second.local_media._current_task("same-owner", 1)
+            second.local_media._current_task("same-owner", "same-session", 1)
 
 
 def test_file_change_uses_its_runtime_workspace_for_latest_selection():

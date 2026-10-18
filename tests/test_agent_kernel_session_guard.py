@@ -48,7 +48,8 @@ async def prepare(session, pipeline, store, *, owner=OWNER, session_id=SESSION):
 
 def lifecycle_for(session, pipeline, store):
     return AgentSessionLifecycle(session=session, store=store, effect_store=pipeline.effect_store,
-                                 clear_provider_state=lambda **kw: {})
+                                 clear_provider_state=lambda **kw: {},
+                                 clear_domain_state=lambda **kw: {})
 
 
 async def confirmation(session, plan, *, owner=OWNER, session_id=SESSION):

@@ -80,6 +80,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         lease = PublicationLease("owner", "session-a", 4, "turn-a", "request-a")
         token = await session.coordinator.begin(lease)
         provider_clears: list[tuple[str, str]] = []
+        domain_clears: list[tuple[str, str]] = []
         lifecycle = AgentSessionLifecycle(
             session=cast(AgentSession, session),
             store=store,
@@ -87,6 +88,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             clear_provider_state=lambda *, owner, session_id: provider_clears.append(
                 (owner, session_id)
             ),
+            clear_domain_state=lambda *, owner, session_id: domain_clears.append((owner, session_id)),
         )
 
         state = await lifecycle.reset(owner="owner", session_id="session-a")
@@ -95,6 +97,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.generation, 5)
         self.assertEqual(store.calls, [("reset", "owner", "session-a")])
         self.assertEqual(provider_clears, [("owner", "session-a")])
+        self.assertEqual(domain_clears, [("owner", "session-a")])
         with self.assertRaisesRegex(EffectPlanError, "unavailable"):
             effects.claim(
                 owner="owner",
@@ -115,6 +118,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         store = _Store()
         effects = ConfirmationEffectPlanStore(ConfirmationStore())
         provider_clears: list[tuple[str, str]] = []
+        domain_clears: list[tuple[str, str]] = []
         lifecycle = AgentSessionLifecycle(
             session=cast(AgentSession, session),
             store=store,
@@ -122,11 +126,13 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             clear_provider_state=lambda *, owner, session_id: provider_clears.append(
                 (owner, session_id)
             ),
+            clear_domain_state=lambda *, owner, session_id: domain_clears.append((owner, session_id)),
         )
 
         self.assertTrue(await lifecycle.delete(owner="owner", session_id="session-a"))
         self.assertEqual(store.calls, [("delete", "owner", "session-a")])
         self.assertEqual(provider_clears, [("owner", "session-a")])
+        self.assertEqual(domain_clears, [("owner", "session-a")])
 
     async def test_protected_effect_blocks_reset_without_mutating_state(self) -> None:
         session = _Session()
@@ -144,6 +150,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         lease = PublicationLease("owner", "session-a", 4, "turn-a", "request-a")
         token = await session.coordinator.begin(lease, protected=True)
         provider_clears: list[tuple[str, str]] = []
+        domain_clears: list[tuple[str, str]] = []
         lifecycle = AgentSessionLifecycle(
             session=cast(AgentSession, session),
             store=store,
@@ -151,6 +158,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             clear_provider_state=lambda *, owner, session_id: provider_clears.append(
                 (owner, session_id)
             ),
+            clear_domain_state=lambda *, owner, session_id: domain_clears.append((owner, session_id)),
         )
 
         with self.assertRaises(SessionBusyError):
@@ -158,6 +166,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(store.calls, [])
         self.assertEqual(provider_clears, [])
+        self.assertEqual(domain_clears, [])
         self.assertFalse(token.cancelled)
         await session.coordinator.finish(lease, token)
         claimed = effects.claim(

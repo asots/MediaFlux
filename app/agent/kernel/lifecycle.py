@@ -20,7 +20,7 @@ class SessionLifecycleStore(Protocol):
 
 
 class AgentSessionLifecycle:
-    """串行撤销回合、确认票据和 Provider 临时状态后再变更会话。"""
+    """串行撤销回合、确认票据与会话临时状态后再变更会话。"""
 
     def __init__(
         self,
@@ -29,11 +29,13 @@ class AgentSessionLifecycle:
         store: SessionLifecycleStore,
         effect_store: ConfirmationEffectPlanStore,
         clear_provider_state: Callable[..., Any],
+        clear_domain_state: Callable[..., Any],
     ) -> None:
         self.session = session
         self.store = store
         self.effect_store = effect_store
         self.clear_provider_state = clear_provider_state
+        self.clear_domain_state = clear_domain_state
 
     async def _invalidate(self, *, owner: str, session_id: str) -> None:
         await guarded_state_call(owner, session_id, partial(
@@ -41,6 +43,9 @@ class AgentSessionLifecycle:
         ))
         await guarded_state_call(owner, session_id, partial(
             self.clear_provider_state, owner=owner, session_id=session_id,
+        ))
+        await guarded_state_call(owner, session_id, partial(
+            self.clear_domain_state, owner=owner, session_id=session_id,
         ))
 
     async def _change[T](

@@ -123,7 +123,7 @@ class LocalMediaTaskOutcomeTests(IsolatedDatabaseTestCase):
     def _list(self, **arguments):
         return self._domain_actions.local_media.list_local_media_task_summaries(
             local_media_task_summaries_arguments(arguments),
-            ToolContext(owner="owner-a"),
+            ToolContext(owner="owner-a", session_id="session-a"),
         )
 
     def _scan(self, task_ids, outcomes=None):
@@ -318,7 +318,7 @@ class LocalMediaTaskOutcomeTests(IsolatedDatabaseTestCase):
         assert item["current_status"] == "requires_manual"
         assert item["file_outcome"] == "conflict_skipped"
         assert item["can_inspect"]
-        _, selected_task = self._domain_actions.local_media._current_task("owner-a", 1)
+        _, selected_task = self._domain_actions.local_media._current_task("owner-a", "session-a", 1)
         assert selected_task.id == task_ids[20]
         assert selected_task.status == "requires_manual"
 

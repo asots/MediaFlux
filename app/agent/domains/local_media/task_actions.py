@@ -26,7 +26,7 @@ from .task_context import LocalMediaAgentContextStore, _InspectionRef, _TaskRef
 
 def _require_owner(context: ToolContext) -> str:
     owner = (context.owner or "").strip()
-    if not owner:
+    if not owner or not context.session_id.strip():
         raise AgentToolError(
             "本地媒体任务操作需要已登录会话", code="precondition_failed"
         )
@@ -123,9 +123,9 @@ class LocalMediaTaskActions:
 
     def clear_local_media_agent_context(
         self,
-        *, owner: str, invalidate_persisted: bool = True
+        *, owner: str, session_id: str
     ) -> None:
-        self._context_store.clear_owner(owner=owner, invalidate_persisted=invalidate_persisted)
+        self._context_store.clear_session(owner=owner, session_id=session_id)
 
     def list_local_media_task_summaries(
         self,
@@ -147,7 +147,7 @@ class LocalMediaTaskActions:
             except ValueError as exc:
                 raise AgentToolError("本地扫描引用无效") from exc
             except LookupError:
-                self._context_store.capture_tasks(owner=owner, tasks=[])
+                self._context_store.capture_tasks(owner=owner, session_id=context.session_id, tasks=[])
                 return ToolResult(
                     True,
                     "not_recorded",
@@ -173,7 +173,7 @@ class LocalMediaTaskActions:
             page = task_queries._scope_tasks(scope, limit + 1, offset)
             has_more = len(page) > limit
             tasks = page[:limit]
-        self._context_store.capture_tasks(owner=owner, tasks=tasks)
+        self._context_store.capture_tasks(owner=owner, session_id=context.session_id, tasks=tasks)
         items = []
         for index, task in enumerate(tasks, start=1):
             snapshot = snapshots.get(int(task.id))
@@ -220,8 +220,8 @@ class LocalMediaTaskActions:
                 "attention": attention,
                 "tasks": items,
                 **scan_data,
-                "task_number_kind": "owner_scoped_ordinal_not_database_id",
-                "pagination_note": "total 仅为本页条数；翻页请保留 scan_ref/scope 并使用 next_offset。每次列表重建短期任务序号，后续动作使用最新一页的 task_number。",
+                "task_number_kind": "session_scoped_ordinal_not_database_id",
+                "pagination_note": "total 仅为本页条数；翻页请保留 scan_ref/scope 并使用 next_offset。每次列表重建当前会话的短期任务序号，后续动作使用本会话最新一页的 task_number。",
                 "outcome_note": "任务完成不等于文件已归档；冲突跳过必须按 skipped_video_count/file_outcome 解释。扫描快照是当次事实，可用动作基于任务当前状态。",
                 "expires_in_seconds": self._context_store.ttl_seconds,
             },
@@ -237,8 +237,8 @@ class LocalMediaTaskActions:
             else [],
         )
 
-    def _current_task(self, owner: str, task_number: int) -> tuple[_TaskRef, Any]:
-        ref = self._context_store.task(owner=owner, number=task_number)
+    def _current_task(self, owner: str, session_id: str, task_number: int) -> tuple[_TaskRef, Any]:
+        ref = self._context_store.task(owner=owner, session_id=session_id, number=task_number)
         if ref is None:
             raise AgentToolError(
                 "任务序号不存在或已过期，请先重新列出本地媒体任务",
@@ -261,7 +261,7 @@ class LocalMediaTaskActions:
     ) -> ToolResult:
         owner = _require_owner(context)
         task_number = int(arguments["task_number"])
-        ref, task = self._current_task(owner, task_number)
+        ref, task = self._current_task(owner, context.session_id, task_number)
         if task.status != "requires_manual":
             raise AgentToolError("只有待人工确认的任务可以检查", code="precondition_failed")
         try:
@@ -283,6 +283,7 @@ class LocalMediaTaskActions:
                 names.append(name)
         inspection_number = self._context_store.capture_inspection(
             owner=owner,
+            session_id=context.session_id,
             task=ref,
             inspection_id=str(raw.get("inspection_id") or ""),
             digest=str(raw.get("digest") or ""),
@@ -318,7 +319,7 @@ class LocalMediaTaskActions:
             evidence=[
                 Evidence(
                     "local_media_inspection",
-                    "在已配置来源边界内只读扫描任务文件并生成 owner 绑定短期检查序号；未返回绝对/相对路径、源摘要、任务错误或内部 inspection ID。",
+                    "在已配置来源边界内只读扫描任务文件并生成当前登录与会话绑定的短期检查序号；未返回绝对/相对路径、源摘要、任务错误或内部 inspection ID。",
                     common._now(),
                 )
             ],
@@ -327,8 +328,8 @@ class LocalMediaTaskActions:
             ],
         )
 
-    def _current_inspection(self, owner: str, number: int) -> tuple[_InspectionRef, Any]:
-        ref = self._context_store.inspection(owner=owner, number=number)
+    def _current_inspection(self, owner: str, session_id: str, number: int) -> tuple[_InspectionRef, Any]:
+        ref = self._context_store.inspection(owner=owner, session_id=session_id, number=number)
         if ref is None:
             raise AgentToolError(
                 "检查序号不存在或已过期，请重新检查任务", code="precondition_failed"
@@ -353,7 +354,7 @@ class LocalMediaTaskActions:
     ) -> ToolResult:
         owner = _require_owner(context)
         number = int(arguments["inspection_number"])
-        ref, task = self._current_inspection(owner, number)
+        ref, task = self._current_inspection(owner, context.session_id, number)
         service = get_local_media_service()
 
         def preview(inspection_id: str) -> dict[str, Any]:
@@ -391,6 +392,7 @@ class LocalMediaTaskActions:
                 raw = preview(rebuilt_id)
                 self._context_store.replace_inspection(
                     owner=owner,
+                    session_id=context.session_id,
                     number=number,
                     inspection_id=rebuilt_id,
                     digest=rebuilt_digest,
@@ -459,8 +461,8 @@ class LocalMediaTaskActions:
             error="匹配结果尚不足以自动整理。" if status != "planned" else "",
         )
 
-    def _task_snapshot(self, owner: str, task_number: int) -> tuple[dict[str, Any], Any]:
-        _ref, task = self._current_task(owner, task_number)
+    def _task_snapshot(self, owner: str, session_id: str, task_number: int) -> tuple[dict[str, Any], Any]:
+        _ref, task = self._current_task(owner, session_id, task_number)
         return {
             "task_id": int(task.id),
             "version": int(task.version),
@@ -477,7 +479,7 @@ class LocalMediaTaskActions:
     ) -> tuple[ToolResult, str]:
         owner = _require_owner(context)
         task_number = int(arguments["task_number"])
-        snapshot, task = self._task_snapshot(owner, task_number)
+        snapshot, task = self._task_snapshot(owner, context.session_id, task_number)
         if task.status not in common._RETRYABLE:
             raise AgentToolError(
                 "只有失败或待人工确认的任务可以重试", code="precondition_failed"
@@ -555,7 +557,7 @@ class LocalMediaTaskActions:
         season = int(arguments["season"]) if "season" in arguments else None
         episode = int(arguments["episode"]) if "episode" in arguments else None
         try:
-            snapshot, task = self._task_snapshot(owner, task_number)
+            snapshot, task = self._task_snapshot(owner, context.session_id, task_number)
             confirmation_snapshot = _retry_confirmation_snapshot(
                 snapshot, task, season=season, episode=episode,
             )
@@ -632,9 +634,9 @@ class LocalMediaTaskActions:
 
     def _refresh_snapshot(
         self,
-        owner: str, task_number: int
+        owner: str, session_id: str, task_number: int
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        base, task = self._task_snapshot(owner, task_number)
+        base, task = self._task_snapshot(owner, session_id, task_number)
         scope = task_library._bound_task_scope(task)
         return {**base, "binding": scope["binding"]}, scope
 
@@ -644,7 +646,7 @@ class LocalMediaTaskActions:
     ) -> tuple[ToolResult, str]:
         owner = _require_owner(context)
         task_number = int(arguments["task_number"])
-        snapshot, scope = self._refresh_snapshot(owner, task_number)
+        snapshot, scope = self._refresh_snapshot(owner, context.session_id, task_number)
         try:
             return ToolResult(
                 True,
@@ -681,7 +683,7 @@ class LocalMediaTaskActions:
         owner = _require_owner(context)
         task_number = int(arguments["task_number"])
         try:
-            snapshot, scope = self._refresh_snapshot(owner, task_number)
+            snapshot, scope = self._refresh_snapshot(owner, context.session_id, task_number)
         except AgentToolError as exc:
             raise AgentToolError(exc.safe_message, code="confirmation_stale") from None
         try:
@@ -765,7 +767,7 @@ class LocalMediaTaskActions:
     ) -> ToolResult:
         owner = _require_owner(context)
         task_number = int(arguments["task_number"])
-        _snapshot, scope = self._refresh_snapshot(owner, task_number)
+        _snapshot, scope = self._refresh_snapshot(owner, context.session_id, task_number)
         try:
             task = scope["task"]
             tmdb_id = str(task.tmdb_id or "").strip()
