@@ -571,9 +571,12 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         self.assertEqual(self.bot.attempts, [])
 
     def test_late_interaction_receipt_keeps_safe_topic_route_in_existing_outbox(self):
-        with patch("app.agent.effect_completion.agent_effect_reply_is_current", return_value=True), patch.object(center, "send_event_result", return_value=types.SimpleNamespace(ok=True, message_id=99)) as send:
+        delivery = {"version": 1, "owner": OWNER, "session_id": SESSION, "delivery_id": PLAN,
+                    "lifecycle_id": self.lifecycle_id, "delivery_route": ROUTE}
+        key = center._effect_delivery_key(delivery)
+        with patch.object(center, "send_event_result", return_value=types.SimpleNamespace(ok=True, message_id=99)) as send:
             result = center.publish_agent_interaction_reply(
-                "agent-effect:late-fixture", NotificationEvent("延迟回执"), chat_id="-100", message_thread_id=42,
+                key, NotificationEvent("延迟回执"), delivery=delivery,
             )
             self.assertTrue(result.accepted)
             self.assertEqual(json.loads(self.rows()[0]["event_json"])["_delivery_route"], ROUTE)
@@ -582,7 +585,8 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         for thread in (False, 0, -1, "42x", 1.2):
             with self.subTest(thread=thread):
                 result = center.publish_agent_interaction_reply(
-                    "agent-effect:invalid-fixture", NotificationEvent("回执"), chat_id="-100", message_thread_id=thread,
+                    key, NotificationEvent("回执"),
+                    delivery={**delivery, "delivery_route": {"chat_id": "-100", "message_thread_id": thread}},
                 )
                 self.assertFalse(result.accepted)
                 self.assertEqual(result.status, "invalid_delivery_route")

@@ -1601,25 +1601,70 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("effect_next_poll_at", state.metadata)
 
     async def test_telegram_outbox_handoff_is_idempotent_and_deleted_session_invalidates(self):
-        from app.agent.effect_completion import (
-            _effect_reply_key,
-            agent_effect_reply_is_current,
-        )
-        from app.modules.telegram_notification_center import get_notification
+        from app.modules import telegram_notification_center as center
+
         await self.pending(channel="telegram")
-        with patch("app.modules.telegram_notification_center._agent_interaction_enabled", return_value=True):
+        with patch.object(center, "_agent_interaction_enabled", return_value=True), patch.object(
+            center, "wake_telegram_notification_dispatcher", return_value=False,
+        ):
             self.assertEqual((await self.finish())[0], 1)
-        key = _effect_reply_key({**self.scope_args, "plan_id": self.plan_id})
+        state = await self.store.load(**self.scope_args)
+        delivery = {"version": 1, **self.scope_args, "delivery_id": self.plan_id,
+                    "lifecycle_id": state.lifecycle_id, "delivery_route": {"chat_id": "123"}}
+        key = center._effect_delivery_key(delivery)
         # 原会话 chat，绝不落到默认通知接收人。
-        from app.modules.telegram_notification_center import _event_key
-        event_key = _event_key("event", "agent", key, "123")
-        row = get_notification(event_key)
+        event_key = center._event_key("event", "agent", key, "123")
+        row = center.get_notification(event_key)
         assert (row) is not None
         self.assertEqual(row["chat_id"], "123")
-        self.assertTrue(agent_effect_reply_is_current(event_key))
+        self.assertEqual(json.loads(row["event_json"])["_agent_effect_delivery"], delivery)
         self.assertEqual((await self.finish())[0], 0)
         await self.store.reset_session(**self.scope_args)
-        self.assertFalse(agent_effect_reply_is_current(event_key))
+        with patch.object(center, "_agent_interaction_enabled", return_value=True), patch.object(
+            center, "send_event_result",
+        ) as send:
+            await asyncio.to_thread(center.drain_telegram_notifications, event_key=event_key)
+        suppressed = center.get_notification(event_key)
+        assert suppressed is not None
+        self.assertEqual(suppressed["status"], "suppressed")
+        send.assert_not_called()
+
+    async def test_reset_between_receipt_save_and_enqueue_keeps_original_lifecycle(self):
+        from app.agent import effect_completion
+        from app.agent.kernel.bootstrap import build_agent_kernel_runtime
+        from app.modules import telegram_notification_center as center
+        from tests.test_agent_kernel_core import ScriptedModel
+
+        await self.pending(channel="telegram")
+        initial = await self.store.load(**self.scope_args)
+        runtime = build_agent_kernel_runtime(model=ScriptedModel([]), store=self.store)
+        enqueue = effect_completion._enqueue_late_receipt
+        captured = []
+
+        def reset_then_enqueue(seed, message, *, lifecycle_id):
+            asyncio.run(runtime.lifecycle.reset(**self.scope_args))
+            captured.append(lifecycle_id)
+            return enqueue(seed, message, lifecycle_id=lifecycle_id)
+
+        with patch.object(effect_completion, "_enqueue_late_receipt", side_effect=reset_then_enqueue), patch.object(
+            center, "_agent_interaction_enabled", return_value=True,
+        ), patch.object(center, "wake_telegram_notification_dispatcher", return_value=False), patch.object(
+            center, "send_event_result",
+        ) as send:
+            self.assertEqual((await self.finish())[0], 1)
+            current = await self.store.load(**self.scope_args)
+            self.assertNotEqual(current.lifecycle_id, initial.lifecycle_id)
+            self.assertEqual(captured, [initial.lifecycle_id])
+            with db.get_conn() as conn:
+                row = conn.execute("SELECT * FROM telegram_notification_outbox").fetchone()
+            assert row is not None
+            self.assertEqual(json.loads(row["event_json"])["_agent_effect_delivery"]["lifecycle_id"], initial.lifecycle_id)
+            await asyncio.to_thread(center.drain_telegram_notifications, event_key=row["event_key"])
+            suppressed = center.get_notification(row["event_key"])
+            assert suppressed is not None
+            self.assertEqual(suppressed["status"], "suppressed")
+            self.assertEqual(current.conversation, [])
+            send.assert_not_called()
 
 
 if __name__ == "__main__":

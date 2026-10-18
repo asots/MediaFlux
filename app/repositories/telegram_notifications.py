@@ -461,6 +461,25 @@ def get_agent_continuation_group(event_key: str) -> list[dict[str, Any]]:
         )]
 
 
+def bind_agent_effect_delivery(
+    notification_id: int, *, lease_generation: int, claimed_revision: int,
+    expected_event_json: str, event_json: str,
+) -> dict[str, Any] | None:
+    """旧回执只补身份；精确领取者才能原位替换仍未变化的载荷。"""
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        updated = conn.execute(
+            "UPDATE telegram_notification_outbox SET event_json=? "
+            "WHERE id=? AND status='sending' AND lease_generation=? AND revision=? AND event_json=?",
+            (event_json, notification_id, lease_generation, claimed_revision, expected_event_json),
+        )
+        if updated.rowcount != 1:
+            return None
+        return dict(conn.execute(
+            "SELECT * FROM telegram_notification_outbox WHERE id=?", (notification_id,),
+        ).fetchone())
+
+
 def bind_agent_continuation_group(
     notification_id: int, *, lease_generation: int, claimed_revision: int,
     parts: Mapping[int, tuple[int, str, str]],

@@ -7,10 +7,12 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from typing import Any, TypedDict
+
+from cryptography.fernet import InvalidToken
 
 from app import config
 from app.agent.feature_gate import is_agent_enabled
@@ -35,6 +37,7 @@ from app.notifier import (
 from app.repositories.telegram_notifications import (
     AGENT_CONTINUATION_EVENT_PREFIX,
     bind_agent_continuation_group,
+    bind_agent_effect_delivery,
     claim_due_notifications,
     complete_notification,
     fail_notification,
@@ -63,7 +66,6 @@ _AGENT_INTERACTION_EVENT_KEY_PREFIX = "tg:event:agent:agent-effect:"
 _AGENT_INTERACTION_STATE = "agent_effect_reply"
 _AGENT_CONTINUATION_KEY_PREFIX = "agent-continuation:"
 _AGENT_CONTINUATION_STATE = "agent_continuation_reply"
-_CHAT_ID_RE = re.compile(r"-?[0-9]+\Z")
 _PURGE_INTERVAL_SECONDS = 6 * 60 * 60
 _PURGE_RETRY_SECONDS = 60
 _maintenance_lock = threading.Lock()
@@ -369,6 +371,103 @@ def _continuation_digest(owner: str, session_id: str, delivery_id: str) -> str:
     return hashlib.sha256(json.dumps([owner, session_id, delivery_id], ensure_ascii=False).encode()).hexdigest()
 
 
+def _agent_delivery_identity(delivery: Mapping[str, Any]) -> dict[str, Any]:
+    if (not isinstance(delivery, Mapping) or delivery.get("version") != 1 or any(
+        not isinstance(delivery.get(key), str) or not delivery[key].strip()
+        for key in ("owner", "session_id", "delivery_id", "lifecycle_id")
+    )):
+        raise ValueError("invalid Agent delivery identity")
+    route = normalize_delivery_route(delivery["delivery_route"], owner=delivery["owner"])
+    if not route:
+        raise ValueError("missing Agent delivery route")
+    return {**delivery, "delivery_route": route}
+
+
+def _effect_delivery_key(delivery: Mapping[str, Any]) -> str:
+    from app.agent.kernel.persistence import SQLiteKernelStore
+
+    owner, session = SQLiteKernelStore()._scope(delivery["owner"], delivery["session_id"])
+    plan = hashlib.sha256(delivery["delivery_id"].encode()).hexdigest()
+    return f"agent-effect:{owner}:{session}:{plan}"
+
+
+def _legacy_effect_delivery(item, state=None):
+    """旧回执只能从原签名状态的加密受理事实恢复身份，不能猜测 owner。"""
+    from app import database as db
+    from app.agent.kernel.completion_receipts import _completion_cipher
+    from app.agent.kernel.persistence import SQLiteKernelStore
+
+    reason = "AgentInteractionLegacyIdentityUnavailable"
+    match = re.fullmatch(
+        r"tg:event:agent:agent-effect:([0-9a-f]{64}):([0-9a-f]{64}):([0-9a-f]{64}):[0-9a-f]{16}",
+        item["event_key"],
+    )
+    if match is None:
+        raise ValueError(reason)
+    owner_digest, session_digest, plan_digest = match.groups()
+    store = SQLiteKernelStore()
+    source = None
+    if state is None:
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT generation,state_json,state_hmac FROM agent_kernel_sessions "
+                "WHERE owner_digest=? AND session_digest=?", (owner_digest, session_digest),
+            ).fetchone()
+        if row is None:
+            raise ValueError(reason)
+        payload = store._decode(row["state_json"], row["state_hmac"],
+            domain=f"state:v1:{owner_digest}:{session_digest}:{row['generation']}".encode(), expected_type=dict)
+        source = row["generation"], payload
+        metadata = payload.get("metadata") or {}
+    else:
+        metadata = state.metadata
+    matches = []
+    for plan_id, record in (metadata.get("effect_waits") or {}).items():
+        if (hashlib.sha256(plan_id.encode()).hexdigest() != plan_digest or record.get("state") != "terminal"
+                or (record.get("receipt_message") or {}).get("completion_receipt_id") != plan_id):
+            continue
+        try:
+            seed = json.loads(_completion_cipher().decrypt(record["sealed"].encode()))
+            if (seed["plan_id"] != plan_id or seed["channel"] != "telegram"
+                    or store._scope(seed["owner"], seed["session_id"]) != (owner_digest, session_digest)):
+                continue
+            if source is not None:
+                state = store._state_from_payload(owner=seed["owner"], session_id=seed["session_id"],
+                    generation=source[0], payload=source[1])
+            if state is None:
+                raise ValueError(reason)
+            if (state.owner, state.session_id) != (seed["owner"], seed["session_id"]):
+                continue
+            route = (seed.get("origin") or {}).get("delivery_route") or {"chat_id": item["chat_id"]}
+            delivery = _agent_delivery_identity({
+                "version": 1, "owner": state.owner, "session_id": state.session_id,
+                "delivery_id": plan_id, "lifecycle_id": state.lifecycle_id, "delivery_route": route,
+            })
+            stored = json.loads(item["event_json"])
+            if (delivery["delivery_route"] != normalize_delivery_route(
+                    stored.get("_delivery_route") or {"chat_id": item["chat_id"]}, owner=state.owner)
+                    or item["event_key"] != _event_key("event", "agent", _effect_delivery_key(delivery), item["chat_id"])):
+                continue
+        except (InvalidToken, KeyError, TypeError, ValueError):
+            continue
+        matches.append(delivery)
+    if len(matches) != 1:
+        raise ValueError(reason)
+    return matches[0]
+
+
+def _normalize_legacy_effect_delivery(item, delivery, state):
+    if _legacy_effect_delivery(item, state) != delivery:
+        raise ValueError("AgentInteractionLegacyIdentityUnavailable")
+    stored = json.loads(item["event_json"])
+    stored["_agent_effect_delivery"] = delivery
+    normalized = bind_agent_effect_delivery(
+        item["id"], lease_generation=item["lease_generation"], claimed_revision=item["revision"],
+        expected_event_json=item["event_json"], event_json=json.dumps(stored, ensure_ascii=False),
+    )
+    return json.loads(normalized["event_json"])["_agent_effect_delivery"] if normalized is not None else None
+
+
 def _normalize_legacy_continuation(item, delivery, state):
     """已领取旧组先一次性补全持久身份，之后只走完整身份的发送链。"""
     from app.agent.kernel.continuation import retained_delivery_routes
@@ -416,19 +515,32 @@ def _normalize_legacy_continuation(item, delivery, state):
     return json.loads(normalized["event_json"])["_agent_continuation_delivery"]
 
 
-def _send_agent_continuation_item(item, delivery):
+def _send_agent_delivery_item(
+    item, delivery, *, continuation: bool,
+    send: Callable[[Mapping[str, Any]], TelegramSendResult],
+):
     from app.agent.kernel.persistence import SQLiteKernelStore
     from app.agent.kernel.session_guard import session_scope_guard
-    from app.bot.agent_adapter import _send_agent_continuation_part
 
+    label = "AgentContinuation" if continuation else "AgentInteraction"
     def suppress(reason):
-        suppress_agent_continuation_group(
+        suppress_call = suppress_agent_continuation_group if continuation else suppress_notification
+        suppress_call(
             item["id"], lease_generation=item["lease_generation"], claimed_revision=item["revision"], reason=reason,
         )
 
+    legacy_effect = delivery is None and not continuation
+    if legacy_effect:
+        try:
+            delivery = _legacy_effect_delivery(item)
+        except (KeyError, TypeError, ValueError):
+            suppress("AgentInteractionLegacyIdentityUnavailable")
+            return None
+        except Exception as exc:
+            return TelegramSendResult(False, error=type(exc).__name__, status_code=503)
     owner, session_id = delivery.get("owner"), delivery.get("session_id")
     if not isinstance(owner, str) or not owner or not isinstance(session_id, str) or not session_id:
-        suppress("InvalidAgentContinuationIdentity")
+        suppress(f"Invalid{label}Identity")
         return None
     with ExitStack() as scope:
         try:
@@ -436,33 +548,37 @@ def _send_agent_continuation_item(item, delivery):
             try:
                 state = SQLiteKernelStore().load_existing_session(owner=owner, session_id=session_id)
             except (TypeError, ValueError):
-                suppress("AgentContinuationSessionInvalid")
+                suppress(f"{label}SessionInvalid")
                 return None
             if state is None:
-                suppress("AgentContinuationSessionMissing")
+                suppress(f"{label}SessionMissing")
                 return None
             try:
-                if "version" not in delivery:
+                if legacy_effect:
+                    delivery = _normalize_legacy_effect_delivery(item, delivery, state)
+                elif continuation and "version" not in delivery:
                     delivery = _normalize_legacy_continuation(item, delivery, state)
-                    if delivery is None:
-                        return TelegramSendResult(False, error="AgentContinuationIdentityChanged", status_code=503)
-                if (delivery.get("version") != 1 or any(
-                    not isinstance(delivery.get(key), str) or not delivery[key].strip()
-                    for key in ("delivery_id", "lifecycle_id")
-                ) or not item["event_key"].startswith(AGENT_CONTINUATION_EVENT_PREFIX + _continuation_digest(
+                if delivery is None:
+                    return TelegramSendResult(False, error=f"{label}IdentityChanged", status_code=503)
+                delivery = _agent_delivery_identity(delivery)
+                key_matches = (item["event_key"].startswith(AGENT_CONTINUATION_EVENT_PREFIX + _continuation_digest(
                     owner, session_id, delivery["delivery_id"],
-                ) + ":")):
-                    raise ValueError("InvalidAgentContinuationIdentity")
+                ) + ":") if continuation else item["event_key"] == _event_key(
+                    "event", "agent", _effect_delivery_key(delivery), item["chat_id"],
+                ))
+                stored_route = json.loads(item["event_json"]).get("_delivery_route") or {"chat_id": item["chat_id"]}
+                if (not key_matches or delivery["delivery_route"] != normalize_delivery_route(stored_route, owner=owner)):
+                    raise ValueError(f"Invalid{label}Identity")
             except (KeyError, TypeError, ValueError) as exc:
-                suppress(str(exc) if str(exc).startswith("AgentContinuation") else "InvalidAgentContinuationIdentity")
+                suppress(str(exc) if str(exc).startswith(label) else f"Invalid{label}Identity")
                 return None
             if delivery["lifecycle_id"] != state.lifecycle_id:
-                suppress("AgentContinuationLifecycleChanged")
+                suppress(f"{label}LifecycleChanged")
                 return None
         except Exception as exc:
             # 尚未触达 Bot；锁忙或临时读取/补身份失败不属于发送结果未知。
             return TelegramSendResult(False, error=type(exc).__name__, status_code=503)
-        return _send_agent_continuation_part(delivery)
+        return send(delivery)
 
 
 def _dispatch_item(item: dict) -> bool:
@@ -471,6 +587,8 @@ def _dispatch_item(item: dict) -> bool:
     claimed_revision = int(item["revision"])
     event = None
     continuation_delivery = None
+    interaction_delivery = None
+    agent_interaction = False
     continuation_candidate = (
         str(item.get("topic") or "") == NotificationTopic.AGENT.value
         and str(item.get("event_key") or "").startswith(AGENT_CONTINUATION_EVENT_PREFIX)
@@ -507,6 +625,7 @@ def _dispatch_item(item: dict) -> bool:
         else:
             if _is_agent_interaction_item(item, candidate):
                 event = candidate
+                agent_interaction = True
                 if not _agent_interaction_enabled():
                     suppress_notification(
                         notification_id,
@@ -515,28 +634,14 @@ def _dispatch_item(item: dict) -> bool:
                         reason="AgentInteractionDisabled",
                     )
                     return True
-                try:
-                    from app.agent.effect_completion import (
-                        agent_effect_reply_is_current,
-                    )
-
-                    is_current = agent_effect_reply_is_current(
-                        str(item.get("event_key") or "")
-                    )
-                except Exception as exc:
-                    retry_notification(
-                        notification_id,
-                        lease_generation=generation,
-                        claimed_revision=claimed_revision,
-                        error=f"AgentInteractionStateUnavailable:{type(exc).__name__}",
-                    )
-                    return False
-                if not is_current:
+                stored = json.loads(item["event_json"])
+                interaction_delivery = stored.get("_agent_effect_delivery")
+                if "_agent_effect_delivery" in stored and not isinstance(interaction_delivery, Mapping):
                     suppress_notification(
                         notification_id,
                         lease_generation=generation,
                         claimed_revision=claimed_revision,
-                        reason="AgentInteractionSessionRemoved",
+                        reason="InvalidAgentInteractionIdentity",
                     )
                     return True
 
@@ -619,9 +724,26 @@ def _dispatch_item(item: dict) -> bool:
         send_kwargs["message_thread_id"] = message_thread_id
     outcome: TelegramSendResult
     fallback_to_new_message = False
+
+    def send_event(_delivery):
+        nonlocal fallback_to_new_message
+        if message_id > 0:
+            result = edit_event_result(event, chat_id=chat_id, message_id=message_id)
+            if not result.ok and _edit_can_fallback_to_new_message(result):
+                # 旧消息身份已被 Telegram 明确拒绝；后续新发送若结果未知，
+                # 绝不能继续沿用旧 message_id 或自动重放。
+                fallback_to_new_message = True
+                result = send_event_result(event, **send_kwargs)
+            return result
+        return send_event_result(event, **send_kwargs)
+
     try:
         if continuation_delivery is not None:
-            continuation_outcome = _send_agent_continuation_item(item, continuation_delivery)
+            from app.bot.agent_adapter import _send_agent_continuation_part
+
+            continuation_outcome = _send_agent_delivery_item(
+                item, continuation_delivery, continuation=True, send=_send_agent_continuation_part,
+            )
             if continuation_outcome is None:
                 return False
             outcome = continuation_outcome
@@ -630,17 +752,15 @@ def _dispatch_item(item: dict) -> bool:
                     "Telegram Agent 续行投递未完成 key=%s status=%s error=%s",
                     item.get("event_key"), outcome.status_code, outcome.error,
                 )
-        elif message_id > 0:
-            outcome = edit_event_result(
-                event, chat_id=chat_id, message_id=message_id,
+        elif agent_interaction:
+            interaction_outcome = _send_agent_delivery_item(
+                item, interaction_delivery, continuation=False, send=send_event,
             )
-            if not outcome.ok and _edit_can_fallback_to_new_message(outcome):
-                # 旧消息身份已被 Telegram 明确拒绝；后续新发送若结果未知，
-                # 绝不能继续沿用旧 message_id 或自动重放。
-                fallback_to_new_message = True
-                outcome = send_event_result(event, **send_kwargs)
+            if interaction_outcome is None:
+                return True
+            outcome = interaction_outcome
         else:
-            outcome = send_event_result(event, **send_kwargs)
+            outcome = send_event(None)
     except Exception as exc:
         logger.warning(
             "Telegram 通知投递异常 topic=%s type=%s",
@@ -725,6 +845,7 @@ def _publish(
     agent_interaction_attempt_id: str = "",
     delivery_route: Mapping[str, Any] | None = None,
     agent_continuation_delivery: Mapping[str, Any] | None = None,
+    agent_effect_delivery: Mapping[str, Any] | None = None,
 ) -> NotificationPublishResult:
     normalized_importance = NotificationImportance(_importance(importance))
     normalized_topic = _topic(topic)
@@ -803,7 +924,7 @@ def _publish(
         if thread:
             event = _bounded_thread_event(event)
         event_json = serialize_notification_event(event)
-        if agent_interaction_attempt_id or delivery_route or agent_continuation:
+        if agent_interaction_attempt_id or delivery_route or agent_continuation or agent_effect_delivery:
             payload = json.loads(event_json)
             if agent_interaction_attempt_id:
                 payload["_agent_interaction_attempt_id"] = agent_interaction_attempt_id
@@ -815,6 +936,8 @@ def _publish(
             if agent_continuation:
                 assert agent_continuation_delivery is not None
                 payload["_agent_continuation_delivery"] = dict(agent_continuation_delivery)
+            if agent_effect_delivery is not None:
+                payload["_agent_effect_delivery"] = dict(agent_effect_delivery)
             event_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except Exception as exc:
         logger.warning(
@@ -879,19 +1002,10 @@ def publish_agent_interaction_reply(
     logical_key: str,
     event: NotificationEvent,
     *,
-    chat_id: str | int | None,
-    message_thread_id: object = None,
+    delivery: Mapping[str, Any],
     deliver_now: bool = False,
 ) -> NotificationPublishResult:
-    """持久化交互回执；话题必须来自已冻结的服务端物理地址。"""
-    target = str(chat_id if chat_id is not None else "").strip()
-    if not _CHAT_ID_RE.fullmatch(target):
-        return NotificationPublishResult(False, status="invalid_chat_id")
-    try:
-        route = normalize_delivery_route({"chat_id": target, "message_thread_id": message_thread_id})
-    except ValueError:
-        return NotificationPublishResult(False, status="invalid_delivery_route")
-
+    """持久化交互回执；身份来自保存终态的同一事务，发送时持锁复核。"""
     key = (logical_key or "").strip()
     try:
         encoded_key = key.encode("utf-8")
@@ -905,6 +1019,14 @@ def publish_agent_interaction_reply(
         return NotificationPublishResult(False, status="invalid_key")
     if not isinstance(event, NotificationEvent):
         return NotificationPublishResult(False, status="invalid_event")
+    try:
+        delivery = _agent_delivery_identity(delivery)
+    except (KeyError, TypeError, ValueError):
+        return NotificationPublishResult(False, status="invalid_delivery_route")
+    if key != _effect_delivery_key(delivery):
+        return NotificationPublishResult(False, status="invalid_key")
+    route = delivery["delivery_route"]
+    target = route["chat_id"]
     if not _agent_interaction_enabled():
         return NotificationPublishResult(False, status="disabled")
 
@@ -940,7 +1062,8 @@ def publish_agent_interaction_reply(
         deliver_now=deliver_now,
         agent_interaction=True,
         agent_interaction_attempt_id=attempt_id,
-        delivery_route=route if message_thread_id is not None else None,
+        delivery_route=route,
+        agent_effect_delivery=delivery,
     )
     if not published.accepted:
         return published

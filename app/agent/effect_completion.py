@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import time
@@ -236,50 +235,13 @@ async def _record_effect_observation(
     return stop_requested
 
 
-def _effect_reply_key(seed: Mapping[str, Any]) -> str:
-    from app.agent.kernel.persistence import SQLiteKernelStore
-
-    owner, session = SQLiteKernelStore()._scope(seed["owner"], seed["session_id"])
-    plan = hashlib.sha256(seed["plan_id"].encode()).hexdigest()
-    return f"agent-effect:{owner}:{session}:{plan}"
-
-
-def agent_effect_reply_is_current(event_key: str) -> bool:
-    """Outbox 投递前核对签名会话，删除/重置后的迟到通知不再发送。"""
-    from app import database as db
-    from app.agent.kernel.conversation_codec import conversation_rows
-    from app.agent.kernel.persistence import SQLiteKernelStore
-
-    match = re.fullmatch(
-        r"tg:event:agent:agent-effect:([0-9a-f]{64}):([0-9a-f]{64}):([0-9a-f]{64}):[0-9a-f]{16}",
-        event_key,
+def _enqueue_late_receipt(
+    seed: Mapping[str, Any], message: Mapping[str, Any], *, lifecycle_id: str,
+) -> bool:
+    from app.modules.telegram_notification_center import (
+        _effect_delivery_key,
+        publish_agent_interaction_reply,
     )
-    if match is None:
-        return False
-    owner, session, plan = match.groups()
-    with db.get_conn() as conn:
-        row = conn.execute(
-            "SELECT generation,state_json,state_hmac FROM agent_kernel_sessions "
-            "WHERE owner_digest=? AND session_digest=?", (owner, session),
-        ).fetchone()
-    if row is None:
-        return False
-    try:
-        payload = SQLiteKernelStore()._decode(
-            row["state_json"], row["state_hmac"],
-            domain=f"state:v1:{owner}:{session}:{row['generation']}".encode(), expected_type=dict,
-        )
-        conversation = conversation_rows(payload.get("conversation", []))
-    except (ValueError, TypeError):
-        return False
-    return any(
-        hashlib.sha256(str(message.get("completion_receipt_id") or "").encode()).hexdigest() == plan
-        for message in conversation
-    )
-
-
-def _enqueue_late_receipt(seed: Mapping[str, Any], message: Mapping[str, Any]) -> bool:
-    from app.modules.telegram_notification_center import publish_agent_interaction_reply
     from app.notifier import NotificationEvent
 
     if seed["channel"] != "telegram":
@@ -288,12 +250,15 @@ def _enqueue_late_receipt(seed: Mapping[str, Any], message: Mapping[str, Any]) -
     if match is None:
         # 只保留会话回执，不把无法确定接收人的交互回复发到默认通知群。
         return True
+    delivery = {
+        "version": 1, "owner": seed["owner"], "session_id": seed["session_id"],
+        "delivery_id": seed["plan_id"], "lifecycle_id": lifecycle_id,
+        "delivery_route": (seed.get("origin") or {}).get("delivery_route") or {"chat_id": match.group(1)},
+    }
     published = publish_agent_interaction_reply(
-        _effect_reply_key(seed), NotificationEvent(
+        _effect_delivery_key(delivery), NotificationEvent(
             title="已确认任务的后续结果", lines=(message["public_content"],),
-        ), chat_id=match.group(1), deliver_now=False,
-        **({"message_thread_id": seed["origin"]["delivery_route"].get("message_thread_id")}
-           if isinstance(seed.get("origin"), dict) and isinstance(seed["origin"].get("delivery_route"), dict) else {}),
+        ), delivery=delivery, deliver_now=False,
     )
     # 用户关闭 TG Agent 时不排队补发旧交互，但 Web/历史中的任务事实仍保留。
     return bool(published) or published.status == "disabled"
@@ -393,13 +358,14 @@ async def poll_effect_receipts(
                     release_effect(row, time.time())
                     commit_conversation(state, state.conversation)
                     receipts._next_effect_poll(state)
-                    return message
+                    return message, state.lifecycle_id
 
-                message = await store.update_effect_state(**scope, change=save)
-                if message is None or cancelled():
+                saved = await store.update_effect_state(**scope, change=save)
+                if saved is None or cancelled():
                     return 0
+                message, lifecycle_id = saved
                 # 先保存会话回执，再交给同一个 outbox；崩溃重试沿用相同幂等键。
-                if not await asyncio.to_thread(_enqueue_late_receipt, seed, message):
+                if not await asyncio.to_thread(_enqueue_late_receipt, seed, message, lifecycle_id=lifecycle_id):
                     return 0
 
                 def delivered(state):
