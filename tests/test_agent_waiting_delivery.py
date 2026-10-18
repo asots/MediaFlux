@@ -10,6 +10,7 @@ import pytest
 
 from app import config
 from app import database as db
+from app.agent.model_catalog import provider_channel_fingerprint
 from app.agent.kernel.bootstrap import (
     _capture_creation_binding,
     build_agent_kernel_runtime,
@@ -34,9 +35,8 @@ ROUTE = {'chat_id': '-100123', 'message_thread_id': 42}
 
 async def park(clock, route):
     config.set_and_save({'TG_AGENT_ENABLED': '1', 'TG_CHAT_ID': '-100123', 'TG_AGENT_ALLOWED_USER_IDS': '7'})
-    from app.modules.telegram_model_preferences import _channel_fingerprint
     script = WaitScript()
-    script.adapter.settings = replace(script.adapter.settings, telegram_channel=_channel_fingerprint())
+    script.adapter.settings = replace(script.adapter.settings, telegram_channel=provider_channel_fingerprint(config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))))
     runtime = build_agent_kernel_runtime(model=script.adapter, store=SQLiteKernelStore(clock=lambda: clock[0]))
     runtime.session.continuation_binding = _capture_creation_binding()
     runtime.session.pipeline.rate_limiter = Quota()
@@ -60,8 +60,7 @@ def test_cold_read_terminal_uses_same_outbox_and_ack_retry_without_reexecution(t
             set_telegram_model_preference(OWNER, SID, 'changed-model')
         clock[0] = 110
         runtime, script, reads = resumed(clock)
-        from app.modules.telegram_model_preferences import _channel_fingerprint
-        script.adapter.settings = replace(script.adapter.settings, telegram_channel=_channel_fingerprint())
+        script.adapter.settings = replace(script.adapter.settings, telegram_channel=provider_channel_fingerprint(config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))))
         assert await runtime.session.resume_wait(candidate=candidate)
         assert not await runtime.session.resume_wait(candidate=candidate)
         state = await runtime.store.load(owner=OWNER, session_id=SID)
@@ -72,6 +71,10 @@ def test_cold_read_terminal_uses_same_outbox_and_ack_retry_without_reexecution(t
         assert len(reads) == len(script.requests) == (0 if policy_changed else 1)
 
         from app.agent.kernel.continuation import deliver_continuation_result
+        from app.bot.agent_adapter import (
+            prepare_agent_continuation_delivery,
+            publish_agent_continuation_delivery,
+        )
         from app.modules import telegram_notification_center as notifications
         cold = SQLiteKernelStore(clock=lambda: clock[0])
         delivery, = await cold.due_continuations()
@@ -81,7 +84,11 @@ def test_cold_read_terminal_uses_same_outbox_and_ack_retry_without_reexecution(t
         ):
             with patch.object(cold, 'update_effect_state', side_effect=RuntimeError('outbox committed before ACK')):
                 with pytest.raises(RuntimeError, match='before ACK'):
-                    await deliver_continuation_result(cold, delivery)
+                    await deliver_continuation_result(
+                        cold, delivery,
+                        prepare_delivery=prepare_agent_continuation_delivery,
+                        publish_delivery=publish_agent_continuation_delivery,
+                    )
             with db.get_conn() as conn:
                 rows = conn.execute("SELECT event_json FROM telegram_notification_outbox WHERE json_extract(event_json,'$._agent_continuation_delivery') IS NOT NULL").fetchall()
             assert len(rows) == 1
@@ -154,8 +161,7 @@ def test_read_checkpoint_complete_keeps_claim_until_public_terminal(tg_config):
             candidate = await park(clock, ROUTE)
         clock[0] = 110
         runtime, script, reads = resumed(clock, CheckpointScript(True))
-        from app.modules.telegram_model_preferences import _channel_fingerprint
-        script.adapter.settings = replace(script.adapter.settings, telegram_channel=_channel_fingerprint())
+        script.adapter.settings = replace(script.adapter.settings, telegram_channel=provider_channel_fingerprint(config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))))
         assert await runtime.session.resume_wait(candidate=candidate)
         state = await runtime.store.load(owner=OWNER, session_id=SID)
         assert state.metadata['task']['status'] == 'complete'

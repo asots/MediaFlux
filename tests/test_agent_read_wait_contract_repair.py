@@ -6,7 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
+from app import config
 from app import database as db
+from app.agent.model_catalog import provider_channel_fingerprint
 from app.agent.feature_gate import (
     begin_runtime_change,
     finish_runtime_change,
@@ -93,7 +95,7 @@ def test_telegram_issued_model_policy_is_not_rerouted(changed):
         clock = [100]
         owner, sid = 'tg:v1:-100123\x1f7', 'tg-route-wait'
         first = WaitScript()
-        first.adapter.settings = replace(first.adapter.settings, telegram_channel=prefs._channel_fingerprint())
+        first.adapter.settings = replace(first.adapter.settings, telegram_channel=provider_channel_fingerprint(config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))))
         runtime = build_agent_kernel_runtime(model=first.adapter, store=SQLiteKernelStore(clock=lambda: clock[0]))
         binding = _capture_creation_binding()
         runtime.session.continuation_binding = binding
@@ -110,7 +112,7 @@ def test_telegram_issued_model_policy_is_not_rerouted(changed):
             assert _capture_creation_binding() == binding
             clock[0] = 110
             script = WaitScript(True)
-            script.adapter.settings = replace(script.adapter.settings, telegram_channel=prefs._channel_fingerprint())
+            script.adapter.settings = replace(script.adapter.settings, telegram_channel=provider_channel_fingerprint(config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))))
             fresh, script, calls = resumed(clock, script)
             await fresh.session.resume_wait(candidate=candidate)
             record = (await fresh.store.load(owner=owner, session_id=sid)).metadata['read_wait']

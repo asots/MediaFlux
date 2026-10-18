@@ -1,11 +1,28 @@
-"""Provider 模型列表服务；供 Telegram 与管理路由复用。"""
+"""Provider 身份与模型列表服务；供内核、Telegram 与管理路由复用。"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import unicodedata
+from collections.abc import Mapping
 
 _MODEL_ID_MAX_LENGTH = 200
+
+
+def provider_channel_fingerprint(values: Mapping[str, str]) -> str:
+    """摘要化同一 Provider 快照；保持历史 KV 摘要格式，不保存 API key。"""
+    base_url = (values.get("AGENT_LLM_API_URL", "") or "").strip().rstrip("/")
+    protocol = (values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip().casefold()
+    api_key = (values.get("AGENT_LLM_API_KEY", "") or "")
+    credential_digest = hashlib.sha256(api_key.encode("utf-8")).digest()
+    material = b"\0".join((
+        b"mediaflux-telegram-model-channel:v1",
+        base_url.encode("utf-8"),
+        protocol.encode("utf-8"),
+        credential_digest,
+    ))
+    return hashlib.sha256(material).hexdigest()
 
 
 def normalize_provider_model_id(value: object) -> str:

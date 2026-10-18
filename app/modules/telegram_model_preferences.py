@@ -8,12 +8,14 @@ import math
 import re
 import secrets
 import time
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from app import config
 from app import database as db
-from app.agent.model_catalog import normalize_provider_model_id
+from app.agent.model_catalog import (
+    normalize_provider_model_id,
+    provider_channel_fingerprint,
+)
 
 if TYPE_CHECKING:
     from app.agent.kernel.provider_model import ProviderSettings
@@ -35,23 +37,6 @@ def _key(owner: str, session_id: str) -> str:
         + session_value.encode("utf-8")
     ).hexdigest()
     return f"telegram_model_preference:v1:{digest}"
-
-
-def _channel_fingerprint(values: Mapping[str, str] | None = None) -> str:
-    """摘要化同一 Provider 快照；保持历史 KV 摘要格式，不保存 API key。"""
-    if values is None:
-        values = config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))
-    base_url = (values.get("AGENT_LLM_API_URL", "") or "").strip().rstrip("/")
-    protocol = (values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip().casefold()
-    api_key = (values.get("AGENT_LLM_API_KEY", "") or "")
-    credential_digest = hashlib.sha256(api_key.encode("utf-8")).digest()
-    material = b"\0".join((
-        b"mediaflux-telegram-model-channel:v1",
-        base_url.encode("utf-8"),
-        protocol.encode("utf-8"),
-        credential_digest,
-    ))
-    return hashlib.sha256(material).hexdigest()
 
 
 def _callback_key(owner: str, token: str) -> str:
@@ -103,7 +88,9 @@ def create_model_callback(
                 "action": action,
                 "model_id": normalized_model,
                 "page": page_value,
-                "channel": _channel_fingerprint(),
+                "channel": provider_channel_fingerprint(config.get_many((
+                    "AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY",
+                ))),
                 "expires_at": time.time() + _MODEL_CALLBACK_TTL_SECONDS,
             },
             separators=(",", ":"),
@@ -126,7 +113,9 @@ def resolve_model_callback(
         not isinstance(route, dict)
         or not _expiry_is_live(route.get("expires_at"))
         or str(route.get("thread_id") or "") != str(thread_id or "")
-        or route.get("channel") != _channel_fingerprint()
+        or route.get("channel") != provider_channel_fingerprint(config.get_many((
+            "AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY",
+        )))
         or route.get("action") not in {"select", "page", "cancel"}
         or not isinstance(route.get("session_id"), str)
     ):
@@ -142,9 +131,11 @@ def get_telegram_model_preference(
     except (TypeError, ValueError):
         return ""
     if settings is None:
-        channel = _channel_fingerprint()
+        channel = provider_channel_fingerprint(config.get_many((
+            "AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY",
+        )))
     else:
-        channel = settings.telegram_channel or _channel_fingerprint({
+        channel = settings.telegram_channel or provider_channel_fingerprint({
             "AGENT_LLM_API_URL": settings.api_url,
             "AGENT_LLM_PROTOCOL": settings.protocol,
             "AGENT_LLM_API_KEY": settings.api_key,
@@ -163,7 +154,9 @@ def set_telegram_model_preference(
     db.kv_set(
         _key(owner, session_id),
         json.dumps(
-            {"model_id": normalized, "channel": _channel_fingerprint()},
+            {"model_id": normalized, "channel": provider_channel_fingerprint(config.get_many((
+                "AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY",
+            )))},
             ensure_ascii=False,
             separators=(",", ":"),
         ),

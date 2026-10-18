@@ -503,12 +503,8 @@ class _DeliveryAcknowledged:
                 current["due_at"] = self.now + CLAIM_SECONDS
 
 
-async def deliver_continuation_result(store, candidate):
-    """只重投已保存的最终视图；进程重启不能再次调用模型或执行旧写操作。"""
-    from app.bot.agent_adapter import (
-        prepare_agent_continuation_delivery,
-        publish_agent_continuation_delivery,
-    )
+async def deliver_continuation_result(store, candidate, *, prepare_delivery, publish_delivery):
+    """通过组合层提供的交付入口重投持久视图，不再调用模型或执行旧写操作。"""
 
     state = await store.load(owner=candidate["owner"], session_id=candidate["session_id"])
     record = continuation_record(state, candidate["wait_id"], candidate.get("kind"))
@@ -520,12 +516,12 @@ async def deliver_continuation_result(store, candidate):
     accepted = False
     if not expired:
         route = effect_payload(state, record)["origin"].get("delivery_route") if candidate.get("kind") == "effect" else record.get("delivery_route")
-        payload = prepare_agent_continuation_delivery(
+        payload = prepare_delivery(
             record["delivery_view"], owner=state.owner, session_id=state.session_id,
             delivery_route=route or {},
             delivery_id=f'{record["wait_id"]}:{record["resume_turn_id"]}',
         )
-        result = await publish_agent_continuation_delivery(payload)
+        result = await publish_delivery(payload)
         accepted = result.accepted
 
     await store.update_effect_state(owner=state.owner, session_id=state.session_id,

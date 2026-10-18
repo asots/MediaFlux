@@ -470,7 +470,15 @@ class AgentJobsScheduler:
                     from app.agent.kernel.continuation import (
                         deliver_continuation_result,
                     )
-                    if await deliver_continuation_result(store, candidate):
+                    from app.bot.agent_adapter import (
+                        prepare_agent_continuation_delivery,
+                        publish_agent_continuation_delivery,
+                    )
+                    if await deliver_continuation_result(
+                        store, candidate,
+                        prepare_delivery=prepare_agent_continuation_delivery,
+                        publish_delivery=publish_agent_continuation_delivery,
+                    ):
                         return 1
                     continue
                 with config.runtime_config_read_guard():

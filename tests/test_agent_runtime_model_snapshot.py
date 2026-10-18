@@ -12,6 +12,7 @@ import telebot
 
 from app import config
 from app import database as db
+from app.agent.model_catalog import provider_channel_fingerprint
 from app.agent.kernel import bootstrap
 from app.agent.kernel.provider_model import (
     OpenAICompatibleModelAdapter,
@@ -68,7 +69,7 @@ def select(model):
     agent_adapter.handle_agent_model_callback(bot, call, telebot)
     assert prefs.get_telegram_model_preference(owner, session_id) == model
     stored = json.loads(db.kv_get(prefs._key(owner, session_id)))
-    assert stored == {'channel': prefs._channel_fingerprint(), 'model_id': model}
+    assert stored == {'channel': provider_channel_fingerprint(config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))), 'model_id': model}
     assert 'synthetic' not in json.dumps(stored)
 
 
@@ -439,3 +440,24 @@ def test_title_uses_selected_model_and_own_cap(harness):
     assert title == 'Topic'
     assert harness.requests[0]['body']['model'] == 'title-choice'
     assert output(harness.requests[0]['body']) == 96
+
+
+def test_provider_channel_fingerprint_preserves_persisted_identity_and_raw_snapshot():
+    values = {
+        'AGENT_LLM_API_URL': ' https://provider.invalid/v1/ ',
+        'AGENT_LLM_PROTOCOL': ' CHAT_COMPLETIONS ',
+        'AGENT_LLM_API_KEY': ' fixture-key ',
+        'AGENT_LLM_MODEL': 'fixture-model',
+        'AGENT_LLM_TIMEOUT_SECONDS': '',
+        'AGENT_LLM_CONTEXT_WINDOW_TOKENS': '',
+        'AGENT_LLM_BUDGET_PROFILES': '',
+    }
+    # 固定值来自迁移前的实现，保护已持久化的偏好/回调渠道标识。
+    expected = 'd41f8a21d551ba64e27b2ec00dfa2c75b9f7bb0cb56031b1e3d10ff613177c33'
+    assert provider_channel_fingerprint(values) == expected
+    with patch.object(config, 'get_many', return_value=values) as snapshot:
+        settings = ProviderSettings.from_config()
+    snapshot.assert_called_once()
+    assert settings.telegram_channel == expected
+    assert settings.api_key == 'fixture-key'
+    assert provider_channel_fingerprint({**values, 'AGENT_LLM_API_KEY': settings.api_key}) != expected

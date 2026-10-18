@@ -11,6 +11,7 @@ from typing import Any, Literal, NoReturn
 
 import httpx
 
+from app.agent.model_catalog import provider_channel_fingerprint
 from app.agent.model_context_budget import conservative_tokens
 from app.clients.http import FixedHostHttpClient
 from app.clients.openai_compatible import (
@@ -191,7 +192,6 @@ class ProviderSettings:
     @classmethod
     def from_config(cls) -> ProviderSettings:
         from app import config
-        from app.modules.telegram_model_preferences import _channel_fingerprint
 
         values = config.get_many((
             "AGENT_LLM_API_URL", "AGENT_LLM_MODEL", "AGENT_LLM_API_KEY",
@@ -213,7 +213,7 @@ class ProviderSettings:
             api_key=(values.get("AGENT_LLM_API_KEY", "") or "").strip(),
             protocol=(values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip(),
             timeout_seconds=max(2, min(120, timeout)),
-            telegram_channel=_channel_fingerprint(values),
+            telegram_channel=provider_channel_fingerprint(values),
             context_window_tokens=max(16_384, min(2_000_000, context)),
             budget_profiles_json=values["AGENT_LLM_BUDGET_PROFILES"],
         )

@@ -436,6 +436,10 @@ def test_real_outbox_handoff_survives_crash_before_delivery_ack_without_new_mode
     async def run():
         from app import config
         from app.agent.kernel.continuation import deliver_continuation_result
+        from app.bot.agent_adapter import (
+            prepare_agent_continuation_delivery,
+            publish_agent_continuation_delivery,
+        )
         from app.modules import telegram_notification_center as notifications
         get_config = config.get
         values = {'AGENT_ENABLED': '1', 'TG_AGENT_ENABLED': '1', 'TG_CHAT_ID': '-100', 'TG_AGENT_ALLOWED_USER_IDS': '7'}
@@ -453,7 +457,11 @@ def test_real_outbox_handoff_survives_crash_before_delivery_ack_without_new_mode
                 with patch.object(notifications, '_agent_interaction_enabled', return_value=True):
                     store.update_effect_state = cut
                     with pytest.raises(RuntimeError, match='ACK not committed'):
-                        await deliver_continuation_result(store, delivery)
+                        await deliver_continuation_result(
+                            store, delivery,
+                            prepare_delivery=prepare_agent_continuation_delivery,
+                            publish_delivery=publish_agent_continuation_delivery,
+                        )
                     store.update_effect_state = original
                     with db.get_conn() as conn:
                         rows = conn.execute("SELECT event_json FROM telegram_notification_outbox WHERE json_extract(event_json,'$._agent_continuation_delivery') IS NOT NULL").fetchall()
@@ -463,7 +471,11 @@ def test_real_outbox_handoff_survives_crash_before_delivery_ack_without_new_mode
                     assert 'admitted.mp4' in saved['html']
                     cold = SQLiteKernelStore()
                     pending, = await cold.due_continuations()
-                    assert await deliver_continuation_result(cold, pending)
+                    assert await deliver_continuation_result(
+                        cold, pending,
+                        prepare_delivery=prepare_agent_continuation_delivery,
+                        publish_delivery=publish_agent_continuation_delivery,
+                    )
                     assert await cold.due_continuations() == []
                     with db.get_conn() as conn:
                         assert conn.execute("SELECT COUNT(*) FROM telegram_notification_outbox WHERE json_extract(event_json,'$._agent_continuation_delivery') IS NOT NULL").fetchone()[0] == 1

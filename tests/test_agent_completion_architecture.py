@@ -4,16 +4,17 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-AGENT_ROOT = Path(__file__).resolve().parents[1] / "app" / "agent"
+APP_ROOT = Path(__file__).resolve().parents[1] / "app"
+AGENT_ROOT = APP_ROOT / "agent"
 
 
-def _runtime_import_graph(root: Path = AGENT_ROOT) -> dict[str, set[str]]:
+def _runtime_import_graph(root: Path = AGENT_ROOT, *, package: str = "app.agent") -> dict[str, set[str]]:
     modules = {}
     for path in root.rglob("*.py"):
         suffix = list(path.relative_to(root).with_suffix("").parts)
         if suffix[-1] == "__init__":
             suffix.pop()
-        modules[".".join(("app", "agent", *suffix))] = path
+        modules[".".join((package, *suffix))] = path
     graph: dict[str, set[str]] = {module: set() for module in modules}
 
     class Imports(ast.NodeVisitor):
@@ -148,13 +149,32 @@ def test_type_checking_import_does_not_create_runtime_cycle(tmp_path: Path) -> N
 
 
 def test_execution_kernel_has_no_domain_or_transport_imports() -> None:
-    graph = _runtime_import_graph()
+    graph = _runtime_import_graph(APP_ROOT, package="app")
+    violations = {}
     for module, targets in graph.items():
         if not module.startswith("app.agent.kernel."):
             continue
         if module == "app.agent.kernel.bootstrap" or module.startswith("app.agent.kernel.ports."):
             continue
-        assert not {
+        forbidden = {
             target for target in targets
-            if target.startswith("app.agent.domains.") or target == "app.agent.transports"
-        }, module
+            if target.startswith(("app.agent.domains", "app.bot", "app.routes", "app.modules.telegram_"))
+            or target == "app.agent.transports"
+        }
+        if forbidden:
+            violations[module] = forbidden
+    assert not violations
+
+
+def test_dependency_check_detects_cycles_through_external_transport(tmp_path: Path) -> None:
+    (tmp_path / "agent").mkdir()
+    (tmp_path / "bot").mkdir()
+    (tmp_path / "agent" / "core.py").write_text(
+        "def deliver():\n    from app.bot.delivery import send\n"
+    )
+    (tmp_path / "bot" / "delivery.py").write_text(
+        "def send():\n    from app.agent.core import deliver\n"
+    )
+    assert _cycles(_runtime_import_graph(tmp_path, package="app")) == [
+        ["app.agent.core", "app.bot.delivery"],
+    ]
