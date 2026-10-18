@@ -140,10 +140,9 @@ def _precondition_failure(state: dict[str, Any]) -> ToolResult | None:
         )
     if state["current"] == state["requested"]:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="STRM 调度策略已经是目标状态",
-            error="STRM 调度策略没有变化。",
         )
     return None
 

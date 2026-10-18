@@ -280,10 +280,9 @@ def _precondition_failure(state: dict[str, Any]) -> ToolResult | None:
         )
     if state["current"] == state["requested"]:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary=f"{definition.label}已经是{definition.public_label(state['requested'])}",
-            error="目标策略无需修改。",
         )
     if (
         state["policy"] == "login_wallpaper_mode"

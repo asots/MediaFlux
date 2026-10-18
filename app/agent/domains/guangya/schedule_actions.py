@@ -277,10 +277,9 @@ def _precondition_failure(state: dict[str, Any]) -> ToolResult | None:
         )
     if state["current"] == state["requested"]:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="光鸭定时整理策略已经是目标状态",
-            error="光鸭定时整理策略没有变化。",
         )
     return None
 

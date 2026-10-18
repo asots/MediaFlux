@@ -123,10 +123,9 @@ def _preview_strm_failure_retry(
         )
     if count == 0:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="当前范围没有可重试的 STRM 失败记录",
-            error="没有可重试的失败记录。",
             suggestions=["可先询问：查看 STRM 失败状态。"],
         )
     if count > _MAX_RETRY_ITEMS:

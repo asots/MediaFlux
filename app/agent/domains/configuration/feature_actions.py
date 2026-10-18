@@ -275,10 +275,9 @@ def _precondition_failure(state: dict[str, Any]) -> ToolResult | None:
         )
     if state["current_enabled"] == state["requested_enabled"]:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary=f"{definition.label}已经处于目标状态",
-            error="功能状态没有变化。",
         )
     if (
         state["requested_enabled"]
@@ -411,7 +410,7 @@ def verify_feature_state_write(
     result: ToolResult,
 ) -> ToolResult:
     """回读持久化快照；不返回配置键、原始值或部署路径。"""
-    if not result.ok:
+    if not result.ok or result.status == "no_changes":
         return result
     definition = _FEATURES[arguments["feature"]]
     _snapshot, values = config.read_env_snapshot(config.ENV_FILE)

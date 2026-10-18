@@ -452,7 +452,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
             patch("app.agent.domains.guangya.organize_actions.Organizer", return_value=organizer),
         ):
             empty, _context = prepare_guangya_organize_run_once({})
-        self.assertFalse(empty.ok)
+        self.assertTrue(empty.ok)
         self.assertEqual(empty.status, "no_changes")
 
     def test_confirmed_run_uses_manual_trigger_and_hides_task_identifiers(self):

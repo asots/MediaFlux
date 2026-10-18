@@ -270,10 +270,9 @@ def prepare_add_watchlist(arguments: dict[str, Any]) -> tuple[ToolResult, str]:
     )
     if db.get_media_watchlist(*identity) is not None:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="该影视条目已在探索收藏中",
-            error="无需重复添加。",
         ), ""
     try:
         card = get_discovery_service().get_detail(identity[0], identity[2], identity[1])

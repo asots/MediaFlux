@@ -84,11 +84,13 @@ def _preview_rss_failure_retry(
     count = len(state["entries"])
     if count == 0:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="当前没有可安全重试的 RSS 失败条目",
-            error="只有已分类为可重试的 qB / 光鸭失败条目会进入本动作。",
-            suggestions=["可先询问：诊断 RSS 失败状态。"],
+            suggestions=[
+                "只有已分类为可重试的 qB / 光鸭失败条目会进入本动作。",
+                "可先询问：诊断 RSS 失败状态。",
+            ],
         )
     if state["config_error"]:
         return ToolResult(

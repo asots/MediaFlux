@@ -89,10 +89,9 @@ def _preview_rss_pending_download(
     count = len(state["entries"])
     if count == 0:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="当前没有可提交到 qBittorrent 的待处理 RSS 条目",
-            error="没有符合 pending 与 qB 目标条件的条目。",
             suggestions=["可先询问：诊断 RSS 订阅状态。"],
         )
     if state["config_error"]:

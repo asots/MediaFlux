@@ -238,11 +238,10 @@ def _organize_preview_snapshot(
         )
     if for_confirmation and data["sampled_files"] == 0:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="当前来源中没有可整理的媒体文件",
             data=data,
-            error="没有发现需要启动整理任务的内容。",
             evidence=[
                 Evidence(
                     "guangya_organizer", "执行只读 dry-run；未进行云盘写入。", _now()

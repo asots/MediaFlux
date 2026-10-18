@@ -201,10 +201,9 @@ def _precondition_failure(state: dict[str, Any]) -> ToolResult | None:
     )
     if state["current_site_ids"] == state["requested_site_ids"] and search_unchanged:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="资源站点已经是目标选择",
-            error="资源站点选择没有变化。",
         )
     return None
 
@@ -382,7 +381,7 @@ def verify_indexer_sites_write(
     result: ToolResult,
 ) -> ToolResult:
     """回读资源站点白名单的持久化结果，不暴露内部配置内容。"""
-    if not result.ok:
+    if not result.ok or result.status == "no_changes":
         return result
     expected = _requested_updates(arguments)
     _snapshot, values = config.read_env_snapshot(config.ENV_FILE)

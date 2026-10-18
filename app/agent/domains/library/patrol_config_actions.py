@@ -152,10 +152,9 @@ def _precondition_failure(state: dict[str, Any]) -> ToolResult | None:
         )
     if state["current"] == state["requested"]:
         return ToolResult(
-            ok=False,
+            ok=True,
             status="no_changes",
             summary="全库巡检策略已经是目标状态",
-            error="巡检策略没有变化。",
         )
     return None
 
