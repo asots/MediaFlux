@@ -65,6 +65,28 @@ def _make_due():
 
 
 @pytest.mark.parametrize("storage", ["memory", "sqlite"])
+def test_absent_session_reads_are_stable_and_actual_creation_gets_a_new_identity(storage):
+    async def exercise():
+        store = InMemorySessionStateStore() if storage == "memory" else SQLiteKernelStore()
+        first = await store.load(owner=OWNER, session_id=SID)
+        cold = SQLiteKernelStore() if storage == "sqlite" else store
+        assert await cold.load(owner=OWNER, session_id=SID) == first
+        assert first.lifecycle_id == "", "未创建的空读取不应分配活跃生命周期"
+        if isinstance(store, SQLiteKernelStore):
+            assert store.load_existing_session(owner=OWNER, session_id=SID) is None
+        _, created = await store.begin_turn(owner=OWNER, session_id=SID, request_id="create")
+        assert created.lifecycle_id and created.lifecycle_id != first.lifecycle_id
+        assert (await cold.load(owner=OWNER, session_id=SID)).lifecycle_id == created.lifecycle_id
+        if isinstance(store, SQLiteKernelStore):
+            assert await store.delete_session(owner=OWNER, session_id=SID)
+            assert await cold.load(owner=OWNER, session_id=SID) == first
+            _, recreated = await cold.begin_turn(owner=OWNER, session_id=SID, request_id="recreate")
+            assert recreated.lifecycle_id and recreated.lifecycle_id != created.lifecycle_id
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("storage", ["memory", "sqlite"])
 def test_lifecycle_identity_survives_turns_and_cannot_be_reassigned_by_tool_updates(storage):
     async def exercise():
         store = InMemorySessionStateStore() if storage == "memory" else SQLiteKernelStore()

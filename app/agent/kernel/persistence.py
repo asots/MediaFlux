@@ -795,7 +795,9 @@ class SQLiteKernelStore:
 
     def _load_sync(self, owner: str, session_id: str) -> SessionState:
         with db.get_conn() as conn:
-            return self._load_row(conn, owner, session_id)
+            state = self._load_existing_row(conn, owner, session_id)
+            # 缺行只是稳定的读取视图；实际首次写入才创建新的生命周期。
+            return state if state is not None else SessionState(owner=owner, session_id=session_id, lifecycle_id="")
 
     def _patch_session_display_sync(
         self, owner: str, session_id: str, patch: dict[str, Any]

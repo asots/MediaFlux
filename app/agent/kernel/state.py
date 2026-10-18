@@ -375,7 +375,7 @@ class InMemorySessionStateStore:
             return (
                 state.clone()
                 if state
-                else SessionState(owner=owner, session_id=session_id)
+                else SessionState(owner=owner, session_id=session_id, lifecycle_id="")
             )
 
 
