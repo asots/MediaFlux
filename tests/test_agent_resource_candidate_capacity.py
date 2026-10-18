@@ -1,6 +1,5 @@
 """候选业务容量独立于模型/展示预算，搜索到确认与后置生命周期不丢尾项。"""
 from __future__ import annotations
-from typing import Any
 
 import asyncio
 import inspect
@@ -10,6 +9,7 @@ import socket
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -31,7 +31,6 @@ from app.agent.domains.resources.candidate_context import (
     validate_safe_resource_snapshot,
 )
 from app.agent.domains.resources.ingest_actions import (
-    AgentIngestSessionStore,
     IngestActions,
     ingest_inspect_arguments,
     ingest_submit_arguments,
@@ -54,6 +53,7 @@ from app.agent.schema import validate_json_schema
 from app.agent.transports import QueryEnvelope
 from app.indexers.models import IndexerItem
 from app.indexers.result_store import IndexerResultStore
+from app.modules.share_transfer import ShareTransferPreviewStore
 from tests import test_agent_ux_backend as ux
 from tests.test_agent_recent_resource_confirmation import _candidate, _single_result
 from tests.test_agent_resource_batch import _prepare_batch
@@ -143,7 +143,7 @@ def test_private_snapshot_restores_every_handle_after_restart_and_rejects_tamper
 
 
 def test_schema_and_validators_share_resource_capacity_without_reducing_share_capacity():
-    specs = {spec.name: spec for spec in build_tool_specs(RecentResourceCandidateStore(), AgentIngestSessionStore())}
+    specs = {spec.name: spec for spec in build_tool_specs(RecentResourceCandidateStore(), ShareTransferPreviewStore())}
     reference = "ref_" + "a" * 24
     positions = list(range(1, 51))
     arguments = {
@@ -202,7 +202,7 @@ def test_low_model_budget_still_persists_full_reference_and_presents_tail(store)
 def test_inspect_reads_entire_snapshot_or_tail_in_original_request_order():
     resources = RecentResourceCandidateStore()
     search_id = resources.capture(owner=ux.OWNER, result=_resources(20))
-    actions = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=resources)
+    actions = IngestActions(share_store=ShareTransferPreviewStore(), recent_resource_store=resources)
     for positions in (None, [20, 13, 20]):
         arguments: dict[str, Any] = {"source_type": "resource_candidates"}
         if positions is not None:

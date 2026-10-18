@@ -17,7 +17,6 @@ from app.agent.domains.library.missing_workflows import (
     SQLiteMissingMediaWorkflowRepository,
 )
 from app.agent.domains.resources.candidate_context import RecentResourceCandidateStore
-from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
 from app.agent.feature_gate import (
     RuntimeFence,
     RuntimeFenceError,
@@ -27,6 +26,7 @@ from app.agent.feature_gate import (
 from app.agent.provider_actions import clear_provider_session_state
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.agent.transports import TelegramKernelTransport, WebKernelTransport
+from app.modules.share_transfer import ShareTransferPreviewStore
 
 from .capabilities import CapabilityRetriever
 from .effects import ConfirmationEffectPlanStore
@@ -94,20 +94,20 @@ _runtime: AgentKernelRuntime | None = None
 def _build_domain_dependencies() -> tuple[
     DomainActions,
     RecentResourceCandidateStore,
-    AgentIngestSessionStore,
+    ShareTransferPreviewStore,
     MissingMediaWorkflowRuntime,
 ]:
     context_repository = SQLiteAgentSessionContextRepository()
     domain_actions = DomainActions(context_repository)
     resource_store = RecentResourceCandidateStore(repository=context_repository)
-    ingest_store = AgentIngestSessionStore()
+    share_store = ShareTransferPreviewStore(ttl_seconds=15 * 60, max_entries=256)
     missing_media_runtime = MissingMediaWorkflowRuntime(
         repository=SQLiteMissingMediaWorkflowRepository(),
         recent_download_store=RecentDownloadSubmissionStore(
             repository=context_repository
         ),
     )
-    return domain_actions, resource_store, ingest_store, missing_media_runtime
+    return domain_actions, resource_store, share_store, missing_media_runtime
 
 
 def _session_limits_from_config() -> SessionLimits:
@@ -146,12 +146,12 @@ def _build_agent_kernel_runtime(
     (
         domain_actions,
         resource_store,
-        ingest_store,
+        share_store,
         missing_media_runtime,
     ) = _build_domain_dependencies()
     declarations = build_tool_specs(
         resource_store,
-        ingest_store,
+        share_store,
         missing_media_runtime=missing_media_runtime,
         domain_actions=domain_actions,
     )

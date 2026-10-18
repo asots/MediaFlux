@@ -32,6 +32,7 @@ from app.agent.domains.subscriptions.preference_policy import (
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext, ToolResult
 from app.modules.media_server_profiles import MediaServerProfile
+from app.modules.share_transfer import ShareTransferPreviewStore
 from app.repositories.media_experience import (
     clear_media_preferences,
     default_media_preferences,
@@ -328,11 +329,10 @@ def ingest_environment(preference_db):
         RecentResourceCandidateStore,
     )
     from app.agent.domains.resources.ingest_actions import (
-        AgentIngestSessionStore,
         IngestActions,
     )
 
-    actions = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=RecentResourceCandidateStore())
+    actions = IngestActions(share_store=ShareTransferPreviewStore(ttl_seconds=900, max_entries=256), recent_resource_store=RecentResourceCandidateStore())
     with patch("app.agent.domains.resources.ingest_actions.download_target_readiness",
                side_effect=lambda target: {name: True for name in (["qb", "guangya"] if target == "both" else [target])}), \
             patch("app.agent.domains.resources.ingest_actions.create_request", return_value={"id": 42, "created": True}) as create, \
@@ -349,15 +349,16 @@ def _inspect_direct(actions, owner="viewer"):
 def test_ingest_default_target_validator_and_share_protocol_stay_separate():
     from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
-    assert ingest_submit_arguments({"source_type": "direct_url"})["target"] == "preferred"
+    reference = "ref_1234567890abcdefghijkl"
+    assert ingest_submit_arguments({"source_type": "direct_url", "ingest_snapshot_ref": reference})["target"] == "preferred"
     assert ingest_submit_arguments({"source_type": "resource_candidates", "positions": [1]})["target"] == "preferred"
-    assert ingest_submit_arguments({"source_type": "guangya_share", "target": "preferred"})["target"] == "guangya"
+    assert ingest_submit_arguments({"source_type": "guangya_share", "target": "preferred", "ingest_snapshot_ref": reference})["target"] == "guangya"
     for target in ("qb", "both"):
         with pytest.raises(AgentToolError, match="只能转存"):
-            ingest_submit_arguments({"source_type": "guangya_share", "target": target})
+            ingest_submit_arguments({"source_type": "guangya_share", "target": target, "ingest_snapshot_ref": reference})
     for invalid in ("evil", "", 0, False, None):
         with pytest.raises(AgentToolError):
-            ingest_submit_arguments({"source_type": "direct_url", "target": invalid})
+            ingest_submit_arguments({"source_type": "direct_url", "target": invalid, "ingest_snapshot_ref": reference})
 
 
 def test_ingest_resolves_defaults_per_owner_and_explicit_choice_without_writes(ingest_environment):
@@ -370,11 +371,12 @@ def test_ingest_resolves_defaults_per_owner_and_explicit_choice_without_writes(i
         ("viewer", None, "qb"), ("other", None, "guangya"),
         ("viewer", "both", "both"), ("viewer", "guangya", "guangya"),
     ):
-        _inspect_direct(actions, owner)
-        raw = {"source_type": "direct_url"}
+        inspected = _inspect_direct(actions, owner)
+        raw = {"source_type": "direct_url", "ingest_snapshot_ref": "ref_1234567890abcdefghijkl"}
         if explicit is not None:
             raw["target"] = explicit
         arguments = ingest_submit_arguments(raw)
+        arguments["ingest_snapshot"] = inspected.references[0].value
         preview, fingerprint = actions.prepare_submit(arguments, _context(owner))
         assert preview.ok and preview.data["target"] == expected
         assert preview.data["backends"] == ({"qb": True, "guangya": True} if expected == "both" else {expected: True})
@@ -389,7 +391,6 @@ def test_ingest_confirm_restores_frozen_target_after_preferences_change_and_serv
         RecentResourceCandidateStore,
     )
     from app.agent.domains.resources.ingest_actions import (
-        AgentIngestSessionStore,
         IngestActions,
         ingest_submit_arguments,
     )
@@ -398,12 +399,12 @@ def test_ingest_confirm_restores_frozen_target_after_preferences_change_and_serv
     owner = action_history_owner_digest("viewer")
     set_media_preferences(owner, expected_revision=0, updates={"preferred_download_target": "qb"})
     inspected = _inspect_direct(actions)
-    arguments = ingest_submit_arguments({"source_type": "direct_url"})
+    arguments = ingest_submit_arguments({"source_type": "direct_url", "ingest_snapshot_ref": "ref_1234567890abcdefghijkl"})
     arguments["ingest_snapshot"] = inspected.references[0].value
     preview, fingerprint = actions.prepare_submit(arguments, _context())
     assert preview.data["target"] == "qb"
     # 仅模拟领域进程对象重建；资源来自原 Kernel 持久 opaque ref。
-    restarted = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=RecentResourceCandidateStore())
+    restarted = IngestActions(share_store=ShareTransferPreviewStore(ttl_seconds=900, max_entries=256), recent_resource_store=RecentResourceCandidateStore())
     set_media_preferences(owner, expected_revision=1, updates={"preferred_download_target": "guangya"})
     with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("确认阶段不得重读偏好")):
         result = restarted.execute_submit(arguments, fingerprint, _context())
@@ -416,8 +417,9 @@ def test_ingest_default_plan_rejects_tampered_target_or_missing_freeze(ingest_en
     from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
     actions, create, dispatch = ingest_environment
-    _inspect_direct(actions)
-    arguments = ingest_submit_arguments({"source_type": "direct_url"})
+    inspected = _inspect_direct(actions)
+    arguments = ingest_submit_arguments({"source_type": "direct_url", "ingest_snapshot_ref": "ref_1234567890abcdefghijkl"})
+    arguments["ingest_snapshot"] = inspected.references[0].value
     _preview, fingerprint = actions.prepare_submit(arguments, _context())
     corrupted = [
         fingerprint.replace(":guangya:", ":qb:"),
@@ -438,8 +440,9 @@ def test_ingest_legacy_explicit_hash_plan_and_unavailable_default_do_not_regress
     from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
     actions, create, dispatch = ingest_environment
-    _inspect_direct(actions)
-    explicit = ingest_submit_arguments({"source_type": "direct_url", "target": "qb"})
+    inspected = _inspect_direct(actions)
+    explicit = ingest_submit_arguments({"source_type": "direct_url", "target": "qb", "ingest_snapshot_ref": "ref_1234567890abcdefghijkl"})
+    explicit["ingest_snapshot"] = inspected.references[0].value
     _preview, old_hash = actions.prepare_submit(explicit, _context())
     assert len(old_hash) == 64 and ":" not in old_hash
     with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("显式目标不得读取偏好")):
@@ -449,8 +452,10 @@ def test_ingest_legacy_explicit_hash_plan_and_unavailable_default_do_not_regress
     dispatch.reset_mock()
     set_media_preferences(action_history_owner_digest("viewer"), expected_revision=0,
                           updates={"preferred_download_target": "qb"})
+    default_arguments = ingest_submit_arguments({"source_type": "direct_url", "ingest_snapshot_ref": "ref_1234567890abcdefghijkl"})
+    default_arguments["ingest_snapshot"] = inspected.references[0].value
     with patch("app.agent.domains.resources.ingest_actions.download_target_readiness", return_value={"qb": False}):
-        preview, fingerprint = actions.prepare_submit(ingest_submit_arguments({"source_type": "direct_url"}), _context())
+        preview, fingerprint = actions.prepare_submit(default_arguments, _context())
     assert not preview.ok and fingerprint == ""
     create.assert_not_called()
     dispatch.assert_not_called()
@@ -466,14 +471,13 @@ def test_ingest_default_resource_single_and_batch_freeze_target_without_ref_posi
         safe_resource_snapshot,
     )
     from app.agent.domains.resources.ingest_actions import (
-        AgentIngestSessionStore,
         IngestActions,
         ingest_submit_arguments,
     )
 
     owner = action_history_owner_digest("viewer")
     set_media_preferences(owner, expected_revision=0, updates={"preferred_download_target": "qb"})
-    actions = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=RecentResourceCandidateStore())
+    actions = IngestActions(share_store=ShareTransferPreviewStore(ttl_seconds=900, max_entries=256), recent_resource_store=RecentResourceCandidateStore())
     snapshot = safe_resource_snapshot(ToolResult(True, "success", "搜索完成", data={"items": [
         _resource("a", "Show.S01E01.2160p", site_id="nyaa", site_name="Nyaa"),
         _resource("b", "Show.S01E02.2160p", site_id="nyaa", site_name="Nyaa"),
@@ -517,15 +521,19 @@ def test_ingest_share_preview_stays_cloud_even_when_saved_target_is_qb(ingest_en
     actions, create, dispatch = ingest_environment
     set_media_preferences(action_history_owner_digest("viewer"), expected_revision=0,
                           updates={"preferred_download_target": "qb"})
-    actions.store.capture(
-        owner="viewer", conversation_session_id=_context().session_id,
-        source_type="guangya_share", public={"items": [{"position": 1, "name": "Show.mkv"}], "target_name": "默认云盘目录"},
-        private={"file_ids": ["private-file"], "target_id": "private-directory", "preview_id": "private-preview"},
-        identity="share-test",
-    )
-    with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("分享不应读取qB偏好")):
-        arguments = ingest_submit_arguments({"source_type": "guangya_share", "target": "preferred"})
+    with patch("app.agent.domains.resources.ingest_actions.inspect_share_for_transfer", return_value={
+        "preview_id": "private-preview", "share_id": "private-share",
+        "files": [{"id": "private-file", "name": "Show.mkv", "size": 1}],
+        "target_id": "private-directory", "target_name": "默认云盘目录", "expires_in": 900,
+    }) as inspect_share, patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("分享不应读取qB偏好")):
+        inspected = actions.inspect({
+            "source_type": "guangya_share",
+            "input": "https://www.guangyapan.com/s/1938060615538466851_aecd7hu726g3whGl#/share",
+        }, _context())
+        arguments = ingest_submit_arguments({"source_type": "guangya_share", "target": "preferred", "ingest_snapshot_ref": "ref_1234567890abcdefghijkl"})
+        arguments["ingest_snapshot"] = inspected.references[0].value
         preview, fingerprint = actions.prepare_submit(arguments, _context())
+    assert inspect_share.call_count == 2
     assert preview.ok and preview.data["target"] == "guangya"
     assert len(fingerprint) == 64
     create.assert_not_called()

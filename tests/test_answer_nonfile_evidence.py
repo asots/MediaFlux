@@ -6,12 +6,12 @@ import pytest
 
 from app.agent.domains.resources.candidate_context import RecentResourceCandidateStore
 from app.agent.domains.resources.ingest_actions import (
-    AgentIngestSessionStore,
     IngestActions,
 )
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.models import ToolContext
 from app.agent.public_view import public_conversation_messages
+from app.modules.share_transfer import ShareTransferPreviewStore
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import (
     AgentInput,
@@ -41,7 +41,7 @@ def tool_round(*calls):
 @pytest.mark.parametrize("unresolved,foreign", [(False, False), (True, False), (False, True)])
 def test_ingest_followup_explanation(unresolved, foreign):
     async def scenario():
-        actions = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=RecentResourceCandidateStore())
+        actions = IngestActions(share_store=ShareTransferPreviewStore(), recent_resource_store=RecentResourceCandidateStore())
         context = ToolContext(owner="a32-owner")
         args = {"source_type": "direct_url", "target": "qb", "positions": []}
         row = {"id": 43 if foreign else 42, "title": "Offline fixture", "kind": "magnet",
@@ -93,7 +93,8 @@ def test_ingest_followup_explanation(unresolved, foreign):
              patch("app.agent.domains.resources.ingest_actions.create_request", return_value={"id": 42, "created": True, "status": "pending"}) as create, \
              patch("app.agent.domains.resources.ingest_actions.dispatch_request", return_value={"ok": True, "status": "submitted", "succeeded": ["qb"], "failed": []}) as dispatch, \
              patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=None):
-            actions.inspect({"source_type": "direct_url", "input": "magnet:?xt=urn:btih:" + "a" * 40}, context)
+            inspected = actions.inspect({"source_type": "direct_url", "input": "magnet:?xt=urn:btih:" + "a" * 40}, context)
+            args["ingest_snapshot"] = inspected.references[0].value
             preview = await consume_events(session.run(AgentInput(message="提交下载并核验进度", owner="o", session_id="s")))
             assert preview.approval is not None
             final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))

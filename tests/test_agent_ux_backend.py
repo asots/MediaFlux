@@ -22,7 +22,6 @@ from app.agent.domains.resources.candidate_context import (
     new_resource_search_id,
     safe_resource_snapshot,
 )
-from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
 from app.agent.domains.resources.selection import (
     CANDIDATE_VIEW_KEY,
     current_candidate_view,
@@ -46,6 +45,7 @@ from app.agent.kernel.state_types import (
 from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolReference, ToolResult
 from app.agent.transports import QueryEnvelope
+from app.modules.share_transfer import ShareTransferPreviewStore
 from app.routes import agent_api
 from tests.test_agent_ux_model_context import model_resource_candidates
 
@@ -375,7 +375,7 @@ class SelectionModel:
 
 
 def _runtime(store=None, *, ttl=900, model=None):
-    specs = {item.name: item for item in build_tool_specs(RecentResourceCandidateStore(), AgentIngestSessionStore())}
+    specs = {item.name: item for item in build_tool_specs(RecentResourceCandidateStore(), ShareTransferPreviewStore())}
     specs["indexer.search_resources"] = replace(specs["indexer.search_resources"], handler=lambda _: _resources(ttl=ttl))
     catalog = catalog_from_tool_specs((specs["indexer.search_resources"], specs["indexer.present_candidates"], specs["ingest.submit"]))
     states = store or InMemorySessionStateStore()
@@ -1274,7 +1274,7 @@ def test_eight_step_query_contract_survives_empty_results_and_database_reload(st
     monkeypatch.setattr('app.agent.domains.resources.indexer_actions.get_indexer_service', lambda: service)
 
     async def exercise():
-        specs = build_tool_specs(RecentResourceCandidateStore(), AgentIngestSessionStore())
+        specs = build_tool_specs(RecentResourceCandidateStore(), ShareTransferPreviewStore())
         catalog = catalog_from_tool_specs(spec for spec in specs if spec.name in {
             'indexer.search_resources', 'indexer.present_candidates', 'ingest.inspect', 'ingest.submit',
         })

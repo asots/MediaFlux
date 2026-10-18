@@ -1,10 +1,9 @@
 """生产短句的完整能力窗口与搜索引用→批量 EffectPlan 回归。"""
 from __future__ import annotations
-from app.agent.kernel.model import ModelAdapter
-from typing import cast
 
 import unittest
 from dataclasses import replace
+from typing import cast
 from unittest.mock import patch
 
 from app.agent.domain_catalog import build_tool_specs
@@ -13,18 +12,23 @@ from app.agent.domains.resources.candidate_context import (
     new_resource_search_id,
     safe_resource_snapshot,
 )
-from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
 from app.agent.kernel.bootstrap import build_agent_kernel
 from app.agent.kernel.capabilities import CapabilityRetriever
 from app.agent.kernel.discovery import CapabilityDiscovery
 from app.agent.kernel.events import AgentEventType
-from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+from app.agent.kernel.model import (
+    ModelAdapter,
+    ModelEvent,
+    ModelEventType,
+    ModelToolCall,
+)
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import InMemorySessionStateStore
 from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolReference, ToolResult
+from app.modules.share_transfer import ShareTransferPreviewStore
 from tests.test_agent_kernel_capability_corpus import NoModel
 from tests.test_agent_kernel_resource_ingest import (
     SearchThenAnswerModel,
@@ -92,7 +96,7 @@ class AgentKernelBtFollowupTests(unittest.IsolatedAsyncioTestCase):
         result.references = [ToolReference(
             "resource_candidates", safe_resource_snapshot(result, search_id=new_resource_search_id())
         )]
-        specs = build_tool_specs(RecentResourceCandidateStore(), AgentIngestSessionStore())
+        specs = build_tool_specs(RecentResourceCandidateStore(), ShareTransferPreviewStore())
         catalog = catalog_from_tool_specs(tuple(
             replace(spec, handler=lambda _arguments: result)
             if spec.name == "indexer.search_resources" else spec for spec in specs

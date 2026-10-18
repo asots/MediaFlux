@@ -36,10 +36,7 @@ from app.agent.domains.local_media.tools import (
 )
 from app.agent.domains.playback.tools import register_specs as register_playback_specs
 from app.agent.domains.resources.candidate_context import RecentResourceCandidateStore
-from app.agent.domains.resources.ingest_actions import (
-    AgentIngestSessionStore,
-    IngestActions,
-)
+from app.agent.domains.resources.ingest_actions import IngestActions
 from app.agent.domains.resources.tools import register_specs as register_resource_specs
 from app.agent.domains.strm.metadata_tools import (
     register_specs as register_strm_metadata_specs,
@@ -52,6 +49,7 @@ from app.agent.domains.system.tools import register_specs as register_system_spe
 from app.agent.domains.workspace.tools import register_specs as register_workspace_specs
 from app.agent.models import ToolSpec
 from app.agent.session_context import AgentSessionContextRepository
+from app.modules.share_transfer import ShareTransferPreviewStore
 
 
 @dataclass(slots=True)
@@ -86,15 +84,16 @@ class DomainActions:
 
 def build_tool_specs(
     recent_resource_store: RecentResourceCandidateStore | None = None,
-    ingest_store: AgentIngestSessionStore | None = None,
+    share_store: ShareTransferPreviewStore | None = None,
     missing_media_runtime: MissingMediaWorkflowRuntime | None = None,
     domain_actions: DomainActions | None = None,
 ) -> tuple[ToolSpec, ...]:
     collector = ToolSpecCollector()
     resource_store = recent_resource_store or RecentResourceCandidateStore()
-    active_ingest_store = ingest_store or AgentIngestSessionStore()
     ingest_actions = IngestActions(
-        store=active_ingest_store,
+        share_store=share_store if share_store is not None else ShareTransferPreviewStore(
+            ttl_seconds=15 * 60, max_entries=256,
+        ),
         recent_resource_store=resource_store,
     )
     actions = domain_actions if domain_actions is not None else DomainActions()

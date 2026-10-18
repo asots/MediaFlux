@@ -18,7 +18,6 @@ from app.agent.domains.resources.candidate_context import (
     safe_resource_snapshot,
     validate_safe_resource_snapshot,
 )
-from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
 from app.agent.kernel.capabilities import CapabilityRetriever
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import (
@@ -33,6 +32,7 @@ from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import InMemorySessionStateStore
 from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolReference, ToolResult
+from app.modules.share_transfer import ShareTransferPreviewStore
 
 
 def _search_result() -> ToolResult:
@@ -168,8 +168,8 @@ async def _collect(stream) -> list:
 
 def _runtime(model, search_result=None):
     resource_store = RecentResourceCandidateStore()
-    ingest_store = AgentIngestSessionStore()
-    specs = {spec.name: spec for spec in build_tool_specs(resource_store, ingest_store)}
+    share_store = ShareTransferPreviewStore()
+    specs = {spec.name: spec for spec in build_tool_specs(resource_store, share_store)}
     search_spec = replace(
         specs["indexer.search_resources"],
         handler=lambda _arguments: search_result if search_result is not None else _search_result(),
@@ -526,10 +526,10 @@ class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         search_model = MultiWorkSearchThenAnswerModel()
         resource_store = RecentResourceCandidateStore()
-        ingest_store = AgentIngestSessionStore()
+        share_store = ShareTransferPreviewStore()
         specs = {
             spec.name: spec
-            for spec in build_tool_specs(resource_store, ingest_store)
+            for spec in build_tool_specs(resource_store, share_store)
         }
         # 仅模拟外部检索结果；输入校验、候选引用、预检与确认使用真实实现。
         search_spec = replace(

@@ -204,8 +204,8 @@ def register_specs(registry, *, ingest_actions) -> None:
             name="ingest.inspect",
             description=(
                 "统一只读检查资源接入来源：可识别光鸭官方分享、Magnet、ED2K、明确 HTTP(S) 下载直链，"
-                "或读取候选快照。resource_candidates 可选 positions 仅检查指定序号，省略读取全部；保持原序号，不代表已下载。原始链接、分享令牌、file_id 与索引 result_id 只保存在"
-                "owner 绑定的短期服务端快照中；普通网页链接不会创建下载任务。"
+                "或读取候选快照。resource_candidates 可选 positions 仅检查指定序号，省略读取全部；保持原序号，不代表已下载。原始链接、file_id 与索引 result_id 只保存在"
+                "owner/session 绑定的私有引用中，分享访问令牌仅存于服务端预览；提交直链或分享必须原样提供 ingest_snapshot_ref。普通网页链接不会创建下载任务。"
             ),
             risk=RiskLevel.READ,
             parameters={
@@ -265,9 +265,9 @@ def register_specs(registry, *, ingest_actions) -> None:
         ToolSpec(
             name="ingest.submit",
             description=(
-                "在用户确认后统一提交最近检查的直链或光鸭分享，或按资源搜索候选序号提交。"
+                "在用户确认后按检查引用提交直链或光鸭分享，或按资源搜索候选序号提交。"
                 "资源搜索完成后应把返回的 resource_candidates_ref 原样传入，确保同轮与后续对话均绑定"
-                "同一份候选快照；直链或分享检查完成后应把 ingest_snapshot_ref 原样传入。"
+                "同一份候选快照；直链或分享检查完成后必须把 ingest_snapshot_ref 原样传入。"
                 "直链和资源候选可选 qB、光鸭或两边；省略 target 或使用 preferred 时，在预检中采用用户保存的默认下载目标，没有偏好则使用光鸭；目标随计划冻结，确认期间不随偏好变化。光鸭分享始终只转存到光鸭。确认参数不包含链接、"
                 "访问令牌、云端 file_id、内部 result_id 或后端任务标识。"
             ),
@@ -307,7 +307,9 @@ def register_specs(registry, *, ingest_actions) -> None:
                         "positions": {"maxItems": MAX_RESOURCE_CANDIDATES,
                                       "items": {"maximum": MAX_RESOURCE_CANDIDATES}},
                     }},
-                    {"properties": {"source_type": {"enum": ["direct_url", "guangya_share"]}}},
+                    {"required": ["ingest_snapshot_ref"], "properties": {
+                        "source_type": {"enum": ["direct_url", "guangya_share"]},
+                    }},
                 ],
             },
             validator=ingest_submit_arguments,

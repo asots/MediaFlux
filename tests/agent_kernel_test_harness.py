@@ -5,10 +5,10 @@ ToolPipeline -> EffectPlan -> execute_confirmed 的真实生命周期。
 """
 
 from __future__ import annotations
-from collections.abc import Mapping
 
 import asyncio
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -91,14 +91,14 @@ class KernelDomainTestHarness:
         (
             self.domain_actions,
             resource_store,
-            ingest_store,
+            share_store,
             missing_media_runtime,
         ) = _build_domain_dependencies()
         self.recent_resource_store = resource_store
         self.catalog = catalog_from_tool_specs(
             build_tool_specs(
                 resource_store,
-                ingest_store,
+                share_store,
                 missing_media_runtime=missing_media_runtime,
                 domain_actions=self.domain_actions,
             )

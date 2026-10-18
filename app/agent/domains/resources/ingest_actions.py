@@ -1,8 +1,8 @@
 """Agent 专用的统一资源接入入口。
 
-只读检查把原始链接、分享访问令牌、云端 file_id 等敏感信息保存在
-owner 绑定的短期内存快照中；模型和公开确认参数只接触来源类型、候选序号
-与下载目标。非 Agent Telegram 继续使用原有独立 handler/store。
+只读检查把原始链接和云端 file_id 保存在当前会话的加密引用中，
+分享访问令牌由独立预览 store 保管；模型和公开确认参数只接触引用、
+来源类型、候选序号与下载目标。非 Agent Telegram 使用独立 handler/store。
 """
 
 from __future__ import annotations
@@ -11,12 +11,7 @@ import hashlib
 import json
 import re
 import secrets
-import threading
-import time
 import unicodedata
-from collections import OrderedDict
-from collections.abc import Callable
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -96,14 +91,12 @@ def _nonnegative_int(value: Any, *, maximum: int | None = None) -> int:
 
 
 @dataclass(frozen=True)
-class IngestSessionSnapshot:
-    session_id: str
+class IngestSnapshot:
     owner: str
     source_type: str
     public: dict[str, Any]
     private: dict[str, Any]
     fingerprint: str
-    expires_at: float
 
 
 def _receiving_folders(target: str, resources: list[dict[str, Any]]) -> tuple[list[str], str]:
@@ -134,151 +127,6 @@ def _receiving_folders(target: str, resources: list[dict[str, Any]]) -> tuple[li
                 text += "；匹配二次分流规则时改用「" + (_safe_text(rules.secondary_dir_name, 100) or "二次分流目录") + "」"
             public.append(text)
     return public, _fingerprint(frozen)
-
-
-class AgentIngestSessionStore:
-    """按 owner 与会话保存资源接入快照；与传统 Telegram 预览完全隔离。"""
-
-    def __init__(
-        self,
-        *,
-        ttl_seconds: int = 15 * 60,
-        max_entries: int = 256,
-        clock: Callable[[], float] = time.monotonic,
-        token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
-        share_store: ShareTransferPreviewStore | None = None,
-    ) -> None:
-        self.ttl_seconds = max(1, ttl_seconds)
-        self.max_entries = max(1, max_entries)
-        self._clock = clock
-        self._token_factory = token_factory
-        self.share_store = share_store or ShareTransferPreviewStore(
-            ttl_seconds=self.ttl_seconds,
-            max_entries=self.max_entries,
-        )
-        self._lock = threading.RLock()
-        self._entries: OrderedDict[tuple[str, str], IngestSessionSnapshot] = (
-            OrderedDict()
-        )
-
-    @staticmethod
-    def _scope(owner: str, conversation_session_id: str = "") -> tuple[str, str]:
-        return (
-            (owner or "").strip(),
-            (conversation_session_id or "").strip(),
-        )
-
-    def _prune_locked(self, now: float) -> None:
-        for scope in [
-            scope
-            for scope, snapshot in self._entries.items()
-            if snapshot.expires_at <= now
-        ]:
-            self._discard_locked(scope)
-
-    def _discard_locked(self, scope: tuple[str, str]) -> None:
-        snapshot = self._entries.pop(scope, None)
-        if snapshot is None or snapshot.source_type != "guangya_share":
-            return
-        preview_id = str(snapshot.private.get("preview_id") or "")
-        if not preview_id:
-            return
-        try:
-            self.share_store.discard(preview_id, snapshot.owner, "agent")
-        except ValueError:
-            pass
-
-    def capture(
-        self,
-        *,
-        owner: str,
-        source_type: str,
-        public: dict[str, Any],
-        private: dict[str, Any],
-        identity: str,
-        conversation_session_id: str = "",
-    ) -> IngestSessionSnapshot:
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            raise AgentToolError("请先登录后检查资源", code="precondition_failed")
-        snapshot_id = (self._token_factory() or "").strip()
-        if not snapshot_id:
-            raise AgentToolError("暂时无法保存资源检查结果", code="unavailable")
-        scope = self._scope(owner_key, conversation_session_id)
-        now = self._clock()
-        snapshot = IngestSessionSnapshot(
-            session_id=snapshot_id,
-            owner=owner_key,
-            source_type=source_type,
-            public=deepcopy(public),
-            private=deepcopy(private),
-            fingerprint=_fingerprint(
-                {
-                    "session_id": snapshot_id,
-                    "owner": owner_key,
-                    "source_type": source_type,
-                    "identity": identity,
-                }
-            ),
-            expires_at=now + self.ttl_seconds,
-        )
-        with self._lock:
-            self._prune_locked(now)
-            self._discard_locked(scope)
-            self._entries[scope] = snapshot
-            self._entries.move_to_end(scope)
-            while len(self._entries) > self.max_entries:
-                oldest = next(iter(self._entries))
-                self._discard_locked(oldest)
-        return deepcopy(snapshot)
-
-    def get(
-        self,
-        *,
-        owner: str,
-        source_type: str = "",
-        conversation_session_id: str = "",
-    ) -> IngestSessionSnapshot | None:
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return None
-        with self._lock:
-            self._prune_locked(self._clock())
-            if conversation_session_id:
-                scope = self._scope(owner_key, conversation_session_id)
-                snapshot = self._entries.get(scope)
-            else:
-                match = next(
-                    (
-                        (scope, item)
-                        for scope, item in reversed(self._entries.items())
-                        if scope[0] == owner_key
-                    ),
-                    None,
-                )
-                scope, snapshot = match if match is not None else (("", ""), None)
-            if snapshot is None or (
-                source_type and snapshot.source_type != source_type
-            ):
-                return None
-            self._entries.move_to_end(scope)
-            return deepcopy(snapshot)
-
-    def clear_owner(self, *, owner: str) -> bool:
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return False
-        with self._lock:
-            scopes = [scope for scope in self._entries if scope[0] == owner_key]
-            existed = bool(scopes)
-            for scope in scopes:
-                self._discard_locked(scope)
-            return existed
-
-    def reset(self) -> None:
-        with self._lock:
-            for scope in list(self._entries):
-                self._discard_locked(scope)
 
 
 def ingest_inspect_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -393,10 +241,10 @@ def ingest_submit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise AgentToolError("只有资源候选提交接受 search_id")
     elif raw_reference not in (None, ""):
         raise AgentToolError("只有资源候选提交接受 resource_candidates_ref")
-    elif raw_ingest_reference not in (None, ""):
+    else:
         reference = str(raw_ingest_reference or "").strip()
         if not _OPAQUE_REFERENCE_RE.fullmatch(reference):
-            raise AgentToolError("ingest_snapshot_ref 不是有效的资源检查引用")
+            raise AgentToolError("请原样提供资源检查返回的 ingest_snapshot_ref")
         normalized["ingest_snapshot_ref"] = reference
     return normalized
 
@@ -414,10 +262,10 @@ class IngestActions:
     def __init__(
         self,
         *,
-        store: AgentIngestSessionStore,
+        share_store: ShareTransferPreviewStore,
         recent_resource_store: RecentResourceCandidateStore,
     ) -> None:
-        self.store = store
+        self.share_store = share_store
         self.recent_resource_store = recent_resource_store
         self.candidate_actions = IndexerCandidateActions(recent_resource_store)
 
@@ -494,7 +342,7 @@ class IngestActions:
                     value,
                     owner,
                     "agent",
-                    store=self.store.share_store,
+                    store=self.share_store,
                 )
             except Exception as exc:
                 raise AgentToolError(
@@ -527,34 +375,12 @@ class IngestActions:
                     inspected.get("target_name") or "根目录", 120
                 ),
                 "expires_in": min(
-                    self.store.ttl_seconds,
+                    self.share_store.ttl_seconds,
                     _nonnegative_int(
-                        inspected.get("expires_in"), maximum=self.store.ttl_seconds
+                        inspected.get("expires_in"), maximum=self.share_store.ttl_seconds
                     ),
                 ),
             }
-            session = self.store.capture(
-                owner=owner,
-                source_type="guangya_share",
-                public=public,
-                private={
-                    "preview_id": str(inspected.get("preview_id") or ""),
-                    "file_ids": [
-                        str(item.get("id") or "").strip() for item in share_files
-                    ],
-                    "target_id": str(inspected.get("target_id") or "0"),
-                    "target_name": str(inspected.get("target_name") or "根目录"),
-                },
-                identity=_fingerprint(
-                    {
-                        "preview": inspected.get("preview_id"),
-                        "share": inspected.get("share_id"),
-                        "files": [item.get("id") for item in share_files],
-                    }
-                ),
-                conversation_session_id=context.session_id,
-            )
-            public["expires_in"] = max(0, int(session.expires_at - time.monotonic()))
             return ToolResult(
                 True,
                 "success",
@@ -563,7 +389,7 @@ class IngestActions:
                 evidence=[
                     Evidence(
                         "guangya_share",
-                        "服务端已解析分享并保存 owner 绑定的短期私有快照；未返回 access token、file_id 或分享链接。",
+                        "服务端已解析分享并生成会话绑定的私有引用；未返回 access token、file_id 或分享链接。",
                         _now(),
                     )
                 ],
@@ -589,7 +415,7 @@ class IngestActions:
                                 for item in share_files
                             ],
                         },
-                        ttl_seconds=self.store.ttl_seconds,
+                        ttl_seconds=self.share_store.ttl_seconds,
                     )
                 ],
             )
@@ -611,17 +437,8 @@ class IngestActions:
             "source_type": "direct_url",
             "kind": item.kind,
             "title": _safe_text(item.title or "下载资源", 180),
-            "expires_in": self.store.ttl_seconds,
+            "expires_in": self.share_store.ttl_seconds,
         }
-        session = self.store.capture(
-            owner=owner,
-            source_type="direct_url",
-            public=public,
-            private={"download_input": item},
-            identity=request_key(item),
-            conversation_session_id=context.session_id,
-        )
-        public["expires_in"] = max(0, int(session.expires_at - time.monotonic()))
         return ToolResult(
             True,
             "success",
@@ -630,7 +447,7 @@ class IngestActions:
             evidence=[
                 Evidence(
                     "download_dispatcher",
-                    "服务端已校验下载协议并保存 owner 绑定的短期私有快照；未返回链接或哈希。",
+                    "服务端已校验下载协议并生成会话绑定的私有引用；未返回链接或哈希。",
                     _now(),
                 )
             ],
@@ -644,7 +461,7 @@ class IngestActions:
                         "input": value,
                         "identity": request_key(item),
                     },
-                    ttl_seconds=self.store.ttl_seconds,
+                    ttl_seconds=self.share_store.ttl_seconds,
                 )
             ],
         )
@@ -670,39 +487,10 @@ class IngestActions:
 
     def _snapshot(
         self, arguments: dict[str, Any], context: ToolContext
-    ) -> IngestSessionSnapshot:
+    ) -> IngestSnapshot:
         owner = self._owner(context)
-        reference = arguments.get("ingest_snapshot")
-        if reference is not None:
-            return self._snapshot_from_reference(
-                reference,
-                owner=owner,
-                source_type=str(arguments["source_type"]),
-            )
-        snapshot = self.store.get(
-            owner=owner,
-            source_type=arguments["source_type"],
-            conversation_session_id=context.session_id,
-        )
-        if snapshot is None:
-            label = (
-                "光鸭分享"
-                if arguments["source_type"] == "guangya_share"
-                else "下载链接"
-            )
-            raise AgentToolError(
-                f"最近{label}检查不存在或已过期，请重新发送链接",
-                code="precondition_failed",
-            )
-        return snapshot
-
-    def _snapshot_from_reference(
-        self,
-        value: Any,
-        *,
-        owner: str,
-        source_type: str,
-    ) -> IngestSessionSnapshot:
+        source_type = str(arguments["source_type"])
+        value = arguments.get("ingest_snapshot")
         if not isinstance(value, dict) or value.get("version") != _INGEST_REFERENCE_VERSION:
             raise AgentToolError(
                 "资源检查引用无效或已过期", code="confirmation_stale"
@@ -718,7 +506,6 @@ class IngestActions:
         raw_input = value.get("input")
         if not isinstance(raw_input, str) or not raw_input or len(raw_input) > 8192:
             raise AgentToolError("资源检查引用无效", code="confirmation_stale")
-        now = time.monotonic()
 
         if reference_source == "direct_url":
             if set(value) != {"version", "source_type", "input", "identity"}:
@@ -740,10 +527,9 @@ class IngestActions:
                 "source_type": "direct_url",
                 "kind": item.kind,
                 "title": _safe_text(item.title or "下载资源", 180),
-                "expires_in": self.store.ttl_seconds,
+                "expires_in": self.share_store.ttl_seconds,
             }
-            return IngestSessionSnapshot(
-                session_id=_fingerprint(value)[:32],
+            return IngestSnapshot(
                 owner=owner,
                 source_type="direct_url",
                 public=public,
@@ -751,7 +537,6 @@ class IngestActions:
                 fingerprint=_fingerprint(
                     {"source_type": "direct_url", "identity": identity}
                 ),
-                expires_at=now + self.store.ttl_seconds,
             )
 
         if set(value) != {
@@ -771,7 +556,7 @@ class IngestActions:
                 raw_input,
                 owner,
                 "agent",
-                store=self.store.share_store,
+                store=self.share_store,
             )
         except Exception as exc:
             raise AgentToolError(
@@ -811,8 +596,7 @@ class IngestActions:
             }
             for index, item in enumerate(share_files, start=1)
         ]
-        return IngestSessionSnapshot(
-            session_id=_fingerprint(value)[:32],
+        return IngestSnapshot(
             owner=owner,
             source_type="guangya_share",
             public={
@@ -820,7 +604,7 @@ class IngestActions:
                 "count": len(public_items),
                 "items": public_items,
                 "target_name": _safe_text(target_name, 120),
-                "expires_in": self.store.ttl_seconds,
+                "expires_in": self.share_store.ttl_seconds,
             },
             private={
                 "preview_id": str(inspected.get("preview_id") or ""),
@@ -837,12 +621,11 @@ class IngestActions:
                     "files": current_files,
                 }
             ),
-            expires_at=now + self.store.ttl_seconds,
         )
 
     @staticmethod
     def _submission_context(
-        snapshot: IngestSessionSnapshot, arguments: dict[str, Any]
+        snapshot: IngestSnapshot, arguments: dict[str, Any]
     ) -> str:
         return _fingerprint(
             {
@@ -956,7 +739,7 @@ class IngestActions:
                 evidence=[
                     Evidence(
                         "agent_ingest_snapshot",
-                        "已复核 owner 绑定的短期资源快照和下载后端状态；未返回原始链接或哈希。",
+                        "已复核会话绑定的资源检查引用和下载后端状态；未返回原始链接或哈希。",
                         _now(),
                     )
                 ],
@@ -997,7 +780,7 @@ class IngestActions:
             evidence=[
                 Evidence(
                     "agent_ingest_snapshot",
-                    "已锁定 owner 绑定的分享快照、文件序号和目标目录；未返回 access token 或 file_id。",
+                    "已锁定会话绑定的分享引用、文件序号和目标目录；未返回 access token 或 file_id。",
                     _now(),
                 )
             ],
@@ -1165,7 +948,7 @@ class IngestActions:
                 target_name=str(snapshot.private.get("target_name") or "根目录"),
                 origin="agent",
                 tracker_chat_id="",
-                store=self.store.share_store,
+                store=self.share_store,
             )
         except ValueError as exc:
             raise AgentToolError(str(exc), code="confirmation_stale") from exc

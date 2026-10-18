@@ -16,7 +16,6 @@ from app.agent.domains.resources.candidate_context import (
     safe_resource_snapshot,
 )
 from app.agent.domains.resources.ingest_actions import (
-    AgentIngestSessionStore,
     IngestActions,
     ingest_inspect_arguments,
     ingest_status_arguments,
@@ -35,6 +34,7 @@ from app.agent.state_commit import (
 from app.bot.agent_adapter import _render_turn
 from app.bot.telegram_markdown import render_telegram_markdown
 from app.modules import download_dispatcher as dispatcher
+from app.modules.share_transfer import ShareTransferPreviewStore
 from tests.support import isolated_test_database
 
 _MAGNET = "magnet:?xt=urn:btih:" + "a" * 40 + "&dn=Demo"
@@ -180,13 +180,14 @@ class AgentIngestArgumentTests(unittest.TestCase):
             )
 
     def test_share_defaults_to_guangya_and_all_items(self):
+        reference = "ref_1234567890abcdefghijkl"
         self.assertEqual(
-            ingest_submit_arguments({"source_type": "guangya_share"}),
-            {"source_type": "guangya_share", "target": "guangya", "positions": []},
+            ingest_submit_arguments({"source_type": "guangya_share", "ingest_snapshot_ref": reference}),
+            {"source_type": "guangya_share", "target": "guangya", "positions": [], "ingest_snapshot_ref": reference},
         )
         self.assertEqual(
-            ingest_submit_arguments({"source_type": "guangya_share", "positions": []}),
-            {"source_type": "guangya_share", "target": "guangya", "positions": []},
+            ingest_submit_arguments({"source_type": "guangya_share", "positions": [], "ingest_snapshot_ref": reference}),
+            {"source_type": "guangya_share", "target": "guangya", "positions": [], "ingest_snapshot_ref": reference},
         )
 
     def test_resource_inspection_rejects_input(self):
@@ -262,10 +263,10 @@ class AgentIngestArgumentTests(unittest.TestCase):
 
 class AgentIngestActionTests(unittest.TestCase):
     def setUp(self):
-        self.store = AgentIngestSessionStore()
+        self.share_store = ShareTransferPreviewStore(ttl_seconds=900, max_entries=256)
         self.resources = RecentResourceCandidateStore()
         self.actions = IngestActions(
-            store=self.store, recent_resource_store=self.resources
+            share_store=self.share_store, recent_resource_store=self.resources
         )
         self.context = ToolContext(owner="owner-a")
         self.resource_result = _resource_result(
@@ -454,7 +455,7 @@ class AgentIngestActionTests(unittest.TestCase):
         )
         with ExitStack() as stack:
             mocked_mutations = [stack.enter_context(patch(name)) for name in mutations]
-            capture = stack.enter_context(patch.object(self.store, "capture"))
+            create_preview = stack.enter_context(patch.object(self.share_store, "create"))
             for selection, count in (({"positions": [3]}, 1), ({}, 3)):
                 with self.subTest(selection=selection):
                     result = self.actions.inspect(
@@ -472,9 +473,9 @@ class AgentIngestActionTests(unittest.TestCase):
                     self.assertNotIn("request_number", result.data)
             for mocked_mutation in mocked_mutations:
                 mocked_mutation.assert_not_called()
-            capture.assert_not_called()
+            create_preview.assert_not_called()
         self.assertEqual(self.resources.get(owner="owner-a"), before)
-        self.assertIsNone(self.store.get(owner="owner-a"))
+        self.assertEqual(self.share_store.entry_count, 0)
 
     def test_direct_link_snapshot_never_returns_link_or_hash(self):
         result = self.actions.inspect(
@@ -485,37 +486,39 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertNotIn("magnet:?", rendered)
         self.assertNotIn("a" * 40, rendered)
         self.assertEqual(result.data["source_type"], "direct_url")
-        self.assertIsNone(self.store.get(owner="owner-b"))
-
-    def test_ingest_memory_snapshots_are_isolated_by_conversation_session(self):
-        first_context = ToolContext(owner="owner-a", session_id="session-a")
-        second_context = ToolContext(owner="owner-a", session_id="session-b")
-        self.actions.inspect(
-            {"source_type": "direct_url", "input": _MAGNET}, first_context
-        )
-        self.actions.inspect(
-            {"source_type": "direct_url", "input": _MAGNET}, second_context
-        )
-
-        first = self.store.get(
-            owner="owner-a",
-            source_type="direct_url",
-            conversation_session_id="session-a",
-        )
-        second = self.store.get(
-            owner="owner-a",
-            source_type="direct_url",
-            conversation_session_id="session-b",
-        )
-        assert (first) is not None
-        assert (second) is not None
-        self.assertNotEqual(first.session_id, second.session_id)
+        self.assertEqual(self.share_store.entry_count, 0)
+        self.assertEqual([reference.kind for reference in result.references], ["ingest_snapshot"])
 
     @patch(
         "app.agent.domains.resources.ingest_actions.download_target_readiness",
         return_value={"qb": True},
     )
-    def test_direct_reference_rebuilds_preview_after_memory_store_restart(
+    def test_explicit_direct_reference_does_not_follow_a_later_inspection(self, _readiness):
+        first = self.actions.inspect(
+            {"source_type": "direct_url", "input": _MAGNET}, self.context
+        )
+        second = self.actions.inspect(
+            {"source_type": "direct_url", "input": _MAGNET.replace("a" * 40, "b" * 40)},
+            self.context,
+        )
+        fingerprints = []
+        for inspected in (first, second, first):
+            preview, fingerprint = self.actions.prepare_submit(
+                {"source_type": "direct_url", "target": "qb", "positions": [],
+                 "ingest_snapshot": inspected.references[0].value},
+                self.context,
+            )
+            self.assertTrue(preview.ok)
+            fingerprints.append(fingerprint)
+        self.assertEqual(fingerprints[0], fingerprints[2])
+        self.assertNotEqual(fingerprints[0], fingerprints[1])
+        self.assertEqual(self.share_store.entry_count, 0)
+
+    @patch(
+        "app.agent.domains.resources.ingest_actions.download_target_readiness",
+        return_value={"qb": True},
+    )
+    def test_direct_reference_rebuilds_preview_after_domain_restart(
         self, _readiness
     ):
         context = ToolContext(owner="owner-a", session_id="session-a")
@@ -524,7 +527,7 @@ class AgentIngestActionTests(unittest.TestCase):
         )
         reference_value = inspected.references[0].value
         restarted = IngestActions(
-            store=AgentIngestSessionStore(),
+            share_store=ShareTransferPreviewStore(ttl_seconds=900, max_entries=256),
             recent_resource_store=RecentResourceCandidateStore(),
         )
         resolved_arguments = {
@@ -539,13 +542,8 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertTrue(preview.ok)
         self.assertTrue(fingerprint)
         self.assertEqual(preview.data["source_type"], "direct_url")
-        self.assertIsNone(
-            restarted.store.get(
-                owner="owner-a",
-                source_type="direct_url",
-                conversation_session_id="session-a",
-            )
-        )
+        self.assertEqual(restarted.share_store.entry_count, 0)
+        self.assertIsNot(restarted.share_store, self.share_store)
 
     def test_ordinary_web_page_is_not_ingested(self):
         with self.assertRaises(AgentToolError) as raised:
@@ -557,7 +555,7 @@ class AgentIngestActionTests(unittest.TestCase):
                 self.context,
             )
         self.assertEqual(raised.exception.code, "precondition_failed")
-        self.assertIsNone(self.store.get(owner="owner-a"))
+        self.assertEqual(self.share_store.entry_count, 0)
 
     def test_malformed_download_link_returns_agent_input_error(self):
         with self.assertRaises(AgentToolError) as raised:
@@ -566,7 +564,7 @@ class AgentIngestActionTests(unittest.TestCase):
                 self.context,
             )
         self.assertEqual(raised.exception.code, "precondition_failed")
-        self.assertIsNone(self.store.get(owner="owner-a"))
+        self.assertEqual(self.share_store.entry_count, 0)
 
     @patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=None)
     @patch(
@@ -588,10 +586,11 @@ class AgentIngestActionTests(unittest.TestCase):
     def test_direct_link_requires_confirmation_and_executes_via_dispatcher(
         self, _readiness, create_request_mock, dispatch_mock, _get_request
     ):
-        self.actions.inspect(
+        inspected = self.actions.inspect(
             {"source_type": "direct_url", "input": _MAGNET}, self.context
         )
-        arguments = {"source_type": "direct_url", "target": "qb", "positions": []}
+        arguments = {"source_type": "direct_url", "target": "qb", "positions": [],
+                     "ingest_snapshot": inspected.references[0].value}
         preview, fingerprint = self.actions.prepare_submit(arguments, self.context)
         self.assertTrue(preview.ok)
         self.assertNotIn("magnet:?", repr(preview.to_dict()))
@@ -657,7 +656,7 @@ class AgentIngestActionTests(unittest.TestCase):
             "expires_in": 900,
         },
     )
-    def test_share_reference_revalidates_after_memory_store_restart(
+    def test_share_reference_revalidates_after_domain_restart(
         self, inspect_share, _readiness
     ):
         context = ToolContext(owner="owner-a", session_id="session-a")
@@ -666,7 +665,7 @@ class AgentIngestActionTests(unittest.TestCase):
         )
         reference_value = inspected.references[0].value
         restarted = IngestActions(
-            store=AgentIngestSessionStore(),
+            share_store=ShareTransferPreviewStore(ttl_seconds=900, max_entries=256),
             recent_resource_store=RecentResourceCandidateStore(),
         )
 
@@ -706,9 +705,8 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual(result.data["count"], 1)
         self.assertEqual(result.data["items"][0]["position"], 1)
         self.assertEqual(result.data["items"][0]["size_bytes"], 0)
-        snapshot = self.store.get(owner="owner-a", source_type="guangya_share")
-        assert snapshot is not None
-        self.assertEqual(snapshot.private["file_ids"], ["file-secret-2"])
+        snapshot = result.references[0].value
+        self.assertEqual([item["id"] for item in snapshot["files"]], ["file-secret-2"])
 
     @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     def test_staged_candidates_override_older_persisted_latest(self, prepare_resource):
@@ -838,7 +836,7 @@ class AgentIngestActionTests(unittest.TestCase):
         self, prepare_resource, submit_resource
     ):
         resources = RecentResourceCandidateStore(max_snapshots_per_owner=1)
-        actions = IngestActions(store=self.store, recent_resource_store=resources)
+        actions = IngestActions(share_store=self.share_store, recent_resource_store=resources)
         prepare_resource.side_effect = lambda arguments: (
             ToolResult(True, "confirmation_required", "preview", data={"resource": {}}),
             f"{arguments['result_id']}:{arguments['target']}",
@@ -997,7 +995,7 @@ def test_direct_submission_receipt_matches_real_dispatch(
     ):
         cloud_client.return_value.logged_in = True
         actions = IngestActions(
-            store=AgentIngestSessionStore(),
+            share_store=ShareTransferPreviewStore(ttl_seconds=900, max_entries=256),
             recent_resource_store=RecentResourceCandidateStore(),
         )
         context = ToolContext(owner="owner-a", session_id="direct-receipt")
@@ -1005,7 +1003,10 @@ def test_direct_submission_receipt_matches_real_dispatch(
             ingest_inspect_arguments({"source_type": "direct_url", "input": _MAGNET}),
             context,
         )
-        arguments = ingest_submit_arguments({"source_type": "direct_url", "target": "both"})
+        arguments = ingest_submit_arguments({
+            "source_type": "direct_url", "target": "both",
+            "ingest_snapshot_ref": "ref_1234567890abcdefghijkl",
+        })
         arguments["ingest_snapshot"] = inspected.references[0].value
         preview, fingerprint = actions.prepare_submit(arguments, context)
         assert preview.ok and preview.data["backends"] == {"qb": True, "guangya": True}
