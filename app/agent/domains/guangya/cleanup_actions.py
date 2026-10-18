@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import logging
 import re
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -20,7 +21,6 @@ from app.agent.public_safety import sanitize_public_text, sanitize_untrusted_fil
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
-    PersistedAgentContext,
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.guangya_residual_cleanup import (
@@ -71,6 +71,7 @@ _PREVIEW_KEYS = (
 @dataclass
 class _Flow:
     owner: str
+    session_id: str
     plan_id: str
     fingerprint: str
     preview_safe: dict[str, Any]
@@ -78,6 +79,17 @@ class _Flow:
     updated_at: float = 0.0
     generation: int = 0
     revision: int = 0
+
+    @property
+    def scope_key(self) -> str:
+        return _scope_key(self.owner, self.session_id)
+
+
+def _scope_key(owner: str, session_id: str) -> str:
+    owner_key, session_key = owner.strip(), session_id.strip()
+    if not owner_key or not session_key:
+        raise AgentToolError("残留清理需要已登录会话", code="precondition_failed")
+    return hashlib.sha256(json.dumps([owner_key, session_key]).encode()).hexdigest()
 
 
 def _now() -> str:
@@ -129,6 +141,7 @@ def _payload(flow: _Flow) -> dict[str, Any]:
 
 def _from_payload(
     owner: str,
+    session_id: str,
     payload: dict[str, Any],
     *,
     generation: int = 0,
@@ -147,6 +160,7 @@ def _from_payload(
         return None
     return _Flow(
         owner=owner,
+        session_id=session_id,
         plan_id=plan_id,
         fingerprint=fingerprint,
         preview_safe=preview,
@@ -422,170 +436,111 @@ class GuangyaCleanupActions:
         self._repository = repository
         self._lock = threading.RLock()
         self._flows: dict[str, _Flow] = {}
+        self._generation = 0
+        self._memory_guards: dict[str, tuple[AgentContextWriteGuard, float]] = {}
 
-
-    def clear_guangya_cleanup_context(self, *, owner: str) -> None:
-        """清除 owner 的内存缓存；SQLite epoch 是唯一有效性权威。"""
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return
+    def clear_session(self, *, owner: str, session_id: str) -> None:
+        scope = _scope_key(owner, session_id)
         with self._lock:
-            self._flows.pop(owner_key, None)
+            if self._repository is not None:
+                self._repository.invalidate_context(owner=scope, context_type=_CONTEXT_TYPE)
+            self._flows.pop(scope, None)
+            self._memory_guards.pop(scope, None)
 
-    def _begin(self, owner: str) -> AgentContextWriteGuard:
-        if self._repository is None:
-            return AgentContextWriteGuard(generation=0, revision=0)
-        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
-        if not callable(begin):
-            return AgentContextWriteGuard(generation=0, revision=0)
-        return begin(owner=owner, context_type=_CONTEXT_TYPE)
+    def _prune_locked(self) -> None:
+        now = time.monotonic()
+        expired = {key for key, item in self._flows.items() if now - item.updated_at > _TTL_SECONDS}
+        expired.update(key for key, (_, expires_at) in self._memory_guards.items() if expires_at <= now)
+        for key in expired:
+            self._flows.pop(key, None)
+            self._memory_guards.pop(key, None)
 
     def _begin_update(
         self,
         owner: str,
+        session_id: str,
     ) -> tuple[_Flow | None, AgentContextWriteGuard]:
-        if self._repository is not None:
-            begin_update: Callable[..., tuple[PersistedAgentContext | None, AgentContextWriteGuard]] | None = getattr(self._repository, "begin_context_update", None)
-            if callable(begin_update):
-                persisted, guard = begin_update(
-                    owner=owner,
-                    context_type=_CONTEXT_TYPE,
-                )
-                previous = None
-                if persisted is not None:
-                    previous = _from_payload(
-                        owner,
-                        persisted.payload,
-                        generation=persisted.generation,
-                        revision=persisted.revision,
-                    )
-                    if previous is not None:
-                        with self._lock:
-                            self._flows[owner] = previous
-                return previous, guard
-        return self._flow(owner), self._begin(owner)
+        scope = _scope_key(owner, session_id)
+        with self._lock:
+            self._prune_locked()
+            if self._repository is not None:
+                persisted, guard = self._repository.begin_context_update(owner=scope, context_type=_CONTEXT_TYPE)
+                previous = (_from_payload(owner, session_id, persisted.payload,
+                    generation=persisted.generation, revision=persisted.revision) if persisted else None)
+            else:
+                previous = self._flows.get(scope)
+                self._generation += 1
+                guard = AgentContextWriteGuard(self._generation, previous.revision if previous else 0)
+                self._memory_guards[scope] = guard, time.monotonic() + _TTL_SECONDS
+                if previous is not None:
+                    previous = replace(previous, generation=guard.generation)
+                    self._flows[scope] = previous
+            return previous, guard
 
     def _save(self, flow: _Flow) -> bool:
-        flow.updated_at = time.monotonic()
-        if self._repository is not None:
-            try:
-                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
-                if callable(guarded):
-                    if flow.generation <= 0:
-                        return False
-                    persisted = guarded(
-                        owner=flow.owner,
+        with self._lock:
+            self._prune_locked()
+            scope, guard = flow.scope_key, AgentContextWriteGuard(flow.generation, flow.revision)
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.replace_latest_guarded(
+                        owner=scope,
                         context_type=_CONTEXT_TYPE,
                         payload=_payload(flow),
                         expires_at=time.time() + _TTL_SECONDS,
-                        guard=AgentContextWriteGuard(flow.generation, flow.revision),
+                        guard=guard,
                     )
-                    if persisted is None:
-                        return False
-                    flow.generation = persisted.generation
-                    flow.revision = persisted.revision
-                else:
-                    self._repository.replace_latest(
-                        owner=flow.owner,
-                        context_type=_CONTEXT_TYPE,
-                        payload=_payload(flow),
-                        expires_at=time.time() + _TTL_SECONDS,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "Agent 光鸭残留清理上下文保存失败 type=%s", type(exc).__name__
-                )
-                return False
-        with self._lock:
-            for owner in [
-                owner
-                for owner, item in self._flows.items()
-                if time.monotonic() - item.updated_at > _TTL_SECONDS
-            ]:
-                self._flows.pop(owner, None)
-            self._flows[flow.owner] = flow
-        return True
+                except Exception as exc:
+                    logger.warning("Agent 光鸭残留清理上下文保存失败 type=%s", type(exc).__name__)
+                    return False
+                if persisted is None:
+                    return False
+                flow.generation, flow.revision = persisted.generation, persisted.revision
+            else:
+                current = self._memory_guards.get(scope)
+                if current is None or current[0] != guard:
+                    return False
+                flow.revision += 1
+                self._memory_guards[scope] = (AgentContextWriteGuard(flow.generation, flow.revision),
+                                             time.monotonic() + _TTL_SECONDS)
+            flow.updated_at = time.monotonic()
+            if self._repository is None:
+                self._flows[scope] = replace(flow)
+            return True
 
-    def _flow(self, owner: str) -> _Flow | None:
-        owner = (owner or "").strip()
-        if not owner:
-            return None
-        if self._repository is not None:
-            try:
-                persisted = self._repository.get_latest(
-                    owner=owner, context_type=_CONTEXT_TYPE, now=time.time()
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Agent 光鸭残留清理上下文恢复失败 type=%s", type(exc).__name__
-                )
-                return None
-            if persisted is None:
-                return None
-            restored = _from_payload(
-                owner,
-                persisted.payload,
-                generation=persisted.generation,
-                revision=persisted.revision,
-            )
-            if restored is None:
-                return None
-            with self._lock:
-                self._flows[owner] = restored
-            return restored
+    def _flow(self, owner: str, session_id: str) -> _Flow | None:
+        scope = _scope_key(owner, session_id)
         with self._lock:
-            current = self._flows.get(owner)
-            if current is None or time.monotonic() - current.updated_at > _TTL_SECONDS:
-                self._flows.pop(owner, None)
-                return None
-            return current
-
-    def validate_empty_only_cleanup_confirmation_binding(self, context: ToolContext) -> None:
-        """确认一键空目录流程在出票前仍指向刚冻结的同一计划。"""
-        flow = self._flow(context.owner)
-        expected = _request_binding(context)
-        if (
-            flow is None
-            or str(flow.preview_safe.get("scope") or "all") != "empty_only"
-            or not flow.request_binding
-            or not expected
-            or not hmac.compare_digest(flow.request_binding, expected)
-        ):
-            raise AgentToolError(
-                "空目录冻结计划已被更新请求取代，请重新预检",
-                code="confirmation_stale",
-            )
+            self._prune_locked()
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.get_latest(owner=scope, context_type=_CONTEXT_TYPE, now=time.time())
+                except Exception as exc:
+                    logger.warning("Agent 光鸭残留清理上下文恢复失败 type=%s", type(exc).__name__)
+                    return None
+                return (_from_payload(owner, session_id, persisted.payload,
+                    generation=persisted.generation, revision=persisted.revision) if persisted else None)
+            flow = self._flows.get(scope)
+            return replace(flow) if flow is not None else None
 
     def _consume(self, flow: _Flow) -> bool:
-        if self._repository is not None:
-            try:
-                consume = getattr(self._repository, "consume_latest_guarded", None)
-                if callable(consume) and flow.generation > 0 and flow.revision > 0:
-                    consumed = bool(
-                        consume(
-                            owner=flow.owner,
-                            context_type=_CONTEXT_TYPE,
-                            guard=AgentContextWriteGuard(flow.generation, flow.revision),
-                        )
-                    )
-                elif not callable(consume):
-                    consumed = bool(
-                        self._repository.delete_latest(
-                            owner=flow.owner, context_type=_CONTEXT_TYPE
-                        )
-                    )
-                else:
-                    consumed = False
-            except Exception as exc:
-                logger.warning(
-                    "Agent 光鸭残留清理上下文消费失败 type=%s", type(exc).__name__
-                )
-                return False
-            if not consumed:
-                return False
         with self._lock:
-            self._flows.pop(flow.owner, None)
-        return True
+            self._prune_locked()
+            scope, guard = flow.scope_key, AgentContextWriteGuard(flow.generation, flow.revision)
+            if self._repository is not None:
+                try:
+                    if not self._repository.consume_latest_guarded(owner=scope, context_type=_CONTEXT_TYPE, guard=guard):
+                        return False
+                except Exception as exc:
+                    logger.warning("Agent 光鸭残留清理上下文消费失败 type=%s", type(exc).__name__)
+                    return False
+            else:
+                current = self._memory_guards.get(scope)
+                if current is None or current[0] != guard:
+                    return False
+                self._memory_guards.pop(scope)
+            self._flows.pop(scope, None)
+            return True
 
     def preview_guangya_cleanup(
         self,
@@ -594,7 +549,7 @@ class GuangyaCleanupActions:
     ) -> ToolResult:
         if not context.owner:
             raise AgentToolError("残留清理需要已登录会话", code="precondition_failed")
-        previous, guard = self._begin_update(context.owner)
+        previous, guard = self._begin_update(context.owner, context.session_id)
         requested_path = str(arguments.get("path") or "").strip()
         scope = str(arguments.get("scope") or "all")
         build_maximum = 1 if scope == "empty_only" else int(arguments["max_candidates"])
@@ -629,6 +584,7 @@ class GuangyaCleanupActions:
         preview = _projection(plan, scope=scope)
         flow = _Flow(
             owner=context.owner,
+            session_id=context.session_id,
             plan_id=str(plan["plan_id"]),
             fingerprint=str(plan["fingerprint"]),
             preview_safe=preview,
@@ -726,7 +682,7 @@ class GuangyaCleanupActions:
     ) -> ToolResult:
         if not context.owner:
             raise AgentToolError("候选复核需要已登录会话", code="precondition_failed")
-        previous, guard = self._begin_update(context.owner)
+        previous, guard = self._begin_update(context.owner, context.session_id)
         if previous is None:
             raise AgentToolError(
                 "最近残留清理预览不存在或已过期", code="precondition_failed"
@@ -750,6 +706,7 @@ class GuangyaCleanupActions:
         )
         flow = _Flow(
             owner=context.owner,
+            session_id=context.session_id,
             plan_id=str(revised["plan_id"]),
             fingerprint=str(revised["fingerprint"]),
             preview_safe=preview,
@@ -804,7 +761,7 @@ class GuangyaCleanupActions:
         _arguments: dict[str, Any],
         context: ToolContext,
     ) -> tuple[ToolResult, str]:
-        flow = self._flow(context.owner)
+        flow = self._flow(context.owner, context.session_id)
         if flow is None:
             raise AgentToolError(
                 "最近残留清理预览不存在或已过期", code="precondition_failed"
@@ -880,7 +837,7 @@ class GuangyaCleanupActions:
         expected_context: str,
         context: ToolContext,
     ) -> ToolResult:
-        flow = self._flow(context.owner)
+        flow = self._flow(context.owner, context.session_id)
         if flow is None:
             raise AgentToolError(
                 "残留清理预览已过期，请重新生成", code="confirmation_stale"

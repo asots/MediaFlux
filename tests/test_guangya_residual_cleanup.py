@@ -604,7 +604,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
             self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
-        previous = self._domain_actions.cleanup._flow("owner")
+        previous = self._domain_actions.cleanup._flow("owner", "session")
         assert (previous) is not None
         previous_path = cleanup._plan_path(previous.plan_id)
         self.assertTrue(previous_path.is_file())
@@ -618,7 +618,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
             self.assertRaisesRegex(Exception, "临时读取失败"),
         ):
             self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
-        flow_result = self._domain_actions.cleanup._flow("owner")
+        flow_result = self._domain_actions.cleanup._flow("owner", "session")
         assert flow_result is not None
         self.assertEqual(flow_result.plan_id, previous.plan_id)
         self.assertTrue(previous_path.is_file())

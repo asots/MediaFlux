@@ -52,7 +52,6 @@ from tests.support import IsolatedDatabaseTestCase, seed_rss_entry_state
 class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
     def setUp(self) -> None:
         self._domain_actions = DomainActions()
-        self._domain_actions.directory_scrape._flows.clear()
         with db.get_conn() as conn:
             for table in (
                 "rss_entry_media",
@@ -67,9 +66,6 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
                 "organize_operation_jobs",
             ):
                 conn.execute(f"DELETE FROM {table}")
-
-    def tearDown(self) -> None:
-        self._domain_actions.directory_scrape._flows.clear()
 
     def test_cloud_directory_scrape_catalog_exposes_linear_builtin_search_workflow(
         self,
@@ -617,7 +613,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         }
         service.store.get_preview.return_value = record
         service.preview_reference.return_value = "PRIVATE DIR"
-        context = ToolContext(owner="owner-a")
+        context = ToolContext(owner="owner-a", session_id="scrape-session")
         with patch(
             "app.agent.domains.guangya.directory_scrape_actions.get_directory_scrape_service",
             return_value=service,
@@ -690,7 +686,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             secret_provider=lambda: "scrape-candidate-validation-secret"
         )
         self._domain_actions.directory_scrape = DirectoryScrapeActions(repository)
-        context = ToolContext(owner="owner-scrape-candidate-validation")
+        context = ToolContext(owner="owner-scrape-candidate-validation", session_id="scrape-session")
         service = Mock()
         service.inspect.return_value = {
             "inspection_id": "inspection-candidates",
@@ -742,7 +738,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             self.assertEqual(searched.data["candidate_count"], 1)
             self.assertEqual(searched.data["candidates"][0]["candidate_number"], 1)
             self.assertEqual(searched.data["candidates"][0]["title"], "合法候选")
-            self._domain_actions.directory_scrape._flows.clear()
+            self._domain_actions.directory_scrape = DirectoryScrapeActions(repository)
             previewed = self._domain_actions.directory_scrape.preview_directory_scrape(
                 {"candidate_number": 1, "numbering_mode": "auto"}, context
             )
@@ -755,7 +751,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             secret_provider=lambda: "scrape-retry-secret"
         )
         self._domain_actions.directory_scrape = DirectoryScrapeActions(repository)
-        context = ToolContext(owner="owner-scrape-queue-retry")
+        context = ToolContext(owner="owner-scrape-queue-retry", session_id="scrape-session")
         record = SimpleNamespace(
             inspection=SimpleNamespace(fingerprint="retry-inspection"),
             rules=None,
@@ -831,7 +827,8 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         self.assertEqual(accepted.status, "accepted")
         self.assertIsNone(
             repository.get_latest(
-                owner=context.owner, context_type="directory_scrape", now=time.time()
+                owner=hashlib.sha256(json.dumps([context.owner, context.session_id]).encode()).hexdigest(),
+                context_type="directory_scrape", now=time.time()
             )
         )
 
@@ -842,7 +839,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             secret_provider=lambda: "scrape-test-secret"
         )
         self._domain_actions.directory_scrape = DirectoryScrapeActions(repository)
-        context = ToolContext(owner="owner-persisted-scrape")
+        context = ToolContext(owner="owner-persisted-scrape", session_id="scrape-session")
         inspection = SimpleNamespace(fingerprint="stable-inspection")
         original_record = SimpleNamespace(
             inspection=inspection,
@@ -927,7 +924,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
                 {"candidate_number": 1, "numbering_mode": "auto"}, context
             )
             _prepared, fingerprint = self._domain_actions.directory_scrape.prepare_run_directory_scrape({}, context)
-        self._domain_actions.directory_scrape._flows.clear()
+        self._domain_actions.directory_scrape = DirectoryScrapeActions(repository)
         with (
             patch(
                 "app.agent.domains.guangya.directory_scrape_actions.get_directory_scrape_service",
@@ -959,7 +956,8 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         second.execute_preview.assert_called_once_with(execution_owner, "preview-new")
         self.assertIsNone(
             repository.get_latest(
-                owner=context.owner, context_type="directory_scrape", now=time.time()
+                owner=hashlib.sha256(json.dumps([context.owner, context.session_id]).encode()).hexdigest(),
+                context_type="directory_scrape", now=time.time()
             )
         )
 
@@ -969,7 +967,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         )
         self._domain_actions.directory_scrape = DirectoryScrapeActions(repository)
         owner = "owner-stale-worker-cache"
-        context = ToolContext(owner=owner)
+        context = ToolContext(owner=owner, session_id="scrape-session")
         service = Mock()
         service.inspect.return_value = {
             "inspection_id": "inspection-stale",
@@ -984,13 +982,15 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             return_value=service,
         ):
             self._domain_actions.directory_scrape.inspect_directory_scrape({"directory_id": "dir-stale"}, context)
-            self.assertIn(owner, self._domain_actions.directory_scrape._flows)
-            repository.invalidate_owner(owner=owner)
+            flow = self._domain_actions.directory_scrape._flow(owner, context.session_id)
+            self.assertIsNotNone(flow)
+            assert flow is not None
+            repository.invalidate_context(owner=flow.scope_key, context_type="directory_scrape")
             with self.assertRaises(AgentToolError) as caught:
                 self._domain_actions.directory_scrape.search_directory_scrape({"media_type": "auto"}, context)
         self.assertEqual(caught.exception.code, "precondition_failed")
         service.search.assert_not_called()
-        self.assertNotIn(owner, self._domain_actions.directory_scrape._flows)
+        self.assertIsNone(self._domain_actions.directory_scrape._flow(owner, context.session_id))
 
     def test_keyed_confirmation_fingerprints_are_canonical_domain_separated_and_cover_legacy_rss(
         self,

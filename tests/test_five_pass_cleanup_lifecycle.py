@@ -30,7 +30,7 @@ class CleanupPlanLifecycleTests(IsolatedDatabaseTestCase):
     def _preview(self):
         with patch.object(actions, "GuangYaClient", return_value=self.client):
             self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, self.context)
-        flow = self._domain_actions.cleanup._flow(self.context.owner)
+        flow = self._domain_actions.cleanup._flow(self.context.owner, self.context.session_id)
         assert (flow) is not None
         return cleanup.load_cleanup_plan(flow.plan_id, owner=self.context.owner)
 

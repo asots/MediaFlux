@@ -1,13 +1,15 @@
-"""光鸭目录/文件刮削的 owner-bound inspect/search/preview/confirmed run。"""
+"""光鸭目录/文件刮削：会话内检查、预览、确认与持久执行。"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -18,7 +20,6 @@ from app.agent.public_safety import sanitize_public_text
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
-    PersistedAgentContext,
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.directory_scrape import get_directory_scrape_service
@@ -43,6 +44,7 @@ _SAFE_PLAN_ACTIONS = {"move", "skip", "conflict"}
 @dataclass
 class _Flow:
     owner: str
+    session_id: str
     scope_type: str = ""
     scope_id: str = ""
     inspection_id: str = ""
@@ -55,9 +57,20 @@ class _Flow:
     generation: int = 0
     revision: int = 0
 
+    @property
+    def scope_key(self) -> str:
+        return _scope_key(self.owner, self.session_id)
+
 
 _CONTEXT_TYPE = "directory_scrape"
 logger = logging.getLogger(__name__)
+
+
+def _scope_key(owner: str, session_id: str) -> str:
+    owner_key, session_key = owner.strip(), session_id.strip()
+    if not owner_key or not session_key:
+        raise AgentToolError("目录刮削需要已登录会话", code="precondition_failed")
+    return hashlib.sha256(json.dumps([owner_key, session_key]).encode()).hexdigest()
 
 
 def _now() -> str:
@@ -171,6 +184,7 @@ def _durable_flow_payload(item: _Flow) -> dict[str, Any]:
 
 
 def _durable_flow_from_payload(owner: str, payload: dict[str, Any]) -> _Flow | None:
+    """已受理任务只恢复签名业务快照，不再访问会话预览。"""
     scope_type = str(payload.get("scope_type") or "").strip().casefold()
     scope_id = str(payload.get("scope_id") or "").strip()
     if (
@@ -210,6 +224,7 @@ def _durable_flow_from_payload(owner: str, payload: dict[str, Any]) -> _Flow | N
         return None
     return _Flow(
         owner=owner,
+        session_id="",
         scope_type=scope_type,
         scope_id=scope_id,
         candidates=[],
@@ -238,6 +253,7 @@ def _flow_payload(item: _Flow) -> dict[str, Any]:
 
 def _flow_from_payload(
     owner: str,
+    session_id: str,
     payload: dict[str, Any],
     *,
     generation: int = 0,
@@ -289,6 +305,7 @@ def _flow_from_payload(
         return None
     return _Flow(
         owner=owner,
+        session_id=session_id,
         scope_type=scope_type,
         scope_id=scope_id,
         inspection_id=inspection_id,
@@ -548,169 +565,103 @@ class DirectoryScrapeActions:
         self._repository = repository
         self._lock = threading.RLock()
         self._flows: dict[str, _Flow] = {}
+        self._generation = 0
+        self._memory_guards: dict[str, tuple[AgentContextWriteGuard, float]] = {}
 
-
-    def clear_directory_scrape_context(
-        self,
-        *,
-        owner: str,
-        delete_persisted: bool = True,
-    ) -> bool:
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return False
+    def clear_session(self, *, owner: str, session_id: str) -> None:
+        scope = _scope_key(owner, session_id)
         with self._lock:
-            removed = self._flows.pop(owner_key, None) is not None
-        if delete_persisted and self._repository is not None:
-            try:
-                removed = (
-                    bool(
-                        self._repository.delete_latest(
-                            owner=owner_key,
-                            context_type=_CONTEXT_TYPE,
-                        )
-                    )
-                    or removed
-                )
-            except Exception as exc:
-                logger.warning("Agent 光鸭刮削上下文清理失败 type=%s", type(exc).__name__)
-        return removed
+            if self._repository is not None:
+                self._repository.invalidate_context(owner=scope, context_type=_CONTEXT_TYPE)
+            self._flows.pop(scope, None)
+            self._memory_guards.pop(scope, None)
 
-    def _flow(self, owner: str) -> _Flow | None:
-        owner_key = (owner or "").strip()
-        if not owner_key:
-            return None
-        if self._repository is not None:
-            try:
-                persisted = self._repository.get_latest(
-                    owner=owner_key,
-                    context_type=_CONTEXT_TYPE,
-                    now=time.time(),
-                )
-            except Exception as exc:
-                logger.warning("Agent 光鸭刮削上下文恢复失败 type=%s", type(exc).__name__)
-                with self._lock:
-                    self._flows.pop(owner_key, None)
-                return None
-            if persisted is None:
-                with self._lock:
-                    self._flows.pop(owner_key, None)
-                return None
-            if callable(getattr(self._repository, "replace_latest_guarded", None)) and (
-                persisted.generation <= 0 or persisted.revision <= 0
-            ):
-                with self._lock:
-                    self._flows.pop(owner_key, None)
-                return None
-            restored = _flow_from_payload(
-                owner_key,
-                persisted.payload,
-                generation=persisted.generation,
-                revision=persisted.revision,
-            )
-            if restored is None:
-                with self._lock:
-                    self._flows.pop(owner_key, None)
-                return None
-            with self._lock:
-                self._flows[owner_key] = restored
-            return restored
+    def _prune_locked(self) -> None:
+        now = time.monotonic()
+        expired = {key for key, item in self._flows.items() if now - item.updated_at > _TTL_SECONDS}
+        expired.update(key for key, (_, expires_at) in self._memory_guards.items() if expires_at <= now)
+        for key in expired:
+            self._flows.pop(key, None)
+            self._memory_guards.pop(key, None)
+
+    def _flow(self, owner: str, session_id: str) -> _Flow | None:
+        scope = _scope_key(owner, session_id)
         with self._lock:
-            item = self._flows.get(owner_key)
-            if item is None or time.monotonic() - item.updated_at > _TTL_SECONDS:
-                self._flows.pop(owner_key, None)
-                return None
-            return item
+            self._prune_locked()
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.get_latest(owner=scope, context_type=_CONTEXT_TYPE, now=time.time())
+                except Exception as exc:
+                    logger.warning("Agent 光鸭刮削上下文恢复失败 type=%s", type(exc).__name__)
+                    return None
+                return (_flow_from_payload(owner, session_id, persisted.payload,
+                    generation=persisted.generation, revision=persisted.revision) if persisted else None)
+            flow = self._flows.get(scope)
+            return replace(flow) if flow is not None else None
 
-    def _begin_flow(self, owner: str) -> AgentContextWriteGuard:
-        if self._repository is None:
-            return AgentContextWriteGuard(generation=0, revision=0)
-        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
-        if not callable(begin):
-            return AgentContextWriteGuard(generation=0, revision=0)
-        return begin(owner=owner, context_type=_CONTEXT_TYPE)
+    def _begin_flow(self, owner: str, session_id: str) -> AgentContextWriteGuard:
+        scope = _scope_key(owner, session_id)
+        with self._lock:
+            self._prune_locked()
+            if self._repository is not None:
+                return self._repository.begin_context(owner=scope, context_type=_CONTEXT_TYPE)
+            self._generation += 1
+            guard = AgentContextWriteGuard(self._generation, 0)
+            self._flows.pop(scope, None)
+            self._memory_guards[scope] = guard, time.monotonic() + _TTL_SECONDS
+            return guard
 
     def _save(self, item: _Flow) -> bool:
-        item.updated_at = time.monotonic()
-        if self._repository is not None:
-            try:
-                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
-                if callable(guarded):
-                    if item.generation <= 0:
-                        with self._lock:
-                            self._flows.pop(item.owner, None)
-                        return False
-                    persisted = guarded(
-                        owner=item.owner,
-                        context_type=_CONTEXT_TYPE,
-                        payload=_flow_payload(item),
-                        expires_at=time.time() + _TTL_SECONDS,
-                        guard=AgentContextWriteGuard(
-                            generation=item.generation,
-                            revision=item.revision,
-                        ),
-                    )
-                    if persisted is None:
-                        with self._lock:
-                            self._flows.pop(item.owner, None)
-                        return False
-                    item.generation = persisted.generation
-                    item.revision = persisted.revision
-                else:
-                    self._repository.replace_latest(
-                        owner=item.owner,
-                        context_type=_CONTEXT_TYPE,
-                        payload=_flow_payload(item),
-                        expires_at=time.time() + _TTL_SECONDS,
-                    )
-            except Exception as exc:
-                logger.warning("Agent 光鸭刮削上下文持久化失败 type=%s", type(exc).__name__)
-                with self._lock:
-                    self._flows.pop(item.owner, None)
-                return False
         with self._lock:
-            expired = [
-                owner
-                for owner, row in self._flows.items()
-                if time.monotonic() - row.updated_at > _TTL_SECONDS
-            ]
-            for owner in expired:
-                self._flows.pop(owner, None)
-            self._flows[item.owner] = item
-        return True
+            self._prune_locked()
+            scope, guard = item.scope_key, AgentContextWriteGuard(item.generation, item.revision)
+            if self._repository is not None:
+                try:
+                    persisted = self._repository.replace_latest_guarded(
+                        owner=scope,
+                        context_type=_CONTEXT_TYPE,
+                        payload=_flow_payload(item),
+                        expires_at=time.time() + _TTL_SECONDS,
+                        guard=guard,
+                    )
+                except Exception as exc:
+                    logger.warning("Agent 光鸭刮削上下文持久化失败 type=%s", type(exc).__name__)
+                    return False
+                if persisted is None:
+                    return False
+                item.generation, item.revision = persisted.generation, persisted.revision
+            else:
+                current = self._memory_guards.get(scope)
+                if current is None or current[0] != guard:
+                    return False
+                item.revision += 1
+                self._memory_guards[scope] = (AgentContextWriteGuard(item.generation, item.revision),
+                                             time.monotonic() + _TTL_SECONDS)
+            item.updated_at = time.monotonic()
+            if self._repository is None:
+                self._flows[scope] = replace(item)
+            return True
 
     def _consume_flow(self, item: _Flow) -> bool:
-        if self._repository is not None:
-            consume = getattr(self._repository, "consume_latest_guarded", None)
-            try:
-                if callable(consume) and item.generation > 0 and item.revision > 0:
-                    consumed = bool(
-                        consume(
-                            owner=item.owner,
-                            context_type=_CONTEXT_TYPE,
-                            guard=AgentContextWriteGuard(
-                                generation=item.generation,
-                                revision=item.revision,
-                            ),
-                        )
-                    )
-                elif not callable(consume):
-                    consumed = bool(
-                        self._repository.delete_latest(
-                            owner=item.owner,
-                            context_type=_CONTEXT_TYPE,
-                        )
-                    )
-                else:
-                    consumed = False
-            except Exception as exc:
-                logger.warning("Agent 光鸭刮削上下文消费失败 type=%s", type(exc).__name__)
-                return False
-            if not consumed:
-                return False
         with self._lock:
-            self._flows.pop(item.owner, None)
-        return True
+            self._prune_locked()
+            scope, guard = item.scope_key, AgentContextWriteGuard(item.generation, item.revision)
+            if self._repository is not None:
+                try:
+                    if not self._repository.consume_latest_guarded(owner=scope, context_type=_CONTEXT_TYPE, guard=guard):
+                        return False
+                except Exception as exc:
+                    logger.warning("Agent 光鸭刮削上下文消费失败 type=%s", type(exc).__name__)
+                    return False
+            else:
+                current = self._memory_guards.get(scope)
+                if current is None or current[0] != guard:
+                    return False
+                # 与 SQLite consume 一致：保留同代空版本，队列明确拒绝时才可恢复。
+                self._memory_guards[scope] = (AgentContextWriteGuard(item.generation, 0),
+                                             time.monotonic() + _TTL_SECONDS)
+            self._flows.pop(scope, None)
+            return True
 
     def _restore_consumed_flow(self, item: _Flow) -> bool:
         """仅在队列明确拒绝且世代未变化时恢复可重试 flow。"""
@@ -776,10 +727,8 @@ class DirectoryScrapeActions:
         self,
         arguments: dict[str, Any], context: ToolContext
     ) -> ToolResult:
-        if not context.owner:
-            raise AgentToolError("目录刮削需要已登录会话", code="precondition_failed")
+        guard = self._begin_flow(context.owner, context.session_id)
         try:
-            guard = self._begin_flow(context.owner)
             service = get_directory_scrape_service()
             resolved_arguments = dict(arguments)
             if "path" in resolved_arguments:
@@ -801,6 +750,7 @@ class DirectoryScrapeActions:
         counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
         flow = _Flow(
             owner=context.owner,
+            session_id=context.session_id,
             scope_type="directory" if "directory_id" in resolved_arguments else "file",
             scope_id=str(
                 resolved_arguments.get("directory_id")
@@ -870,7 +820,7 @@ class DirectoryScrapeActions:
         self,
         arguments: dict[str, Any], context: ToolContext
     ) -> ToolResult:
-        flow = self._flow(context.owner)
+        flow = self._flow(context.owner, context.session_id)
         if flow is None or not flow.inspection_id:
             raise AgentToolError(
                 "最近刮削检查不存在或已过期，请先检查目录或文件", code="precondition_failed"
@@ -957,7 +907,7 @@ class DirectoryScrapeActions:
         self,
         arguments: dict[str, Any], context: ToolContext
     ) -> ToolResult:
-        flow = self._flow(context.owner)
+        flow = self._flow(context.owner, context.session_id)
         if flow is None or not flow.inspection_id or not flow.candidates:
             raise AgentToolError(
                 "最近刮削候选不存在或已过期，请先搜索匹配", code="precondition_failed"
@@ -1043,7 +993,7 @@ class DirectoryScrapeActions:
         self,
         _arguments: dict[str, Any], context: ToolContext
     ) -> tuple[ToolResult, str]:
-        flow = self._flow(context.owner)
+        flow = self._flow(context.owner, context.session_id)
         if flow is None or not flow.preview_id or not flow.preview_safe:
             raise AgentToolError(
                 "最近刮削预览不存在或已过期，请重新生成预览", code="precondition_failed"
@@ -1079,7 +1029,7 @@ class DirectoryScrapeActions:
         self,
         _arguments: dict[str, Any], expected_context: str, context: ToolContext
     ) -> ToolResult:
-        flow = self._flow(context.owner)
+        flow = self._flow(context.owner, context.session_id)
         if flow is None or not flow.preview_id:
             raise AgentToolError("刮削预览已过期，请重新生成", code="confirmation_stale")
         try:
