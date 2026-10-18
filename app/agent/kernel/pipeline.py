@@ -261,7 +261,12 @@ class ToolPipeline:
                 context.schema_replacements[exc.repair_ticket] = replace(next_entry, predecessors=lineage)
             raise
         content = result.outcome.public_content
-        if result.effect_plan is None and error_repair.completed_result(result.tool, content):
+        if result.effect_plan is not None:
+            # 已消费的修复 ticket 只能随该计划真实完成后清算，不能再用来预检。
+            context.schema_replacements[arguments["ticket"]] = replace(entry,
+                pending_plan_id=result.effect_plan.plan_id, offered=False, guard_key=None,
+                equivalent_arguments=json.dumps(replacement, sort_keys=True, ensure_ascii=False))
+        elif error_repair.completed_result(result.tool, content):
             return replace(result, recovered_failures=tuple(dict.fromkeys((*lineage, *result.recovered_failures))))
         return result
 
@@ -456,7 +461,8 @@ class ToolPipeline:
                 # 只回读本次确认的事实，不重放写操作、票据、引用或状态更新。
                 outcome = replace(completed.outcome, refs=(), state_updates=(), effect_plan=None,
                                   model_content="本轮该操作已确认执行；以下为原回执，不是再次执行。\n" + completed.outcome.model_message())
-                return PipelineResult(tool=tool, arguments=normalized, outcome=outcome)
+                return PipelineResult(tool=tool, arguments=normalized, outcome=outcome,
+                    recovered_failures=error_repair.completed(tool, raw_arguments, context, outcome.public_content))
 
         if tool.effect is ToolEffect.READ:
             return await self._execute_read(tool, normalized, resolved, context, started,
@@ -628,6 +634,7 @@ class ToolPipeline:
                         context=context,
                     )
                     raise
+                error_repair.bind_plan(tool, raw_arguments, context, plan.plan_id)
                 return PipelineResult(
                     tool=tool,
                     arguments=normalized,
@@ -858,6 +865,8 @@ class ToolPipeline:
             outcome=outcome,
             effect_plan=plan,
             elapsed_ms=elapsed_ms,
+            recovered_failures=error_repair.completed(tool, plan.arguments, context, outcome.public_content,
+                                                    plan_id=plan.plan_id),
         )
 
     async def _run_effect(self, plan: EffectPlan, *, context: ToolCallContext):

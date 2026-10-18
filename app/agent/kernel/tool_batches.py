@@ -286,6 +286,10 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
                     turn.last_user = turn.state.metadata.get("pending_effect_goal") or {"role": "user", "content": turn.agent_input.message}
                     if not await turn.confirm_effect(scoped_trust=True):
                         return True
+                    confirmed = turn.tool_context.confirmed_effect
+                    if confirmed is not None and error_repair.completed_result(confirmed.tool, confirmed.outcome.public_content):
+                        record_result(turn, confirmed.tool.name, result.arguments, confirmed.outcome.audit_result(),
+                                      recovered_failures=confirmed.recovered_failures)
                     continue
                 turn.scope.close()
             await turn.publish_tool_result(canonical_call, result)

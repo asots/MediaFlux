@@ -23,6 +23,7 @@ class SchemaReplacement:
     collision_keys: frozenset[str] = frozenset()
     guard_key: str | None = None
     offered: bool = True
+    pending_plan_id: str = ""
 
 
 def scope(context):
@@ -188,14 +189,23 @@ def completed_result(tool, content):
     return content.get("ok") is not False and content.get("status", "success") in statuses
 
 
-def completed(tool, arguments, context, content):
+def bind_plan(tool, arguments, context, plan_id):
+    """保留等价修正与冻结计划的关联；预览不清算原失败。"""
+    encoded = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+    for ticket, entry in list(context.schema_replacements.items()):
+        if entry.scope == scope(context) and entry.tool == tool.name and entry.equivalent_arguments == encoded:
+            context.schema_replacements[ticket] = replace(entry, pending_plan_id=plan_id, offered=False, guard_key=None)
+
+
+def completed(tool, arguments, context, content, *, plan_id=""):
     """Associate a successful exact correction, never another object's success."""
     if not context.schema_replacements or not completed_result(tool, content):
         return ()
     encoded = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
     recovered = []
     for ticket, entry in list(context.schema_replacements.items()):
-        if entry.scope == scope(context) and entry.tool == tool.name and entry.equivalent_arguments == encoded:
+        matches = entry.pending_plan_id == plan_id if plan_id else entry.equivalent_arguments == encoded
+        if entry.scope == scope(context) and entry.tool == tool.name and matches:
             recovered.extend((*entry.predecessors, ticket))
             context.schema_replacements.pop(ticket)
     return tuple(dict.fromkeys(recovered))
