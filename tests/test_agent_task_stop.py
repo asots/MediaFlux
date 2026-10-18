@@ -687,6 +687,7 @@ class SQLiteAgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
 
                 after = await self._cold_store().load(owner="owner", session_id=phase)
                 expected = deepcopy(before.metadata)
+                expected["stop_requested_generation"] = before.generation
                 expected["effect_waits"][plan_id]["continuation"].update(
                     state="cancelled", terminal_reason="cancelled",
                 )

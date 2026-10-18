@@ -245,7 +245,7 @@ async def _stop_captured_turn(
     session_id: str,
     active: Mapping[str, Any],
 ) -> tuple[str, int]:
-    """Fence and cancel only the coordinator turn observed by ``describe``."""
+    """Fence and cancel only the observed local or durable publication."""
     try:
         generation = int(active.get("generation") or 0)
     except (TypeError, ValueError):
@@ -280,6 +280,8 @@ async def _stop_captured_turn(
         cancel_busy = True
     current = await session.coordinator.describe(owner=owner, session_id=session_id)
     if current is None:
+        if accepted:
+            return "stop_requested", stop_generation
         return ("stop_unconfirmed" if cancel_busy else "not_running"), stop_generation
     if not _same_turn(current, generation=generation, request_id=request_id):
         return "superseded", stop_generation
@@ -391,6 +393,14 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
                     active = await session.coordinator.describe(
                         owner=owner_key, session_id=session_key
                     )
+                    if active is None:
+                        state = await store.load(owner=owner_key, session_id=session_key)
+                        publication = state.metadata.get("active_publication")
+                        if (isinstance(publication, Mapping)
+                                and publication.get("generation") == state.generation
+                                and publication.get("status") == "running"
+                                and (state.metadata.get("read_wait") or {}).get("state") != "pending"):
+                            active = publication
                     if active and active.get("protected") is True:
                         model_turn, stop_requested_generation = await _stop_captured_turn(
                             session, store, owner=owner_key,
