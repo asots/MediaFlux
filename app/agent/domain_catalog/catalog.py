@@ -79,6 +79,7 @@ class DomainActions:
     def clear_session(self, *, owner: str, session_id: str) -> None:
         self.local_media.clear_local_media_agent_context(owner=owner, session_id=session_id)
         self.discovery_mapping.clear_session(owner=owner, session_id=session_id)
+        self.rename.clear_session(owner=owner, session_id=session_id)
 
 
 def build_tool_specs(

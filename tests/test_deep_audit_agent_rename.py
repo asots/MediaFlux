@@ -5,6 +5,8 @@ from __future__ import annotations
 from threading import Event, Thread
 from unittest.mock import Mock, patch
 
+import pytest
+
 from app.agent.domains.guangya import rename_actions as actions
 from app.agent.models import ToolContext
 from app.agent.session_context import SQLiteAgentSessionContextRepository
@@ -13,7 +15,8 @@ from tests.support import isolated_test_database
 from tests.test_agent_guangya_rename import FakeGuangYaClient
 
 
-def test_accepted_rename_survives_replacement_preview(tmp_path):
+@pytest.mark.parametrize("other_session_id", ["first-session", "second-session"])
+def test_accepted_rename_survives_replacement_preview(tmp_path, other_session_id):
     with (
         isolated_test_database(),
         patch.object(plans, "_plan_directory", return_value=tmp_path),
@@ -27,13 +30,13 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
         try:
             context = ToolContext(owner="deep-rename-owner", session_id="first-session")
             other_session = ToolContext(
-                owner=context.owner, session_id="second-session"
+                owner=context.owner, session_id=other_session_id
             )
             arguments = actions.guangya_rename_preview_arguments(
                 {"paths": ["/整理/动漫"], "mode": "remove_bitrate"}
             )
             assert rename_actions.preview_guangya_rename(arguments, context).ok
-            prior = rename_actions._flow(context.owner)
+            prior = rename_actions._flow(context.owner, context.session_id)
             _, fingerprint = rename_actions.prepare_guangya_rename_confirmation({}, context)
             load, build = actions.load_rename_plan, actions.build_rename_plan
             manager = Mock()
@@ -60,7 +63,7 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
                     failures.append(exc)
 
             def interleave(*args, **kwargs):
-                # 新预览已提升 owner 级 flow generation，再让另一会话旧确认入队。
+                # 另一会话开始预览时，原会话确认仍须保留独立的消费世代。
                 proceed.set()
                 assert thread is not None
                 thread.join(5)
@@ -80,8 +83,8 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
                 assert entered.wait(5), "旧确认未取得 flow"
                 assert rename_actions.preview_guangya_rename(arguments, other_session).ok
             assert accepted[0].ok and accepted[0].status == "accepted"
-            # CAS 正确拒绝消费新 generation，但队列已经接受旧任务。
-            assert accepted[0].data["requires_manual"] is True
+            # 另一会话预览不会改变原会话的消费世代。
+            assert accepted[0].data["requires_manual"] is (other_session_id == context.session_id)
             manager.start_durable_operation.assert_called_once()
             assert prior is not None
             queued = plans.load_rename_plan(

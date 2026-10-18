@@ -129,7 +129,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
             result = self._domain_actions.rename.preview_guangya_media_hygiene(
                 {"path": "/NSFW", "recursive": True, "limit": 20, "enrich_metadata": False},
-                ToolContext(owner="year-sequence-owner"),
+                ToolContext(owner="year-sequence-owner", session_id="session"),
             )
         self.assertTrue(result.ok)
         self.assertEqual(result.data["video_rename_count"], 1)

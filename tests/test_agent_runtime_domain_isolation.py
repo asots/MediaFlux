@@ -62,7 +62,7 @@ def test_existing_runtime_keeps_its_repository_after_another_build(
         runtime.domain_actions.local_media._context_store._scope_key("same-owner", "same-session")
         if context_type == "local_media_tasks" else
         hashlib.sha256(json.dumps([context.owner, context.session_id]).encode()).hexdigest()
-        if context_type == "discovery_mapping" else "same-owner"
+        if context_type in {"discovery_mapping", "guangya_rename"} else "same-owner"
     )
     assert first.reads == [(expected_owner, context_type)]
     assert second.reads == []

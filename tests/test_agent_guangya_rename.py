@@ -382,7 +382,7 @@ class GuangYaRenameTests(unittest.TestCase):
         }
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
             self._domain_actions.rename.preview_guangya_rename(arguments, context)
-        previous = self._domain_actions.rename._flow("owner")
+        previous = self._domain_actions.rename._flow("owner", "session")
         assert (previous) is not None
         previous_path = guangya_rename._plan_path(previous.plan_id)
         self.assertTrue(previous_path.is_file())
@@ -396,7 +396,7 @@ class GuangYaRenameTests(unittest.TestCase):
             self.assertRaisesRegex(Exception, "临时读取失败"),
         ):
             self._domain_actions.rename.preview_guangya_rename(arguments, context)
-        flow_result = self._domain_actions.rename._flow("owner")
+        flow_result = self._domain_actions.rename._flow("owner", "session")
         assert flow_result is not None
         self.assertEqual(flow_result.plan_id, previous.plan_id)
         self.assertTrue(previous_path.is_file())
@@ -412,9 +412,9 @@ class GuangYaRenameTests(unittest.TestCase):
         }
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
             self._domain_actions.rename.preview_guangya_rename(arguments, context)
-            first = self._domain_actions.rename._flow("owner")
+            first = self._domain_actions.rename._flow("owner", "session")
             self._domain_actions.rename.preview_guangya_rename(arguments, context)
-            second = self._domain_actions.rename._flow("owner")
+            second = self._domain_actions.rename._flow("owner", "session")
         assert first is not None
         assert second is not None
         self.assertNotEqual(first.plan_id, second.plan_id)
