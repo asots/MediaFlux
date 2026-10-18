@@ -43,32 +43,36 @@ def digest(rows):
     return hashlib.sha256(json.dumps(json.loads(json_text(conversation_payload(rows))), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def anchor_for(state, call_id, tool):
-    matches = []
+def _history_anchors(state, call_id, tool):
     for index, row in enumerate(state.conversation):
-        if any(c.get("call_id") == call_id for c in row.get("tool_calls", ())):
+        if row.get("role") == "assistant" and any(c.get("call_id") == call_id for c in row.get("tool_calls", ())):
             calls = row["tool_calls"]
             group = state.conversation[index:index + 1 + len(calls)]
             if len(group) != len(calls) + 1 or {r.get("tool_call_id") for r in group[1:]} != {c["call_id"] for c in calls}:
                 raise ValueError("read wait requires a closed native group")
             user = next((r for r in reversed(state.conversation[:index]) if r.get("role") == "user"), None)
             if user is not None:
-                matches.append((group, user))
-    if len(matches) != 1:
+                anchor = {"group_digest": digest(group), "user_digest": digest([user]), "call_id": call_id, "tool": tool}
+                yield index, anchor, next(c for c in calls if c["call_id"] == call_id)
+
+
+def anchor_for(state, call_id, tool):
+    latest = next((i for i in reversed(range(len(state.conversation)))
+                   if state.conversation[i].get("role") == "assistant" and state.conversation[i].get("tool_calls")), None)
+    matches = list(_history_anchors(state, call_id, tool))
+    current = next((anchor for index, anchor, _call in matches if index == latest), None)
+    if current is None or sum(anchor == current for _index, anchor, _call in matches) != 1:
         raise ValueError("read wait history unavailable")
-    group, user = matches[0]
-    return {"group_digest": digest(group), "user_digest": digest([user]), "call_id": call_id, "tool": tool}
+    return current
 
 
 def history_call(state, record):
     anchor = record["anchor"]
-    if anchor_for(state, anchor["call_id"], anchor["tool"]) != anchor:
+    matches = [call for _index, candidate, call in _history_anchors(state, anchor["call_id"], anchor["tool"])
+               if candidate == anchor]
+    if len(matches) != 1:
         raise ValueError("read wait history changed")
-    for row in state.conversation:
-        for call in row.get("tool_calls", ()):
-            if call["call_id"] == anchor["call_id"]:
-                return deepcopy(call)
-    raise ValueError("read wait history missing")
+    return deepcopy(matches[0])
 
 
 def check_claim(state, lease, now, conn=None, *, publication=False):

@@ -25,6 +25,7 @@ from app.agent.kernel.continuation import (
     register_effect,
     release_effect,
 )
+from app.agent.kernel.conversation_state import commit_conversation
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session_state import SessionState
 from app.agent.kernel.state import InMemorySessionStateStore
@@ -188,6 +189,43 @@ def test_repark_replaces_old_anchor(effect_case):
     assert history_call(case.state, case.record) == call
     assert case.record["budget"]["wait_segments"] == 2
     assert case.record["budget"]["wait_seconds_spent"] == 20
+
+
+@pytest.mark.parametrize("new_user_turn", [False, True])
+def test_reused_call_id_restores_anchored_group_after_cold_reload(effect_case, new_user_turn):
+    case = effect_case
+    closed_group(case.state)
+    if new_user_turn:
+        case.state.conversation.append({"role": "user", "content": case.state.conversation[0]["content"]})
+    current = deepcopy(closed_group(case.state,
+        arguments=None if new_user_turn else {"item_ids": ["second"]}))
+    commit_conversation(case.state, case.state.conversation)
+    if new_user_turn:
+        users = [row for row in case.state.conversation if row["role"] == "user"]
+        assert users[0]["content"] == users[1]["content"]
+        assert users[0]["history_id"] != users[1]["history_id"]
+    park(case, native_denial())
+    assert set(case.record["anchor"]) == {"group_digest", "user_digest", "call_id", "tool"}
+    cold = SessionState.from_payload(owner=case.state.owner, session_id=case.state.session_id,
+        generation=case.state.generation, payload=case.state.to_payload())
+    record = cold.metadata["effect_waits"][case.lease.continuation_id]["continuation"]
+    # 后续同 ID 的组不能让已保存锚点悄悄改用新参数。
+    closed_group(cold, arguments={"item_ids": ["later"]})
+    assert history_call(cold, record) == current
+    restored = history_call(cold, record)
+    restored["arguments"]["item_ids"].append("mutated")
+    assert history_call(cold, record) == current
+    if new_user_turn:
+        cold.conversation = cold.conversation[3:]
+        assert history_call(cold, record) == current
+
+
+def test_anchor_creation_cannot_fall_back_to_a_previous_native_group(effect_case):
+    case = effect_case
+    closed_group(case.state, "previous")
+    closed_group(case.state, "current")
+    with pytest.raises(ValueError, match="read wait"):
+        anchor_for(case.state, "previous", READ)
 
 
 @pytest.mark.parametrize("effect,name,in_handler", [
