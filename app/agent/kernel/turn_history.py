@@ -104,7 +104,8 @@ async def persist_conversation(turn: AgentTurn,
                 extra_updates = (_ContinuationAction("", {
                     "operation": "seed", "model_limit": turn.session.limits.max_model_rounds,
                     "tool_limit": turn.session.limits.max_tool_calls,
-                    "model_spent": turn.round_index + 1, "tool_spent": turn.total_tool_calls,
+                    "model_spent": turn._budget_model_attempts - turn._budget_paid_models,
+                    "tool_spent": turn._budget_tool_attempts - turn._budget_paid_tools,
                 }, binding=turn.session.continuation_binding),)
             # 失败确认后的诊断仍属于同一执行组，不能在续接前撤掉已有的有界容量。
             # 下一用户回合仍按正常规则释放；保留此阶段并不会提高容量上限。
@@ -119,6 +120,13 @@ async def persist_conversation(turn: AgentTurn,
                 conversation=stored,
                 **({"task_patch": task_patch} if task_patch is not None else {}),
             )
+            if task_patch is not None and not lease.continuation_id:
+                if task_patch.operation == "create" and turn.session.continuation_binding is not None:
+                    turn._budget_task_id = turn.state.metadata["task"]["task_id"]
+                    turn._budget_paid_models = turn._budget_model_attempts
+                    turn._budget_paid_tools = turn._budget_tool_attempts
+                elif task_patch.operation == "cancel":
+                    turn._budget_task_id = ""
         except HistoryCapacityError as exc:
             raise ToolPipelineError(
                 "当前结果超过历史容量，已保留此前检查点；已开始的调用结果可能未知，请勿重放写操作。",

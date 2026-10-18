@@ -17,7 +17,6 @@ from app.agent.model_context_budget import bounded_model_messages, compact_tool_
 from app.agent.public_safety import public_tool_label
 
 from . import error_repair, telegram_reference
-from .continuation import continuation_record
 from .conversation_context import persisted_conversation
 from .discovery import DISCOVERY_TOOL
 from .events import AgentEventType
@@ -91,12 +90,18 @@ async def build_request(turn: AgentTurn, round_task: Mapping[str, Any] | None,
             "所需能力尚未载入时，先集中发现这些能力，再批量进行独立查询。"
             "依赖前项结果的参数不能猜测后提前提交；写操作与任务状态变更仍按顺序处理并等待原有确认。"
         )
-    if turn.session.continuation_binding is not None and (lease.continuation_id or turn.state.metadata.get("read_wait")):
-        task_budget = continuation_record(turn.state, lease.continuation_id, lease.continuation_kind)["budget"]
+    task_budget = turn.task_budget if turn.session.continuation_binding is not None else None
+    if task_budget is not None:
         tools_left = max(0, task_budget['tool_limit'] - task_budget['tool_spent'])
         models_left = max(0, task_budget['model_limit'] - task_budget['model_spent'])
         if min(tools_left, models_left) <= 2:
             request_system_prompt += f"\n任务累计预算临近上限：剩余工具尝试 {tools_left} 次，模型调用 {models_left} 次。"
+    elif round_task and not turn.explaining and turn.uses_session_task:
+        request_system_prompt += (
+            "\n本次前台请求尚未选择历史任务。普通问题可直接回答；继续原任务的业务操作或checkpoint/revise会沿用其累计预算，"
+            "并计入本轮此前的模型与工具尝试。明确的新目标用现有agent.task取消旧任务后create，"
+            "不能为绕过原任务额度重建同一任务。"
+        )
     if turn.is_effect_resume:
         request_system_prompt += (
             "\n这是已确认后台操作的任务续行，不是新的用户授权。原操作的真实终态已在会话中。"

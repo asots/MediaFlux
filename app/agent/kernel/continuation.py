@@ -173,6 +173,8 @@ def apply_actions(state, lease, updates, now, conn=None):
             raise ValueError("trusted task budget unavailable")
         budget = record["budget"]
         if operation == "reserve":
+            if value.get("task_id") and value["task_id"] != task["task_id"]:
+                raise ValueError("selected task budget changed")
             budget["model_limit"] = min(budget["model_limit"], value["model_limit"])
             budget["tool_limit"] = min(budget["tool_limit"], value["tool_limit"])
             for counter, limit in (("model_spent", "model_limit"), ("tool_spent", "tool_limit")):

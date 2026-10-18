@@ -125,6 +125,9 @@ class AgentTurn:
         self.selection_tool: KernelToolSpec | None = None
         self.model_calls = 0
         self.round_index = 0
+        self._budget_task_id = ""
+        self._budget_model_attempts = self._budget_tool_attempts = 0
+        self._budget_paid_models = self._budget_paid_tools = 0
         self.confirmed_result: dict[str, Any] | None = None
         self.diagnosing_effect = False
         self.reobservation_source = None
@@ -482,6 +485,10 @@ class AgentTurn:
                 self.lease = adopted
                 self.state = await self.session.state_store.load(owner=adopted.owner, session_id=adopted.session_id)
                 self.tool_context = replace(self.tool_context, lease=adopted)
+                # 确认前的规划成本不属于新领取的 effect 续行。
+                self._budget_task_id = ""
+                self._budget_paid_models = self._budget_model_attempts
+                self._budget_paid_tools = self._budget_tool_attempts
                 if result is None:
                     from .continuation import confirmed_result as restore_confirmed
                     result = restore_confirmed(self.session.catalog, self.state, continuation_record(self.state, adopted.continuation_id, adopted.continuation_kind))
@@ -860,13 +867,57 @@ class AgentTurn:
             "successful_read_queries": len(self.observed_reads),
         })
 
-    async def reserve_budget(self, *, model: int = 0, tools: int = 0) -> None:
+    @property
+    def uses_session_task(self) -> bool:
+        """显式新目标不自动继承旧任务；结构化任务选择和续行仍使用原任务。"""
+        return bool(self.tool_context.lease.continuation_id or self._budget_task_id) or not (
+            self.agent_input.initial_read_tool or self.validated_selection is not None
+            or self.explaining or self.plan_id is not None
+        )
+
+    @property
+    def task_budget(self) -> dict | None:
         lease = self.tool_context.lease
-        if self.session.continuation_binding is not None and (lease.continuation_id or self.state.metadata.get("read_wait")):
+        if lease.continuation_id:
+            return continuation_record(self.state, lease.continuation_id, lease.continuation_kind)["budget"]
+        if self._budget_task_id:
+            record = self.state.metadata.get("read_wait") or {}
+            if record.get("task_id") != self._budget_task_id:
+                raise StalePublicationError("selected task budget changed")
+            return record["budget"]
+        return None
+
+    async def reserve_budget(self, *, model: int = 0, tools: int = 0,
+                             tool: KernelToolSpec | None = None,
+                             arguments: Mapping[str, Any] | None = None) -> None:
+        self._budget_model_attempts += model
+        self._budget_tool_attempts += tools
+        if self.session.continuation_binding is None:
+            return
+        lease = self.tool_context.lease
+        operation = (arguments or {}).get("operation") if tool is not None and tool.name == "agent.task" else None
+        if not lease.continuation_id and (operation in ("create", "cancel")
+                                         or (tool is not None and tool.name == "agent.pending_plan")):
+            return  # 耗尽后仍可停止/选择新任务；新建时在原事务内归账。
+        if tool is not None and not lease.continuation_id and not self._budget_task_id:
+            task = self.state.metadata.get("task")
+            record = self.state.metadata.get("read_wait") or {}
+            continuing = (operation in ("checkpoint", "revise") or (
+                self.uses_session_task and task and task["status"] in {"partial", "blocked"}
+                and tool.name != "agent.capabilities"
+                and (not tool.metadata.get("kernel_utility") or tool.effect is not ToolEffect.READ
+                     or tool.name in {"agent.read_result", "agent.repair"})))
+            if continuing and task and record.get("task_id") == task["task_id"]:
+                self._budget_task_id = task["task_id"]
+        if self.task_budget is not None:
             try:
                 self.state = await self.session.state_store.commit(lease, updates=(_ContinuationAction("", {
-                    "operation": "reserve", "model_spent": model, "tool_spent": tools,
+                    "operation": "reserve", "task_id": self._budget_task_id,
+                    "model_spent": self._budget_model_attempts - self._budget_paid_models,
+                    "tool_spent": self._budget_tool_attempts - self._budget_paid_tools,
                     "model_limit": self.session.limits.max_model_rounds, "tool_limit": self.session.limits.max_tool_calls,
                 }, binding=self.session.continuation_binding),))
             except ValueError as exc:
                 raise ToolPipelineError("任务累计预算已用完，未继续调用。", code="task_budget_exceeded") from exc
+            self._budget_paid_models = self._budget_model_attempts
+            self._budget_paid_tools = self._budget_tool_attempts

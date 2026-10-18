@@ -274,7 +274,7 @@ def test_new_turn_or_durable_epoch_revokes_old_wait(change):
                           session_id='wait-control', request_id='new-request'))]
             assert events[-1].payload.get('status') == 'success'
             after = await fresh.store.load(owner=OWNER, session_id='wait-control')
-            assert after.metadata['read_wait']['budget']['model_spent'] == 4
+            assert after.metadata['read_wait']['budget']['model_spent'] == 3
             assert after.metadata['read_wait']['budget']['tool_spent'] == 3
             count = len(script.requests)
             assert not await fresh.session.resume_wait(candidate=candidate)

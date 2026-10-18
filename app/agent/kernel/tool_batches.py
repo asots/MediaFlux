@@ -110,7 +110,6 @@ def admit_calls(turn: AgentTurn, reply: _ModelRound) -> None:
 async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping[str, Any] | None,
                         business_batch_calls: int, discovery_batch_calls: int) -> bool:
     calls, resuming_read = reply.calls, reply.resuming_read
-    await turn.reserve_budget(tools=len(calls))
     turn.total_tool_calls += len(calls)
     turn.business_tool_calls += business_batch_calls
     turn.discovery_tool_calls += discovery_batch_calls
@@ -121,10 +120,18 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
         and all(call.argument_error is None
             and call.name in turn.available_names
             and independent_read(turn.session.catalog.get(call.name), turn.state.metadata.get("task")) for call in calls))
+    if parallel_batch:
+        # 并发批次必须在任何 handler 前一次领取；顺序批次先允许任务控制选择归属。
+        await turn.reserve_budget(tools=len(calls), tool=turn.session.catalog.get(calls[0].name),
+                                  arguments=calls[0].arguments)
     ready: dict[str, tuple[ToolCallContext, PipelineResult | BaseException]] = {}
 
     for call_index, call in enumerate(calls):
         lease = turn.tool_context.lease
+        if not parallel_batch:
+            await turn.reserve_budget(tools=1,
+                tool=turn.session.catalog.get(call.name) if call.name in turn.available_names else None,
+                arguments=call.arguments)
         if call.name not in turn.available_names:
             error = ToolPipelineError(
                 "该工具不在本轮候选能力中；先调用 agent.capabilities 指定 tool_names 加载工具，下一轮按返回的 Schema 调用。",
@@ -184,7 +191,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
             # 接力未携带持久化 scope，不能借旧任务额度停泊成无 scope 的恢复回合。
             if (isinstance(exc, _ReadPermitRejected) and not turn.agent_input.initial_read_tool
                     and turn.session.continuation_binding is not None
-                    and (turn.state.metadata.get("read_wait") or lease.continuation_kind == "effect") and not turn.confirming and not turn.explaining
+                    and turn.task_budget is not None and not turn.confirming and not turn.explaining
                     and (not turn.attempted_write or (
                         lease.continuation_kind == "effect" and lease.continuation_id
                         and turn.confirmed_result is not None and public_result_state(turn.confirmed_result) == "failed"
@@ -367,7 +374,8 @@ async def execute_group(turn: AgentTurn, calls: tuple[ModelToolCall, ...], start
                 turn.returned_reads[item.call_id] = receipt
             context = replace(turn.tool_context,
                 current_task=(dict(round_task) if round_task is not None else None)
-                    if spec.metadata.get("kernel_utility") else turn.state.metadata.get("task"),
+                    if spec.metadata.get("kernel_utility") else (
+                        turn.state.metadata.get("task") if turn.uses_session_task else None),
                 call_id=item.call_id,
                 schema_replacements={} if concurrent else turn.tool_context.schema_replacements)
             admitted = asyncio.Event()
