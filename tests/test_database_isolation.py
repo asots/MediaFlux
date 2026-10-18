@@ -135,6 +135,51 @@ class DatabaseIsolationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "生产数据库"):
             db.configure_database(db.production_db_path(), test_mode=True)
 
+    def test_agent_search_does_not_boot_web_after_database_test(self):
+        # 新进程避免全量收集已导入 app.main 后掩盖跨测试模块的启动副作用。
+        probe = textwrap.dedent(
+            """
+            import socket
+            import sys
+            import unittest
+            import tests
+            from app import config, database
+            from app.modules import first_run
+
+            def blocked_network(*args, **kwargs):
+                raise AssertionError('test forbids real networking')
+
+            socket.create_connection = blocked_network
+            socket.socket.connect = blocked_network
+            socket.socket.connect_ex = blocked_network
+            # 模拟先运行仓储测试：已有 schema 不等于完成正式安装。
+            database.init_db()
+            assert database.resolve_db_path().is_file()
+            assert first_run.needs_initialization()
+            env_before = config.ENV_FILE.read_bytes()
+            assert 'app.main' not in sys.modules
+
+            suite = unittest.defaultTestLoader.loadTestsFromName(
+                'tests.test_agent_discovery_search.AgentDiscoveryIdentityRegressionTests.'
+                'test_tmdb_agent_search_keeps_chinese_query_on_single_http_request'
+            )
+            result = unittest.TextTestRunner().run(suite)
+            assert result.wasSuccessful()
+            assert 'app.main' not in sys.modules
+            assert first_run.needs_initialization()
+            assert config.ENV_FILE.read_bytes() == env_before
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-B", "-c", probe],
+            cwd=Path(__file__).resolve().parent.parent,
+            env={**os.environ, "MEDIAFLUX_INITIALIZED": "0"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
     def test_environment_test_path_is_only_used_in_test_mode(self):
         production = db.production_db_path()
         with tempfile.TemporaryDirectory() as root:

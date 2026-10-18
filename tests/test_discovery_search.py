@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import threading
@@ -17,39 +16,7 @@ from app import config as app_config
 from app.clients.tmdb import TMDBClient
 from app.discovery.models import MediaCard, ProviderUnavailable
 from app.main import create_app
-from tests.support import InitializedWebTestCase
-
-
-class FakeResponse:
-    def __init__(self, payload, status_code=200):
-        self.status_code = status_code
-        self.headers = {"Content-Type": "application/json; charset=utf-8"}
-        self._content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.text = self._content.decode("utf-8")
-
-    def json(self):
-        return json.loads(self.text)
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            import requests
-            error = requests.HTTPError(f"HTTP {self.status_code}")
-            error.response = self
-            raise error
-
-
-class FakeSession:
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.calls = []
-
-    def get(self, url, **kwargs):
-        self.calls.append(("GET", url, kwargs))
-        return self.responses.pop(0)
-
-    def post(self, url, **kwargs):
-        self.calls.append(("POST", url, kwargs))
-        return self.responses.pop(0)
+from tests.support import FakeHttpSession, FakeJsonResponse, InitializedWebTestCase
 
 
 class FakeSearchProvider:
@@ -240,7 +207,7 @@ class DiscoverySearchUnitTests(unittest.TestCase):
     def test_douban_search_uses_fixed_suggestion_endpoint(self):
         from app.discovery.search import DoubanSearchProvider
 
-        session = FakeSession([FakeResponse([
+        session = FakeHttpSession([FakeJsonResponse([
             {"id": "1292052", "title": "肖申克的救赎", "type": "movie", "year": "1994", "img": "https://img1.doubanio.com/view/photo/s_ratio_poster/public/p1.jpg"},
         ])])
         cards, has_more = DoubanSearchProvider(session=session).search("肖申克", 1)
@@ -254,7 +221,7 @@ class DiscoverySearchUnitTests(unittest.TestCase):
     def test_douban_search_uses_configured_dbcl2_cookie(self):
         from app.discovery.search import DoubanSearchProvider
 
-        session = FakeSession([FakeResponse([])])
+        session = FakeHttpSession([FakeJsonResponse([])])
         with patch(
             "app.discovery.search.app_config.get",
             side_effect=lambda key, default="": (
@@ -270,7 +237,7 @@ class DiscoverySearchUnitTests(unittest.TestCase):
     def test_bangumi_search_posts_bounded_query(self):
         from app.discovery.search import BangumiSearchProvider
 
-        session = FakeSession([FakeResponse({
+        session = FakeHttpSession([FakeJsonResponse({
             "total": 40,
             "data": [{"id": 12, "name": "Test", "name_cn": "测试动画", "date": "2025-01-01", "images": {"large": "https://lain.bgm.tv/pic/cover/l/test.jpg"}}],
         })])
@@ -390,7 +357,7 @@ class DiscoverySearchUnitTests(unittest.TestCase):
         from app.clients.tmdb import TMDBClient
         from app.discovery.models import ProviderUnavailable
 
-        session = FakeSession([FakeResponse({}, status_code=302)])
+        session = FakeHttpSession([FakeJsonResponse({}, status_code=302)])
         client = TMDBClient(api_key="key", session=session, retries=0)
         with self.assertRaises(ProviderUnavailable):
             client.get("/search/movie", {"query": "电影"})

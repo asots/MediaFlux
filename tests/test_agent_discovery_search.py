@@ -11,6 +11,7 @@ from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.discovery.models import MediaCard
 from app.discovery.search import DiscoverySearchResult
+from tests.support import FakeHttpSession, FakeJsonResponse
 
 _SECRET_POSTER = "https://image.example/private/poster?api_key=secret"
 _SECRET_BACKDROP = "https://image.example/private/backdrop?token=secret"
@@ -284,9 +285,8 @@ class AgentDiscoveryIdentityRegressionTests(unittest.TestCase):
     def test_tmdb_agent_search_keeps_chinese_query_on_single_http_request(self):
         from app.clients.tmdb import TMDBClient
         from app.discovery.search import DiscoverySearchService, TMDBSearchProvider
-        from tests.test_discovery_search import FakeResponse, FakeSession
 
-        http = FakeSession([FakeResponse({"results": [
+        http = FakeHttpSession([FakeJsonResponse({"results": [
             {"id": 75787, "media_type": "tv", "name": "狐妖小红娘", "first_air_date": "2015-06-25"},
             {"id": 205599, "media_type": "tv", "name": "狐妖小红娘月红篇", "first_air_date": "2024-05-23"},
         ], "total_pages": 1})])

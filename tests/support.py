@@ -1,6 +1,7 @@
 """MediaFlux 测试共享辅助工具。"""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -14,6 +15,42 @@ from app import database as db
 from app.clients.guangya import GuangYaFile
 
 _TEST_DATABASE_LOCK = threading.RLock()
+
+
+class FakeJsonResponse:
+    """仅提供 JSON HTTP 响应，不依赖 Web 应用或运行时初始化。"""
+
+    def __init__(self, payload, status_code=200):
+        self.status_code = status_code
+        self.headers = {"Content-Type": "application/json; charset=utf-8"}
+        self._content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.text = self._content.decode("utf-8")
+
+    def json(self):
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            error = requests.HTTPError(f"HTTP {self.status_code}")
+            error.response = self
+            raise error
+
+
+class FakeHttpSession:
+    """按队列返回响应，同时记录请求方法、地址与参数。"""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return self.responses.pop(0)
+
+    def post(self, url, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return self.responses.pop(0)
 
 
 def seed_rss_entry_state(entry_id: int, status: str) -> None:
