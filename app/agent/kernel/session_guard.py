@@ -5,17 +5,20 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Generator
+from typing import TYPE_CHECKING, Any
 
 from app import database as db
 from app.modules.process_lock import CrossProcessLock
 
 from .state_types import SessionBusyError
+
+if TYPE_CHECKING:
+    from .session_state import SessionState
 
 
 @dataclass(slots=True)
@@ -66,23 +69,23 @@ def continuation_execution_guard(owner: str, session_id: str) -> Generator[bool,
             lock.release()
 
 
-def _foreground_lock(owner: str, session_id: str, lifecycle_id: str, generation: int) -> CrossProcessLock:
-    identity = hashlib.sha256(f"{lifecycle_id}:{generation}".encode()).hexdigest()
+def _foreground_lock(owner: str, session_id: str, lifecycle_id: str, generation: int, turn_id: str = "") -> CrossProcessLock:
+    identity = hashlib.sha256((f"{lifecycle_id}:{generation}" + (f":{turn_id}" if turn_id else "")).encode()).hexdigest()
     return CrossProcessLock(f"agent-foreground-{_scope_key(owner, session_id)}-{identity}")
 
 
 @contextmanager
 def foreground_execution_guard(owner: str, session_id: str, lifecycle_id: str,
-                               generation: int) -> Generator[bool, None, None]:
-    """普通前台的执行活性；在 begin_turn 的会话互斥窗口内取得，至执行收尾释放。
+                               generation: int, *, turn_id: str = "") -> Generator[bool, None, None]:
+    """前台执行活性；在普通/确认准入的会话互斥窗口内取得，至执行收尾释放。
 
     身份每轮唯一，旧回合不能阻挡新请求。固定会话锁不能删除；这里的
     一次性文件不会再次授予执行权，退出后可清理，崩溃残留在下次准入清理。
     """
-    lock = _foreground_lock(owner, session_id, lifecycle_id, generation)
+    lock = _foreground_lock(owner, session_id, lifecycle_id, generation, turn_id)
     acquired = lock.acquire(blocking=False)
     try:
-        if acquired:
+        if acquired and not turn_id:
             prefix = f".mediaflux-agent-foreground-{_scope_key(owner, session_id)}-"
             for path in lock.path.parent.glob(prefix + "*.lock"):
                 if path != lock.path:
@@ -96,9 +99,9 @@ def foreground_execution_guard(owner: str, session_id: str, lifecycle_id: str,
                 lock.path.unlink(missing_ok=True)
 
 
-def foreground_execution_active(owner: str, session_id: str, lifecycle_id: str, generation: int) -> bool:
+def foreground_execution_active(owner: str, session_id: str, lifecycle_id: str, generation: int, *, turn_id: str = "") -> bool:
     """仅在会话状态事务内探测当前代，文件存在并不代表执行者存活。"""
-    lock = _foreground_lock(owner, session_id, lifecycle_id, generation)
+    lock = _foreground_lock(owner, session_id, lifecycle_id, generation, turn_id)
     try:
         lock.path.stat()
     except FileNotFoundError:
@@ -109,6 +112,16 @@ def foreground_execution_active(owner: str, session_id: str, lifecycle_id: str, 
     with suppress(OSError):
         lock.path.unlink(missing_ok=True)
     return False
+
+
+def publication_execution_active(state: SessionState) -> bool:
+    """按当前发布 fence 探测执行者，忽略已被新确认接管的旧普通回合。"""
+    active = state.metadata.get("active_publication") or {}
+    confirmed = state.metadata.get("confirmed_publication") or {}
+    turn_id = confirmed.get("turn_id", "") if confirmed.get("generation") == state.generation else ""
+    if active.get("generation") == state.generation and active.get("turn_id") == turn_id:
+        turn_id = ""  # 普通回合内自动预授权没有转移执行者，仍持普通 generation 锁。
+    return foreground_execution_active(state.owner, state.session_id, state.lifecycle_id, state.generation, turn_id=turn_id)
 
 
 @contextmanager

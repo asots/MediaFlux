@@ -7,7 +7,7 @@ import json
 import logging
 import secrets
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
-from contextlib import aclosing, suppress
+from contextlib import aclosing, nullcontext, suppress
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -21,6 +21,7 @@ from app.agent.kernel.state_types import (
     PublicationLease,
     SessionBusyError,
     _PendingEffectTransition,
+    _PublicationFinished,
 )
 from app.agent.kernel.tool_calls import PipelineResult, ToolCallContext
 from app.concurrency import CrossLoopAsyncLock
@@ -32,7 +33,11 @@ from .metrics import KernelMetrics
 from .model import (
     ModelAdapter,
 )
-from .session_guard import session_scope_guard
+from .session_guard import (
+    continuation_execution_guard,
+    publication_execution_active,
+    session_scope_guard,
+)
 from .turn import AgentTurn
 
 logger = logging.getLogger(__name__)
@@ -167,7 +172,6 @@ class AgentSession:
 
     async def resume_wait(self, *, candidate, cancelled=lambda: False) -> bool:
         """Internal continuation: signed-store claim, no synthetic user turn."""
-        from .session_guard import continuation_execution_guard
         with continuation_execution_guard(candidate["owner"], candidate["session_id"]) as acquired:
             if not acquired:
                 return False
@@ -283,8 +287,10 @@ class AgentSession:
         self, *, owner: str, session_id: str, plan_id: str,
         arguments: Mapping[str, Any], request_id: str = "", channel: str = "web",
     ) -> PipelineResult:
-        context = await self._confirmation_context(owner=owner, session_id=session_id, request_id=request_id, channel=channel)
-        with session_scope_guard(owner, session_id):
+        with continuation_execution_guard(owner, session_id) as acquired, session_scope_guard(owner, session_id):
+            if not acquired:
+                raise SessionBusyError("session continuation is running")
+            context = await self._confirmation_context(owner=owner, session_id=session_id, request_id=request_id, channel=channel)
             result = await self.pipeline.edit_confirmation(plan_id, arguments, context=context)
             plan = result.effect_plan
             canonical = plan.metadata["editing"]["values"] if plan else dict(arguments)
@@ -310,9 +316,13 @@ class AgentSession:
 
     async def set_scoped_trust(self, *, owner: str, session_id: str, operation: str,
                                request_id: str = "", **selection: Any) -> dict[str, Any]:
-        context = await self._confirmation_context(owner=owner, session_id=session_id, request_id=request_id,
-                                                   idle=operation != "revoke")
-        return await self.pipeline.scoped_trust.set(context=context, operation=operation, **selection)
+        with (nullcontext(True) if operation == "revoke" else continuation_execution_guard(owner, session_id)) as acquired:
+            if not acquired:
+                raise SessionBusyError("session continuation is running")
+            with session_scope_guard(owner, session_id, kind="effect"):
+                context = await self._confirmation_context(owner=owner, session_id=session_id, request_id=request_id,
+                                                           idle=operation != "revoke")
+                return await self.pipeline.scoped_trust.set(context=context, operation=operation, **selection)
 
     async def _confirmation_context(self, *, owner: str, session_id: str, request_id: str = "",
                                     channel: str = "web", idle: bool = True) -> ToolCallContext:
@@ -320,14 +330,17 @@ class AgentSession:
                                  request_id=request_id, channel=channel)
         await self.turn_admission.begin(agent_input)
         state = await self.state_store.load(owner=owner, session_id=session_id)
-        if idle and ((state.metadata.get("active_publication") or {}).get("status") == "running"
-                     or await self.coordinator.describe(owner=owner, session_id=session_id)):
-            raise SessionBusyError("session turn is running")
         # 确认后的只读续行可在同代生成下一张卡；管理该卡仍服从原发布 fence。
         confirmed = state.metadata.get("confirmed_publication") or {}
         turn_id = confirmed.get("turn_id") if confirmed.get("generation") == state.generation else None
+        local = await self.coordinator.describe(owner=owner, session_id=session_id) if idle else None
+        if idle and (publication_execution_active(state) or (local and local["generation"] == state.generation
+                     and (turn_id is None or local["turn_id"] == turn_id))):
+            raise SessionBusyError("session turn is running")
         lease = PublicationLease(owner, session_id, state.generation,
                                  turn_id or secrets.token_urlsafe(12), request_id or secrets.token_urlsafe(12))
+        if idle and (state.metadata.get("active_publication") or {}).get("status") == "running":
+            state = await self.state_store.commit(lease, updates=(_PublicationFinished("", None),))
         async def progress(_payload):
             pass
         goal = state.metadata.get("pending_effect_goal") or {}

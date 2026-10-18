@@ -656,13 +656,14 @@ class SQLiteKernelStore:
                     session_digest=session_digest,
                 ),
             ) + 1
-            _begin_publication(state, request_id)
+            turn_id = secrets.token_urlsafe(12)
+            _begin_publication(state, request_id, turn_id)
             self._write_state(conn, state)
         lease = PublicationLease(
             owner=owner,
             session_id=session_id,
             generation=state.generation,
-            turn_id=secrets.token_urlsafe(12),
+            turn_id=turn_id,
             request_id=request_id,
         )
         return lease, state.clone()

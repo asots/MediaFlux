@@ -18,7 +18,7 @@ from .batch_progress import observe_batch
 from .completion_receipts import EFFECT_PENDING, _completion_cipher, _late_receipt
 from .conversation_codec import conversation_payload, json_text
 from .conversation_state import commit_conversation
-from .session_guard import foreground_execution_active
+from .session_guard import publication_execution_active
 from .session_state import SessionState
 from .state_types import PublicationLease, StalePublicationError, StateUpdate
 from .task_state import identity
@@ -324,7 +324,7 @@ def claim(state: SessionState, candidate, now, binding, conn=None):
                   parked_at=now, last_checked_at=now)
     record["budget"]["wait_seconds_spent"] = spent
     state.metadata["active_publication"] = {"generation": state.generation,
-        "request_id": record["source_request_id"], "status": "running"}
+        "turn_id": record["resume_turn_id"], "request_id": record["source_request_id"], "status": "running"}
     return PublicationLease(state.owner, state.session_id, state.generation, record["resume_turn_id"],
                             record["source_request_id"], record["wait_id"], record["claim_id"])
 
@@ -456,9 +456,7 @@ def claim_effect(state, candidate, now, binding, conn=None):
         require_runtime_fence(conn, binding.fence)
     if state.pending_effect_plan_id:
         return None  # Retain this goal, never overwrite the user's newer confirmation.
-    publication = state.metadata.get("active_publication") or {}
-    if (publication.get("generation") == state.generation and publication.get("status") == "running"
-            and foreground_execution_active(state.owner, state.session_id, state.lifecycle_id, state.generation)):
+    if publication_execution_active(state):
         return None  # A newer user turn is still working; defer without discarding the old goal.
     task = state.metadata.get("task")
     expected = record.get("expected_task")
@@ -480,7 +478,7 @@ def claim_effect(state, candidate, now, binding, conn=None):
     record.update(state="claimed", claim_id=secrets.token_urlsafe(18), claim_until=now + CLAIM_SECONDS,
         resume_turn_id=secrets.token_urlsafe(12), publication_generation=state.generation, last_checked_at=now)
     state.metadata["active_publication"] = {"generation": state.generation,
-        "request_id": record["source_request_id"], "status": "running"}
+        "turn_id": record["resume_turn_id"], "request_id": record["source_request_id"], "status": "running"}
     state.metadata["confirmed_publication"] = {"generation": state.generation,
         "turn_id": record["resume_turn_id"], "plan_id": record["wait_id"]}
     return PublicationLease(state.owner, state.session_id, state.generation, record["resume_turn_id"],

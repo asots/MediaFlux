@@ -294,6 +294,11 @@ class AgentTurn:
                 if pending_plan is None:
                     await self.session.pipeline._cancel_effect_scoped(self.plan_id, lease=self.lease)
                     raise ConfirmationClaimError()
+                if not self.execution_scope.enter_context(foreground_execution_guard(
+                    self.lease.owner, self.lease.session_id, self.state.lifecycle_id, self.lease.generation,
+                    turn_id=self.lease.turn_id,
+                )):
+                    raise SessionBusyError("confirmation publication is already executing")
                 self.reobservation_source = pending_plan.metadata.get("reobservation_source")
                 self.token = await self.session.coordinator.begin(self.lease, protected=True, task=asyncio.current_task())
             self.messages = restore_messages(self.state)

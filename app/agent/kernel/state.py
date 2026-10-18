@@ -119,12 +119,12 @@ def _record_stop_request(state: SessionState, generation: int) -> bool:
     return True
 
 
-def _begin_publication(state: SessionState, request_id: str) -> None:
+def _begin_publication(state: SessionState, request_id: str, turn_id: str) -> None:
     """Internal durable request identity, never copied from model metadata."""
     from .continuation import revoke
     revoke(state, "superseded")
     state.metadata["active_publication"] = {
-        "generation": state.generation, "request_id": request_id, "status": "running",
+        "generation": state.generation, "turn_id": turn_id, "request_id": request_id, "status": "running",
     }
 
 
@@ -153,7 +153,8 @@ def _settle_cancelled_reads(state, receipts, maximum=256 * 1024):
     if ((state.owner, state.session_id) != (lease.owner, lease.session_id)
             or state.generation != lease.generation + 1
             or _exact_value(state.metadata.get("active_publication")) != _exact_value({
-                "generation": lease.generation, "request_id": lease.request_id, "status": "cancelled"})):
+                "generation": lease.generation, "turn_id": lease.turn_id,
+                "request_id": lease.request_id, "status": "cancelled"})):
         return None
     expected = _exact_value(state.conversation)
     updated = state.clone()
@@ -218,7 +219,8 @@ class InMemorySessionStateStore:
                 state.metadata.pop("pending_effect_binding", None)
             _consume_delivered_effect_receipts(state)
             state.generation = generation
-            _begin_publication(state, request_id)
+            turn_id = secrets.token_urlsafe(12)
+            _begin_publication(state, request_id, turn_id)
             if state.execution_capacity or pending_guard is not None:
                 validate_execution_state(state)
             self._states[key] = state
@@ -226,7 +228,7 @@ class InMemorySessionStateStore:
                 owner=owner,
                 session_id=session_id,
                 generation=generation,
-                turn_id=secrets.token_urlsafe(12),
+                turn_id=turn_id,
                 request_id=request_id,
             )
             return lease, state.clone()

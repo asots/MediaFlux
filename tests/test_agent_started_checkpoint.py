@@ -312,6 +312,7 @@ def test_preexecution_checkpoint_failure_never_runs_handler_or_erases_prior_fact
             assert final.generation == old_lease.generation + 1
             assert final.metadata["active_publication"] == {
                 "generation": old_lease.generation,
+                "turn_id": old_lease.turn_id,
                 "request_id": old_lease.request_id, "status": "cancelled",
             }
             cold_store = store()

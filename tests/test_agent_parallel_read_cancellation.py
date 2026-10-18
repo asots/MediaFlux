@@ -293,7 +293,8 @@ def test_producer_interrupt_during_materialization_settles_returned_reads_atomic
             _assert_unknown(rows[2])
         assert final.generation == started.generation + 1
         assert final.metadata["active_publication"] == {
-            "generation": started.generation, "request_id": OLD_REQUEST, "status": "cancelled",
+            "generation": started.generation, "turn_id": settled.receipts[0].lease.turn_id,
+            "request_id": OLD_REQUEST, "status": "cancelled",
         }
         assert not await store.is_current(settled.receipts[0].lease)
         assert len(model.requests) == 1
