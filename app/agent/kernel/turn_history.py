@@ -45,7 +45,9 @@ def record_result(turn: AgentTurn,
     name: str, arguments: Mapping[str, Any], result: Mapping[str, Any],
     *, error: ToolPipelineError | None = None, recovered_failures: tuple[str, ...] = (), rejected_call: str = "",
 ) -> None:
-
+    tool = turn.session.catalog.get(name) if turn.session.catalog.has(name) else None
+    if tool is not None:
+        name = tool.name
     if name == DISCOVERY_TOOL:
         return
     # 显式参数重试按对象归并；无参工具依赖隐式上下文，切换后不能冒充同一对象恢复。
@@ -56,7 +58,6 @@ def record_result(turn: AgentTurn,
                "unparsed:" + rejected_call if rejected_call else json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, default=str))
     # DTO 可同时提供部分结果和限流事实；保留已取得的结果，再登记未完成部分。
     turn.has_tool_result = turn.has_tool_result or (error is None and result.get("ok") is not False)
-    tool = turn.session.catalog.get(name) if turn.session.catalog.has(name) else None
     status = result.get("status")
     if error is None and isinstance(status, str) and (
         status == "rate_limited" or (result.get("ok") is False and tool is not None

@@ -24,6 +24,7 @@ from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession, SessionLimits
 from app.agent.kernel.state_types import AgentInput
+from app.agent.public_view import public_conversation_messages
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel, collect
 
@@ -81,7 +82,7 @@ def test_confirm_readback_is_loaded_without_discovery_but_never_grants_permissio
                     ModelEvent(ModelEventType.FINISH, finish_reason="stop")]
 
         model = ScriptedModel([call(write.name, "rename"), answer("只解释预览，尚未执行。"),
-                               call(read.name, "readback"), answer("已据实际结果核对。")])
+                               call(read.name, "readback"), answer("改名和重新读取全部完成。")])
 
         def cold_session():
             store = SQLiteKernelStore(secret_provider=lambda: "readback-test-only")
@@ -110,6 +111,13 @@ def test_confirm_readback_is_loaded_without_discovery_but_never_grants_permissio
         failures = [e.payload["code"] for e in events if e.type is AgentEventType.TOOL_FAILED]
         assert failures == ([] if read_access == "allowed" else ["tool_not_available"])
         assert len(model.requests) == 4  # 确认后直接读取+回答，不再发现/重试。
+        terminal = events[-1].payload
+        assert terminal["status"] == ("success" if read_access == "allowed" else "partial")
+        if read_access != "allowed":
+            assert "改名和重新读取全部完成。" not in terminal["answer"]
+            assert "文件改名完成" in terminal["answer"]
+        cold = await cold_session().state_store.load(owner="readback-owner", session_id="readback-session")
+        assert public_conversation_messages(cold.conversation)[-1]["content"] == terminal["answer"]
         await collect(cold_session().confirm(**options))
         assert len(model.requests) == 4 and writes == ["rename"]
 

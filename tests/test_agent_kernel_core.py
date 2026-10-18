@@ -1762,7 +1762,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         user = next(item for item in persisted.conversation if item["role"] == "user")
         self.assertEqual(user["content"], "它有多少集？")
 
-    async def test_tool_error_is_returned_to_model_for_self_correction(self) -> None:
+    async def test_unrecovered_tool_error_reaches_model_and_closes_as_failure(self) -> None:
         catalog = ToolCatalog([read_tool("library.status")])
         state = InMemorySessionStateStore()
         model = ScriptedModel(
@@ -1801,7 +1801,8 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         failed = [event for event in events if event.type is AgentEventType.TOOL_FAILED]
         self.assertEqual(failed[0].payload["code"], "tool_not_available")
-        self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)
+        self.assertEqual(events[-1].type, AgentEventType.TURN_FAILED)
+        self.assertEqual(events[-1].payload["code"], "tool_not_available")
         self.assertIn("tool_not_available", model.requests[1].messages[-1].content)
 
     async def test_write_only_freezes_plan_and_confirm_continues_after_deterministic_execution(

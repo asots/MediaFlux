@@ -280,7 +280,7 @@ async def next_round(turn: AgentTurn, round_task: Mapping[str, Any] | None,
             if model_event.type is ModelEventType.TEXT_DELTA:
                 if model_event.text:
                     text_parts.append(model_event.text)
-                    if turn.confirmed_result is None:
+                    if turn.confirmed_result is None and not turn.unresolved_errors:
                         await turn.publish(
                             AgentEventType.MODEL_DELTA,
                             {"delta": model_event.text, "round": turn.round_index + 1},

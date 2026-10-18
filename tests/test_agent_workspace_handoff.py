@@ -289,7 +289,9 @@ class WorkspaceHandoffKernelTests(unittest.IsolatedAsyncioTestCase):
                    and event.payload["tool"] in {"unsafe.write", "unsafe__write"}
                    and event.payload["code"] in {"tool_not_available", "read_scope_required"} for event in events)
         assert events[-1].type is AgentEventType.TURN_COMPLETED
-        assert events[-1].payload["answer"] == "依据当前只读结果回答。"
+        assert events[-1].payload["status"] == "partial"
+        assert "已读取当前队列" in events[-1].payload["answer"]
+        assert events[-1].payload["answer"] != "依据当前只读结果回答。"
 
 
     async def test_initial_read_round_does_not_claim_or_settle_quota_resume(self):

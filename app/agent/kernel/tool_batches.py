@@ -148,12 +148,18 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
                 "该工具不在本轮候选能力中；先调用 agent.capabilities 指定 tool_names 加载工具，下一轮按返回的 Schema 调用。",
                 code="tool_not_available",
             )
+            record_result(turn, call.name, call.arguments or {},
+                          {"ok": False, "status": error.code, "summary": str(error)}, error=error,
+                          rejected_call=call.call_id if call.argument_error else "")
             await turn.close_failed_call(call, error)
             continue
         tool = turn.session.catalog.get(call.name)
         if turn.agent_input.initial_read_tool and tool.effect is not ToolEffect.READ:
-            await turn.close_failed_call(call, ToolPipelineError(
-                "工作区行动接力仅允许只读能力。", code="read_scope_required"))
+            error = ToolPipelineError("工作区行动接力仅允许只读能力。", code="read_scope_required")
+            record_result(turn, tool.name, call.arguments or {},
+                          {"ok": False, "status": error.code, "summary": str(error)}, error=error,
+                          rejected_call=call.call_id if call.argument_error else "")
+            await turn.close_failed_call(call, error)
             continue
         if call.argument_error is not None:
             error = ToolPipelineError(
@@ -306,7 +312,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
                         return True
                     confirmed = turn.tool_context.confirmed_effect
                     if confirmed is not None and error_repair.completed_result(confirmed.tool, confirmed.outcome.public_content):
-                        record_result(turn, confirmed.tool.name, result.arguments, confirmed.outcome.audit_result(),
+                        record_result(turn, confirmed.tool.name, arguments, confirmed.outcome.audit_result(),
                                       recovered_failures=confirmed.recovered_failures)
                     continue
                 turn.scope.close()
