@@ -54,6 +54,8 @@ def record_result(turn: AgentTurn,
     turn.last_business_tool = name
     attempt = (name, 0 if arguments else turn.context_revision,
                "unparsed:" + rejected_call if rejected_call else json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, default=str))
+    # DTO 可同时提供部分结果和限流事实；保留已取得的结果，再登记未完成部分。
+    turn.has_tool_result = turn.has_tool_result or (error is None and result.get("ok") is not False)
     tool = turn.session.catalog.get(name) if turn.session.catalog.has(name) else None
     status = result.get("status")
     if error is None and isinstance(status, str) and (
@@ -63,7 +65,6 @@ def record_result(turn: AgentTurn,
         error = ToolPipelineError(
             sanitize_public_text(result.get("error") or result.get("summary") or "工具查询未取得结果"), code=status,
         )
-    turn.has_tool_result = turn.has_tool_result or (error is None and result.get("ok") is not False)
     turn.progress_results.append((public_tool_label(name), {**result, "_recovery_tracked": error is not None}))
     if error is not None:
         turn.unresolved_errors[attempt] = error
