@@ -67,7 +67,8 @@ def continuation_execution_guard(owner: str, session_id: str) -> Generator[bool,
 
 
 def _foreground_lock(owner: str, session_id: str, lifecycle_id: str, generation: int) -> CrossProcessLock:
-    return CrossProcessLock(f"agent-foreground-{_scope_key(owner, session_id)}-{lifecycle_id}-{generation}")
+    identity = hashlib.sha256(f"{lifecycle_id}:{generation}".encode()).hexdigest()
+    return CrossProcessLock(f"agent-foreground-{_scope_key(owner, session_id)}-{identity}")
 
 
 @contextmanager

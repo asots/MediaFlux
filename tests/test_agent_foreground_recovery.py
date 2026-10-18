@@ -186,3 +186,18 @@ def test_finished_foreground_turns_do_not_accumulate_execution_lock_files(tmp_pa
                     assert current == previous
                 previous = current
     asyncio.run(run())
+
+
+def test_legacy_lifecycle_execution_uses_portable_lock_filename():
+    from app.agent.kernel.session_guard import foreground_execution_active, foreground_execution_guard
+
+    with isolated_test_database():
+        lifecycle = "legacy:" + "a" * 64
+        baseline = _lock_files()
+        with foreground_execution_guard(OWNER, "legacy-foreground", lifecycle, 1) as acquired:
+            assert acquired
+            assert foreground_execution_active(OWNER, "legacy-foreground", lifecycle, 1)
+            names = _lock_files() - baseline
+            assert len(names) == 1 and all(":" not in name for name in names)
+        assert not foreground_execution_active(OWNER, "legacy-foreground", lifecycle, 1)
+        assert _lock_files() == baseline
