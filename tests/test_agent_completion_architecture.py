@@ -169,6 +169,15 @@ def test_execution_kernel_has_no_domain_or_transport_imports() -> None:
     assert not violations
 
 
+def test_probe_repository_does_not_load_notification_execution() -> None:
+    graph = _runtime_import_graph(APP_ROOT, package="app")
+    assert not {
+        target for target in graph["app.repositories.organize_probe"]
+        if target.startswith(("app.modules.", "app.agent.", "app.bot.", "app.routes."))
+    }
+    assert "app.repositories.organize_probe" in graph["app.modules.organize_probe_notifications"]
+
+
 def test_dependency_check_detects_cycles_through_external_transport(tmp_path: Path) -> None:
     (tmp_path / "agent").mkdir()
     (tmp_path / "bot").mkdir()

@@ -9,74 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from typing import Any, Iterable
+from typing import Iterable
 
 from app.config import get
 from app.logger import get_logger
+from app.repositories import organize_probe as probe_repository
 
 logger = get_logger(__name__)
 PROBE_CONTEXT_KEY = "_probe_notification_context"
-
-
-def _closed_notification_context() -> dict:
-    """未知协议不是旧空任务；保留可持久化的拒绝路由标记。"""
-    return {
-        "version": 1, "untrusted": True, "task_id": "", "chat_id": "",
-        "notify_enabled": False, "topic_enabled": False,
-        "notification_threads": [], "download_request_ids": [],
-    }
-
-
-def normalize_notification_context(value: object) -> dict:
-    """只保留内部合同字段；真正旧空值与未知/损坏非空协议严格区分。"""
-    if value is None or value == {}:
-        return {}
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except (TypeError, ValueError):
-            return _closed_notification_context()
-        if value == {}:
-            return {}
-    if not isinstance(value, dict) or value.get("version") != 1 or value.get("untrusted"):
-        return _closed_notification_context()
-    raw_refs = value.get("notification_threads") or []
-    ids = value.get("download_request_ids") or []
-    if not isinstance(raw_refs, list) or not isinstance(ids, list):
-        return _closed_notification_context()
-    refs: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for ref in raw_refs:
-        if not isinstance(ref, dict):
-            continue
-        topic = str(ref.get("topic") or "")
-        identity_key = {"organize": "task_id", "confirmation": "token", "download": "request_id"}.get(topic)
-        if not identity_key:
-            continue
-        identity = str(ref.get(identity_key) or "").strip()
-        if not identity or (topic == "download" and (not identity.isdecimal() or int(identity) <= 0)):
-            continue
-        if str(ref.get("thread_key") or "") != f"{topic}:{identity}":
-            continue
-        chat = str(ref.get("chat_id") or "").strip()
-        key = (topic, identity, chat)
-        refs[key] = {
-            "topic": topic, "thread_key": f"{topic}:{identity}", identity_key: identity,
-            "chat_id": chat,
-            # 同一 scope 的重复 ref 不能把已有关闭策略重新打开。
-            "topic_enabled": ref.get("topic_enabled", True) is True
-            and refs.get(key, {}).get("topic_enabled", True),
-        }
-    return {
-        "version": 1,
-        "task_id": str(value.get("task_id") or "").strip(),
-        "chat_id": str(value.get("chat_id") or "").strip(),
-        "notify_enabled": value.get("notify_enabled", True) is True,
-        "topic_enabled": value.get("topic_enabled", True) is True,
-        "notification_threads": list(refs.values()),
-        "download_request_ids": list(dict.fromkeys(
-            int(item) for item in ids if str(item).isdecimal() and int(item) > 0
-        )),
-    }
 
 
 def build_notification_context(
@@ -119,7 +59,7 @@ def build_notification_context(
             refs.append({"topic": "download", "thread_key": f"download:{request_id}",
                          "request_id": str(request_id), "chat_id": recipient,
                          "topic_enabled": topic_enabled})
-    return normalize_notification_context({
+    return probe_repository.normalize_notification_context({
         "version": 1, "task_id": task, "chat_id": chat,
         "notify_enabled": notify_enabled, "topic_enabled": topic_enabled,
         "notification_threads": refs, "download_request_ids": ids,
@@ -127,7 +67,7 @@ def build_notification_context(
 
 
 def apply_notification_context(stats: dict, context: object) -> None:
-    context = normalize_notification_context(context)
+    context = probe_repository.normalize_notification_context(context)
     if context:
         stats["notification_context"] = context
         if context["task_id"]:
@@ -135,7 +75,7 @@ def apply_notification_context(stats: dict, context: object) -> None:
 
 
 def tag_probe_changes(changes: list[dict], context: object, *, notify_enabled: bool) -> list[dict]:
-    context = normalize_notification_context(context)
+    context = probe_repository.normalize_notification_context(context)
     return [{**item, PROBE_CONTEXT_KEY: context, "_probe_notify_enabled": notify_enabled} for item in changes]
 
 
@@ -150,7 +90,7 @@ def merge_notification_scopes(*groups) -> list[dict]:
 
 def probe_scopes_from_changes(changes: Iterable[object] | None) -> list[dict]:
     return merge_notification_scopes([
-        {"probe": True, "context": normalize_notification_context(item[PROBE_CONTEXT_KEY]),
+        {"probe": True, "context": probe_repository.normalize_notification_context(item[PROBE_CONTEXT_KEY]),
          "notify_override": item.get("_probe_notify_enabled", True) is True}
         for item in changes or [] if isinstance(item, dict) and PROBE_CONTEXT_KEY in item
     ])
@@ -172,9 +112,7 @@ def notification_scopes(options: dict) -> list[dict]:
 
 def probe_downstream_state(ref: dict, *, strm_status: str, partial: bool, error: str) -> tuple[str, bool, str]:
     """稳定的批次状态，不把首个完成对象或仅入 STRM 队列当作全批完成。"""
-    from app.repositories.organize_probe import get_organize_probe_notification_progress
-
-    progress = get_organize_probe_notification_progress(
+    progress = probe_repository.get_organize_probe_notification_progress(
         topic=str(ref.get("topic") or ""), thread_key=str(ref.get("thread_key") or ""),
         chat_id=str(ref.get("chat_id") or ""), notification_enabled_only=True,
     )
@@ -189,19 +127,14 @@ def probe_downstream_state(ref: dict, *, strm_status: str, partial: bool, error:
 
 def publish_probe_acknowledged(job: dict) -> None:
     """补齐最后一项 STRM 先完成、probe 后 ACK 的通知竞态；不改变业务结果。"""
-    context = normalize_notification_context(job.get("notification_context_json"))
+    context = probe_repository.normalize_notification_context(job.get("notification_context_json"))
     if not context:
         return
-    from app.repositories.organize_probe import (
-        get_organize_probe_notification_progress,
-        probe_rules_notify_enabled,
-    )
-
-    if not probe_rules_notify_enabled(job.get("rules_json", "{}")):
+    if not probe_repository.probe_rules_notify_enabled(job.get("rules_json", "{}")):
         return
     ready_refs = []
     for ref in context["notification_threads"]:
-        progress = get_organize_probe_notification_progress(
+        progress = probe_repository.get_organize_probe_notification_progress(
             topic=ref["topic"], thread_key=ref["thread_key"], chat_id=ref["chat_id"],
             notification_enabled_only=True,
         )
@@ -233,7 +166,7 @@ def publish_probe_scope(scope: dict, *, strm_status: str, media_refresh: str,
     )
     from app.notifier import NotificationEvent
 
-    context = normalize_notification_context(scope.get("context"))
+    context = probe_repository.normalize_notification_context(scope.get("context"))
     if not scope.get("notify_override", True) or (context and not context["notify_enabled"]):
         return False
     if context and not context["topic_enabled"]:

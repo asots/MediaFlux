@@ -40,6 +40,7 @@ from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.config import get, get_bool, get_int
 from app.database import add_organize_log, add_organize_log_items, get_media_probe_cache
 from app.logger import get_logger, log_throttled
+from app.repositories.organize_probe import normalize_notification_context
 from app.modules.directory_scrape_errors import (
     DirectoryScrapeConflictError,
     DirectoryScrapeStateError,
@@ -2613,7 +2614,6 @@ class Organizer:
         from app.modules.organize_probe_notifications import (
             apply_notification_context,
             build_notification_context,
-            normalize_notification_context,
         )
 
         # 父身份在执行之前生成；不能等 notify_directory_results() 事后补 ID。
@@ -3536,9 +3536,6 @@ class Organizer:
         strm_root = get("STRM_ROOT", "")
         if base_url and strm_root:
             try:
-                from app.modules.organize_probe_notifications import (
-                    normalize_notification_context,
-                )
                 from app.modules.scheduler import get_scheduler
 
                 context = normalize_notification_context(stats.get("notification_context"))
@@ -3859,10 +3856,6 @@ class Organizer:
     def notify_directory_results(stats: dict, rules: OrganizeRules,
                                  source_name: str = "", chat_id: str = "") -> None:
         """目录刮削只发一条汇总；人工候选继续使用独立可更新按钮卡。"""
-        from app.modules.organize_probe_notifications import (
-            normalize_notification_context,
-        )
-
         context = normalize_notification_context(stats.get("notification_context"))
         if context:
             chat_id = context["chat_id"]
@@ -4159,10 +4152,6 @@ class Organizer:
     def _publish_or_update_task_summary(stats: dict, rules: OrganizeRules,
                        source_name: str = "", chat_id: str = "") -> None:
         """发布或原位更新整理汇总；候选卡由独立通知步骤负责。"""
-        from app.modules.organize_probe_notifications import (
-            normalize_notification_context,
-        )
-
         context = normalize_notification_context(stats.get("notification_context"))
         if context:
             chat_id = context["chat_id"]

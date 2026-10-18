@@ -21,6 +21,7 @@ from app.modules.guangya_compensation import (
 )
 from app.modules.organize_postprocess import companion_target_name
 from app.modules.process_lock import CrossProcessLock
+from app.repositories.organize_probe import normalize_notification_context
 
 logger = get_logger(__name__)
 
@@ -374,10 +375,7 @@ class OrganizeProbeWorker:
             if not changes:
                 return False
             from app.modules.organize import Organizer
-            from app.modules.organize_probe_notifications import (
-                normalize_notification_context,
-                tag_probe_changes,
-            )
+            from app.modules.organize_probe_notifications import tag_probe_changes
 
             rules = self._rules_from_job(job)
             context = normalize_notification_context(job.get("notification_context_json"))
@@ -590,10 +588,7 @@ class OrganizeProbeWorker:
         finally:
             if notification_error:
                 try:
-                    from app.modules.organize_probe_notifications import (
-                        normalize_notification_context,
-                        publish_probe_scope,
-                    )
+                    from app.modules.organize_probe_notifications import publish_probe_scope
 
                     publish_probe_scope(
                         {"probe": True,

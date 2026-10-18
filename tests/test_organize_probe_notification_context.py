@@ -396,9 +396,7 @@ class ProbeNotificationDeliveryTests(IsolatedDatabaseTestCase):
         self.assertTrue(failure.call_args.kwargs["has_silent_notification_scope"])
 
     def test_corrupt_context_shape_degrades_without_blocking_handoff(self):
-        from app.modules.organize_probe_notifications import (
-            normalize_notification_context,
-        )
+        from app.repositories.organize_probe import normalize_notification_context
         for raw in ("not-json", {"version": 1, "notification_threads": 42}, {"version": 1, "download_request_ids": 42}):
             with self.subTest(raw=raw):
                 normalized = normalize_notification_context(raw)

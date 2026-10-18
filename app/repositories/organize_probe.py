@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -27,6 +27,67 @@ def _safe_error(value: object, limit: int = 500) -> str:
     return text[: max(40, limit)]
 
 
+def _closed_notification_context() -> dict:
+    """未知协议不是旧空任务；保留可持久化的拒绝路由标记。"""
+    return {
+        "version": 1, "untrusted": True, "task_id": "", "chat_id": "",
+        "notify_enabled": False, "topic_enabled": False,
+        "notification_threads": [], "download_request_ids": [],
+    }
+
+
+def normalize_notification_context(value: object) -> dict:
+    """只保留内部合同字段；真正旧空值与未知/损坏非空协议严格区分。"""
+    if value is None or value == {}:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return _closed_notification_context()
+        if value == {}:
+            return {}
+    if not isinstance(value, dict) or value.get("version") != 1 or value.get("untrusted"):
+        return _closed_notification_context()
+    raw_refs = value.get("notification_threads") or []
+    ids = value.get("download_request_ids") or []
+    if not isinstance(raw_refs, list) or not isinstance(ids, list):
+        return _closed_notification_context()
+    refs: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for ref in raw_refs:
+        if not isinstance(ref, dict):
+            continue
+        topic = str(ref.get("topic") or "")
+        identity_key = {"organize": "task_id", "confirmation": "token", "download": "request_id"}.get(topic)
+        if not identity_key:
+            continue
+        identity = str(ref.get(identity_key) or "").strip()
+        if not identity or (topic == "download" and (not identity.isdecimal() or int(identity) <= 0)):
+            continue
+        if str(ref.get("thread_key") or "") != f"{topic}:{identity}":
+            continue
+        chat = str(ref.get("chat_id") or "").strip()
+        key = (topic, identity, chat)
+        refs[key] = {
+            "topic": topic, "thread_key": f"{topic}:{identity}", identity_key: identity,
+            "chat_id": chat,
+            # 同一 scope 的重复 ref 不能把已有关闭策略重新打开。
+            "topic_enabled": ref.get("topic_enabled", True) is True
+            and refs.get(key, {}).get("topic_enabled", True),
+        }
+    return {
+        "version": 1,
+        "task_id": str(value.get("task_id") or "").strip(),
+        "chat_id": str(value.get("chat_id") or "").strip(),
+        "notify_enabled": value.get("notify_enabled", True) is True,
+        "topic_enabled": value.get("topic_enabled", True) is True,
+        "notification_threads": list(refs.values()),
+        "download_request_ids": list(dict.fromkeys(
+            int(item) for item in ids if str(item).isdecimal() and int(item) > 0
+        )),
+    }
+
+
 def enqueue_organize_probe_completion(
     organize_log_id: int,
     *,
@@ -42,8 +103,6 @@ def enqueue_organize_probe_completion(
     stamp = database.now()
     next_attempt = _future_stamp(max(30, delay_seconds))
     payload = json.dumps(rules if isinstance(rules, dict) else {}, ensure_ascii=False)
-    from app.modules.organize_probe_notifications import normalize_notification_context
-
     context_json = json.dumps(normalize_notification_context(notification_context), ensure_ascii=False)
     with database.get_conn() as conn:
         conn.execute(
