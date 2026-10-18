@@ -145,7 +145,7 @@ async def scenario(store, good, *, ending="answer", mixed=True):
 ], ids=["different-ref", "different-scope-same-owner"])
 @pytest.mark.parametrize("ending,reason", [
     ("answer", "provider_timeout"), ("model-fault", "model_provider_error"),
-    ("round-empty", "model_round_budget_exceeded"), ("tool-empty", "tool_budget_exceeded"),
+    ("round-empty", "provider_timeout"), ("tool-empty", "provider_timeout"),
 ])
 def test_operational_failure_remains_disclosed_after_read_schema_correction(store, other, ending, reason):
     final, answers = asyncio.run(scenario(store, other, ending=ending))

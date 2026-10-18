@@ -96,6 +96,28 @@ def test_normal_completed_answer_keeps_existing_paths_and_links_contract():
     assert sanitize_confirmed_answer(text, receipt) == text
 
 
+@pytest.mark.parametrize('unresolved', [False, True])
+@pytest.mark.parametrize('iterator', [False, True])
+@pytest.mark.parametrize('error', ['查询服务超时', '目录 /data/media 无法读取', 'https://private.invalid 查询超时'])
+def test_completed_write_does_not_prove_failed_followup_queries(unresolved, iterator, error):
+    receipt = {'ok': True, 'status': 'completed', 'summary': '已确认的改名完成'}
+    advice = '建议稍后继续查询。'
+    claim = '所有目录均已核验完成，没有任何错误。'
+    errors = [error] if unresolved else []
+    answer = format_partial_progress('查询收尾', [], confirmed_result=receipt,
+        current_errors=iter(errors) if iterator else errors, analysis_text=advice + claim)
+    assert '已确认的改名完成' in answer
+    assert advice in answer
+    if unresolved:
+        assert claim not in answer
+        if error == '查询服务超时':
+            assert answer.count(error) == 1
+        else:
+            assert error not in answer
+    else:
+        assert advice + claim in answer
+
+
 def test_corrupt_embedded_receipt_cannot_replace_a_completed_receipt():
     receipt = {'ok': True, 'status': 'completed', 'summary': '可信改名已完成'}
     text = '不应发布的残片。已确认操作的可信系统结果（不是待执行计划）：{broken'

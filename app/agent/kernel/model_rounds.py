@@ -395,15 +395,6 @@ async def model_loop(turn: AgentTurn) -> None:
                 "模型没有返回回答或工具调用",
                 code="empty_model_response",
             )
-        if turn.unresolved_errors:
-            # Prefer the operational blocker while retaining every rejected request
-            # in the evidence summary; a schema error must not hide a timeout.
-            pending_error = next((error for error in turn.unresolved_errors.values()
-                                  if error.code != "invalid_arguments"),
-                                 next(iter(turn.unresolved_errors.values())))
-            message = f"仍有工具调用受到频率限制：{pending_error}" if pending_error.code == "rate_limited" else str(pending_error)
-            await turn.failure(pending_error.code, message, analysis_text=assistant_text)
-            return
         await turn.finish_answer(assistant_text, "partial" if turn.diagnosing_effect else "success", finish_reason,
                             turn.model_calls, response_state=provider_state)
         return

@@ -407,8 +407,22 @@ def test_repeated_errors_exhaust_normal_budget(store):
         events=[e async for e in make_session(transport.adapter,store,executed,SessionLimits(max_model_rounds=3,max_tool_calls=2)).run(AgentInput(message='只读核验',owner='owner',session_id='budget'))]
         transport.verify(3)
         assert not executed
-        assert events[-1].payload.get('finish_reason') == 'tool_budget_exceeded'
-        assert events[-1].payload['tool_calls'] == 2
+        assert events[-1].type is AgentEventType.TURN_FAILED
+        assert events[-1].payload['code'] == 'invalid_arguments'
+        assert not transport.requests[-1].get('tools')
+        failures = [event.payload for event in events if event.type is AgentEventType.TOOL_FAILED]
+        assert [(event['call_id'], event['code']) for event in failures] == [
+            ('call-0', 'invalid_arguments'), ('call-1', 'invalid_arguments'),
+            ('call-2', 'tool_budget_exceeded'),
+        ]
+        cold = SQLiteKernelStore(secret_provider=lambda: 'offline-tool-argument-test')
+        saved = await cold.load(owner='owner', session_id='budget')
+        assert [call['call_id'] for row in saved.conversation for call in row.get('tool_calls', [])] == [
+            'call-0', 'call-1', 'call-2',
+        ]
+        assert [row['tool_call_id'] for row in saved.conversation if row['role'] == 'tool'] == [
+            'call-0', 'call-1', 'call-2',
+        ]
     asyncio.run(run())
 
 

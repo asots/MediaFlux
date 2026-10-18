@@ -494,8 +494,8 @@ def _without_internal_receipts(text: str, *, keep_incomplete_prefix: bool = True
     return text
 
 
-def _model_analysis(content, result, results, *, write_attempted=False) -> str:
-    completed = result is not None and public_result_state(result) == "success"
+def _model_analysis(content, result, results, *, write_attempted=False, has_errors=False) -> str:
+    completed = result is not None and public_result_state(result) == "success" and not has_errors
     text = _without_internal_receipts(str(content or "").replace("\x00", ""), keep_incomplete_prefix=not completed)
     # 正常成功答复本来就保留完整正文（含用户可见媒体路径/链接），不因修复降级投影而回归。
     if completed:
@@ -544,7 +544,12 @@ def format_partial_progress(
 ) -> str:
     """统一降级投影：查询交付已有内容，实际涉及写入才显示执行警示。"""
     lines = ["部分完成：" + _safe(reason, limit=300)]
-    analysis = _model_analysis(analysis_text, confirmed_result, results, write_attempted=write_attempted)
+    pending_errors = tuple(current_errors) if current_errors is not None else ()
+    errors = list(dict.fromkeys(
+        text for error in pending_errors if (text := _safe(error, limit=200))
+    ))
+    analysis = _model_analysis(analysis_text, confirmed_result, results,
+        write_attempted=write_attempted, has_errors=bool(pending_errors))
     if write_attempted or confirmed_result is not None:
         if confirmed_result is not None:
             lines.extend(("", format_public_result(confirmed_result)))
@@ -556,12 +561,8 @@ def format_partial_progress(
                 lines.append(f"• {_safe(label, limit=100)}：\n{format_public_result(result)}")
             if len(results) > 8:
                 lines.append(f"以上为最近 8 项；本轮共记录 {len(results)} 项工具结果。")
-        if current_errors is not None:
-            errors = list(dict.fromkeys(
-                text for error in current_errors if (text := _safe(error, limit=200))
-            ))
-            if errors:
-                lines.append("\n未完成的查询：" + "；".join(errors))
+        if errors:
+            lines.append("\n未完成的查询：" + "；".join(errors))
         lines.append("\n后续写操作尚未执行；已确认操作以以上回执为准。" if confirmed_result is not None
                      else "\n本轮未执行新的写操作；检查或搜索成功不等于变更已提交。")
         lines.append("可稍后继续处理未完成部分；新的写操作仍需确认，不会自动重放。")
@@ -571,9 +572,6 @@ def format_partial_progress(
     items: dict[tuple[str, str, str], str] = {}
     summaries = []
     # 投影调用方 ledger 的当前错误；历史抑制只信任其可靠清错类别，不在这里推断恢复。
-    errors = list(dict.fromkeys(
-        text for error in current_errors if (text := _safe(error, limit=200))
-    )) if current_errors is not None else []
     for _label, result in results:
         if result.get("ok") is False or result.get("status") in {"rate_limited", "failed", "error"}:
             # 标记不含按工具名清除的参数错误及未登记失败；它们与确认/写入分支仍展示历史。

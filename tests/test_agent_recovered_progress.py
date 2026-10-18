@@ -201,13 +201,15 @@ def test_existing_identity_recovery_controls(store, case):
     ("tool-empty", "tool_budget_exceeded"), ("round-blocked", "model_round_budget_exceeded"),
 ])
 @pytest.mark.parametrize("unresolved", [False, True])
-def test_fallback_entries_use_current_errors_without_changing_budget_status(store, ending, reason, unresolved):
+def test_fallback_entries_prioritize_current_errors_over_budget_status(store, ending, reason, unresolved):
     steps = [(A, X, "rate_limited")]
     if unresolved:
         steps.append((C, Z, "provider_timeout"))
     steps += [(B, {}, None), (A, X, None)]
     final, _, wire, _ = asyncio.run(run_scenario(store, steps, ending=ending))
     assert final["status"] == "partial"
+    if unresolved and ending != "model-fault":
+        reason = "provider_timeout"
     assert final["finish_reason"] == reason
     assert unfinished(final["answer"]) == ("未完成的查询：未恢复对象:object-z" if unresolved else "")
     assert "可信已得内容" in final["answer"]

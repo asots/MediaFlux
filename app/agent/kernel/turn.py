@@ -231,14 +231,11 @@ class AgentTurn:
             except SessionBusyError:
                 await self.failure("effect_in_progress", "已确认的写操作正在执行，请等待完成后再继续。")
             except ToolPipelineError as exc:
-                await preserve_checkpoint(self)
                 await self.failure(exc.code, str(exc))
             except ModelProviderError as exc:
-                await preserve_checkpoint(self)
                 logger.warning("Agent model provider failed type=%s diagnostic=%s", type(exc).__name__, exc.failure)
                 await self.failure("model_provider_error", _provider_failure_message(exc))
             except Exception as exc:  # noqa: BLE001 - final turn fault boundary
-                await preserve_checkpoint(self)
                 logger.error("Agent turn failed type=%s", type(exc).__name__)
                 await self.failure("internal_error", "Agent 运行失败")
             finally:
@@ -716,13 +713,15 @@ class AgentTurn:
             request_id=self.agent_input.request_id,
         )
         measurements = {"successful_read_queries": len(getattr(self, "observed_reads", ()))}
+        answer: str | None = None
         if self.confirmed_result is not None or self.has_tool_result:
             answer = format_partial_progress(
                 message, self.progress_results, confirmed_result=self.confirmed_result, write_attempted=self.attempted_write,
                 current_errors=self.unresolved_errors.values(), analysis_text=analysis_text,
             )
             self.messages.append(ModelMessage(role="assistant", content=answer, effect_plan_id=self.plan_id or ""))
-            await preserve_checkpoint(self)
+        await preserve_checkpoint(self)
+        if answer is not None:
             event = failure_factory.create(AgentEventType.TURN_COMPLETED, {"status": "partial", "answer": answer, "finish_reason": code, **measurements, **await self.terminal_task("partial")})
         else:
             event = failure_factory.create(AgentEventType.TURN_FAILED, {"code": code, "message": message, **measurements, **await self.terminal_task("failed")})
@@ -857,6 +856,14 @@ class AgentTurn:
     async def finish_answer(self, answer: str, status: str, reason: str, model_calls: int,
                             *, response_state: ProviderState | None = None) -> None:
         """正常回答与预算收尾共用一次持久化/终态发布，不丢失工具调用协议。"""
+        if self.unresolved_errors:
+            # 预算收尾仍以真实阻塞为准；语法错误不能掩盖尚未恢复的服务错误。
+            pending_error = next((error for error in self.unresolved_errors.values()
+                                  if error.code != "invalid_arguments"),
+                                 next(iter(self.unresolved_errors.values())))
+            message = f"仍有工具调用受到频率限制：{pending_error}" if pending_error.code == "rate_limited" else str(pending_error)
+            await self.failure(pending_error.code, message, analysis_text=answer)
+            return
         answer = answer or format_partial_progress(
             "本轮预算已用完，已保留已取得的结果；可回复继续。", self.progress_results,
             confirmed_result=self.confirmed_result, write_attempted=self.attempted_write,

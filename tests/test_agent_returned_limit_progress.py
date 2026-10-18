@@ -33,7 +33,7 @@ PRIVATE = "检查失败 /srv/private/returned-limit"
 FINAL = "已按证据完成核验。"
 ENDINGS = [
     ("answer", "rate_limited"), ("fault", "model_provider_error"),
-    ("round-empty", "model_round_budget_exceeded"), ("tool-empty", "tool_budget_exceeded"),
+    ("round-empty", "rate_limited"), ("tool-empty", "rate_limited"),
 ]
 
 

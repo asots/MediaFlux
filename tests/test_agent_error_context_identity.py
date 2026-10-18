@@ -245,7 +245,7 @@ def test_context_failure_and_independent_success_survive_terminal_paths(store, e
     if not mixed and ending == "answer":
         assert final["status"] == "success" and final["answer"] == FINAL
         return
-    if mixed and ending == "answer":
+    if mixed and ending != "model-fault":
         reason = "provider_timeout"
     assert_partial(final, answers, reason=reason, titles=("独立健康结果", "切换后显式成功结果"))
     for answer in answers:
