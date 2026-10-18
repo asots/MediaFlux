@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -440,6 +441,80 @@ def suppress_notification(
             ),
         )
         return bool(cur.rowcount)
+
+
+def _continuation_group(event_key: str) -> str:
+    group = event_key[:_CONTINUATION_GROUP_LENGTH]
+    digest = group[len(AGENT_CONTINUATION_EVENT_PREFIX):-1]
+    if (not event_key.startswith(AGENT_CONTINUATION_EVENT_PREFIX) or len(digest) != 64
+            or group[-1:] != ":" or any(c not in "0123456789abcdef" for c in digest)):
+        raise ValueError("invalid Agent continuation group")
+    return group
+
+
+def get_agent_continuation_group(event_key: str) -> list[dict[str, Any]]:
+    group = _continuation_group(event_key)
+    with db.get_conn() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM telegram_notification_outbox WHERE event_key>=? AND event_key<? ORDER BY id",
+            (group, group + ":"),
+        )]
+
+
+def bind_agent_continuation_group(
+    notification_id: int, *, lease_generation: int, claimed_revision: int,
+    parts: Mapping[int, tuple[int, str, str]],
+) -> dict[str, Any] | None:
+    """旧组只补持久身份；保持事件键、发送状态、远端回执和 revision 不变。"""
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT * FROM telegram_notification_outbox WHERE id=? AND status='sending' "
+            "AND lease_generation=? AND revision=?",
+            (notification_id, lease_generation, claimed_revision),
+        ).fetchone()
+        if current is None:
+            return None
+        group = _continuation_group(current["event_key"])
+        rows = conn.execute(
+            "SELECT id,revision,event_json FROM telegram_notification_outbox WHERE event_key>=? AND event_key<?",
+            (group, group + ":"),
+        ).fetchall()
+        if {row["id"] for row in rows} != set(parts) or any(
+            (row["revision"], row["event_json"]) != parts[row["id"]][:2] for row in rows
+        ):
+            return None
+        conn.executemany(
+            "UPDATE telegram_notification_outbox SET event_json=? WHERE id=?",
+            [(part[2], notification_id) for notification_id, part in parts.items()],
+        )
+        return dict(conn.execute(
+            "SELECT * FROM telegram_notification_outbox WHERE id=?", (notification_id,),
+        ).fetchone())
+
+
+def suppress_agent_continuation_group(
+    notification_id: int, *, lease_generation: int, claimed_revision: int, reason: str,
+) -> bool:
+    """精确领取者终结整组未发段；陈旧 lease/revision 不能误伤其它分段。"""
+    stamp = db.now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT event_key FROM telegram_notification_outbox WHERE id=? AND status='sending' "
+            "AND lease_generation=? AND revision=?",
+            (notification_id, lease_generation, claimed_revision),
+        ).fetchone()
+        if current is None:
+            return False
+        group = _continuation_group(current["event_key"])
+        conn.execute(
+            "UPDATE telegram_notification_outbox SET status='suppressed',delivered_revision=revision,"
+            "last_error=?,updated_at=? WHERE id=? OR (event_key>=? AND event_key<? "
+            "AND status IN ('pending','retry_wait'))",
+            ((reason or "InvalidAgentContinuationDelivery")[:300], stamp, notification_id, group, group + ":"),
+        )
+        return True
 
 
 def _recover_deliveries(conn: sqlite3.Connection, stamp: str) -> int:

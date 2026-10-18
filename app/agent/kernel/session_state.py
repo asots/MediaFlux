@@ -1,6 +1,9 @@
 """会话状态值、输入守卫与 publication 匹配规则；不依赖存储和续行执行器。"""
 from __future__ import annotations
 
+import hashlib
+import json
+import secrets
 import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
@@ -73,6 +76,7 @@ class SessionState:
     pending_effect_plan_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     execution_capacity: bool = False
+    lifecycle_id: str = field(default_factory=lambda: secrets.token_urlsafe(24))
 
     def clone(self) -> SessionState:
         return deepcopy(self)
@@ -80,6 +84,7 @@ class SessionState:
     def to_payload(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
+            "lifecycle_id": self.lifecycle_id,
             "conversation": conversation_payload(deepcopy(self.conversation)),
             "summary": self.summary,
             "recent_refs": list(self.recent_refs[-100:]),
@@ -94,6 +99,13 @@ class SessionState:
         cls, *, owner: str, session_id: str, generation: int, payload: Mapping[str, Any]
     ) -> SessionState:
         metadata = payload.get("metadata")
+        if "lifecycle_id" in payload:
+            lifecycle_id = payload["lifecycle_id"]
+            if not isinstance(lifecycle_id, str) or not lifecycle_id.strip() or len(lifecycle_id) > 128:
+                raise ValueError("invalid session lifecycle identity")
+        else:
+            scope = json.dumps([owner, session_id], ensure_ascii=False).encode()
+            lifecycle_id = "legacy:" + hashlib.sha256(b"agent-session-lifecycle:v1\0" + scope).hexdigest()
         return cls(
             owner=owner,
             session_id=session_id,
@@ -109,6 +121,7 @@ class SessionState:
             ],
             metadata=deepcopy(metadata) if isinstance(metadata, dict) else {},
             execution_capacity=bool(payload.get("execution_capacity", 0)),
+            lifecycle_id=lifecycle_id,
         )
 
     def apply(self, updates: Sequence[StateUpdate]) -> None:
@@ -153,6 +166,8 @@ class SessionState:
                 self.execution_capacity = bool(update.value)
                 continue
             key = (update.key or "").strip()
+            if key == "lifecycle_id" or key.startswith("lifecycle_id."):
+                raise ValueError("session lifecycle identity is immutable")
             if any(key == "metadata." + field or key.startswith("metadata." + field + ".")
                    for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "continuation_deliveries", "history_memory_version", "scoped_trust")):
                 raise ValueError("pending binding requires a typed transition")

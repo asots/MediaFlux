@@ -634,7 +634,7 @@ def _approval_from_delivery(value: Mapping[str, Any]) -> ApprovalView:
 
 def prepare_agent_continuation_delivery(
     view: Mapping[str, Any], *, owner: str, session_id: str,
-    delivery_route: Mapping[str, Any], delivery_id: str = "",
+    delivery_route: Mapping[str, Any], delivery_id: str, lifecycle_id: str,
 ) -> dict[str, Any]:
     """把核心持久化的原生 TurnView.to_dict 转为可幂等重放的 outbox 投影。"""
     route = normalize_delivery_route(delivery_route, owner=owner)
@@ -651,8 +651,8 @@ def prepare_agent_continuation_delivery(
         error_code=str(error.get("code") or ""), error_message=str(error.get("message") or ""),
         tool_calls=tuple(view.get("tool_calls") or ()), task=view.get("task"),
     )
-    identity = (delivery_id or turn.turn_id).strip()
-    if not turn.terminal or not identity or (turn.approval is not None) != (turn.status == "approval_required"):
+    if (not turn.terminal or not delivery_id.strip() or not lifecycle_id.strip()
+            or (turn.approval is not None) != (turn.status == "approval_required")):
         raise TransportInputError("后台 Telegram 结果不是可交付终态")
     body = _render_approval_turn(turn) if turn.approval else _render_turn(turn)
     # 预留失效计划的事实提示空间；确认按钮只放在最后一段。
@@ -662,7 +662,7 @@ def prepare_agent_continuation_delivery(
         parts[-1]["approval"] = turn.approval.to_dict()
     return json.loads(json.dumps({
         "version": 1, "owner": owner, "session_id": session_id,
-        "delivery_id": identity, "delivery_route": route, "parts": parts,
+        "delivery_id": delivery_id, "lifecycle_id": lifecycle_id, "delivery_route": route, "parts": parts,
     }, ensure_ascii=False, allow_nan=False))
 
 
@@ -686,6 +686,11 @@ def _send_agent_continuation_part(payload: Mapping[str, Any]) -> TelegramSendRes
     """outbox 使用原生 Bot 回执与按钮协议；不运行模型、不改变 Agent 状态。"""
     from app.notifier import TelegramSendResult, call_telegram_delivery, get_bot
 
+    if payload.get("version") != 1 or any(
+        not isinstance(payload.get(key), str) or not payload[key].strip()
+        for key in ("owner", "session_id", "delivery_id", "lifecycle_id")
+    ):
+        return TelegramSendResult(False, error="InvalidAgentContinuationIdentity", status_code=400)
     owner = str(payload["owner"])
     session_id = str(payload["session_id"])
     route = normalize_delivery_route(payload["delivery_route"], owner=owner)

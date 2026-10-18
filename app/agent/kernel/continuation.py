@@ -9,6 +9,8 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from cryptography.fernet import InvalidToken
+
 from app.agent.errors import _ReadPermitRejected
 from app.agent.feature_gate import RuntimeFence, require_runtime_fence
 
@@ -155,7 +157,9 @@ def normalize_delivery_payload(payload):
     for record in records:
         if record.get("delivery_pending") is True:
             if record.get("kind") == "effect":
-                state = SessionState(owner=record["owner"], session_id=record["session_id"], metadata=metadata)
+                state = SessionState.from_payload(
+                    owner=record["owner"], session_id=record["session_id"], generation=0, payload=payload,
+                )
                 route = effect_payload(state, record)["origin"].get("delivery_route")
             else:
                 route = record.get("delivery_route")
@@ -406,6 +410,27 @@ def effect_payload(state, record):
     return {"seed": seed, "origin": origin, "result": deepcopy(row["final_result"])}
 
 
+def retained_delivery_routes(state):
+    """为旧 outbox 归一枚举仍留在签名状态内的可信终态身份；不发送旧记录。"""
+    for delivery_id, record in (state.metadata.get("continuation_deliveries") or {}).items():
+        if ((record.get("owner"), record.get("session_id")) == (state.owner, state.session_id)
+                and record.get("delivery_id") == delivery_id):
+            yield delivery_id, record.get("delivery_route")
+    records = [state.metadata.get("read_wait") or {}, *((row.get("continuation") or {})
+               for row in (state.metadata.get("effect_waits") or {}).values())]
+    for record in records:
+        if (record.get("state") != "terminal" or record.get("channel") != "telegram"
+                or (record.get("owner"), record.get("session_id")) != (state.owner, state.session_id)
+                or not record.get("wait_id") or not record.get("resume_turn_id")):
+            continue
+        try:
+            route = (effect_payload(state, record)["origin"].get("delivery_route")
+                     if record.get("kind") == "effect" else record.get("delivery_route"))
+        except (InvalidToken, KeyError, TypeError, ValueError):
+            continue
+        yield f'{record["wait_id"]}:{record["resume_turn_id"]}', route
+
+
 def claim_effect(state, candidate, now, binding, conn=None):
     row = (state.metadata.get("effect_waits") or {}).get(candidate.get("wait_id")) or {}
     record = row.get("continuation") or {}
@@ -436,7 +461,6 @@ def claim_effect(state, candidate, now, binding, conn=None):
             task["epoch"] != expected["epoch"] or task["status"] == "cancelled"):
         record.update(state="cancelled", terminal_reason="goal_changed")
         return None
-    from cryptography.fernet import InvalidToken
     try:
         payload = effect_payload(state, record)
         # Confirmation has its own request ID within the same user generation.
@@ -562,6 +586,7 @@ async def deliver_continuation_result(store, candidate, *, prepare_delivery, pub
         payload = prepare_delivery(
             record["delivery_view"], owner=state.owner, session_id=state.session_id,
             delivery_route=record["delivery_route"], delivery_id=record["delivery_id"],
+            lifecycle_id=state.lifecycle_id,
         )
         result = await publish_delivery(payload)
         accepted = result.accepted

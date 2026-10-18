@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from typing import Any, TypedDict
 
@@ -33,14 +34,17 @@ from app.notifier import (
 )
 from app.repositories.telegram_notifications import (
     AGENT_CONTINUATION_EVENT_PREFIX,
+    bind_agent_continuation_group,
     claim_due_notifications,
     complete_notification,
     fail_notification,
     get_notification,
+    get_agent_continuation_group,
     purge_notifications,
     recover_notifications,
     retry_notification,
     suppress_notification,
+    suppress_agent_continuation_group,
     upsert_notification,
 )
 
@@ -361,6 +365,106 @@ def _allows_dispatch(item: dict) -> bool:
     )
 
 
+def _continuation_digest(owner: str, session_id: str, delivery_id: str) -> str:
+    return hashlib.sha256(json.dumps([owner, session_id, delivery_id], ensure_ascii=False).encode()).hexdigest()
+
+
+def _normalize_legacy_continuation(item, delivery, state):
+    """已领取旧组先一次性补全持久身份，之后只走完整身份的发送链。"""
+    from app.agent.kernel.continuation import retained_delivery_routes
+
+    if "delivery_id" in delivery or "lifecycle_id" in delivery:
+        raise ValueError("InvalidAgentContinuationIdentity")
+    owner, session_id = state.owner, state.session_id
+    matches = {}
+    for delivery_id, raw_route in retained_delivery_routes(state):
+        digest = _continuation_digest(owner, session_id, delivery_id)
+        if not item["event_key"].startswith(AGENT_CONTINUATION_EVENT_PREFIX + digest + ":"):
+            continue
+        if not isinstance(raw_route, Mapping):
+            continue
+        route = normalize_delivery_route(raw_route, owner=owner)
+        if route:
+            matches[delivery_id, json.dumps(route, sort_keys=True)] = route
+    if len(matches) != 1:
+        raise ValueError("AgentContinuationLegacyIdentityUnavailable")
+    (delivery_id, _), route = next(iter(matches.items()))
+    if route != normalize_delivery_route(delivery["delivery_route"], owner=owner):
+        raise ValueError("AgentContinuationLegacyIdentityUnavailable")
+    parts = {}
+    for row in get_agent_continuation_group(item["event_key"]):
+        stored = json.loads(row["event_json"])
+        part = stored["_agent_continuation_delivery"]
+        if (not isinstance(part, dict) or (part.get("owner"), part.get("session_id")) != (owner, session_id)
+                or normalize_delivery_route(part["delivery_route"], owner=owner) != route):
+            raise ValueError("AgentContinuationLegacyIdentityUnavailable")
+        if "version" in part:
+            if (part["version"] != 1 or part.get("delivery_id") != delivery_id
+                    or part.get("lifecycle_id") != state.lifecycle_id):
+                raise ValueError("InvalidAgentContinuationIdentity")
+        elif "delivery_id" in part or "lifecycle_id" in part:
+            raise ValueError("InvalidAgentContinuationIdentity")
+        else:
+            part.update(version=1, delivery_id=delivery_id, lifecycle_id=state.lifecycle_id)
+        parts[row["id"]] = (row["revision"], row["event_json"], json.dumps(stored, ensure_ascii=False))
+    normalized = bind_agent_continuation_group(
+        item["id"], lease_generation=item["lease_generation"], claimed_revision=item["revision"], parts=parts,
+    )
+    if normalized is None:
+        return None
+    logger.info("Telegram Agent 旧续行投递身份已归一 parts=%s", len(parts))
+    return json.loads(normalized["event_json"])["_agent_continuation_delivery"]
+
+
+def _send_agent_continuation_item(item, delivery):
+    from app.agent.kernel.persistence import SQLiteKernelStore
+    from app.agent.kernel.session_guard import session_scope_guard
+    from app.bot.agent_adapter import _send_agent_continuation_part
+
+    def suppress(reason):
+        suppress_agent_continuation_group(
+            item["id"], lease_generation=item["lease_generation"], claimed_revision=item["revision"], reason=reason,
+        )
+
+    owner, session_id = delivery.get("owner"), delivery.get("session_id")
+    if not isinstance(owner, str) or not owner or not isinstance(session_id, str) or not session_id:
+        suppress("InvalidAgentContinuationIdentity")
+        return None
+    with ExitStack() as scope:
+        try:
+            scope.enter_context(session_scope_guard(owner, session_id, kind="delivery"))
+            try:
+                state = SQLiteKernelStore().load_existing_session(owner=owner, session_id=session_id)
+            except (TypeError, ValueError):
+                suppress("AgentContinuationSessionInvalid")
+                return None
+            if state is None:
+                suppress("AgentContinuationSessionMissing")
+                return None
+            try:
+                if "version" not in delivery:
+                    delivery = _normalize_legacy_continuation(item, delivery, state)
+                    if delivery is None:
+                        return TelegramSendResult(False, error="AgentContinuationIdentityChanged", status_code=503)
+                if (delivery.get("version") != 1 or any(
+                    not isinstance(delivery.get(key), str) or not delivery[key].strip()
+                    for key in ("delivery_id", "lifecycle_id")
+                ) or not item["event_key"].startswith(AGENT_CONTINUATION_EVENT_PREFIX + _continuation_digest(
+                    owner, session_id, delivery["delivery_id"],
+                ) + ":")):
+                    raise ValueError("InvalidAgentContinuationIdentity")
+            except (KeyError, TypeError, ValueError) as exc:
+                suppress(str(exc) if str(exc).startswith("AgentContinuation") else "InvalidAgentContinuationIdentity")
+                return None
+            if delivery["lifecycle_id"] != state.lifecycle_id:
+                suppress("AgentContinuationLifecycleChanged")
+                return None
+        except Exception as exc:
+            # 尚未触达 Bot；锁忙或临时读取/补身份失败不属于发送结果未知。
+            return TelegramSendResult(False, error=type(exc).__name__, status_code=503)
+        return _send_agent_continuation_part(delivery)
+
+
 def _dispatch_item(item: dict) -> bool:
     notification_id = int(item["id"])
     generation = int(item["lease_generation"])
@@ -382,9 +486,9 @@ def _dispatch_item(item: dict) -> bool:
             if event.state != _AGENT_CONTINUATION_STATE or route.get("chat_id") != str(item.get("chat_id") or ""):
                 raise ValueError("Agent continuation route mismatch")
         except (KeyError, TypeError, ValueError):
-            fail_notification(
+            suppress_agent_continuation_group(
                 notification_id, lease_generation=generation, claimed_revision=claimed_revision,
-                error="InvalidAgentContinuationDelivery",
+                reason="InvalidAgentContinuationDelivery",
             )
             return False
     interaction_candidate = (
@@ -517,9 +621,10 @@ def _dispatch_item(item: dict) -> bool:
     fallback_to_new_message = False
     try:
         if continuation_delivery is not None:
-            from app.bot.agent_adapter import _send_agent_continuation_part
-
-            outcome = _send_agent_continuation_part(continuation_delivery)
+            continuation_outcome = _send_agent_continuation_item(item, continuation_delivery)
+            if continuation_outcome is None:
+                return False
+            outcome = continuation_outcome
             if not outcome.ok:
                 logger.warning(
                     "Telegram Agent 续行投递未完成 key=%s status=%s error=%s",
@@ -862,20 +967,23 @@ def publish_agent_continuation_parts(payload: Mapping[str, Any]) -> Notification
     try:
         if payload["version"] != 1:
             raise ValueError("unsupported delivery version")
-        owner, session_id = str(payload["owner"]), str(payload["session_id"])
-        identity = str(payload["delivery_id"])
+        owner, session_id = payload["owner"], payload["session_id"]
+        identity, lifecycle_id = payload["delivery_id"], payload["lifecycle_id"]
+        if any(not isinstance(value, str) or not value.strip() for value in (owner, session_id, identity, lifecycle_id)):
+            raise ValueError("invalid delivery identity")
         route = normalize_delivery_route(payload["delivery_route"], owner=owner)
         parts = payload["parts"]
         if not route or not session_id or not identity or not isinstance(parts, list) or not parts:
             raise ValueError("invalid delivery payload")
         if any(not isinstance(part, dict) or not isinstance(part.get("html"), str) or not part["html"] for part in parts):
             raise ValueError("invalid delivery parts")
-        digest = hashlib.sha256(json.dumps([owner, session_id, identity], ensure_ascii=False).encode()).hexdigest()
+        digest = _continuation_digest(owner, session_id, identity)
     except (KeyError, TypeError, ValueError):
         return NotificationPublishResult(False, status="invalid_delivery")
     results = []
     for index, part in enumerate(parts):
-        delivery = {**part, "owner": owner, "session_id": session_id, "delivery_route": route}
+        delivery = {**part, "version": 1, "owner": owner, "session_id": session_id,
+                    "delivery_id": identity, "lifecycle_id": lifecycle_id, "delivery_route": route}
         result = _publish(
             f"{_AGENT_CONTINUATION_KEY_PREFIX}{digest}:{index}",
             NotificationEvent("Media Agent", state=_AGENT_CONTINUATION_STATE),

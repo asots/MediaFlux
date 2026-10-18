@@ -538,7 +538,16 @@ class SQLiteKernelStore:
             self._events_since_global_prune = 0
             return True
 
+    def load_existing_session(self, *, owner: str, session_id: str) -> SessionState | None:
+        """实际投递只接受物理存在且通过签名校验的会话，不创建默认状态。"""
+        with db.get_conn() as conn:
+            return self._load_existing_row(conn, owner, session_id)
+
     def _load_row(self, conn: Any, owner: str, session_id: str) -> SessionState:
+        state = self._load_existing_row(conn, owner, session_id)
+        return state if state is not None else self._empty_state(owner, session_id)
+
+    def _load_existing_row(self, conn: Any, owner: str, session_id: str) -> SessionState | None:
         owner_digest, session_digest = self._scope(owner, session_id)
         row = conn.execute(
             "SELECT generation,state_json,state_hmac FROM agent_kernel_sessions "
@@ -546,7 +555,7 @@ class SQLiteKernelStore:
             (owner_digest, session_digest),
         ).fetchone()
         if row is None:
-            return self._empty_state(owner, session_id)
+            return None
         generation = int(row["generation"])
         payload = self._decode(
             row["state_json"],
@@ -812,6 +821,10 @@ class SQLiteKernelStore:
                 raise ValueError("会话显示元数据无效")
             # 不经过 State DTO 的截断/归一化往返，保留所有非显示字段的原始 JSON 值。
             payload["metadata"] = {**metadata, **deepcopy(patch)}
+            state = self._state_from_payload(
+                owner=owner, session_id=session_id, generation=generation, payload=payload,
+            )
+            payload["lifecycle_id"] = state.lifecycle_id
             encoded, signature = self._encode(
                 payload, domain=domain, maximum=self.max_state_bytes,
             )
@@ -820,9 +833,6 @@ class SQLiteKernelStore:
                 "UPDATE agent_kernel_sessions SET state_json=?,state_hmac=? "
                 "WHERE owner_digest=? AND session_digest=?",
                 (encoded, signature, owner_digest, session_digest),
-            )
-            state = self._state_from_payload(
-                owner=owner, session_id=session_id, generation=generation, payload=payload,
             )
             return session_summary(state, updated_at=float(row["updated_at"]))
 

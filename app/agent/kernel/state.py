@@ -107,6 +107,7 @@ def _apply_effect_state_change(
     updated.generation = state.generation
     updated.pending_effect_plan_id = state.pending_effect_plan_id
     updated.execution_capacity = state.execution_capacity
+    updated.lifecycle_id = state.lifecycle_id
     return updated, result, updated != state
 
 

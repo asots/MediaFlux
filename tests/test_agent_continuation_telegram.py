@@ -15,6 +15,7 @@ import requests
 from app import database as db
 from app.agent.kernel.adapters import ApprovalView, consume_events
 from app.agent.kernel.events import AgentEventType, EventFactory
+from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.transports import (
     EffectEnvelope,
     ExplainEnvelope,
@@ -131,6 +132,8 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         was_stopped = center._dispatch_stop.is_set()
         center._dispatch_stop.clear()
         self.addCleanup(center._dispatch_stop.set if was_stopped else center._dispatch_stop.clear)
+        _, state = asyncio.run(SQLiteKernelStore().begin_turn(owner=OWNER, session_id=SESSION, request_id="delivery-fixture"))
+        self.lifecycle_id = state.lifecycle_id
 
     def rows(self):
         with db.get_conn() as conn:
@@ -158,6 +161,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         return adapter.prepare_agent_continuation_delivery(
             self.view(**kwargs), owner=OWNER, session_id=SESSION, delivery_route=ROUTE,
             delivery_id="original-continuation-claim",
+            lifecycle_id=self.lifecycle_id,
         )
 
     def publish(self, payload):
@@ -304,6 +308,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         payload = adapter.prepare_agent_continuation_delivery(
             self.view(approval=True), owner=OWNER, session_id=SESSION,
             delivery_route={"chat_id": -100}, delivery_id="plain-chat-claim",
+            lifecycle_id=self.lifecycle_id,
         )
         self.publish(payload)
         center.drain_telegram_notifications()
@@ -384,6 +389,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         # 增加一段事实 fixture，验证多段确认交付只在最后一段携带按钮。
         approval_payload = adapter.prepare_agent_continuation_delivery(
             view, owner=OWNER, session_id=SESSION, delivery_route=ROUTE, delivery_id="long-approval",
+            lifecycle_id=self.lifecycle_id,
         )
         approval_payload["parts"].insert(0, {"html": "<b>前段事实</b>"})
         self.assertIn("approval", approval_payload["parts"][-1])
@@ -588,10 +594,12 @@ class AgentContinuationTelegramTests(unittest.TestCase):
             with self.subTest(route=route), self.assertRaises(TransportInputError):
                 adapter.prepare_agent_continuation_delivery(
                     view, owner=OWNER, session_id=SESSION, delivery_route=route,
+                    delivery_id="invalid-route", lifecycle_id=self.lifecycle_id,
                 )
         with self.assertRaises(TransportInputError):
             adapter.prepare_agent_continuation_delivery(
                 view, owner=OWNER, session_id="different-session", delivery_route=ROUTE,
+                delivery_id="invalid-session", lifecycle_id=self.lifecycle_id,
             )
 
     def test_disabled_agent_cannot_clear_core_pending_by_accepting_without_persist(self):
@@ -608,7 +616,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
             conn.execute("UPDATE telegram_notification_outbox SET event_json=? WHERE id=?", (json.dumps(stored), row["id"]))
         self.assertFalse(center.drain_telegram_notifications())
         self.assertEqual(self.bot.attempts, [])
-        self.assertEqual(self.rows()[0]["status"], "failed")
+        self.assertEqual(self.rows()[0]["status"], "suppressed")
         self.assertEqual(self.rows()[0]["last_error"], "InvalidAgentContinuationDelivery")
 
 

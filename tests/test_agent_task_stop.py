@@ -982,13 +982,14 @@ def test_native_stop_revokes_delivery_approval_then_tg_sends_buttonless_facts(tm
                 payload = adapter.prepare_agent_continuation_delivery(
                     delivery["delivery_view"], owner=OWNER, session_id=cases.SID,
                     delivery_route=ROUTE, delivery_id=delivery["delivery_id"],
+                    lifecycle_id=after.lifecycle_id,
                 )
                 bot = NativeBotFixture()
                 with patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime), patch.object(
                     adapter, "is_agent_enabled", return_value=True,
                 ), patch("app.notifier.get_bot", return_value=bot):
                     sent = await asyncio.to_thread(adapter._send_agent_continuation_part, {
-                        "owner": OWNER, "session_id": cases.SID, "delivery_route": ROUTE, **payload["parts"][-1],
+                        **payload, **payload["parts"][-1],
                     })
                 assert sent.ok
                 assert bot.sent[-1][2]["reply_markup"] is None
