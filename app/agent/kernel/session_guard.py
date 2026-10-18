@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import partial
@@ -64,6 +64,50 @@ def continuation_execution_guard(owner: str, session_id: str) -> Generator[bool,
     finally:
         if acquired:
             lock.release()
+
+
+def _foreground_lock(owner: str, session_id: str, lifecycle_id: str, generation: int) -> CrossProcessLock:
+    return CrossProcessLock(f"agent-foreground-{_scope_key(owner, session_id)}-{lifecycle_id}-{generation}")
+
+
+@contextmanager
+def foreground_execution_guard(owner: str, session_id: str, lifecycle_id: str,
+                               generation: int) -> Generator[bool, None, None]:
+    """普通前台的执行活性；在 begin_turn 的会话互斥窗口内取得，至执行收尾释放。
+
+    身份每轮唯一，旧回合不能阻挡新请求。固定会话锁不能删除；这里的
+    一次性文件不会再次授予执行权，退出后可清理，崩溃残留在下次准入清理。
+    """
+    lock = _foreground_lock(owner, session_id, lifecycle_id, generation)
+    acquired = lock.acquire(blocking=False)
+    try:
+        if acquired:
+            prefix = f".mediaflux-agent-foreground-{_scope_key(owner, session_id)}-"
+            for path in lock.path.parent.glob(prefix + "*.lock"):
+                if path != lock.path:
+                    with suppress(OSError):
+                        path.unlink(missing_ok=True)  # begin_turn 已撤销这些旧代的发布权。
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
+            with suppress(OSError):
+                lock.path.unlink(missing_ok=True)
+
+
+def foreground_execution_active(owner: str, session_id: str, lifecycle_id: str, generation: int) -> bool:
+    """仅在会话状态事务内探测当前代，文件存在并不代表执行者存活。"""
+    lock = _foreground_lock(owner, session_id, lifecycle_id, generation)
+    try:
+        lock.path.stat()
+    except FileNotFoundError:
+        return False
+    if not lock.acquire(blocking=False):
+        return True
+    lock.release()
+    with suppress(OSError):
+        lock.path.unlink(missing_ok=True)
+    return False
 
 
 @contextmanager

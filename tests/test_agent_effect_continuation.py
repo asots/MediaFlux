@@ -210,16 +210,44 @@ def test_deleted_session_is_not_resurrected_by_old_scan(tmp_path):
     asyncio.run(run())
 
 
-def test_active_new_turn_defers_original_goal_instead_of_overwriting_it(tmp_path):
+@pytest.mark.parametrize("request_identity", ["new", "source"])
+def test_active_new_turn_defers_original_goal_instead_of_overwriting_it(tmp_path, request_identity):
     async def run():
-        from app.agent.kernel.state_types import _PublicationFinished
-        async with _ready_case(tmp_path) as (store, candidate, *_):
-            lease, state = await store.begin_turn(owner=OWNER, session_id=SID, request_id='new-user')
-            assert await store.claim_continuation(candidate, _capture_creation_binding()) is None
-            current = await store.load(owner=OWNER, session_id=SID)
-            assert current.generation == state.generation
-            assert current.metadata['effect_waits'][candidate['wait_id']]['continuation']['state'] == 'pending'
-            await store.commit(lease, updates=(_PublicationFinished('', None),))
+        from app.agent.kernel.model import ModelEvent, ModelEventType
+
+        async with _ready_case(tmp_path) as (store, candidate, client, reads, stack, _users):
+            entered, release = asyncio.Event(), asyncio.Event()
+            request_id = candidate['source_request_id'] if request_identity == 'source' else 'new-user'
+
+            class HeldModel:
+                async def stream(self, request, *, cancellation):
+                    entered.set()
+                    await release.wait()
+                    yield ModelEvent(ModelEventType.TEXT_DELTA, text='收到')
+                    yield ModelEvent(ModelEventType.FINISH, finish_reason='stop')
+
+            session = _session(store, FollowScript(resume=True), client, reads, stack=stack)
+            session.model = HeldModel()
+
+            async def foreground():
+                return [event async for event in session.run(AgentInput(
+                    owner=OWNER, session_id=SID, request_id=request_id, message='你好，请只回复收到',
+                ))]
+
+            running = asyncio.create_task(foreground())
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                before = await store.load(owner=OWNER, session_id=SID)
+                assert before.metadata['active_publication']['status'] == 'running'
+                assert before.metadata['active_publication']['request_id'] == request_id
+                assert await store.claim_continuation(candidate, _capture_creation_binding()) is None
+                current = await store.load(owner=OWNER, session_id=SID)
+                assert current.generation == before.generation
+                assert current.metadata['effect_waits'][candidate['wait_id']]['continuation']['state'] == 'pending'
+            finally:
+                release.set()
+                events = await running
+            assert events[-1].payload.get('status') == 'success'
             assert await store.claim_continuation(candidate, _capture_creation_binding()) is not None
     asyncio.run(run())
 

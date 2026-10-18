@@ -57,7 +57,7 @@ from .model import (
     ProviderState,
 )
 from .provider_model import ModelProviderError, UncommittableModelTurn
-from .session_guard import session_scope_guard
+from .session_guard import foreground_execution_guard, session_scope_guard
 from .task_state import task_projection
 
 if TYPE_CHECKING:
@@ -118,6 +118,7 @@ class AgentTurn:
         self.factory: EventFactory | None = None
         self.checkpoint_ready = False
         self.scope = ExitStack()
+        self.execution_scope = ExitStack()
         self.confirming = self.plan_id is not None
         self.explaining = self.explain_plan_id is not None
         self.explanation_plan: EffectPlan | None = None
@@ -241,18 +242,21 @@ class AgentTurn:
                 logger.error("Agent turn failed type=%s", type(exc).__name__)
                 await self.failure("internal_error", "Agent 运行失败")
             finally:
-                self.scope.close()
-                if self.lease is not None and self.token is not None:
-                    if (not self.lease.continuation_id
-                            or continuation_record(self.state, self.lease.continuation_id, self.lease.continuation_kind).get("state") in {"claimed", "running"}):
-                        try:
-                            update = _ContinuationAction("", {
-                                "operation": "finish", "reason": "turn_ended",
-                            }, binding=self.session.continuation_binding) if self.lease.continuation_id else _PublicationFinished("", None)
-                            await self.session.state_store.commit(self.lease, updates=(update,))
-                        except (StalePublicationError, SessionBusyError):
-                            pass
-                    await self.session.coordinator.finish(self.lease, self.token)
+                try:
+                    self.scope.close()
+                    if self.lease is not None and self.token is not None:
+                        if (not self.lease.continuation_id
+                                or continuation_record(self.state, self.lease.continuation_id, self.lease.continuation_kind).get("state") in {"claimed", "running"}):
+                            try:
+                                update = _ContinuationAction("", {
+                                    "operation": "finish", "reason": "turn_ended",
+                                }, binding=self.session.continuation_binding) if self.lease.continuation_id else _PublicationFinished("", None)
+                                await self.session.state_store.commit(self.lease, updates=(update,))
+                            except (StalePublicationError, SessionBusyError):
+                                pass
+                        await self.session.coordinator.finish(self.lease, self.token)
+                finally:
+                    self.execution_scope.close()
 
     async def admit(self) -> None:
         self.validated_selection = None
@@ -346,6 +350,10 @@ class AgentTurn:
                         pending_guard=pending_guard,
                         selection_guard=selection_guard,
                     )
+                    if not self.execution_scope.enter_context(foreground_execution_guard(
+                        self.lease.owner, self.lease.session_id, self.state.lifecycle_id, self.lease.generation,
+                    )):
+                        raise SessionBusyError("foreground publication is already executing")
                     self.token = await self.session.coordinator.begin(self.lease, task=asyncio.current_task())
                     if not self.sensitive_input and self.agent_input.reply_context:
                         self.agent_input = replace(self.agent_input, reply_context=await telegram_reference.prepare(
