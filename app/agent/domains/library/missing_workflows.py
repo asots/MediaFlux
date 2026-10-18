@@ -32,7 +32,6 @@ _STATES = {
     "stale",
     "cancelled",
 }
-_TERMINAL_STATES = {"visible", "attention", "stale", "cancelled"}
 _PRUNABLE_STATES = {"visible", "stale", "cancelled"}
 _TARGETS = {"qb", "guangya", "both"}
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
@@ -122,11 +121,12 @@ class SQLiteMissingMediaWorkflowRepository:
         state = _rollup_state(tuple(item["state"] for item in parsed["items"]))
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            # 新检查会使相同目标的旧未完成流程失效；旧候选句柄不可跨搜索复用。
+            # 仅废弃旧未受理候选；已提交任务独立等待核验，不能随重搜丢失关联。
             stale_rows = conn.execute(
-                "SELECT workflow_id FROM agent_missing_media_workflows "
-                "WHERE owner_digest=? AND title=? AND tmdb_id=? AND season=? "
-                "AND state NOT IN ('visible','attention','stale','cancelled')",
+                "SELECT DISTINCT w.workflow_id FROM agent_missing_media_workflows w "
+                "JOIN agent_missing_media_workflow_items i ON i.workflow_id=w.workflow_id "
+                "WHERE w.owner_digest=? AND w.title=? AND w.tmdb_id=? AND w.season=? "
+                "AND i.state IN ('search_ready','selection_required','confirmation_required')",
                 (
                     owner_digest,
                     parsed["title"],
@@ -134,20 +134,14 @@ class SQLiteMissingMediaWorkflowRepository:
                     parsed["season"],
                 ),
             ).fetchall()
-            stale_ids = [str(row["workflow_id"]) for row in stale_rows]
-            if stale_ids:
-                placeholders = ",".join("?" for _ in stale_ids)
+            for row in stale_rows:
                 conn.execute(
-                    f"UPDATE agent_missing_media_workflows SET state='stale',"
-                    f"revision=revision+1,updated_at=? WHERE workflow_id IN ({placeholders})",
-                    (now, *stale_ids),
+                    "UPDATE agent_missing_media_workflow_items SET state='stale',"
+                    "revision=revision+1,updated_at=? WHERE workflow_id=? "
+                    "AND state IN ('search_ready','selection_required','confirmation_required')",
+                    (now, row["workflow_id"]),
                 )
-                conn.execute(
-                    f"UPDATE agent_missing_media_workflow_items SET state='stale',"
-                    f"revision=revision+1,updated_at=? WHERE workflow_id IN ({placeholders}) "
-                    "AND state NOT IN ('visible','attention','cancelled')",
-                    (now, *stale_ids),
-                )
+                self._refresh_workflow(conn, workflow_id=row["workflow_id"], updated_at=now)
             conn.execute(
                 "INSERT INTO agent_missing_media_workflows("
                 "workflow_id,owner_digest,source_tool,title,tmdb_id,season,as_of,state,"
@@ -266,21 +260,33 @@ class SQLiteMissingMediaWorkflowRepository:
         if ref is None or request is None:
             return False
         next_state = "verification_pending" if verification_enqueued else "submitted"
+        error_code = ""
         now = db.now()
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            verified = conn.execute(
+                "SELECT status,result FROM agent_download_verifications WHERE request_id=?",
+                (request,),
+            ).fetchone()
+            if verified is not None and verified["status"] in {"visible", "attention"}:
+                next_state = "visible" if verified["status"] == "visible" and verified["result"] == "visible" else "attention"
+                error_code = "" if next_state == "visible" else "verification_attention"
             cursor = conn.execute(
                 "UPDATE agent_missing_media_workflow_items SET state=?,"
-                "download_request_id=?,revision=revision+1,last_error_code='',updated_at=? "
-                "WHERE item_id=? AND workflow_id=? AND revision=? "
-                "AND state='confirmation_required'",
+                "download_request_id=?,revision=revision+1,last_error_code=?,updated_at=? "
+                "WHERE item_id=? AND workflow_id=? AND download_request_id IS NULL "
+                # 重搜只修订一次的已冻结候选可接收真实受理回执，不恢复执行授权。
+                "AND ((revision=? AND state='confirmation_required') OR "
+                "(revision=? AND state='stale' AND candidate_title<>'' AND target<>''))",
                 (
                     next_state,
                     request,
+                    error_code,
                     now,
                     ref.item_id,
                     ref.workflow_id,
                     ref.revision,
+                    ref.revision + 1,
                 ),
             )
             if cursor.rowcount != 1:
@@ -760,8 +766,6 @@ def _rollup_state(states: tuple[str, ...]) -> str:
         return "attention"
     if all(state == "visible" for state in normalized):
         return "visible"
-    if all(state in _TERMINAL_STATES for state in normalized):
-        return "attention" if "attention" in normalized else normalized[0]
     priority = (
         "attention",
         "verification_pending",

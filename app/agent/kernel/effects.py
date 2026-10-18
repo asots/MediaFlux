@@ -414,7 +414,12 @@ class ConfirmationEffectPlanStore:
             owner=scoped_owner,
             confirmation_id=plan_id,
         )
-        return plan if discarded and plan is not None and plan.expires_at > self.store._clock() else None
+        if not discarded or plan is None:
+            return None
+        if plan.expires_at <= self.store._clock():
+            # 注销过期证据仍需释放领域预占，但不能冒充取消了一张有效卡。
+            raise EffectPlanExpiredError(plan)
+        return plan
 
     def revoke_session(self, *, owner: str, session_id: str) -> int:
         """撤销指定 Kernel 会话仍有效的全部确认计划。"""

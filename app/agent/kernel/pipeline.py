@@ -943,17 +943,21 @@ class ToolPipeline:
         if current.pending_effect_plan_id != plan_id:
             return False
         generation = self._pending_generation(current)
-        cancelled_plan = await asyncio.to_thread(
-            self.effect_store.cancel, owner=lease.owner, session_id=lease.session_id,
-            generation=generation if generation is not None else current.generation, plan_id=plan_id,
-        )
+        try:
+            cancelled_plan = await asyncio.to_thread(
+                self.effect_store.cancel, owner=lease.owner, session_id=lease.session_id,
+                generation=generation if generation is not None else current.generation, plan_id=plan_id,
+            )
+            cancelled = cancelled_plan is not None
+        except EffectPlanExpiredError as exc:
+            cancelled_plan, cancelled = exc.plan, False
         if cancelled_plan is not None:
             self._notify_effect("cancelled", plan=cancelled_plan)
         await self._commit_updates(lease, (
             _PendingEffectTransition("pending_effect_plan_id", plan_id, mode="clear_if_equals",
-                                     cancelled=cancelled_plan is not None),
+                                     cancelled=cancelled),
         ))
-        return cancelled_plan is not None
+        return cancelled
 
     async def _authorize(
         self, tool: KernelToolSpec, arguments: dict[str, Any], context: ToolCallContext, *, confirmation: bool = False,
