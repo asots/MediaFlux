@@ -301,7 +301,9 @@ class AgentKernelApiTests(unittest.TestCase):
     def test_read_wait_uses_shared_result_observation_count(self):
         for status, count in (("pending", 1), ("claimed", 1), ("running", 1), ("terminal", 0), ("cancelled", 0)):
             with self.subTest(status=status):
-                self.runtime.store.state.metadata = {"read_wait": {"state": status, "delivery_pending": True}}
+                self.runtime.store.state.metadata = {
+                    "read_wait": {"state": status}, "continuation_deliveries": {"delivery": {}},
+                }
                 response = self.client.get("/api/agent/sessions/session_1234567890")
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()["pending_effect_count"], count)
@@ -522,7 +524,7 @@ class AgentKernelApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()["pending_effect_count"], expected)
         # Telegram's unsent terminal view alone does not keep a Web polling loop alive.
-        self.runtime.store.state.metadata["effect_waits"]["plan"]["continuation"]["delivery_pending"] = True
+        self.runtime.store.state.metadata["continuation_deliveries"] = {"delivery": {}}
         self.assertEqual(self.client.get("/api/agent/sessions/session_1234567890").json()["pending_effect_count"], 0)
 
     def test_evicted_turn_start_does_not_hide_an_unconfirmed_terminal_state(self):

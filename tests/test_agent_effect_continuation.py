@@ -317,12 +317,11 @@ def test_background_tg_terminal_persists_native_view_for_delivery_before_stream_
             assert await session.resume_wait(candidate=candidate)
             cold = SQLiteKernelStore()
             deliveries = await cold.due_continuations()
-            assert len(deliveries) == 1 and deliveries[0]['kind'] == 'effect' and deliveries[0]['delivery_pending'] is True
+            assert len(deliveries) == 1 and deliveries[0]['kind'] == 'delivery'
             assert deliveries[0]['delivery_view']['status'] == 'success'
             assert 'admitted.mp4' in deliveries[0]['delivery_view']['answer']
-            from app.agent.kernel.continuation import effect_payload
             state = await cold.load(owner=OWNER, session_id=SID)
-            assert effect_payload(state, deliveries[0])['origin']['delivery_route'] == route
+            assert deliveries[0]['delivery_route'] == route
             assert state.metadata['active_publication']['status'] == 'finished'
     asyncio.run(run())
 
@@ -334,7 +333,7 @@ def test_new_tg_approval_is_durable_without_executing_it(tmp_path):
             assert await session.resume_wait(candidate=candidate)
             cold = SQLiteKernelStore()
             deliveries = await cold.due_continuations()
-            assert len(deliveries) == 1 and deliveries[0]['kind'] == 'effect' and deliveries[0]['delivery_pending'] is True
+            assert len(deliveries) == 1 and deliveries[0]['kind'] == 'delivery'
             view = deliveries[0]['delivery_view']
             assert view['status'] == 'approval_required'
             assert view['approval']['plan_id'] == (await cold.load(owner=OWNER, session_id=SID)).pending_effect_plan_id

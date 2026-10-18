@@ -466,7 +466,7 @@ class AgentJobsScheduler:
             for candidate in await store.due_continuations(limit=16):
                 if self._stop_event.is_set():
                     return 0
-                if candidate.get('delivery_pending') is True:
+                if candidate.get('kind') == 'delivery':
                     from app.agent.kernel.continuation import (
                         deliver_continuation_result,
                     )

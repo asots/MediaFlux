@@ -212,9 +212,11 @@ class SQLiteKernelStore:
                 "AND json_extract(effect.value,'$.continuation.due_at')<=? "
                 "AND COALESCE(json_extract(effect.value,'$.continuation.claim_until'),0)<=?) "
                 "OR (json_extract(effect.value,'$.continuation.delivery_pending')=1 "
-                "AND json_extract(effect.value,'$.continuation.due_at')<=?)))) "
+                "AND json_extract(effect.value,'$.continuation.due_at')<=?))) OR EXISTS ("
+                "SELECT 1 FROM json_each(json_extract(state_json,'$.metadata.continuation_deliveries')) AS delivery "
+                "WHERE json_extract(delivery.value,'$.due_at')<=?)) "
                 "ORDER BY updated_at LIMIT ?",
-                (self._clock(), self._clock(), self._clock(), self._clock(), maximum),
+                (self._clock(), self._clock(), self._clock(), self._clock(), self._clock(), maximum),
             ).fetchall()
             for row in rows:
                 try:
@@ -470,6 +472,8 @@ class SQLiteKernelStore:
             if len(payload) > state_capacity(value, self.max_state_bytes):
                 raise ValueError("Agent Kernel 数据超过持久化上限")
             conversation_rows(value.get("conversation", []))
+            from .continuation import normalize_delivery_payload
+            normalize_delivery_payload(value)
         return value
 
     def _reference_cipher(self) -> Fernet:

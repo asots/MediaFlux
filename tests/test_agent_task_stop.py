@@ -741,13 +741,13 @@ class SQLiteAgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["stopped"])
         self.assertEqual(await self.store.load(owner="owner", session_id="delivery"), before)
         deliveries = await self.store.due_continuations()
-        self.assertEqual([r["kind"] for r in deliveries], ["effect"])
-        self.assertTrue(deliveries[0]["delivery_pending"])
+        self.assertEqual([r["kind"] for r in deliveries], ["delivery"])
         self.assertEqual(deliveries[0]["delivery_view"], view)
         # 新回合消费历史回执时，也不能提前删掉尚未持久接纳的 Telegram 视图。
         await self.store.begin_turn(owner="owner", session_id="delivery", request_id="new-user")
         after = await self.store.load(owner="owner", session_id="delivery")
-        self.assertEqual(after.metadata["effect_waits"][plan_id], before.metadata["effect_waits"][plan_id])
+        self.assertNotIn(plan_id, after.metadata.get("effect_waits", {}))
+        self.assertEqual(after.metadata["continuation_deliveries"], before.metadata["continuation_deliveries"])
         self.model.stream.assert_not_called()
 
     async def test_cold_stop_does_not_revoke_other_owner_session_or_misplaced_records(self) -> None:
@@ -961,7 +961,7 @@ def test_native_stop_revokes_delivery_approval_then_tg_sends_buttonless_facts(tm
                 assert await session.resume_wait(candidate=candidate)
                 cold = SQLiteKernelStore()
                 delivery = (await cold.due_continuations())[0]
-                assert delivery["kind"] == "effect" and delivery["delivery_pending"] is True and delivery["state"] == "terminal"
+                assert delivery["kind"] == "delivery"
                 before = await cold.load(owner=OWNER, session_id=cases.SID)
                 approval_id = delivery["delivery_view"]["approval"]["plan_id"]
                 assert approval_id == before.pending_effect_plan_id and approval_id != candidate["wait_id"]
@@ -981,7 +981,7 @@ def test_native_stop_revokes_delivery_approval_then_tg_sends_buttonless_facts(tm
                 assert (await cold.due_continuations())[0]["delivery_view"] == delivery["delivery_view"]
                 payload = adapter.prepare_agent_continuation_delivery(
                     delivery["delivery_view"], owner=OWNER, session_id=cases.SID,
-                    delivery_route=ROUTE, delivery_id=f'{delivery["wait_id"]}:{delivery["resume_turn_id"]}',
+                    delivery_route=ROUTE, delivery_id=delivery["delivery_id"],
                 )
                 bot = NativeBotFixture()
                 with patch.object(adapter, "get_agent_kernel_runtime", return_value=runtime), patch.object(

@@ -37,7 +37,7 @@ class EffectCompletionScope:
 
 def effect_active(row):
     record = row.get("continuation") or {}
-    return record.get("state") in EFFECT_PENDING or record.get("delivery_pending") is True
+    return record.get("state") in EFFECT_PENDING
 
 
 def _completion_cipher() -> Fernet:

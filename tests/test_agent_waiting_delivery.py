@@ -65,8 +65,9 @@ def test_cold_read_terminal_uses_same_outbox_and_ack_retry_without_reexecution(t
         assert not await runtime.session.resume_wait(candidate=candidate)
         state = await runtime.store.load(owner=OWNER, session_id=SID)
         record = state.metadata['read_wait']
-        assert record['state'] == 'terminal' and record['delivery_pending'] is True
-        assert record['delivery_view']['status'] == ('failed' if policy_changed else 'success')
+        assert record['state'] == 'terminal' and 'delivery_pending' not in record
+        saved_delivery, = state.metadata['continuation_deliveries'].values()
+        assert saved_delivery['delivery_view']['status'] == ('failed' if policy_changed else 'success')
         assert state.metadata['active_publication']['status'] == 'finished'
         assert len(reads) == len(script.requests) == (0 if policy_changed else 1)
 
@@ -78,7 +79,8 @@ def test_cold_read_terminal_uses_same_outbox_and_ack_retry_without_reexecution(t
         from app.modules import telegram_notification_center as notifications
         cold = SQLiteKernelStore(clock=lambda: clock[0])
         delivery, = await cold.due_continuations()
-        assert delivery['delivery_pending'] is True and delivery['wait_id'] == candidate['wait_id']
+        assert delivery['kind'] == 'delivery'
+        assert delivery['delivery_id'] == f'{candidate["wait_id"]}:{record["resume_turn_id"]}'
         with patch.object(notifications, 'wake_telegram_notification_dispatcher', return_value=False), patch.object(
             notifications, '_agent_interaction_enabled', return_value=True,
         ):
@@ -127,7 +129,7 @@ def test_historical_read_wait_without_route_never_guesses_topic(tg_config):
         assert await runtime.session.resume_wait(candidate=candidate)
         state = await runtime.store.load(owner=OWNER, session_id=SID)
         assert state.metadata['read_wait']['state'] == 'terminal'
-        assert not state.metadata['read_wait'].get('delivery_pending')
+        assert not state.metadata.get('continuation_deliveries')
         assert await runtime.store.due_continuations() == []
         assert len(reads) == len(script.requests) == 1
         with db.get_conn() as conn:

@@ -154,7 +154,7 @@ class SessionState:
                 continue
             key = (update.key or "").strip()
             if any(key == "metadata." + field or key.startswith("metadata." + field + ".")
-                   for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "history_memory_version", "scoped_trust")):
+                   for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "continuation_deliveries", "history_memory_version", "scoped_trust")):
                 raise ValueError("pending binding requires a typed transition")
             if key == "metadata" or key == "metadata.task" or key.startswith("metadata.task."):
                 raise ValueError("task namespace requires a typed patch")

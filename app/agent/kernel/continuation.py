@@ -128,6 +128,42 @@ def interrupt_read_wait(state: SessionState, now: float) -> bool:
     return True
 
 
+def _remember_delivery(metadata, record, view, route):
+    delivery_id = f'{record["wait_id"]}:{record["resume_turn_id"]}'
+    delivery = {
+        "kind": "delivery", "delivery_id": delivery_id,
+        "owner": record["owner"], "session_id": record["session_id"],
+        "delivery_view": deepcopy(view), "delivery_route": deepcopy(route or {}),
+        "due_at": record["due_at"], "expires_at": record["expires_at"],
+    }
+    deliveries = metadata.setdefault("continuation_deliveries", {})
+    previous = deliveries.get(delivery_id)
+    if previous is not None:
+        if any(previous.get(key) != value for key, value in delivery.items() if key != "due_at"):
+            raise ValueError("continuation delivery identity changed")
+        return
+    deliveries[delivery_id] = delivery
+
+
+def normalize_delivery_payload(payload):
+    """旧签名数据只在解码边界搬移；运行时只读取独立的待交接终态。"""
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+    records = [metadata.get("read_wait") or {}, *((row.get("continuation") or {})
+               for row in (metadata.get("effect_waits") or {}).values())]
+    for record in records:
+        if record.get("delivery_pending") is True:
+            if record.get("kind") == "effect":
+                state = SessionState(owner=record["owner"], session_id=record["session_id"], metadata=metadata)
+                route = effect_payload(state, record)["origin"].get("delivery_route")
+            else:
+                route = record.get("delivery_route")
+            _remember_delivery(metadata, record, record["delivery_view"], route)
+        for key in ("delivery_pending", "delivery_view", "delivery_state"):
+            record.pop(key, None)
+
+
 def apply_actions(state, lease, updates, now, conn=None):
     for update in updates:
         if type(update) is not _ContinuationAction:
@@ -147,7 +183,12 @@ def apply_actions(state, lease, updates, now, conn=None):
                     row.update(final_result=final, receipt_message=_late_receipt(payload["seed"], final))
                     commit_conversation(state, state.conversation)
             if value.get("delivery_view") is not None and record.get("channel") == "telegram":
-                record.update(delivery_view=deepcopy(value["delivery_view"]), delivery_pending=True)
+                deliveries = state.metadata.get("continuation_deliveries") or {}
+                for delivery_id in [key for key, item in deliveries.items() if item["expires_at"] <= now]:
+                    deliveries.pop(delivery_id)
+                route = (effect_payload(state, record)["origin"].get("delivery_route")
+                         if lease.continuation_kind == "effect" else record.get("delivery_route"))
+                _remember_delivery(state.metadata, record, value["delivery_view"], route)
             marker = state.metadata.get("active_publication") or {}
             if marker.get("generation") == lease.generation and marker.get("request_id") == lease.request_id:
                 marker["status"] = "finished"
@@ -341,8 +382,10 @@ def due_records(metadata, now):
             continue
         # READ running 不可重放；effect 的冻结尾部保留既有租约恢复规则。
         resumable = {"pending", "claimed", "running"} if record.get("kind") == "effect" else {"pending", "claimed"}
-        if record.get("delivery_pending") is True or (record.get("state") in resumable and record.get("claim_until", 0) <= now):
+        if record.get("state") in resumable and record.get("claim_until", 0) <= now:
             records.append(deepcopy(record))
+    records.extend(deepcopy(record) for record in (metadata.get("continuation_deliveries") or {}).values()
+                   if record["due_at"] <= now)
     return sorted(records, key=lambda r: r["due_at"])
 
 
@@ -493,35 +536,32 @@ class _DeliveryAcknowledged:
 
     def __call__(self, state):
         record = self.record
-        current = continuation_record(state, record["wait_id"], record.get("kind"))
-        if (current.get("wait_id") == record["wait_id"] and current.get("delivery_pending") is True
-                and current.get("resume_turn_id") == record["resume_turn_id"]
-                and current.get("delivery_view") == record["delivery_view"]):
-            current["delivery_pending"] = not (self.accepted or self.expired)
-            current["delivery_state"] = "queued" if self.accepted else "expired" if self.expired else "retry_wait"
-            if self.accepted:
-                current.pop("delivery_view", None)
-            elif not self.expired:
-                current["due_at"] = self.now + CLAIM_SECONDS
+        deliveries = state.metadata.get("continuation_deliveries") or {}
+        current = deliveries.get(record["delivery_id"])
+        if current is None or current != record:
+            return
+        if self.accepted or self.expired:
+            deliveries.pop(record["delivery_id"])
+            if not deliveries:
+                state.metadata.pop("continuation_deliveries", None)
+        else:
+            current["due_at"] = self.now + CLAIM_SECONDS
 
 
 async def deliver_continuation_result(store, candidate, *, prepare_delivery, publish_delivery):
     """通过组合层提供的交付入口重投持久视图，不再调用模型或执行旧写操作。"""
 
     state = await store.load(owner=candidate["owner"], session_id=candidate["session_id"])
-    record = continuation_record(state, candidate["wait_id"], candidate.get("kind"))
-    if (record.get("wait_id") != candidate["wait_id"] or record.get("delivery_pending") is not True or record.get("resume_turn_id") != candidate.get("resume_turn_id")
-            or record.get("delivery_view") != candidate.get("delivery_view")):
+    record = (state.metadata.get("continuation_deliveries") or {}).get(candidate["delivery_id"])
+    if record is None or record != candidate:
         return False
     now = store._clock()
     expired = now >= record["expires_at"]
     accepted = False
     if not expired:
-        route = effect_payload(state, record)["origin"].get("delivery_route") if candidate.get("kind") == "effect" else record.get("delivery_route")
         payload = prepare_delivery(
             record["delivery_view"], owner=state.owner, session_id=state.session_id,
-            delivery_route=route or {},
-            delivery_id=f'{record["wait_id"]}:{record["resume_turn_id"]}',
+            delivery_route=record["delivery_route"], delivery_id=record["delivery_id"],
         )
         result = await publish_delivery(payload)
         accepted = result.accepted
