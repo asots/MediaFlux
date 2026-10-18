@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 from cryptography.fernet import Fernet
 
 from app.agent.effect_completion import (
-    current_session_effect_trackers,
+    session_effect_trackers,
     wait_for_effect_completion,
 )
 from app.agent.feature_gate import initialize_runtime_fence
@@ -136,7 +136,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
             updates=(StateUpdate("pending_effect_plan_id", "plan-a"),),
         )
 
-        with patch("app.agent.task_stop.current_session_effect_trackers", return_value=[]):
+        with patch("app.agent.task_stop.session_effect_trackers", return_value=[]):
             first = await stop_agent_session(self.runtime, "owner", "a")
 
         self.assertEqual(first["status"], "stopping")
@@ -169,7 +169,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "app.agent.task_stop.session_scope_guard", side_effect=SessionBusyError
-        ), patch("app.agent.task_stop.current_session_effect_trackers", return_value=[]):
+        ), patch("app.agent.task_stop.session_effect_trackers", return_value=[]):
             result = await stop_agent_session(self.runtime, "owner", "busy")
 
         state = await self.store.load(owner="owner", session_id="busy")
@@ -187,7 +187,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         task, _stopped, token = await self._start_local_waiter(
             "owner", "critical", protected=True
         )
-        with patch("app.agent.task_stop.current_session_effect_trackers", return_value=[]):
+        with patch("app.agent.task_stop.session_effect_trackers", return_value=[]):
             result = await stop_agent_session(self.runtime, "owner", "critical")
 
         state = await self.store.load(owner="owner", session_id="critical")
@@ -224,7 +224,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             self.store, "request_stop_generation", new=gated_request_stop_generation
-        ), patch("app.agent.task_stop.current_session_effect_trackers", return_value=[]):
+        ), patch("app.agent.task_stop.session_effect_trackers", return_value=[]):
             stopping = asyncio.create_task(
                 stop_agent_session(self.runtime, "owner", "protect-race")
             )
@@ -281,7 +281,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             self.store, "request_stop_generation", new=gated_request_stop_generation
-        ), patch("app.agent.task_stop.current_session_effect_trackers", return_value=[]):
+        ), patch("app.agent.task_stop.session_effect_trackers", return_value=[]):
             stopping = asyncio.create_task(
                 stop_agent_session(self.runtime, "owner", "generation-race")
             )
@@ -375,9 +375,8 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("app.agent.kernel.completion_receipts._completion_cipher", return_value=cipher):
-            records = await current_session_effect_trackers(
-                self.store, owner="owner", session_id="a"
-            )
+            snapshot = await self.store.load(owner="owner", session_id="a")
+            records = session_effect_trackers(snapshot)
 
         self.assertEqual([record["plan_id"] for record in records], [plan_a])
         self.assertEqual(records[0]["owner"], "owner")
@@ -450,7 +449,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
             "delivered": False,
         }
         with patch(
-            "app.agent.task_stop.current_session_effect_trackers",
+            "app.agent.task_stop.session_effect_trackers",
             return_value=[cloud_tracker],
         ):
             result = await stop_agent_session(self.runtime, "owner", "cloud")
@@ -477,7 +476,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         }
         row = {"job_id": job_id, "job_type": "library_episode_audit", "status": "running"}
         with patch(
-            "app.agent.task_stop.current_session_effect_trackers", return_value=[tracker]
+            "app.agent.task_stop.session_effect_trackers", return_value=[tracker]
         ), patch(
             "app.repositories.agent_jobs.get_agent_job", return_value=row
         ) as get_job, patch(
@@ -511,7 +510,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         }
         row = {"job_id": "1" * 32, "lease_generation": 3, "status": "running"}
         with patch(
-            "app.agent.task_stop.current_session_effect_trackers",
+            "app.agent.task_stop.session_effect_trackers",
             return_value=[tracker],
         ), patch(
             "app.repositories.organize_operation_jobs.organize_operation_job_id_from_public_ref",
@@ -557,7 +556,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         }
         row = {"job_id": "2" * 32, "lease_generation": 4, "status": "pending"}
         with patch(
-            "app.agent.task_stop.current_session_effect_trackers", return_value=[tracker]
+            "app.agent.task_stop.session_effect_trackers", return_value=[tracker]
         ), patch(
             "app.repositories.organize_operation_jobs.organize_operation_job_id_from_public_ref",
             return_value="2" * 32,

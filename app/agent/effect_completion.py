@@ -384,15 +384,12 @@ async def poll_effect_receipts(
     return sum(await asyncio.gather(*(follow(row) for row in await store.due_effect_waits(limit=limit))))
 
 
-async def current_session_effect_trackers(
-    store: SessionStateStore, *, owner: str, session_id: str,
-) -> list[dict[str, Any]]:
-    """解密并校验一个 owner/session 的 effect_wait tracker；不 claim 或修改回执。"""
-    owner_key = (owner or "").strip()
-    session_key = (session_id or "").strip()
+def session_effect_trackers(state: SessionState) -> list[dict[str, Any]]:
+    """从同一会话快照解密并校验 tracker，不重读会话或修改回执。"""
+    owner_key = state.owner.strip()
+    session_key = state.session_id.strip()
     if not owner_key or not session_key:
         return []
-    state = await store.load(owner=owner_key, session_id=session_key)
     waits = state.metadata.get(_EFFECT_WAITS_KEY)
     if not isinstance(waits, Mapping):
         return []

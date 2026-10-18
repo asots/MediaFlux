@@ -7,7 +7,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from app.agent.effect_completion import current_session_effect_trackers
+from app.agent.effect_completion import session_effect_trackers
 from app.agent.kernel.completion_receipts import EFFECT_PENDING
 from app.agent.kernel.session_guard import session_scope_guard
 from app.agent.kernel.state_types import SessionBusyError
@@ -169,11 +169,9 @@ def _cancel_organize_task(task_id: str) -> str:
 
 
 async def _cancel_background_trackers(
-    owner: str, session_id: str, store: Any
+    owner: str, trackers: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    trackers = await current_session_effect_trackers(
-        store, owner=owner, session_id=session_id
-    )
+    """只取消停止请求已捕获的稳定任务编号，不在等待后扩大范围。"""
     results: list[dict[str, str]] = []
     for item in trackers:
         if not _is_active_tracker(item):
@@ -243,6 +241,7 @@ async def _stop_captured_turn(
     *,
     owner: str,
     session_id: str,
+    lifecycle_id: str,
     active: Mapping[str, Any],
 ) -> tuple[str, int]:
     """Fence and cancel only the observed local or durable publication."""
@@ -266,7 +265,7 @@ async def _stop_captured_turn(
     # Effect 续行会复用 source request_id，必须同时复查 generation，不能仅凭 request_id。
     current = await session.coordinator.describe(owner=owner, session_id=session_id)
     state = await store.load(owner=owner, session_id=session_id)
-    if state.generation != generation or (current is not None and not _same_turn(
+    if (state.lifecycle_id, state.generation) != (lifecycle_id, generation) or (current is not None and not _same_turn(
         current, generation=generation, request_id=request_id,
     )):
         return "superseded", stop_generation
@@ -379,39 +378,42 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
     stop_requested_generation = 0
     cancelled_continuations: list[str] = []
 
-    active = await session.coordinator.describe(owner=owner_key, session_id=session_key)
-    if active and active.get("protected") is True:
-        async with session._start_lock:
+    async with session._start_lock:
+        snapshot = await store.load(owner=owner_key, session_id=session_key)
+        trackers = {item["plan_id"]: item for item in session_effect_trackers(snapshot)}
+        # 确认体可能尚未登记后台 tracker；只接纳捕获时已有卡片/确认的晚到回执。
+        late_plans = {snapshot.pending_effect_plan_id} - {None, ""}
+        confirmed = snapshot.metadata.get("confirmed_publication") or {}
+        if confirmed.get("generation") == snapshot.generation and confirmed.get("plan_id"):
+            late_plans.add(confirmed["plan_id"])
+
+        active = await session.coordinator.describe(owner=owner_key, session_id=session_key)
+        if active and active.get("generation") != snapshot.generation:
+            model_turn = "superseded"
+        elif active and active.get("protected") is True:
             model_turn, stop_requested_generation = await _stop_captured_turn(
-                session, store, owner=owner_key, session_id=session_key, active=active
+                session, store, owner=owner_key, session_id=session_key,
+                lifecycle_id=snapshot.lifecycle_id, active=active,
             )
-        confirmation = "unchanged"
-    else:
-        try:
-            with session_scope_guard(owner_key, session_key, kind="effect"):
-                async with session._start_lock:
-                    active = await session.coordinator.describe(
-                        owner=owner_key, session_id=session_key
-                    )
-                    if active is None:
-                        state = await store.load(owner=owner_key, session_id=session_key)
-                        publication = state.metadata.get("active_publication")
-                        if (isinstance(publication, Mapping)
-                                and publication.get("generation") == state.generation
-                                and publication.get("status") == "running"
-                                and (state.metadata.get("read_wait") or {}).get("state") != "pending"):
-                            active = publication
-                    if active and active.get("protected") is True:
-                        model_turn, stop_requested_generation = await _stop_captured_turn(
-                            session, store, owner=owner_key,
-                            session_id=session_key, active=active,
-                        )
-                        confirmation = "unchanged"
+            confirmation = "unchanged"
+        else:
+            try:
+                with session_scope_guard(owner_key, session_key, kind="effect"):
+                    state = await store.load(owner=owner_key, session_id=session_key)
+                    if (state.lifecycle_id, state.generation) != (snapshot.lifecycle_id, snapshot.generation):
+                        model_turn = "superseded"
                     else:
+                        if active is None:
+                            publication = state.metadata.get("active_publication")
+                            if (isinstance(publication, Mapping)
+                                    and publication.get("generation") == state.generation
+                                    and publication.get("status") == "running"
+                                    and (state.metadata.get("read_wait") or {}).get("state") != "pending"):
+                                active = publication
                         if active:
                             model_turn, stop_requested_generation = await _stop_captured_turn(
                                 session, store, owner=owner_key,
-                                session_id=session_key, active=active,
+                                session_id=session_key, lifecycle_id=snapshot.lifecycle_id, active=active,
                             )
 
                         if model_turn != "superseded":
@@ -441,25 +443,24 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
                                     plan_id=plan_id,
                                 )
                                 confirmation = "revoked" if revoked else "cleared"
-        except SessionBusyError:
-            # The session scope may be held by a confirm or a short state mutation.
-            # Signal only the observed request and leave its card untouched.
-            async with session._start_lock:
-                active = await session.coordinator.describe(
-                    owner=owner_key, session_id=session_key
-                )
+            except SessionBusyError:
+                # The session scope may be held by a confirm or a short state mutation.
+                # Signal only the observed request and leave its card untouched.
                 if active is None:
-                    state = await store.load(owner=owner_key, session_id=session_key)
                     marked = await store.request_stop_generation(
-                        owner=owner_key, session_id=session_key, generation=state.generation,
+                        owner=owner_key, session_id=session_key, generation=snapshot.generation,
                     )
-                    model_turn = "critical_pending" if marked else "stop_unconfirmed"
-                    stop_requested_generation = state.generation if marked else 0
+                    state = await store.load(owner=owner_key, session_id=session_key)
+                    if (state.lifecycle_id, state.generation) != (snapshot.lifecycle_id, snapshot.generation):
+                        model_turn = "superseded"
+                    else:
+                        model_turn = "critical_pending" if marked else "stop_unconfirmed"
+                    stop_requested_generation = snapshot.generation if marked else 0
                     confirmation = "unchanged"
                 else:
                     model_turn, stop_requested_generation = await _stop_captured_turn(
                         session, store, owner=owner_key,
-                        session_id=session_key, active=active,
+                        session_id=session_key, lifecycle_id=snapshot.lifecycle_id, active=active,
                     )
                     if model_turn == "critical_pending":
                         confirmation = "unchanged"
@@ -467,9 +468,13 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
                         state = await store.load(owner=owner_key, session_id=session_key)
                         confirmation = "pending" if state.pending_effect_plan_id else "none"
 
-    background_tasks = await _cancel_background_trackers(
-        owner_key, session_key, store
-    )
+        current = await store.load(owner=owner_key, session_id=session_key)
+        if current.lifecycle_id == snapshot.lifecycle_id and late_plans:
+            for item in session_effect_trackers(current):
+                if item["plan_id"] in late_plans:
+                    trackers.setdefault(item["plan_id"], item)
+
+    background_tasks = await _cancel_background_trackers(owner_key, list(trackers.values()))
     return _response(
         model_turn=model_turn,
         confirmation=confirmation,
