@@ -35,7 +35,7 @@ from app.agent.kernel.state_types import (
     SessionBusyError,
 )
 from app.agent.kernel.task_state import classify_public_task
-from app.agent.owner_routes import configured_telegram_user_ids
+from app.agent.owner_routes import configured_telegram_user_ids, telegram_owner_route_access
 from app.agent.public_safety import public_tool_label, sanitize_public_text
 from app.agent.public_view import format_public_result
 from app.agent.rate_limit import agent_rate_limiter
@@ -107,15 +107,7 @@ def telegram_user_is_allowed(user_id: object) -> bool:
 def telegram_agent_control_access(chat_id: object, user_id: object) -> str:
     chat = str(chat_id or "").strip()
     user = str(user_id or "").strip()
-    configured_chat = (config.get("TG_CHAT_ID", "") or "").strip()
-    if (
-        not _ALLOWED_ID_RE.fullmatch(chat)
-        or not _ALLOWED_USER_RE.fullmatch(user)
-        or chat != configured_chat
-        or user not in configured_telegram_user_ids()
-    ):
-        return "unauthorized"
-    return "allowed"
+    return telegram_owner_route_access(f"tg:v1:{chat}\x1f{user}", require_enabled=False)
 
 
 def telegram_agent_access(chat_id: object, user_id: object) -> str:
@@ -694,11 +686,12 @@ def _send_agent_continuation_part(payload: Mapping[str, Any]) -> TelegramSendRes
     owner = str(payload["owner"])
     session_id = str(payload["session_id"])
     route = normalize_delivery_route(payload["delivery_route"], owner=owner)
-    user_id = owner.partition("\x1f")[2]
-    if telegram_agent_control_access(route["chat_id"], user_id) != "allowed":
-        return TelegramSendResult(False, error="AgentDeliveryUnauthorized", status_code=403)
-    if not is_agent_enabled() or not _enabled(config.get("TG_AGENT_ENABLED", "0")):
-        return TelegramSendResult(False, error="AgentDeliveryDisabled", status_code=503)
+    access = telegram_owner_route_access(owner, chat_id=route["chat_id"])
+    if access != "allowed":
+        return TelegramSendResult(
+            False, error="AgentDeliveryUnauthorized" if access == "unauthorized" else "AgentDeliveryDisabled",
+            status_code=403 if access == "unauthorized" else 503,
+        )
     bot = get_bot()
     if bot is None:
         return TelegramSendResult(False, error="TelegramUnavailable", status_code=503)

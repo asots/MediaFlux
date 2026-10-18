@@ -69,18 +69,22 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         telegram_enabled: bool = True,
         notifications_enabled: bool = True,
         notification_level: str = "standard",
+        chat_id: str = "100",
     ):
-        def get_bool(key: str, default=None):
-            if key == "TG_AGENT_ENABLED":
-                return telegram_enabled
-            if key == "TG_NOTIFICATION_ENABLED":
-                return notifications_enabled
-            return default
+        values = {
+            "AGENT_ENABLED": "1" if agent_enabled else "0",
+            "TG_AGENT_ENABLED": "1" if telegram_enabled else "0",
+            "TG_NOTIFICATION_ENABLED": "1" if notifications_enabled else "0",
+            "TG_CHAT_ID": chat_id,
+            "TG_AGENT_ALLOWED_USER_IDS": "456",
+        }
+        current_get = notification_center.config.get
+
+        def get(key, default=""):
+            return values[key] if key in values else current_get(key, default)
 
         with patch.object(
-            notification_center, "is_agent_enabled", return_value=agent_enabled,
-        ), patch.object(
-            notification_center.config, "get_bool", side_effect=get_bool,
+            notification_center.config, "get", side_effect=get,
         ), patch(
             "app.modules.telegram_notification_policy.notifications_enabled",
             return_value=notifications_enabled,
@@ -125,6 +129,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             ), self._agent_switches(
                 agent_enabled=agent_enabled,
                 telegram_enabled=telegram_enabled,
+                chat_id="-100123",
             ):
                 outcome = publish_agent_interaction_reply(
                     key,
@@ -207,6 +212,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             ), self._agent_switches(
                 notifications_enabled=notifications_enabled,
                 notification_level=level,
+                chat_id="-100151",
             ):
                 outcome = publish_agent_interaction_reply(
                     key,

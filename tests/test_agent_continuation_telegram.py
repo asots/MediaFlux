@@ -117,11 +117,9 @@ class AgentContinuationTelegramTests(unittest.TestCase):
             telegram=TelegramKernelTransport(cast(AgentSession, self.session)),
             store=types.SimpleNamespace(load=AsyncMock(return_value=types.SimpleNamespace(pending_effect_plan_id=PLAN))),
         )
-        self.values = {"TG_CHAT_ID": "-100", "TG_AGENT_ALLOWED_USER_IDS": "7", "TG_AGENT_ENABLED": "1"}
+        self.values = {"TG_CHAT_ID": "-100", "TG_AGENT_ALLOWED_USER_IDS": "7",
+                       "AGENT_ENABLED": "1", "TG_AGENT_ENABLED": "1"}
         self.enterContext(patch.object(adapter.config, "get", side_effect=lambda key, default="": self.values.get(key, default)))
-        self.enterContext(patch.object(adapter.config, "get_bool", side_effect=lambda key, default=False: key == "TG_AGENT_ENABLED"))
-        self.enterContext(patch.object(adapter, "is_agent_enabled", return_value=True))
-        self.enterContext(patch.object(center, "is_agent_enabled", return_value=True))
         self.enterContext(patch.object(center, "allows_notification", return_value=False))
         self.enterContext(patch.object(center, "wake_telegram_notification_dispatcher", return_value=False))
         self.enterContext(patch.object(center, "notification_target_chat_id", side_effect=lambda chat_id="": chat_id))

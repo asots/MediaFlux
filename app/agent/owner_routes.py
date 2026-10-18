@@ -6,7 +6,7 @@ import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from app import config
 
@@ -84,26 +84,37 @@ def configured_telegram_user_ids() -> set[str]:
     }
 
 
-def telegram_owner_route_is_currently_authorized(
+def telegram_owner_route_access(
     value: object,
     *,
     chat_id: object = "",
-) -> bool:
-    """按当前 Agent/TG 配置重新授权持久化 owner，撤权后立即失效。"""
+    require_enabled: bool = True,
+) -> Literal["allowed", "unauthorized", "disabled"]:
+    """输入、工具与回执共用实时授权；开关控制可在 Agent 关闭时使用。"""
     route = (
         value
         if isinstance(value, TelegramOwnerRoute)
         else parse_telegram_owner_route(value)
     )
     if route is None:
-        return False
+        return "unauthorized"
     persisted_chat = str(chat_id or "").strip()
     if persisted_chat and persisted_chat != route.chat_id:
-        return False
-    if not config.get_bool("AGENT_ENABLED", False):
-        return False
-    if not config.get_bool("TG_AGENT_ENABLED", False):
-        return False
-    if (config.get("TG_CHAT_ID", "") or "").strip() != route.chat_id:
-        return False
-    return route.user_id in configured_telegram_user_ids()
+        return "unauthorized"
+    enabled = not require_enabled or (
+        config.get_bool("AGENT_ENABLED", False)
+        and config.get_bool("TG_AGENT_ENABLED", False)
+    )
+    if ((config.get("TG_CHAT_ID", "") or "").strip() != route.chat_id
+            or route.user_id not in configured_telegram_user_ids()):
+        return "unauthorized"
+    return "allowed" if enabled else "disabled"
+
+
+def telegram_owner_route_is_currently_authorized(
+    value: object,
+    *,
+    chat_id: object = "",
+) -> bool:
+    """按当前 Agent/TG 配置重新授权持久化 owner，撤权后立即失效。"""
+    return telegram_owner_route_access(value, chat_id=chat_id) == "allowed"

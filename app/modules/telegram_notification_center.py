@@ -16,7 +16,7 @@ from cryptography.fernet import InvalidToken
 
 from app import config
 from app.agent.feature_gate import is_agent_enabled
-from app.agent.owner_routes import normalize_delivery_route
+from app.agent.owner_routes import normalize_delivery_route, telegram_owner_route_access
 from app.logger import get_logger
 from app.modules.telegram_notification_policy import (
     NotificationImportance,
@@ -575,6 +575,12 @@ def _send_agent_delivery_item(
             if delivery["lifecycle_id"] != state.lifecycle_id:
                 suppress(f"{label}LifecycleChanged")
                 return None
+            access = telegram_owner_route_access(owner, chat_id=delivery["delivery_route"]["chat_id"])
+            if access != "allowed":
+                return TelegramSendResult(
+                    False, error="AgentDeliveryUnauthorized" if access == "unauthorized" else "AgentDeliveryDisabled",
+                    status_code=403 if access == "unauthorized" else 503,
+                )
         except Exception as exc:
             # 尚未触达 Bot；锁忙或临时读取/补身份失败不属于发送结果未知。
             return TelegramSendResult(False, error=type(exc).__name__, status_code=503)
