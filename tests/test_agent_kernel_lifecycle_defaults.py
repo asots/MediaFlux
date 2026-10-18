@@ -6,13 +6,14 @@ import inspect
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import replace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from app.agent.confirmation import ConfirmationStore
 from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.completion_receipts import EffectCompletionScope
 from app.agent.kernel.effects import (
     ConfirmationEffectPlanStore,
     EffectPlan,
@@ -63,6 +64,10 @@ class RecordingLifecycle:
 
     def cancelled(self, *, plan):
         self.calls.append(("cancelled", dict(plan=plan)))
+
+    async def register_terminal_failure(self, *, scope, tool, result):
+        self.calls.append(("register_terminal_failure", dict(scope=scope, tool=tool, result=result)))
+        return False
 
 
 def _fixture(lifecycle: EffectLifecycle | None = None, *, terminal="completed"):
@@ -116,6 +121,86 @@ def test_protocol_is_not_instantiable_and_default_pipeline_uses_named_noop():
     assert type(pipeline.effect_lifecycle) is NoopEffectLifecycle
     assert type(NoopEffectLifecycle()).__name__ == "NoopEffectLifecycle"
     assert EffectLifecycle is not NoopEffectLifecycle
+
+
+def test_terminal_registration_is_an_explicit_async_keyword_only_hook():
+    for cls in (EffectLifecycle, NoopEffectLifecycle, MediaFluxEffectLifecycle):
+        hook = cls.register_terminal_failure
+        assert inspect.iscoroutinefunction(hook)
+        signature = inspect.signature(hook)
+        parameters = list(signature.parameters.values())
+        assert parameters[0].name == "self"
+        assert [(p.name, p.annotation) for p in parameters[1:]] == [
+            ("scope", "EffectCompletionScope"), ("tool", "str"), ("result", "Mapping[str, Any]"),
+        ]
+        assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters[1:])
+        assert all(p.default is inspect.Parameter.empty for p in parameters)
+        assert signature.return_annotation == "bool"
+
+
+def test_noop_terminal_registration_returns_false_without_mutating_scope_or_result():
+    async def check():
+        pipeline, tool, _, result = _fixture()
+        context = await _context(pipeline.state_store)
+        scope = EffectCompletionScope(pipeline.state_store, context.lease, "noop-plan",
+            origin={"nested": {"values": [1, 2]}})
+        before = deepcopy((scope.origin, result))
+        state = await pipeline.state_store.load(owner=context.owner, session_id=context.session_id)
+        assert await pipeline.effect_lifecycle.register_terminal_failure(scope=scope, tool=tool.name, result=result) is False
+        assert (scope.origin, result) == before
+        assert await pipeline.state_store.load(owner=context.owner, session_id=context.session_id) == state
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_mediaflux_terminal_registration_forwards_exact_scope_and_result(registered):
+    async def check():
+        pipeline, tool, _, result = _fixture()
+        context = await _context(pipeline.state_store)
+        scope = EffectCompletionScope(pipeline.state_store, context.lease, "forwarded-plan")
+        with patch("app.agent.effect_completion.register_terminal_failure", new=AsyncMock(return_value=registered)) as hook:
+            assert await MediaFluxEffectLifecycle().register_terminal_failure(
+                scope=scope, tool=tool.name, result=result,
+            ) is registered
+        hook.assert_awaited_once_with(scope, tool=tool.name, result=result)
+        forwarded = hook.await_args
+        assert forwarded is not None
+        assert forwarded.args[0] is scope
+        assert forwarded.kwargs["result"] is result
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("fault", [None, RuntimeError, asyncio.CancelledError], ids=["false", "exception", "cancel"])
+def test_pipeline_awaits_injected_registration_and_preserves_failure_boundaries(fault):
+    async def check():
+        lifecycle = RecordingLifecycle()
+        pipeline, tool, _, _ = _fixture(lifecycle, terminal="failed")
+        context = await _context(pipeline.state_store)
+        preview = await pipeline.execute(tool.name, {}, context=context)
+        assert preview.effect_plan is not None
+        error = fault("registration unavailable") if fault else None
+        with patch.object(lifecycle, "register_terminal_failure", new=AsyncMock(
+            return_value=False, side_effect=error,
+        )) as injected, patch("app.agent.effect_completion.register_terminal_failure", new=AsyncMock()) as business:
+            if fault is asyncio.CancelledError:
+                with pytest.raises(asyncio.CancelledError, match="registration unavailable") as cancelled:
+                    await pipeline.execute_confirmed(preview.effect_plan.plan_id, context=context)
+                assert cancelled.value is error
+            else:
+                with pytest.raises(ToolPipelineError, match="fixture failure") as failed:
+                    await pipeline.execute_confirmed(preview.effect_plan.plan_id, context=context)
+                assert failed.value.code == "fixture_failed" and failed.value.execution_started is True
+            injected.assert_awaited_once()
+            business.assert_not_called()
+            invocation = injected.await_args
+            assert invocation is not None
+            payload = invocation.kwargs
+            assert payload["scope"].lease is context.lease
+            assert payload["scope"].plan_id == preview.effect_plan.plan_id
+            assert payload["tool"] == tool.name
+            assert payload["result"] == {"ok": False, "status": "fixture_failed", "summary": "fixture failure",
+                                         "data": {"execution_started": True}}
+    asyncio.run(check())
 
 
 def test_noop_returns_identity_and_never_mutates_nested_payloads():
@@ -247,7 +332,10 @@ def test_injected_hooks_run_on_real_pipeline_paths(kind, terminal):
                 assert isinstance(payload["elapsed_ms"], int)
             if kind == "structural":
                 assert isinstance(lifecycle, RecordingLifecycle)
-                assert [name for name, _ in lifecycle.calls] == ["prepared", terminal]
+                expected = ["prepared", terminal]
+                if terminal in {"completed", "failed"}:
+                    expected.append("register_terminal_failure")
+                assert [name for name, _ in lifecycle.calls] == expected
             elif terminal == "completed":
                 runtime.complete_submission.assert_called_once_with(
                     owner=context.owner, tool_name="fixture.write", result=value, followups=None,

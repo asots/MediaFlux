@@ -39,6 +39,7 @@ from app.concurrency import CrossLoopAsyncLock
 
 from . import error_repair
 from .capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from .completion_receipts import EffectCompletionScope
 from .effects import (
     ConfirmationEffectPlanStore,
     EffectPlan,
@@ -106,6 +107,12 @@ class EffectLifecycle(Protocol):
 
     def cancelled(self, *, plan: EffectPlan) -> None:
         del plan
+
+    async def register_terminal_failure(
+        self, *, scope: EffectCompletionScope, tool: str, result: Mapping[str, Any],
+    ) -> bool:
+        del scope, tool, result
+        return False
 
 
 class NoopEffectLifecycle(EffectLifecycle):
@@ -772,9 +779,6 @@ class ToolPipeline:
                 ))
             raise ConfirmationClaimError() from exc
 
-        from app.agent.effect_completion import register_terminal_failure
-        from app.agent.kernel.completion_receipts import EffectCompletionScope
-
         from .continuation import effect_origin
 
         completion_scope = None
@@ -783,7 +787,7 @@ class ToolPipeline:
             if completion_scope is None:
                 return
             try:
-                await register_terminal_failure(completion_scope, tool=plan.tool_name, result=result)
+                await self.effect_lifecycle.register_terminal_failure(scope=completion_scope, tool=plan.tool_name, result=result)
             except Exception as exc:  # 登记故障不能覆盖已经成立的原始失败事实/code。
                 from app.logger import get_logger
                 get_logger(__name__).warning("确认失败续行登记未完成 type=%s", type(exc).__name__)

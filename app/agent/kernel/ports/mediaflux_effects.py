@@ -9,6 +9,7 @@ from dataclasses import replace
 from typing import Any
 
 from app import config
+from app.agent import effect_completion
 from app.agent.action_history import (
     record_confirmation_claimed,
     record_confirmation_error,
@@ -28,6 +29,7 @@ from app.agent.models import RiskLevel, ToolContext, ToolResult
 from app.logger import get_logger
 
 from ..capabilities import KernelToolSpec, ToolEffect
+from ..completion_receipts import EffectCompletionScope
 from ..effects import EffectPlan, PreparedEffect
 
 logger = get_logger(__name__)
@@ -175,3 +177,8 @@ class MediaFluxEffectLifecycle:
 
     def cancelled(self, *, plan: EffectPlan) -> None:
         self._release_followups(plan, plan)
+
+    async def register_terminal_failure(
+        self, *, scope: EffectCompletionScope, tool: str, result: Mapping[str, Any],
+    ) -> bool:
+        return await effect_completion.register_terminal_failure(scope, tool=tool, result=result)

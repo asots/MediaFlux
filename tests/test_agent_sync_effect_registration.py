@@ -24,6 +24,7 @@ from app.agent.kernel.continuation import effect_origin, effect_payload
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.state_types import CancellationToken, StalePublicationError
 from app.agent.kernel.tool_calls import ToolCallContext
@@ -81,7 +82,8 @@ class RegistrationCase:
             input_schema={"type": "object", "properties": {"fixture_blob_ref": {"type": "string"}}, "additionalProperties": False},
             effect=ToolEffect.WRITE, prepare=prepare, execute_confirmed=execute, verify=verify)
         self.pipeline = ToolPipeline(catalog=ToolCatalog([self.tool]), state_store=self.store, reference_store=self.store,
-            effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore(clock=lambda: self.clock[0]), record_actions=True))
+            effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore(clock=lambda: self.clock[0]), record_actions=True),
+            effect_lifecycle=MediaFluxEffectLifecycle())
 
     def cold_store(self):
         return SQLiteKernelStore(secret_provider=lambda: "sync-registration-secret", clock=lambda: self.clock[0])

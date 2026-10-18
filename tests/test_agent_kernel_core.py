@@ -2562,6 +2562,10 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             def cancelled(self, *, plan):
                 self.cancelled_plans.append(plan)
 
+            async def register_terminal_failure(self, *, scope, tool, result):
+                del scope, tool, result
+                return False
+
         tool = KernelToolSpec(
             name="download.pause",
             domain="download",
@@ -2840,6 +2844,10 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
             def cancelled(self, *, plan):
                 del plan
+
+            async def register_terminal_failure(self, *, scope, tool, result):
+                del scope, tool, result
+                return False
 
         def execute(_arguments, expected_snapshot, _context):
             self.assertEqual(expected_snapshot, "snapshot:disconnect-safe")

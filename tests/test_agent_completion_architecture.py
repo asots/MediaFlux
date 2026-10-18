@@ -159,7 +159,10 @@ def test_execution_kernel_has_no_domain_or_transport_imports() -> None:
         forbidden = {
             target for target in targets
             if target.startswith(("app.agent.domains", "app.bot", "app.routes", "app.modules.telegram_"))
-            or target == "app.agent.transports"
+            or target in {
+                "app.agent.transports", "app.agent.effect_completion",
+                "app.agent.completion_observers",
+            }
         }
         if forbidden:
             violations[module] = forbidden
